@@ -13,7 +13,7 @@ namespace Aspose.Pdf;
 
 public sealed partial class Document : IDisposable
 {
-    private void LayoutGraphParagraph(Aspose.Pdf.Drawing.Graph graph, FlowLayout flow, Page page, double marginLeft, double marginTop, double marginBottom)
+    private static void LayoutGraphParagraph(Aspose.Pdf.Drawing.Graph graph, FlowLayout flow, double marginLeft)
     {
         // Shapes carry graph-local coordinates with the origin at the
         // graph box's bottom-left corner. Translate the rendered stream
@@ -25,8 +25,8 @@ public sealed partial class Document : IDisposable
             // assigned Left re-anchors the flow at margin + Left, an assigned Top seats
             // the box top at content top - Top, an unassigned axis takes the cursor -
             // and the flow goes on from the box's TOP, taking no room for it (probed:
-            // "Before" / box / "After" writes "After" on the line the box top starts;
-            // a Left of -margin reaches the page corner).
+            // "Before" / box / "After" writes "After" on the line the box top starts; a
+            // Left of -margin reaches the page corner).
             if (graph.LeftAssigned)
                 flow.AnchorLeft = marginLeft + graph.Left;
             originX = flow.CurrentLeft;
@@ -45,15 +45,12 @@ public sealed partial class Document : IDisposable
         // (a previous anchor included), the top is the cursor. Repeated graphs
         // with the same Left/Top therefore overlay, and the cursor continues
         // under the box either way (measured 2026-08-23).
-        if (!graph.TopAssigned)
-        {
-            // Push to a fresh page if it doesn't fit below the cursor (but
-            // never when the cursor is already at the page top — an oversized
-            // graph still renders on the current page rather than looping).
-            if (flow.CurrentY - graph.Height < flow.BottomMargin
-                && flow.CurrentY < flow.ContentTop - 0.5)
-                flow.BreakPageIfContent();
-        }
+        // Push to a fresh page if it doesn't fit below the cursor (but
+        // never when the cursor is already at the page top — an oversized
+        // graph still renders on the current page rather than looping).
+        if (!graph.TopAssigned && flow.CurrentY - graph.Height < flow.BottomMargin
+            && flow.CurrentY < flow.ContentTop - 0.5)
+            flow.BreakPageIfContent();
         if (graph.LeftAssigned)
             flow.AnchorLeft = marginLeft + graph.Left;
         originX = flow.CurrentLeft;
@@ -171,7 +168,6 @@ public sealed partial class Document : IDisposable
         byte[]? data = default;
         double w = default;
         double h = default;
-        w = h = 0;
         byte[]? bytes;
         if (img.ImageStream is { } ist)
         {
@@ -182,14 +178,18 @@ public sealed partial class Document : IDisposable
         }
         else
             bytes = img.ReadSourceBytes();
-        if (bytes is null) { data = System.Array.Empty<byte>(); return null; }
+        if (bytes is null) { System.Array.Empty<byte>(); return null; }
         data = bytes;
         var (natW, natH) = TryGetImageNaturalSizePt(bytes, img.IsApplyResolution) ?? (0, 0);
         var haveNatural = natW > 0 && natH > 0;
         if (img.FixWidth > 0 || img.FixHeight > 0)
         {
-            w = img.FixWidth > 0 ? img.FixWidth : haveNatural ? natW : availW;
-            h = img.FixHeight > 0 ? img.FixHeight : haveNatural ? natH : availH;
+            if (img.FixWidth > 0) w = img.FixWidth;
+            else if (haveNatural) w = natW;
+            else w = availW;
+            if (img.FixHeight > 0) h = img.FixHeight;
+            else if (haveNatural) h = natH;
+            else h = availH;
         }
         else if (haveNatural)
         {
@@ -203,12 +203,28 @@ public sealed partial class Document : IDisposable
         return (data, w, h);
     }
 
+    /// <summary>A table's cells take the page's default text - its PageInfo.DefaultTextState, else the
+    /// document's - for the face, size, leading and style the table's own DefaultCellTextState leaves unset; a
+    /// row's or a cell's default, or the cell text's own state, still wins. The default seeds the table's
+    /// cell default, never the cells' text.</summary>
+    private static void SeedDefaultCellTextState(Table table, Page page)
+    {
+        var defaults = page.PageInfo?.AssignedDefaultTextState ?? page.Reader.OwnerDocument?.PageInfo?.AssignedDefaultTextState;
+        if (defaults is null) return;
+        var cells = table.DefaultCellTextState ??= new Text.TextState();
+        if (!cells.FontTouched && defaults.FontTouched && defaults.Font is { } font) cells.Font = font;
+        if (!cells.FontSizeTouched && defaults.FontSizeTouched) cells.FontSize = defaults.FontSize;
+        if (!cells.LineSpacingTouched && defaults.LineSpacingTouched) cells.LineSpacing = defaults.LineSpacing;
+        if (!cells.FontStyleTouched && defaults.FontStyleTouched) cells.FontStyle = defaults.FontStyle;
+    }
+
     private void LayoutTableParagraph(Table table, FlowLayout flow, Page page, HashSet<Table> renderedTables, List<(byte[] content, double width, double height)> overflowPages, Dictionary<int, List<(byte[] data, Rectangle rect)>> overflowImages, double marginLeft, double marginTop)
     {
-        // A table already drawn as another table's inner content is not drawn again;
-        // one the caller added to the paragraphs twice draws twice (probed on the
+        // A table already drawn as another table's inner content is not drawn again; one
+        // the caller added to the paragraphs twice draws twice (probed on the
         // reference: a repeated table instance repeats, like a repeated fragment).
         if (renderedTables.Contains(table)) return;
+        SeedDefaultCellTextState(table, page);
 
         var tp = new TableParagraphState();
         tp.containerInners = null;
@@ -219,7 +235,7 @@ public sealed partial class Document : IDisposable
         BuildTableSlices(tp, table, flow, overflowPages);
         PlaceTableSlices(tp, table, flow, overflowPages, overflowImages);
         // A table broken vertically in the same page draws once however often it is
-        // added (probed on the reference: narrow, wide and six-column replicas alike),
+        // added (probed on the reference: narrow, wide and six-column tables alike),
         // while an unbroken table added again repeats.
         if (table.Broken == TableBroken.VerticalInSamePage) renderedTables.Add(table);
     }

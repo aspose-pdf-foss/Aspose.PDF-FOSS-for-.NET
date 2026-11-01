@@ -43,7 +43,7 @@ public sealed partial class Document : IDisposable
         var titleBandLeft = pl.tocColCount > 1 && pl.tocColLefts.Length > 0 ? pl.tocColLefts[0] : pl.marginLeft;
         var titleBandWidth = pl.tocColCount > 1 && pl.tocColWidths.Length > 0
             ? pl.tocColWidths[0]
-            : page.Width - pl.marginLeft - pl.marginRight;
+            : page.LayoutFrameWidth - pl.marginLeft - pl.marginRight;
         // Wrap the title to the band: word-wrap first, and when a
         // single word alone exceeds the band (e.g. a 120 pt
         // "TableOfContents") fill CHARACTER-wise — such a title
@@ -89,6 +89,15 @@ public sealed partial class Document : IDisposable
         // 770 draws its baseline at 760.48 and the next box starts
         // at 758).
         var titleAscFrac = (1000.0 + Text.Standard14Fonts.GetDescent("Helvetica")) / 1000.0;
+        // The title's own alignment and colour: a title ALIGNED left or right stands against the
+        // band's edge, any other is centred as before; the fill is its ForegroundColor, else
+        // black. Both used to be ignored (always centred, always black). Both alignment
+        // properties default to Left, so a Left counts only from the text state, and only
+        // once written there; the fragment's own property can ask for Right alone.
+        var titleAlign = tocTitle.HorizontalAlignment == HorizontalAlignment.Right
+            ? HorizontalAlignment.Right
+            : tocTitle.TextState.HorizontalAlignmentTouched ? tocTitle.TextState.HorizontalAlignment : HorizontalAlignment.None;
+        var titleColor = tocTitle.TextState.ForegroundColor ?? Color.Black;
         var builder = new Content.ContentStreamBuilder();
         foreach (var tl in titleLines)
         {
@@ -96,12 +105,17 @@ public sealed partial class Document : IDisposable
             // Single-column: centre on the PAGE (the title
             // x is independent of asymmetric margins). Multi-column:
             // centre within the first column.
-            var titleX = pl.tocColCount > 1
-                ? System.Math.Max(titleBandLeft, titleBandLeft + (titleBandWidth - titleWidth) / 2)
-                : System.Math.Max(pl.marginLeft, (page.Width - titleWidth) / 2);
+            var titleX = titleAlign switch
+            {
+                HorizontalAlignment.Left => titleBandLeft,
+                HorizontalAlignment.Right => System.Math.Max(titleBandLeft, titleBandLeft + titleBandWidth - titleWidth),
+                _ => pl.tocColCount > 1
+                    ? System.Math.Max(titleBandLeft, titleBandLeft + (titleBandWidth - titleWidth) / 2)
+                    : System.Math.Max(pl.marginLeft, (page.LayoutFrameWidth - titleWidth) / 2),
+            };
             builder.BeginText()
                 .SetFont(titleFont, titleSize)
-                .SetFillColor(0, 0, 0)
+                .SetFillColor(titleColor.R / 255.0, titleColor.G / 255.0, titleColor.B / 255.0)
                 .MoveTextPosition(titleX, pl.curY - titleSize * titleAscFrac)
                 .ShowText(tl)
                 .EndText();

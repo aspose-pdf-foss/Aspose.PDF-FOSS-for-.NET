@@ -338,8 +338,17 @@ public sealed partial class TextAbsorber
         map[GlyphNamePinnedToAdobe2_0] = GlyphNamePinnedToAdobe2_0Unicode;
         var adobeOnly = new Dictionary<string, string>(map, StringComparer.Ordinal);
         foreach (var (name, unicode) in NonAdobeGlyphNames) map[name] = unicode;
+        // The list names an Arabic letter's base shape (afii57xxx) but none of its contextual shapes, which
+        // TrueType fonts of the AFII naming call afii62753 onwards; read only, never a name this engine writes.
+        var afii = FirstArabicContextualFormAfiiNumber;
+        foreach (var form in ArabicShaper.ContextualFormsInAfiiOrder())
+            map["afii" + (afii++).ToString(CultureInfo.InvariantCulture)] = form.ToString();
         return (map, adobeOnly);
     }
+
+    // afii62753 is the final shape of alef with madda above, the first contextual form of the
+    // Arabic Presentation Forms-B block; afii62760 the final alef, afii62841 the final lam-alef.
+    private const int FirstArabicContextualFormAfiiNumber = 62753;
 
     // The list maps more than one name to some codepoints (12 letters cover a
     // Hebrew base and its point, for instance, and several AFII cross-reference
@@ -386,15 +395,19 @@ public sealed partial class TextAbsorber
         }
     }
 
+    /// <summary>The character the Symbol and ZapfDingbats tables give a code their encoding
+    /// leaves undefined.</summary>
+    internal const char UndefinedCharacter = '\0';
+
     /// <summary>The character the Symbol face's code stands for, or nul when its
     /// encoding leaves the code undefined.</summary>
     internal static char SymbolCharacter(byte code) =>
-        SymbolEncoding.TryGetValue(code, out var ch) ? ch : ' ';
+        SymbolEncoding.TryGetValue(code, out var ch) ? ch : UndefinedCharacter;
 
     /// <summary>The character the ZapfDingbats face's code stands for, or nul when its
     /// encoding leaves the code undefined.</summary>
     internal static char DingbatCharacter(byte code) =>
-        ZapfDingbatsEncoding.TryGetValue(code, out var ch) ? ch : ' ';
+        ZapfDingbatsEncoding.TryGetValue(code, out var ch) ? ch : UndefinedCharacter;
 
     // ────────────────────────────────────────────────────────────────────────
     // Symbol font encoding — full 189-entry table

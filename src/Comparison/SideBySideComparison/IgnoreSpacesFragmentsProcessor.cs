@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
     /// carry no spaces at all and edits never hinge on spacing differences.</summary>
     internal class IgnoreSpacesFragmentsProcessor : NormalFragmentProcessor
     {
-        private static readonly Regex NonSpaceRuns = new Regex(@"\S+", RegexOptions.Compiled);
+        private static readonly Regex NonSpaceRuns = new Regex(@"\S+", RegexOptions.Compiled, RegexLimits.Timeout);
 
         internal IgnoreSpacesFragmentsProcessor(TextFragmentRectanglesComparer fragmentsComparer)
             : base(fragmentsComparer)
@@ -20,9 +20,8 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             var absorber = new TextFragmentAbsorber(NonSpaceRuns);
             absorber.Visit(page);
             var fragments = new List<TextFragment>();
-            foreach (var fragment in absorber.TextFragments)
-                if (!string.IsNullOrEmpty(fragment.Text))
-                    fragments.Add(fragment);
+            foreach (var fragment in absorber.TextFragments.Where(fragment => !string.IsNullOrEmpty(fragment.Text)))
+                fragments.Add(fragment);
             return fragments;
         }
     }

@@ -40,8 +40,15 @@ public partial class PolylineAnnotation : PolyAnnotation
                 };
                 if (InternalReader.Resolve(bs.Get("D")) is PdfArray d && d.Count > 0)
                 {
-                    int on = d[0] is PdfInteger di ? (int)di.Value : d[0] is PdfReal dr ? (int)dr.Value : 0;
-                    int off = d.Count > 1 ? (d[1] is PdfInteger oi ? (int)oi.Value : d[1] is PdfReal orr ? (int)orr.Value : on) : on;
+                    int on = d[0] switch { PdfInteger di => (int)di.Value, PdfReal dr => (int)dr.Value, _ => 0 };
+                    int off;
+                    if (d.Count > 1)
+                    {
+                        if (d[1] is PdfInteger oi) off = (int)oi.Value;
+                        else if (d[1] is PdfReal orr) off = (int)orr.Value;
+                        else off = on;
+                    }
+                    else off = on;
                     border.Dash = new Dash(on, off);
                 }
             }

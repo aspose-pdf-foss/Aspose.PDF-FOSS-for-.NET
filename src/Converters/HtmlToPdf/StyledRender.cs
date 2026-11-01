@@ -75,7 +75,7 @@ internal static partial class HtmlToPdfConverter
             var (rr, gg, bb) = ((byte)0, (byte)0, (byte)0);
             if (p.Style.TryGetValue("color", out var col))
             {
-                var cm = Regex.Match(col, @"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)");
+                var cm = SafeRegex.Match(col, @"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)");
                 if (cm.Success)
                     (rr, gg, bb) = (byte.Parse(cm.Groups[1].Value), byte.Parse(cm.Groups[2].Value),
                         byte.Parse(cm.Groups[3].Value));
@@ -164,9 +164,7 @@ internal static partial class HtmlToPdfConverter
     /// go through an embedded Unicode face or its non-Latin characters flatten to '?'.</summary>
     private static bool NeedsUnicode(string s)
     {
-        foreach (var ch in s)
-            if (ch > 0x7F && Text.Cp1252.TryGetByte(ch) is null) return true;
-        return false;
+        return s.Any(ch => ch > 0x7F && Text.Cp1252.TryGetByte(ch) is null);
     }
 
     /// <summary>Convert the embedded RTL segments of a MIXED LTR+RTL line to visual order
@@ -315,15 +313,24 @@ internal static partial class HtmlToPdfConverter
     /// A pure Arabic/Hebrew or CJK run is written in visual order through an embedded Type0/CID
     /// face (the Standard-14 fonts would collapse it to '?'); everything else uses the WinAnsi
     /// Tf/Tj path. Used for list markers, which may themselves be non-Latin (a CSS ::before
-    /// generated Arabic marker).</summary>
-    private static void EmitPositionedRun(Page page, string fontRes, double fontSize, double x, double y, string text, double shear = 0)
+    /// generated Arabic marker). A run of a right-to-left paragraph (<paramref name="rtlParagraph"/>) draws in
+    /// that paragraph's bidi order.</summary>
+    private static void EmitPositionedRun(Page page, string fontRes, double fontSize, double x, double y, string text, double shear = 0,
+        bool rtlParagraph = false)
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         // (a synthetic italic: the upright glyphs sheared right by the slant, see SyntheticItalicShear)
         var tmSlant = shear != 0 ? shear.ToString("0.###", inv) : "0";
         var isRtl = IsPureRtl(text);
-        var visual = isRtl ? ToVisualRtl(text)
-            : Text.BidiReorderer.ContainsRtl(text) ? VisualizeMixedRtl(text) : text;
+        string visual;
+        // A line of a right-to-left paragraph takes the paragraph's bidi order: its Latin words keep their
+        // own order at the visual left, the neutrals follow the paragraph and paired brackets mirror.
+        // (an Arabic line keeps its shaped run-wise order, which the Arabic grids are measured on)
+        if (rtlParagraph && Text.BidiReorderer.ContainsRtl(text) && !Text.ArabicTextShaper.ContainsArabic(text))
+            visual = VisualizeRtlParagraph(text);
+        else if (isRtl) visual = ToVisualRtl(text);
+        else if (Text.BidiReorderer.ContainsRtl(text)) visual = VisualizeMixedRtl(text);
+        else visual = text;
         var uniFont = NeedsUnicode(text) ? ResolveUnicodeFont(visual) : null;
         var ttf = uniFont?.SourceFontData?.TtfData;
         var sb = new StringBuilder();
@@ -333,7 +340,9 @@ internal static partial class HtmlToPdfConverter
             && res.Get("Font") as Core.PdfDictionary is { } fontDict)
         {
             var (rn, hex) = Text.Type0FontEmbedder.Embed(
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
                 fontDict, ttf, uniFont!.FontName ?? "Unicode", visual, stripSpacesInBaseFont: true);
+#pragma warning restore S8969
             sb.Append($"/{rn} {fontSize.ToString("F1", inv)} Tf ");
             sb.Append($"1 0 {tmSlant} 1 {x.ToString("F2", inv)} {y.ToString("F2", inv)} Tm ");
             sb.Append('<').Append(Compat.ToHexString(hex)).Append("> Tj ");
@@ -346,6 +355,25 @@ internal static partial class HtmlToPdfConverter
         }
         sb.AppendLine("ET");
         page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
+    }
+
+    // CJK punctuation falls back character by character to the face the reference draws it in, ahead of
+    // the broad list (probed: in a sans paragraph the fullwidth comma, colon, semicolon, parentheses,
+    // question and exclamation marks and the angle brackets draw in proportional MS PGothic, the corner
+    // brackets in the narrow Microsoft Yi Baiti forms the reference template was drawn with (0.273 em),
+    // the ideographic comma in Microsoft JhengHei, the ideographs and the full stop in SimSun).
+    private const string ProportionalPunctuationChars = "，：；（）？！《》";
+    private const string CornerBracketChars = "「」『』";
+    private static readonly string[] CornerBracketFaces = { "Microsoft Yi Baiti", "MS PGothic" };
+    private static readonly string[] ProportionalPunctuationFaces = { "MS PGothic" };
+    private static readonly string[] IdeographicCommaFaces = { "Microsoft JhengHei" };
+
+    private static string[] PreferredFallbackFaces(string text)
+    {
+        if (text.Length != 1 || !_cssPunctuationFallback) return Array.Empty<string>();
+        if (ProportionalPunctuationChars.IndexOf(text[0]) >= 0) return ProportionalPunctuationFaces;
+        if (CornerBracketChars.IndexOf(text[0]) >= 0) return CornerBracketFaces;
+        return text[0] == '、' ? IdeographicCommaFaces : Array.Empty<string>();
     }
 
     // Broad-Unicode faces (installed on most Windows systems) tried in order; the first
@@ -390,8 +418,7 @@ internal static partial class HtmlToPdfConverter
         // (3,0) cmap covers them, so resolve Wingdings ahead of the Unicode
         // fallbacks when every char in the run is in that block.
         var allSymbolPua = text.Length > 0;
-        foreach (var ch in text)
-            if (ch < '' || ch > '') { allSymbolPua = false; break; }
+        if (text.Any(ch => ch < '' || ch > '')) { allSymbolPua = false; }
         if (allSymbolPua)
         {
             if (!_symbolPuaProbed)
@@ -408,7 +435,7 @@ internal static partial class HtmlToPdfConverter
                     }
             if (_symbolPuaFont is not null) return _symbolPuaFont;
         }
-        foreach (var name in UnicodeFallbackFonts)
+        foreach (var name in PreferredFallbackFaces(text).Concat(UnicodeFallbackFonts))
         {
             if (!_uniFontCache.TryGetValue(name, out var entry))
             {

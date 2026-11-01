@@ -121,6 +121,8 @@ public sealed partial class SoftwarePageRenderer
         public Dictionary<PdfDictionary, int[]?> EncodingGidMaps { get; } = new(ReferenceEqualityComparer.Instance);
         // Per-font codes an explicit /Differences names /.notdef - they show nothing.
         public Dictionary<PdfDictionary, bool[]?> UndefinedCodeMaps { get; } = new(ReferenceEqualityComparer.Instance);
+        // Per-font standard dingbats code behind each code an encoding names (see BuildDingbatCodes).
+        public Dictionary<PdfDictionary, byte[]?> DingbatCodeMaps { get; } = new(ReferenceEqualityComparer.Instance);
 
         /// <summary>
         /// Page's /Resources/Pattern dict — looked up when resolving a <c>scn</c> pattern name.
@@ -174,9 +176,7 @@ public sealed partial class SoftwarePageRenderer
         {
             get
             {
-                foreach (var hidden in OcgHiddenStack)
-                    if (hidden) return true;
-                return false;
+                return OcgHiddenStack.Any(hidden => hidden);
             }
         }
 
@@ -200,6 +200,15 @@ public sealed partial class SoftwarePageRenderer
         /// and clip, Tr 7 only clips. Meaningless while <see cref="TextClipAccum"/> is null.</summary>
         public bool TextClipPaints { get; set; }
 
+        /// <summary>The graphics state the glyphs of the run being drawn are STROKED with - Tr 1,
+        /// 2, 5 and 6 (PDF 32000 §9.3.6) - or null while the run only fills or clips. Set per
+        /// text-showing operator.</summary>
+        public GraphicsState? TextStroke { get; set; }
+
+        /// <summary>Whether the run being drawn FILLS its glyphs: false for the stroke-only
+        /// modes Tr 1 and 5, whose glyphs still collect a Tr 5 clip.</summary>
+        public bool TextFills { get; set; } = true;
+
         /// <summary>
         /// Font units to device pixels for the run being drawn, as (a, b, c, d), when the
         /// text matrix ROTATES or skews the glyphs. Null for the upright case, which keeps
@@ -215,6 +224,13 @@ public sealed partial class SoftwarePageRenderer
         public double GlyphOriginY { get; set; }
         public double BaselineUx { get; set; } = 1;
         public double BaselineUy { get; set; }
+
+        /// <summary>Where one pixel DOWN the upright pen (py, which a vertical run steps down
+        /// its column and moves by its glyphs' vertical origins) lands on the device: the text
+        /// space's -y axis, scaled as the pen's vertical pixels are. Only read while
+        /// <see cref="GlyphEmMatrix"/> is set.</summary>
+        public double PenDownX { get; set; }
+        public double PenDownY { get; set; } = 1;
 
         /// <summary>
         /// The page’s DEFAULT user space as a CTM (the /Rotate compensation, identity for

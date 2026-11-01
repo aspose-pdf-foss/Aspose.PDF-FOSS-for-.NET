@@ -107,10 +107,10 @@ public sealed partial class TextAbsorber
         _effectiveSearchRect = MapViewerRectToMedia(TextSearchOptions?.Rectangle, pv.page);
         _lineStartPageX = double.NaN;
         _lineStartTextOffset = _text.Length;
+        ForgetLineStart();
         _sawIntraLineGapSpaces = false;
         _collectOcrRuns = pv.pureLayout;
         _ocrRuns.Clear();
-        _type3SpanRuns = 0;
         _pageLineStarts.Clear();
         _pageRunSpans.Clear();
     }

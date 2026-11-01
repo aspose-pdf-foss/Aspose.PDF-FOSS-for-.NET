@@ -23,8 +23,9 @@ public class ExplicitDestination : IAppointment
         Type = type;
     }
 
-    /// <summary>Try to parse a destination from a PDF array.</summary>
-    internal static ExplicitDestination? FromArray(PdfArray arr, PdfReader? reader)
+    /// <summary>Try to parse a destination from a PDF array. A local destination (<paramref name="local"/>) names
+    /// a page of the reader's document; a remote one (a GoToR action's) a page of another file, by its index.</summary>
+    internal static ExplicitDestination? FromArray(PdfArray arr, PdfReader? reader, bool local = true)
     {
         if (arr.Count < 2) return null;
 
@@ -34,12 +35,19 @@ public class ExplicitDestination : IAppointment
         int? pageObjNum = arr[0] is PdfIndirectRef iref ? iref.ObjectNumber : null;
         var pageObj = reader is null ? arr[0] : reader.Resolve(arr[0]);
         int pageNum = 0;
+        // The page as the document holds it now - moved by an insertion, copied in from another document - gives
+        // the destination its page and its current number.
+        var page = local ? FindTargetPage(reader?.OwnerDocument, pageObj, pageObjNum) : null;
 
-        if (pageObj is PdfInteger pi)
+        if (page is not null)
+        {
+            pageNum = page.Number;
+        }
+        else if (pageObj is PdfInteger pi)
         {
             pageNum = (int)pi.Value + 1;
         }
-        else if (pageObj is PdfDictionary pageDict && reader is not null && pageObjNum.HasValue)
+        else if (pageObj is PdfDictionary && reader is not null && pageObjNum.HasValue)
         {
             // Walk the page tree to find the 1-based index of this page dict.
             pageNum = ResolvePageIndex(reader, pageObjNum.Value);
@@ -66,24 +74,32 @@ public class ExplicitDestination : IAppointment
                 ReadReal(arr, 4) ?? 0, ReadReal(arr, 5) ?? 0),
             _ => new ExplicitDestination(pageNum, typeName),
         };
-        // Materialise the target Page from the owner document's page list so
-        // the destination tracks the page OBJECT: callers that re-anchor the
-        // page (e.g. inserting a TOC page ahead of it) see its current number,
-        // and identity look-ups against Pages succeed. Matched by page-dict
-        // identity — the raw-tree index and the live collection index diverge
-        // once pages have been inserted.
-        if (reader?.OwnerDocument is { } ownerDoc && pageObj is PdfDictionary destPageDict)
+        dest.Page = page;
+        if (page is null && local && pageObj is PdfDictionary && reader?.OwnerDocument is { } ownerDoc
+            && pageNum >= 1 && pageNum <= ownerDoc.Pages.Count)
         {
-            foreach (var p in ownerDoc.Pages)
-                if (ReferenceEquals(p.Dict, destPageDict))
-                {
-                    dest.Page = p;
-                    break;
-                }
-            if (dest.Page is null && pageNum >= 1 && pageNum <= ownerDoc.Pages.Count)
-                dest.Page = ownerDoc.Pages[pageNum];
+            dest.Page = ownerDoc.Pages[pageNum];
         }
         return dest;
+    }
+
+    /// <summary>The page of <paramref name="owner"/> a destination's first element names: its page dictionary
+    /// (matched by identity, as the raw tree index and the live collection diverge once pages are inserted), the
+    /// object number a page copied in from another document was given, or a 0-based page index.</summary>
+    private static Page? FindTargetPage(Document? owner, PdfObject? pageObj, int? pageObjNum)
+    {
+        if (owner is null) return null;
+        switch (pageObj)
+        {
+            case PdfInteger index:
+                return index.Value >= 0 && index.Value < owner.Pages.Count ? owner.Pages[(int)index.Value + 1] : null;
+            case PdfDictionary pageDict:
+                if (owner.Pages.FirstOrDefault(p => ReferenceEquals(p.Dict, pageDict)) is { } byDict) return byDict;
+                break;
+        }
+        return pageObjNum is { } number
+            ? owner.Pages.FirstOrDefault(p => p.ImportSlotObjNum == number)
+            : null;
     }
 
     private static double? ReadReal(PdfArray arr, int index)
@@ -145,6 +161,20 @@ public class ExplicitDestination : IAppointment
 
     internal PdfArray ToPdfArrayPublic() => ToPdfArray();
 
+    /// <summary>
+    /// The destination as a LOCAL one: a link, a GoTo action, an outline item or the open
+    /// action of the document the page belongs to. ISO 32000-1 12.3.2.2 has the page of a
+    /// local destination as a reference to the page object - an integer is the remote form.
+    /// The page may have no object number until the document is saved, so the array holds
+    /// its index for now and the owning document swaps in the reference while it writes.
+    /// </summary>
+    internal PdfArray ToLocalPdfArray()
+    {
+        var arr = ToPdfArray();
+        Page?.OwnerDocument?.PendingDestinationPages.Add((arr, Page));
+        return arr;
+    }
+
     /// <inheritdoc />
     public override string ToString() => $"{PageNumber} {Type}";
 
@@ -154,7 +184,11 @@ public class ExplicitDestination : IAppointment
 
     /// <summary>Factory: create the destination on <paramref name="page"/>.</summary>
     public static ExplicitDestination CreateDestination(Page page, ExplicitDestinationType type, double[] values)
-        => Build(page?.Number ?? 1, type, values);
+    {
+        var destination = Build(page?.Number ?? 1, type, values);
+        destination.Page = page;
+        return destination;
+    }
 
     /// <summary>Factory: create the destination on <paramref name="pageNumber"/> within <paramref name="doc"/>.</summary>
     public static ExplicitDestination CreateDestination(Document doc, int pageNumber, ExplicitDestinationType type, double[] values)
@@ -192,11 +226,13 @@ public enum ExplicitDestinationType
     XYZ = 7,
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>
 /// XYZ explicit destination: display the page at position (left, top) with zoom factor.
 /// A value of 0 for any parameter means "retain the current viewer value".
 /// </summary>
 public class XYZExplicitDestination : ExplicitDestination
+#pragma warning restore S101
 {
     /// <summary>Left coordinate (0 = unchanged).</summary>
     public double Left { get; }
@@ -207,13 +243,11 @@ public class XYZExplicitDestination : ExplicitDestination
     /// <summary>Zoom factor (0 = unchanged).</summary>
     public double Zoom { get; }
 
-    private readonly Page? _page;
-
     /// <summary>Create an XYZ destination to a specific page with coordinates.</summary>
     public XYZExplicitDestination(Page page, double left, double top, double zoom)
         : base(page?.Number ?? 1, "XYZ")
     {
-        _page = page;
+        Page = page;
         Left = left;
         Top = top;
         Zoom = zoom;
@@ -252,25 +286,44 @@ public class XYZExplicitDestination : ExplicitDestination
 
     public override string ToString() => $"{PageNumber} XYZ {Left} {Top} {Zoom}";
 
-    /// <summary>Build an XYZ destination pointing at the upper-left corner of <paramref name="page"/>.</summary>
+    /// <summary>Build an XYZ destination pointing at the upper-left corner of <paramref name="page"/> as it is
+    /// shown: a /Rotate turns the page, so the shown corner is another corner of the media box.</summary>
     public static XYZExplicitDestination CreateDestinationToUpperLeftCorner(Page page)
-        => new(page, 0, page?.MediaBox?.URY ?? 0, 0);
+        => CreateDestinationToUpperLeftCorner(page, 0);
 
     /// <summary>Upper-left destination with an explicit zoom factor.</summary>
     public static XYZExplicitDestination CreateDestinationToUpperLeftCorner(Page page, double zoom)
-        => new(page, 0, page?.MediaBox?.URY ?? 0, zoom);
+    {
+        if (page?.MediaBox is not { } box) return new XYZExplicitDestination(1, 0, 0, zoom);
+        var turned = ShownRotation(page) is 90 or 270;
+        var (left, top) = ShownToMedia(page, 0, turned ? box.URX : box.URY);
+        return new XYZExplicitDestination(page, left, top, zoom);
+    }
 
-    /// <summary>Build an XYZ destination. <paramref name="considerRotation"/> swaps Left/Top when the page is rotated 90° or 270°.</summary>
+    /// <summary>Build an XYZ destination. With <paramref name="considerRotation"/>, <paramref name="left"/> and
+    /// <paramref name="top"/> are a point of the page as it is shown, turned by its /Rotate.</summary>
     public static XYZExplicitDestination CreateDestination(Page page, double left, double top, double zoom, bool considerRotation)
     {
-        if (considerRotation && page is not null)
-        {
-            var rot = ((page.RotateDegrees % 360) + 360) % 360;
-            if (rot == 90 || rot == 270) (left, top) = (top, left);
-        }
+        if (considerRotation && page is not null) (left, top) = ShownToMedia(page, left, top);
         return page is null
             ? new XYZExplicitDestination(1, left, top, zoom)
             : new XYZExplicitDestination(page, left, top, zoom);
+    }
+
+    private static int ShownRotation(Page page) => ((page.RotateDegrees % 360) + 360) % 360;
+
+    /// <summary>The media-box point that the page turned by its /Rotate shows at (<paramref name="left"/>,
+    /// <paramref name="top"/>): a quarter turn clockwise shows the media box's left edge along the top.</summary>
+    private static (double left, double top) ShownToMedia(Page page, double left, double top)
+    {
+        if (page.MediaBox is not { } box) return (left, top);
+        return ShownRotation(page) switch
+        {
+            90 => (box.URX - top, left),
+            180 => (box.URX - left, box.URY - top),
+            270 => (top, box.URY - left),
+            _ => (left, top),
+        };
     }
 }
 

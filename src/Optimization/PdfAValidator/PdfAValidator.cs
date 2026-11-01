@@ -34,8 +34,10 @@ internal static partial class PdfAValidator
     /// <summary>The single problem reported when the document's encryption
     /// permissions block conformance work: the document was opened with USER
     /// access and /P withholds modify-contents, so no validation or conversion
-    /// may touch it (the log carries exactly this one entry).</summary>
-    public static PdfAValidationResult PermissionBlocked(PdfFormat format)
+    /// may touch it (the log carries exactly this one entry). Nothing a conversion does
+    /// lifts the restriction, so the entry says it cannot be converted away; a conversion
+    /// stamps it with the document's permanent file ID, as the signed-file refusal does.</summary>
+    public static PdfAValidationResult PermissionBlocked(PdfFormat format, string? documentId = null)
     {
         const string description = "Conversion is not allowed by permission restrictions";
         return new PdfAValidationResult
@@ -43,7 +45,13 @@ internal static partial class PdfAValidator
             IsValid = false,
             Format = format,
             Issues = [description],
-            Violations = [new PdfAViolation { Rule = "Permission", Description = description }],
+            Violations = [new PdfAViolation
+            {
+                Rule = "Permission",
+                Description = description,
+                Convertable = false,
+                ObjectId = documentId,
+            }],
         };
     }
 
@@ -129,6 +137,19 @@ internal static partial class PdfAValidator
 
         // 6. Check OutputIntents for color space validation
         CheckPdfAPagesAndTrailer(document, format, isPdfA1, issues, violations);
+
+        // 9. The content problems the conversion detects - nesting and string limits, .notdef shows - are found
+        // the same way here.
+        var part = isPdfA1 ? "1"
+            : format is PdfFormat.PDF_A_2A or PdfFormat.PDF_A_2B or PdfFormat.PDF_A_2U ? "2"
+            : format is PdfFormat.PDF_A_3A or PdfFormat.PDF_A_3B or PdfFormat.PDF_A_3U or PdfFormat.ZUGFeRD ? "3"
+            : null;
+        if (part is not null)
+            foreach (var problem in document.ReportContentProblems(part))
+            {
+                issues.Add(problem.Description);
+                violations.Add(problem);
+            }
 
         return new PdfAValidationResult
         {

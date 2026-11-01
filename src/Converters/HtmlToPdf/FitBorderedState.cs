@@ -23,15 +23,8 @@ private sealed class FitBorderedState
     public double availW = 0;
     public double bw = 0;
     public double p = 0;
-    public double pageWidth = 0;
-    public double pageHeight = 0;
-    public double marginTop = 0;
-    public double marginBottom = 0;
     public double tableWpt = 0;
     public double tablePct = 0;
-    public double baseFontSize = 0;
-    public bool paragraphCells = false;
-    public string tableHtml = default!;
     public double s = 0;
     public string face = default!;
     public string boldFace = default!;
@@ -41,6 +34,8 @@ private sealed class FitBorderedState
     public bool stdSerif = false;
     public double chromeB;
     public double[] naturalB = null!;
+    /// <summary>Per column, the widest min-content of the grids nested in its cells, measured once (NaN = not yet).</summary>
+    public double[]? nestedMin;
     // Attribute grid: undeclared columns take what the grid box leaves
     // beside the pixel-fixed ones, floored at their min-content (the
     // widest unbreakable chunk) — an over-long word overflows the box
@@ -50,8 +45,8 @@ private sealed class FitBorderedState
     // grid spans 96..499 with its outer border edge at 500.5.
     public double availB;
     public double gridChrome;
-    // Declared shares apply only when they FIT beside the min-contents;
-    // an over-constrained set falls back to min-content columns (the
+    // Declared shares apply only when they FIT beside the min-contents; an
+    // over-constrained set falls back to min-content columns (the
     // 15%-column's long word forces its share past 15, so the 85%
     // partner cannot keep 85 — measured: it takes the REMAINDER).
     // Attribute grids resolved their overflow above — pixel-fixed

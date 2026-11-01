@@ -62,6 +62,22 @@ public sealed partial class PdfAnnotationEditor
         Aspose.Pdf.Annotations.RedactionAnnotation.RemoveAnnotationsUnder(page, rect);
     }
 
+    /// <summary>
+    /// Redact an area on a page with a System.Drawing.Color-compatible (R, G, B) color.
+    /// </summary>
+    public void RedactArea(int pageIndex, Rectangle rect, int r, int g, int b)
+    {
+        RedactArea(pageIndex, rect, [r / 255.0, g / 255.0, b / 255.0]);
+    }
+
+    /// <summary>
+    /// Redact an area on a page with the given fill color.
+    /// </summary>
+    public void RedactArea(int pageIndex, Rectangle rect, System.Drawing.Color color)
+    {
+        RedactArea(pageIndex, rect, color.R, color.G, color.B);
+    }
+
     /// <summary>Remove every Widget annotation whose /Rect intersects <paramref name="area"/>
     /// from the page and, for those that are (or become) empty form fields, from the
     /// AcroForm /Fields tree — a redaction drops the fields under it.</summary>
@@ -110,7 +126,7 @@ public sealed partial class PdfAnnotationEditor
             if (reader.Resolve(parent.Get("Kids")) is PdfArray pkids)
             {
                 RebuildArrayExcluding(parent, "Kids", pkids, removeWidgets, reader);
-                if ((reader.Resolve(parent.Get("Kids")) as PdfArray)?.Count == 0)
+                if (reader.Resolve(parent.Get("Kids")) is PdfArray { Count: 0 })
                     removeFields.Add(parent);
                 var pn = doc.FindObjectNumber(parent);
                 if (pn > 0) doc.MarkDirty(pn, parent);
@@ -135,21 +151,5 @@ public sealed partial class PdfAnnotationEditor
             kept.Add(item);
         }
         owner.Set(key, kept);
-    }
-
-    /// <summary>
-    /// Redact an area on a page with a System.Drawing.Color-compatible (R, G, B) color.
-    /// </summary>
-    public void RedactArea(int pageIndex, Rectangle rect, int r, int g, int b)
-    {
-        RedactArea(pageIndex, rect, [r / 255.0, g / 255.0, b / 255.0]);
-    }
-
-    /// <summary>
-    /// Redact an area on a page with the given fill color.
-    /// </summary>
-    public void RedactArea(int pageIndex, Rectangle rect, System.Drawing.Color color)
-    {
-        RedactArea(pageIndex, rect, color.R, color.G, color.B);
     }
 }

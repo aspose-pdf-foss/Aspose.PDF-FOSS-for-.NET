@@ -19,6 +19,10 @@
 /// </summary>
 internal static class CjkFallbackFont
 {
+    /// <summary>The Windows font directory. A candidate there that is missing is looked up by its
+    /// file name in the platform's own font directories (<see cref="LocateFontFile"/>).</summary>
+    private const string WindowsFonts = @"C:\Windows\Fonts\";
+
     private static readonly string[] CandidatePaths =
     [
         // macOS — "Arial Unicode" has the broadest single-file CJK coverage
@@ -29,10 +33,10 @@ internal static class CjkFallbackFont
         // Windows — Arial Unicode MS used to ship until Office 2007; modern
         // installs only have SimSun (zh) / Yu Gothic (ja) / Malgun Gothic
         // (ko). Try the one that loads.
-        @"C:\Windows\Fonts\ARIALUNI.TTF",
-        @"C:\Windows\Fonts\simsun.ttc",
-        @"C:\Windows\Fonts\malgun.ttf",
-        @"C:\Windows\Fonts\YuGothR.ttc",
+        WindowsFonts + "ARIALUNI.TTF",
+        WindowsFonts + "simsun.ttc",
+        WindowsFonts + "malgun.ttf",
+        WindowsFonts + "YuGothR.ttc",
         // Linux — Noto Sans CJK is the de-facto standard on most distros.
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -58,6 +62,10 @@ internal static class CjkFallbackFont
     public static IGlyphOutlineSource? ResolveNamed(string? baseFont, string? ordering = null)
     {
         var (repoNames, sysFiles) = CjkCandidates(baseFont, ordering);
+        // Before the family's candidates: those answer a proportional face's name with the
+        // fixed-pitch face its collection opens with.
+        var collectionFamily = CollectionFamily(baseFont);
+        if (collectionFamily is not null && HostFace(collectionFamily) is { } face) return face;
 
         foreach (var rn in repoNames)
         {
@@ -72,6 +80,10 @@ internal static class CjkFallbackFont
             });
             if (p is not null) return p;
         }
+        // A host without the named collection (and no registered face for the family) still
+        // has the sans one, whose proportional face keeps the half-width cells the text was
+        // set for.
+        if (collectionFamily is not null && HostFace(ProportionalHostFace) is { } proportional) return proportional;
         foreach (var f in sysFiles)
         {
             var p = LoadCached(f, () =>
@@ -80,6 +92,39 @@ internal static class CjkFallbackFont
         }
         return TryGet();
     }
+
+    /// <summary>The proportional faces that ride in a host collection behind its fixed-pitch
+    /// one, by the part of a base font name that tells them, with the family the host knows
+    /// each by.</summary>
+    private static readonly (string Key, string Family)[] CollectionFaces =
+    [
+        ("PMincho", "MS PMincho"), ("PGothic", "MS PGothic"),
+        ("UIGothic", "MS UI Gothic"), ("UI-Gothic", "MS UI Gothic"), ("UI Gothic", "MS UI Gothic"),
+    ];
+
+    private const string ProportionalHostFace = "MS PGothic";
+
+    /// <summary>Half the width of a full-width glyph, in thousandths of the em: how far left of
+    /// a column's pen such a glyph's own origin lies.</summary>
+    internal const double FullWidthOriginX = 500;
+
+    /// <summary>The glyph a host face draws for <paramref name="glyphId"/> in a vertical column.</summary>
+    internal static int VerticalGlyph(IGlyphOutlineSource source, int glyphId) =>
+        source is GlyphOutlineParser face ? face.VerticalForm(glyphId) : glyphId;
+
+    /// <summary>The family of the face a base font names inside a host collection, when it is
+    /// not the face the collection opens with: MS PMincho and MS PGothic ride behind MS Mincho
+    /// and MS Gothic, whose fixed-pitch glyphs sit in full-width cells - an opening parenthesis
+    /// drawn from them under the proportional face's half-em advance landed inside the next
+    /// character. Null for any other name.</summary>
+    private static string? CollectionFamily(string? baseFont) => string.IsNullOrEmpty(baseFont)
+        ? null
+        : CollectionFaces.FirstOrDefault(f => baseFont!.Contains(f.Key, System.StringComparison.OrdinalIgnoreCase)).Family;
+
+    /// <summary>The host's face of that family, taken out of its collection; null when the
+    /// host has none.</summary>
+    private static IGlyphOutlineSource? HostFace(string family) => LoadCached("face:" + family, () =>
+        SystemFontResolver.Resolve(family) is { Length: > 12 } data ? LoadOutlineSource(data) : null);
 
     /// <summary>
     /// Advance width (1/1000 em) for one legacy-CMap byte-code, taken from the
@@ -153,12 +198,9 @@ internal static class CjkFallbackFont
         var hay = name + " " + sb;
         bool Has(params string[] keys)
         {
-            foreach (var k in keys)
-                if (hay.Contains(k, System.StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
+            return keys.Any(k => hay.Contains(k, System.StringComparison.OrdinalIgnoreCase));
         }
 
-        const string F = @"C:\Windows\Fonts\";
         // Korean (Adobe-Korea1). Checked first because Korean family names such as
         // "HYGoThic" contain the substring "Gothic" and would otherwise be routed to
         // the Japanese MS Gothic branch, which has no Hangul. Match on the Korea1
@@ -168,27 +210,27 @@ internal static class CjkFallbackFont
             || Has("HYGoThic", "HYGothic", "HYSMyeong", "HYMyeong", "Batang", "바탕",
                    "Dotum", "돋움", "Gulim", "굴림", "Gungsuh", "궁서", "명조", "고딕", "Malgun", "맑은"))
             return (new[] { "Malgun Gothic", "Batang", "Gulim" },
-                    new[] { F + "malgun.ttf", F + "batang.ttc", F + "gulim.ttc" });
+                    new[] { WindowsFonts + "malgun.ttf", WindowsFonts + "batang.ttc", WindowsFonts + "gulim.ttc" });
         // Japanese Mincho (serif). MS Mincho isn't installed on modern Windows; callers
         // typically register MSMINCHO.TTF, so try the repository first.
         if (Has("Mincho", "明朝", "Ryumin"))      // 明朝
             return (new[] { "MSMINCHO", "MS Mincho", "MS-Mincho" },
-                    new[] { F + "msmincho.ttc", F + "yumin.ttf", F + "msgothic.ttc" });
+                    new[] { WindowsFonts + "msmincho.ttc", WindowsFonts + "yumin.ttf", WindowsFonts + "msgothic.ttc" });
         // Japanese Gothic (sans) — MS Gothic ships with Windows.
         if (Has("Gothic", "ゴシック"))    // ゴシック
             return (new[] { "MSGOTHIC", "MS Gothic", "MS-Gothic" },
-                    new[] { F + "msgothic.ttc", F + "YuGothR.ttc", F + "meiryo.ttc" });
+                    new[] { WindowsFonts + "msgothic.ttc", WindowsFonts + "YuGothR.ttc", WindowsFonts + "meiryo.ttc" });
         // Chinese heavy sans (SimHei / 黑体) — no simhei.ttf on modern Windows.
         if (Has("黑体", "SimHei", "STHeiti", "Heiti"))
-            return (new[] { "SimHei" }, new[] { F + "simhei.ttf", F + "msyhbd.ttc", F + "msyh.ttc" });
+            return (new[] { "SimHei" }, new[] { WindowsFonts + "simhei.ttf", WindowsFonts + "msyhbd.ttc", WindowsFonts + "msyh.ttc" });
         if (Has("雅黑", "YaHei"))
-            return (new[] { "Microsoft YaHei" }, new[] { F + "msyh.ttc" });
+            return (new[] { "Microsoft YaHei" }, new[] { WindowsFonts + "msyh.ttc" });
         if (Has("楷", "KaiTi"))                        // 楷
-            return (new[] { "KaiTi", "SimKai" }, new[] { F + "simkai.ttf", F + "simsun.ttc" });
+            return (new[] { "KaiTi", "SimKai" }, new[] { WindowsFonts + "simkai.ttf", WindowsFonts + "simsun.ttc" });
         if (Has("仿宋", "FangSong"))               // 仿宋
-            return (new[] { "FangSong", "SimFang" }, new[] { F + "simfang.ttf", F + "simsun.ttc" });
+            return (new[] { "FangSong", "SimFang" }, new[] { WindowsFonts + "simfang.ttf", WindowsFonts + "simsun.ttc" });
         if (Has("宋", "SimSun", "NSimSun", "STSong", "Song"))
-            return (new[] { "SimSun", "NSimSun" }, new[] { F + "simsun.ttc" });
+            return (new[] { "SimSun", "NSimSun" }, new[] { WindowsFonts + "simsun.ttc" });
         return (empty, empty);
     }
 
@@ -307,26 +349,9 @@ internal static class CjkFallbackFont
     public static byte[]? ResolveEmbeddableBytes(string text)
     {
         if (string.IsNullOrEmpty(text)) return null;
-        lock (_lock)
-        {
-            foreach (var f in EmbeddableCandidates(text))
-            {
-                if (_embeddable.TryGetValue(f, out var cached))
-                {
-                    if (cached is not null) return cached;
-                    continue;
-                }
-                byte[]? bytes = null;
-                try
-                {
-                    if (LocateFontFile(f) is { } fp)
-                        bytes = NormalizeToSfnt(System.IO.File.ReadAllBytes(fp));
-                }
-                catch { bytes = null; }
-                _embeddable[f] = bytes;
-                if (bytes is not null) return bytes;
-            }
-        }
+        foreach (var f in EmbeddableCandidates(text))
+            if (LoadEmbeddable(f) is { } bytes)
+                return bytes;
         return null;
     }
 
@@ -339,28 +364,33 @@ internal static class CjkFallbackFont
     /// <summary>The UA's serif Latin face (Times New Roman), normalised for
     /// embedding: a CJK cell's ASCII runs — digits, parens, SPACES — are drawn
     /// in the UA serif, not in the CJK face's full/half-width forms
-    /// (a SimSun space is 0.5 em where the drawn Times space is 0.25).</summary>
+    /// (a SimSun space is 0.5 em where the drawn Times space is 0.25).
+    /// Looked up by its family, not by the file Windows keeps it in: macOS keeps it as
+    /// "Times New Roman.ttf", where a lookup of times.ttf found nothing and the cells
+    /// fell back to a face without the glyphs they draw.</summary>
     public static (byte[] Bytes, string Name)? SerifLatinFace(bool bold = false)
     {
         lock (_lock)
         {
-            var file = bold ? @"C:\Windows\Fonts\timesbd.ttf" : @"C:\Windows\Fonts\times.ttf";
+            var family = bold ? SerifLatinFamily + ",Bold" : SerifLatinFamily;
             var name = bold ? "TimesNewRomanBold" : "TimesNewRoman";
             _latinBytes ??= new System.Collections.Generic.Dictionary<string, byte[]?>(
                 System.StringComparer.OrdinalIgnoreCase);
-            if (_latinBytes.TryGetValue(file, out var cached))
+            if (_latinBytes.TryGetValue(family, out var cached))
                 return cached is null ? null : (cached, name);
             byte[]? bytes = null;
             try
             {
-                if (LocateFontFile(file) is { } fp)
-                    bytes = NormalizeToSfnt(System.IO.File.ReadAllBytes(fp));
+                if (SystemFontResolver.Resolve(family) is { Length: > 12 } face)
+                    bytes = NormalizeToSfnt(face);
             }
             catch { bytes = null; }
-            _latinBytes[file] = bytes;
+            _latinBytes[family] = bytes;
             return bytes is null ? null : (bytes, name);
         }
     }
+
+    private const string SerifLatinFamily = "Times New Roman";
 
     private static System.Collections.Generic.Dictionary<string, byte[]?>? _latinBytes;
 
@@ -373,17 +403,16 @@ internal static class CjkFallbackFont
         {
             if (_chain is not null) return _chain;
             _chain = new System.Collections.Generic.List<(byte[], string)>();
-            const string F = @"C:\Windows\Fonts\";
             foreach (var (file, name) in new[]
             {
-                (F + "simsun.ttc", "SimSun"),
+                (WindowsFonts + "simsun.ttc", "SimSun"),
                 // YaHei carries the CJK-radical range SimSun's cmap lacks
                 // (U+2E86… — 21 of the filing form's 30 address radicals).
-                (F + "msyh.ttc", "MicrosoftYaHei"),
-                (F + "seguisym.ttf", "SegoeUISymbol"),
-                (F + "simsunb.ttf", "SimSun-ExtB"),
-                (F + "msgothic.ttc", "MSGothic"),
-                (F + "malgun.ttf", "MalgunGothic"),
+                (WindowsFonts + "msyh.ttc", "MicrosoftYaHei"),
+                (WindowsFonts + "seguisym.ttf", "SegoeUISymbol"),
+                (WindowsFonts + "simsunb.ttf", "SimSun-ExtB"),
+                (WindowsFonts + "msgothic.ttc", "MSGothic"),
+                (WindowsFonts + "malgun.ttf", "MalgunGothic"),
             })
             {
                 try
@@ -399,7 +428,6 @@ internal static class CjkFallbackFont
 
     private static string[] EmbeddableCandidates(string text)
     {
-        const string F = @"C:\Windows\Fonts\";
         bool kana = false, hangul = false, han = false;
         foreach (var c in text)
         {
@@ -407,10 +435,50 @@ internal static class CjkFallbackFont
             else if (c >= 0xAC00 && c <= 0xD7AF) hangul = true;
             else if ((c >= 0x3400 && c <= 0x9FFF) || (c >= 0xF900 && c <= 0xFAFF)) han = true;
         }
-        if (kana) return new[] { F + "msgothic.ttc", F + "YuGothR.ttc", F + "meiryo.ttc" };
-        if (hangul) return new[] { F + "malgun.ttf", F + "gulim.ttc", F + "batang.ttc" };
-        if (han) return new[] { F + "simsun.ttc", F + "msyh.ttc", F + "simhei.ttf" };
+        if (kana) return KanaCandidates;
+        if (hangul) return HangulCandidates;
+        if (han) return HanCandidates;
         return System.Array.Empty<string>();
+    }
+
+    private static readonly string[] KanaCandidates = { WindowsFonts + "msgothic.ttc", WindowsFonts + "YuGothR.ttc", WindowsFonts + "meiryo.ttc" };
+    private static readonly string[] HangulCandidates = { WindowsFonts + "malgun.ttf", WindowsFonts + "gulim.ttc", WindowsFonts + "batang.ttc" };
+    private static readonly string[] HanCandidates = { WindowsFonts + "simsun.ttc", WindowsFonts + "msyh.ttc", WindowsFonts + "simhei.ttf" };
+
+    /// <summary>
+    /// The first installed CJK face that covers CJK text - its own script's faces first, then
+    /// the Han faces (the broadest ideograph sets), then the rest. <see cref="ResolveEmbeddableBytes"/>
+    /// answers the first installed face of the text's script, which may lack a rare ideograph:
+    /// MS Gothic has no 蟗, the SimSun beside it has. Null for text without CJK, or when no
+    /// CJK face covers it.
+    /// </summary>
+    internal static byte[]? ResolveCoveringBytes(string text, Func<byte[], bool> covers)
+    {
+        if (string.IsNullOrEmpty(text)) return null;
+        var own = EmbeddableCandidates(text);
+        if (own.Length == 0) return null;
+        foreach (var f in own.Concat(HanCandidates).Concat(KanaCandidates).Concat(HangulCandidates).Distinct())
+            if (LoadEmbeddable(f) is { } bytes && covers(bytes))
+                return bytes;
+        return null;
+    }
+
+    /// <summary>A candidate's program normalized for embedding, read once per process; null when it is not installed.</summary>
+    private static byte[]? LoadEmbeddable(string candidate)
+    {
+        lock (_lock)
+        {
+            if (_embeddable.TryGetValue(candidate, out var cached)) return cached;
+            byte[]? bytes = null;
+            try
+            {
+                if (LocateFontFile(candidate) is { } fp)
+                    bytes = NormalizeToSfnt(System.IO.File.ReadAllBytes(fp));
+            }
+            catch { bytes = null; }
+            _embeddable[candidate] = bytes;
+            return bytes;
+        }
     }
 
     /// <summary>Number of fonts in a TrueType Collection ('ttcf'); 1 for a plain sfnt.</summary>

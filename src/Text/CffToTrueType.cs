@@ -12,14 +12,31 @@ namespace Aspose.Pdf.Text;
 /// contours and are written as straight-segment glyf records; the cmap is rebuilt
 /// from the source font's encoding.
 /// </summary>
-internal static class CffToTrueType
+internal static partial class CffToTrueType
 {
-    /// <summary>Convert a bare CFF; returns null when it cannot be parsed.</summary>
-    public static byte[]? Convert(byte[] cffData)
+    /// <summary>Convert a bare CFF; returns null when it cannot be parsed. The font dict's
+    /// /Differences (<paramref name="codeToName"/>) and /ToUnicode (<paramref name="codeToUnicode"/>)
+    /// outrank the program's own glyph names in the cmap: the glyph a code draws is the one the
+    /// encoding names and the character it stands for is the one ToUnicode gives - a heading set
+    /// in small capitals draws the capital glyphs for lowercase text, and the served face must
+    /// show the same glyphs for that text.</summary>
+    public static byte[]? Convert(byte[] cffData, Dictionary<int, string>? codeToName = null,
+        Dictionary<int, int>? codeToUnicode = null)
     {
         var src = CffGlyphSource.TryLoad(cffData);
         if (src is null || src.GlyphCount == 0) return null;
-        return Build(src, src.GlyphCount, src.CMap);
+        var cmap = src.CMap;
+        if (codeToName is not null && codeToUnicode is not null)
+        {
+            cmap = new Dictionary<int, int>(src.CMap);
+            var claimed = new HashSet<int>();   // the first code naming a character keeps it
+            foreach (var (code, name) in codeToName)
+            {
+                var gid = src.GidForName(name);
+                if (gid > 0 && codeToUnicode.TryGetValue(code, out var uni) && claimed.Add(uni)) cmap[uni] = gid;
+            }
+        }
+        return Build(src, src.GlyphCount, cmap);
     }
 
     /// <summary>Convert an Adobe Type 1 program; <paramref name="length1"/> and
@@ -118,7 +135,7 @@ internal static class CffToTrueType
             advances[gid] = adv > 0 ? adv : unitsPerEm / 2;
 
             GlyphOutline? outline = null;
-            try { outline = src.GetOutline(gid); } catch { }
+            try { outline = src.GetOutline(gid); } catch { /* a glyph outline that does not parse is written empty */ }
             if (outline is null || outline.Contours.Length == 0) continue;
 
             var gxMin = (short)Math.Round(outline.XMin);
@@ -156,7 +173,7 @@ internal static class CffToTrueType
     private static int MaxOf(int[] values)
     {
         var m = 0;
-        foreach (var v in values) if (v > m) m = v;
+        foreach (var v in values.Where(v => v > m)) m = v;
         return m;
     }
 
@@ -281,7 +298,16 @@ internal static class CffToTrueType
     /// alongside — without it the HTML consumer cannot reach a single ideograph.
     /// Returns the rebuilt sfnt, or null when the program already maps Unicode,
     /// the mapping is empty, or the directory can't be parsed.</summary>
-    internal static byte[]? TryAddUnicodeCmap(byte[] ttf, Dictionary<int, int> unicodeToGid)
+    /// <remarks><paramref name="markGlyphs"/>, when given, also adds a GDEF of glyph classes to a program that
+    /// has none: those glyphs marks, every other glyph a base glyph. A browser that finds no GDEF classes a glyph
+    /// by the character it is reached from; the classes keep that for every glyph but the ones a caller names
+    /// otherwise.</remarks>
+    /// <remarks>With <paramref name="replaceDisagreeing"/>, a program whose own Unicode subtables send a character
+    /// of <paramref name="unicodeToGid"/> to another glyph (or to none) - a subset that kept the full font's table, a
+    /// /ToUnicode naming other characters than the program does - has those subtables replaced by one that maps
+    /// the characters the text carries to the glyphs the codes draw, the characters only they mapped kept.</remarks>
+    internal static byte[]? TryAddUnicodeCmap(byte[] ttf, Dictionary<int, int> unicodeToGid, ISet<int>? markGlyphs = null,
+        bool replaceDisagreeing = false)
     {
         try
         {
@@ -309,12 +335,30 @@ internal static class CffToTrueType
             if (glyphCount == 0) return null;
             var cmap = existingCmap is null
                 ? BuildCmap(unicodeToGid, glyphCount)
-                : MergeUnicodeIntoCmap(existingCmap, unicodeToGid, glyphCount);
+                : MergeUnicodeIntoCmap(existingCmap, unicodeToGid, glyphCount, replaceDisagreeing);
             if (cmap is null) return null;   // program already maps Unicode
             tables["cmap"] = cmap;
+            if (markGlyphs is not null && !tables.ContainsKey("GDEF")) tables["GDEF"] = BuildGlyphClassGdef(glyphCount, markGlyphs);
             return AssembleSfnt(tables, flavour: U32At(ttf, 0));
         }
         catch { return null; }
+    }
+
+    /// <summary>A GDEF 1.0 table that holds glyph classes alone (a format 1 class definition over every glyph):
+    /// <paramref name="markGlyphs"/> marks, every other glyph a base glyph.</summary>
+    internal static byte[] BuildGlyphClassGdef(int glyphCount, ISet<int> markGlyphs)
+    {
+        const ushort BaseGlyph = 1, MarkGlyph = 3, HeaderSize = 12;
+        var ms = new MemoryStream();
+        var w = new BigEndianWriter(ms);
+        w.U16(1); w.U16(0);               // version 1.0
+        w.U16(HeaderSize);                // glyph class definition, right after the header
+        w.U16(0); w.U16(0); w.U16(0);     // no attachment points, ligature carets or mark attachment classes
+        w.U16(1);                         // class definition format 1
+        w.U16(0);                         // from glyph 0
+        w.U16((ushort)glyphCount);
+        for (var gid = 0; gid < glyphCount; gid++) w.U16(markGlyphs.Contains(gid) ? MarkGlyph : BaseGlyph);
+        return ms.ToArray();
     }
 
     /// <summary>A cmap subtable that maps no character: a format 4 table of the end
@@ -332,11 +376,12 @@ internal static class CffToTrueType
         };
     }
 
-    /// <summary>Rebuild a cmap table keeping its existing subtables and appending a
-    /// Windows-Unicode (3,1) format-4 one. Null when a Unicode-capable subtable
-    /// (platform 0, or Windows BMP/full) mapping anything is already present or the
-    /// table is malformed.</summary>
-    private static byte[]? MergeUnicodeIntoCmap(byte[] cmap, Dictionary<int, int> unicodeToGid, int glyphCount)
+    /// <summary>Rebuild a cmap table keeping its existing subtables, but a Windows symbol
+    /// one, and appending a Windows-Unicode (3,1) format-4 one. Null when a Unicode-capable subtable
+    /// (platform 0, or Windows BMP/full) mapping anything is already present - and, with
+    /// <paramref name="replaceDisagreeing"/>, agrees with the mapping offered - or the table is malformed.</summary>
+    private static byte[]? MergeUnicodeIntoCmap(byte[] cmap, Dictionary<int, int> unicodeToGid, int glyphCount,
+        bool replaceDisagreeing = false)
     {
         static ushort U16At(byte[] b, int o) => (ushort)((b[o] << 8) | b[o + 1]);
         static uint U32At(byte[] b, int o) =>
@@ -345,6 +390,7 @@ internal static class CffToTrueType
         int n = U16At(cmap, 2);
         if (cmap.Length < 4 + n * 8) return null;
         var records = new List<(int plat, int enc, int off)>();
+        Dictionary<int, int>? existing = null;
         for (var i = 0; i < n; i++)
         {
             var r = 4 + i * 8;
@@ -357,8 +403,14 @@ internal static class CffToTrueType
             if (plat == 0 || (plat == 3 && enc is 1 or 10))
             {
                 if (MapsNothing(cmap, off)) continue;
-                return null;
+                if (!replaceDisagreeing || ReadUnicodeSubtable(cmap, off) is not { } read) return null;
+                existing ??= new Dictionary<int, int>();
+                foreach (var kv in read) existing.TryAdd(kv.Key, kv.Value);
+                continue;
             }
+            // A Windows symbol subtable over the byte codes is dropped: a face holding one is
+            // read through it alone on Windows, which would bypass the Unicode subtable added here.
+            if (plat == 3 && enc == 0) continue;
             records.Add((plat, enc, off));
         }
         // Subtable length by its format header (U16 at +2 for formats 0-6,
@@ -372,6 +424,15 @@ internal static class CffToTrueType
                 14 => (b[off + 2] << 24) | (b[off + 3] << 16) | (b[off + 4] << 8) | b[off + 5],
                 _ => (b[off + 4] << 24) | (b[off + 5] << 16) | (b[off + 6] << 8) | b[off + 7],
             };
+        }
+        // A table that sends one of the text's characters elsewhere gives way to the mapping offered; the characters
+        // it alone maps keep their glyphs, and the ones past the program's glyphs (a subset keeping its full
+        // font's table) are dropped as the new subtable is built.
+        if (existing is not null)
+        {
+            if (AgreesWith(existing, unicodeToGid, glyphCount)) return null;
+            foreach (var kv in unicodeToGid) existing[kv.Key] = kv.Value;
+            unicodeToGid = existing;
         }
         var unicodeSub = BuildFormat4Subtable(unicodeToGid, glyphCount);
         using var ms = new MemoryStream();
@@ -472,7 +533,9 @@ internal static class CffToTrueType
         sw.U16((ushort)(segCount * 2));
         var searchRange = 2; while (searchRange * 2 <= segCount * 2) searchRange *= 2;
         sw.U16((ushort)searchRange);
+#pragma warning disable S2184 // integer division intended
         sw.U16((ushort)(Compat.Log2(searchRange / 2) is var l && l > 0 ? (int)l : 0));
+#pragma warning restore S2184
         sw.U16((ushort)(segCount * 2 - searchRange));
         foreach (var s in segments) sw.U16((ushort)s.end);
         sw.U16(0);                        // reservedPad
@@ -575,9 +638,9 @@ internal static class CffToTrueType
             w.U32((uint)off);
             w.U32((uint)length);
         }
-        foreach (var kv in tables)
+        foreach (var value in tables.Select(kv => kv.Value))
         {
-            ms.Write(kv.Value, 0, kv.Value.Length);
+            ms.Write(value, 0, value.Length);
             while (ms.Length % 4 != 0) ms.WriteByte(0);
         }
         return ms.ToArray();

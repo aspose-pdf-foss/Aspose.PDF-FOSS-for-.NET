@@ -31,12 +31,9 @@ public sealed partial class TextFragmentAbsorber
         {
             for (var i = _fragments.Count - 1; i >= 0; i--)
             {
-                if (!FragmentInSearchRect(fv.searchRect, _fragments.GetInternal(i)))
-                {
-                    // Only remove fragments added during this Visit call (they have matching pageIndex)
-                    if (_fragments.GetInternal(i).PageIndex == fv.page.Index)
-                        _fragments.RemoveAt(i);
-                }
+                // Only remove fragments added during this Visit call (they have matching pageIndex)
+                if (!FragmentInSearchRect(fv.searchRect, _fragments.GetInternal(i)) && _fragments.GetInternal(i).PageIndex == fv.page.Index)
+                    _fragments.RemoveAt(i);
             }
         }
     }

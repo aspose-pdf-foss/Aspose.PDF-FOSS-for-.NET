@@ -40,7 +40,8 @@ public sealed class TextFormattingOptions
         /// <see cref="FullSize"/> are untouched, so nothing that does not name this
         /// value changes.
         ///
-        /// A caller whose own typography defines the extents declares them with
+        /// A caller whose own typography defines the extents -- one that scales the
+        /// face's metrics its own way -- declares them with
         /// <see cref="Text.TextState.LineBoxAscentEm"/> and
         /// <see cref="Text.TextState.LineBoxDescentEm"/>; left unset, the face's
         /// own are used.</summary>

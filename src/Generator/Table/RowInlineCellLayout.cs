@@ -30,7 +30,9 @@ public partial class Table
         il.rowItemSources = 0;
         il.rowRightCount = 0;
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var para in cell.Paragraphs)
+#pragma warning restore S3267
         {
             if (!LayoutInlineCellParagraph(il, para, defaultFontSize, cellTextState, cellAlign)) break;
         }

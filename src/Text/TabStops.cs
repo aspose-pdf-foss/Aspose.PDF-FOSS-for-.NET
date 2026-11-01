@@ -73,7 +73,9 @@ public sealed class TabStops
 
     /// <summary>Gets the number of tab stops.</summary>
     public int Count => _stops.Count;
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
     /// <summary>Gets or sets the tab stop at the given zero-based index.</summary>
     public TabStop this[int index]

@@ -81,8 +81,9 @@ public sealed partial class Document
             // document-builder default point size (10), not the
             // Standard-14 12 — an untyped FloatingBox fragment
             // renders at the builder default.
-            var size = st.FontSizeTouched ? (double)st.FontSize
-                : parent.FontSizeTouched ? parent.FontSize : 10;
+            double size = 10;
+            if (st.FontSizeTouched) size = (double)st.FontSize;
+            else if (parent.FontSizeTouched) size = parent.FontSize;
             var merged = new Text.TextState
             {
                 ForegroundColor = st.ForegroundColor ?? parent.ForegroundColor,
@@ -90,8 +91,9 @@ public sealed partial class Document
                 IsBold = st.IsBold || parent.IsBold,
                 IsItalic = st.IsItalic || parent.IsItalic,
             };
-            var font = st.Font?.SourceFontData is not null ? st.Font
-                : parent.Font?.SourceFontData is not null ? parent.Font : null;
+            Text.Font? font = null;
+            if (st.Font?.SourceFontData is not null) font = st.Font;
+            else if (parent.Font?.SourceFontData is not null) font = parent.Font;
             if (font is not null) merged.Font = font;
             if (st.FontData is not null) merged.FontData = st.FontData;
             else if (parent.FontData is not null) merged.FontData = parent.FontData;
@@ -109,7 +111,9 @@ public sealed partial class Document
             // fragment's own (the builder default 10 pt for an unsized
             // one; an inline-joined fragment does not borrow the size of
             // the paragraph it joins) — always in the Standard-14 sans.
-            var markSize = tfBase > 0 ? tfBase : parent.FontSizeTouched ? parent.FontSize : 10;
+            double markSize = 10;
+            if (tfBase > 0) markSize = tfBase;
+            else if (parent.FontSizeTouched) markSize = parent.FontSize;
             // A text-less inline fragment joins the previous line at its
             // box top and is as tall as its own size plus leading.
             var joinH = tf.IsInLineParagraph && !hasOwnText ? markSize + parent.LineSpacing : 0;
@@ -155,8 +159,9 @@ public sealed partial class Document
             var st = seg.TextState;
             if (st.LineSpacing > db.styLs) db.styLs = st.LineSpacing;
             if (string.IsNullOrEmpty(seg.Text)) continue;
-            var size = st.FontSizeTouched ? (double)st.FontSize
-                : parent.FontSizeTouched ? parent.FontSize : 10;
+            double size = 10;
+            if (st.FontSizeTouched) size = (double)st.FontSize;
+            else if (parent.FontSizeTouched) size = parent.FontSize;
             var merged = new Text.TextState
             {
                 ForegroundColor = st.ForegroundColor ?? parent.ForegroundColor,
@@ -164,8 +169,9 @@ public sealed partial class Document
                 IsBold = st.IsBold || parent.IsBold,
                 IsItalic = st.IsItalic || parent.IsItalic,
             };
-            var font = st.Font?.SourceFontData is not null ? st.Font
-                : parent.Font?.SourceFontData is not null ? parent.Font : null;
+            Text.Font? font = null;
+            if (st.Font?.SourceFontData is not null) font = st.Font;
+            else if (parent.Font?.SourceFontData is not null) font = parent.Font;
             if (font is not null) merged.Font = font;
             if (!st.Superscript && size > db.styBaseSize) db.styBaseSize = size;
             db.styRuns.Add(new FlowLayout.StyledRun

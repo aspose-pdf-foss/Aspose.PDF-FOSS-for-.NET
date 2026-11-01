@@ -62,16 +62,17 @@ internal static partial class HtmlToPdfConverter
             ws.i = ws.selfClosed ? ws.end + 1 : SkipElement(html, ws.i, ws.tag);
             return true;
         }
-        if (Regex.IsMatch(ws.cls, @"sw[a-z]+-label", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(ws.cls, @"sw[a-z]+-label", RegexOptions.IgnoreCase))
         {
-            ws.pendingPad = Regex.IsMatch(ws.cls, @"(^|\s)ml-0(\s|$)") ? 0
-                : Regex.IsMatch(ws.cls, @"sw[bs]-label", RegexOptions.IgnoreCase) ? 6 : 3;
+            if (SafeRegex.IsMatch(ws.cls, @"(^|\s)ml-0(\s|$)")) ws.pendingPad = 0;
+            else if (SafeRegex.IsMatch(ws.cls, @"sw[bs]-label", RegexOptions.IgnoreCase)) ws.pendingPad = 6;
+            else ws.pendingPad = 3;
             ws.i = ws.end + 1;
             return true;
         }
         // A widget that places a grid labels it first, and the label travels with the
         // grid across a sheet - the data-entry and the M&TE widget both do this.
-        if (Regex.IsMatch(ws.cls, @"smart-widget-(de|mte-)table", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(ws.cls, @"smart-widget-(de|mte-)table", RegexOptions.IgnoreCase))
         {
             FlushStepLine(ws);
             ws.inDetable = true;
@@ -88,7 +89,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Class-driven arms: note bands, table wraps, multiple-choice options and captions.</summary>
     private static bool WalkStepClassArms(StepWalkState ws, string html)
     {
-        ws.nbm = Regex.Match(ws.cls, @"step-(note|caution|alara|warning)(?![-\w])",
+        ws.nbm = SafeRegex.Match(ws.cls, @"step-(note|caution|alara|warning)(?![-\w])",
             RegexOptions.IgnoreCase);
         if (!ws.isClose && ws.nbm.Success && _stepParaMarginPt is not null)
         {
@@ -113,7 +114,9 @@ internal static partial class HtmlToPdfConverter
                     {
                         "caution" => 83.0, "warning" => 88.0, "alara" => 66.0, _ => 55.0,
                     };
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
                     foreach (var cs in cap.Segs)
+#pragma warning restore S3267
                         if (cs.Text is not null)
                         { cs.Bold = true; cs.Text = cs.Text.ToUpperInvariant(); }
                     boxItems[0].GapBefore = _stepParaMarginPt.Value;
@@ -212,9 +215,12 @@ internal static partial class HtmlToPdfConverter
                             // ONE line box, flush; the legacy
                             // line-box-plus-margins pricing is the narrow
                             // family's calibration.
-                            LinePt = _stepParaLinePt > 0 ? _stepParaLinePt
-                                : _stepRowColFull && _stepLinkedParaLinePt > 0
-                                    ? _stepLinkedParaLinePt : 0,
+                            LinePt = (_stepParaLinePt, _stepRowColFull, _stepLinkedParaLinePt) switch
+                            {
+                                (> 0, _, _) => _stepParaLinePt,
+                                (_, true, > 0) => _stepLinkedParaLinePt,
+                                _ => 0,
+                            },
                             ParaMarginPt = _stepParaMarginPt ?? 0,
                             BlockMargined = _stepParaMarginPt is not null
                                 || _stepParaLinePt <= 0
@@ -236,13 +242,13 @@ internal static partial class HtmlToPdfConverter
         // ⚠ an author's OWN block only - the form's table wraps carry text-align too and
         // must keep going through the table path
         if (!ws.isClose && ws.tag is "div" or "p" && !ws.selfClosed && ws.cls.Length == 0
-            && Regex.IsMatch(ws.style, @"text-align\s*:\s*(center|right)", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(ws.style, @"text-align\s*:\s*(center|right)", RegexOptions.IgnoreCase))
         {
             FlushStepLine(ws);
             var (aInner, aPast) = ExtractBalancedInnerSpanAt(html, ws.i);
             if (aInner is not null)
             {
-                var al = Regex.IsMatch(ws.style, @"text-align\s*:\s*center", RegexOptions.IgnoreCase)
+                var al = SafeRegex.IsMatch(ws.style, @"text-align\s*:\s*center", RegexOptions.IgnoreCase)
                     ? 1 : 2;
                 var aItems = WalkStepContent(aInner);
                 if (aItems.Count > 0)
@@ -303,7 +309,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The declared CSS width of the tag at the cursor in points, 0 when it has none.</summary>
     private static double WidthPt(StepWalkState ws)
     {
-        var wm = Regex.Match(ws.style, @"width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+        var wm = SafeRegex.Match(ws.style, @"width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
         return wm.Success
             ? double.Parse(wm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * 0.75
             : 0;

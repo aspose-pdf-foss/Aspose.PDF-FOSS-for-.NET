@@ -7,7 +7,29 @@ public partial class TextFragment
     /// The page this fragment was extracted from. When set, modifying <see cref="Text"/>
     /// will update the PDF content stream.
     /// </summary>
-    internal Page? SourcePage { get; set; }
+    internal Page? SourcePage
+    {
+        get => _sourcePage;
+        set
+        {
+            _sourcePage = value;
+            PositionFrame = value?.ReadingFrame;
+        }
+    }
+
+    private Page? _sourcePage;
+
+    /// <summary>The frame of <see cref="SourcePage"/> the fragment's position belongs to - read off the
+    /// page, or written onto it: a decoration or link set on the fragment later is placed from it.</summary>
+    internal Page.TextFrame? PositionFrame { get; private set; }
+
+    /// <summary>Bind the fragment to the page a writer drew it on, at its position in the page's space - or in the
+    /// view of the page turned, when <paramref name="inView"/>.</summary>
+    internal void BindWritten(Page page, bool inView = false)
+    {
+        _sourcePage = page;
+        PositionFrame = page.TakeWritingFrame(inView);
+    }
 
     internal void MarkCompanionRule(double rawX, double rawY, double rawW, double rawH,
         double pageX, double pageW, Color colour)
@@ -46,6 +68,61 @@ public partial class TextFragment
     {
         (CapturedBackgroundSources ??= new()).Add((x, y, w, h));
         CapturedBackgroundColor ??= color;
+    }
+
+    /// <summary>Captured source strike-out bars (raw <c>re</c> operands), drawn across the text the fragment covers.</summary>
+    internal System.Collections.Generic.List<(double X, double Y, double W, double H)>? CapturedStrikeOutSources;
+
+    /// <summary>Records a captured source strike-out bar and marks the fragment struck out, without
+    /// registering save-time strike-out injection.</summary>
+    internal void MarkCapturedStrikeOutSource(double x, double y, double w, double h)
+    {
+        (CapturedStrikeOutSources ??= new()).Add((x, y, w, h));
+        TextState.SetCapturedStrikeOut(true);
+    }
+
+    /// <summary>The source decorations of replaced text follow the replacement: the captured underline,
+    /// highlight and strike-out rectangles are spliced out of the content (they are sized to the OLD text
+    /// and would keep rendering under, behind or across the new, differently-sized text) and drawn again
+    /// at the replacement's advance.</summary>
+    private void ReseatSourceDecorations(Page page, string oldText, string value, bool rectTookAdvanceDelta)
+    {
+        if (CapturedUnderlineSources is not { Count: > 0 } && CapturedBackgroundSources is not { Count: > 0 }
+            && CapturedStrikeOutSources is not { Count: > 0 })
+            return;
+        page.RegisterUnderlineRemoval(this);
+
+        // Re-size the fragment rectangle by the replacement's advance DELTA so the
+        // injected decoration spans the new text, not the old. Delta, not the absolute
+        // advance: a kern-spread run's rect is far wider than the text's natural
+        // advance, and swapping one word must keep that spread.
+        if (!rectTookAdvanceDelta && _rectangle is not null
+            && TextState.Font is { } decFont && TextState.FontSize > 0)
+        {
+            var advance = MeasureReplacementAdvance(decFont, value, TextState.FontSize);
+            var oldAdvance = MeasureReplacementAdvance(decFont, oldText, TextState.FontSize);
+            if (advance >= 0 && oldAdvance >= 0)
+                _rectangle = new Rectangle(_rectangle.LLX, _rectangle.LLY,
+                    _rectangle.LLX + Math.Max(0, _rectangle.Width + advance - oldAdvance),
+                    _rectangle.URY);
+            else if (advance >= 0)
+                _rectangle = new Rectangle(_rectangle.LLX, _rectangle.LLY,
+                    _rectangle.LLX + advance, _rectangle.URY);
+        }
+
+        // An underline already switched off through the setter stays off: the source
+        // rule goes and nothing is redrawn under the new text.
+        if (CapturedUnderlineSources is { Count: > 0 } && TextState.ExplicitUnderline != false)
+            page.RegisterUnderlineFragment(this);
+        if (CapturedBackgroundSources is { Count: > 0 })
+        {
+            if (TextState.BackgroundColor is null && CapturedBackgroundColor is { } cbc)
+                TextState.SetCapturedBackgroundColor(cbc);
+            page.RegisterBgColorFragment(this);
+        }
+        // A struck-out text stays struck out; deleted text takes its bar with it.
+        if (CapturedStrikeOutSources is { Count: > 0 } && TextState.StrikeOut && value.Length > 0)
+            page.RegisterStrikeOutFragment(this);
     }
 
     /// <summary>The text as last written to the content stream by TextBuilder.</summary>

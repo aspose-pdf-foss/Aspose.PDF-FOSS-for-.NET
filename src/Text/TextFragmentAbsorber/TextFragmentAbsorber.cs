@@ -49,10 +49,12 @@ public sealed partial class TextFragmentAbsorber
     {
     }
 
+#pragma warning disable S3427 // public API: the published overloads
     /// <summary>
     /// Create an absorber that searches for a specific phrase.
     /// </summary>
     public TextFragmentAbsorber(string searchPhrase, bool isRegex = false)
+#pragma warning restore S3427
     {
         _searchPhrase = searchPhrase;
         _isRegex = isRegex;
@@ -116,8 +118,6 @@ public sealed partial class TextFragmentAbsorber
         _textSearchOptions = textSearchOptions;
     }
 
-    private System.Text.RegularExpressions.Regex[]? _regexes;
-
     /// <summary>
     /// Create an absorber that searches using a precompiled .NET <see cref="Regex"/>.
     /// The regex's pattern becomes the search phrase; <see cref="RegexOptions.IgnoreCase"/>
@@ -136,15 +136,17 @@ public sealed partial class TextFragmentAbsorber
         _regexIgnoreCase = !_caseSensitive;
     }
 
-    /// <summary>True when a Regex-based ctor carried RegexOptions.IgnoreCase —
-    /// case-insensitive matching then applies whatever the search options say.</summary>
-    private bool _regexIgnoreCase;
-
     /// <summary>Create an absorber configured with the given edit options.</summary>
     public TextFragmentAbsorber(TextEditOptions textEditOptions)
     {
         _textEditOptions = textEditOptions;
     }
+
+    private System.Text.RegularExpressions.Regex[]? _regexes;
+
+    /// <summary>True when a Regex-based ctor carried RegexOptions.IgnoreCase —
+    /// case-insensitive matching then applies whatever the search options say.</summary>
+    private bool _regexIgnoreCase;
 
     private TextEditOptions? _textEditOptions;
 
@@ -236,8 +238,7 @@ public sealed partial class TextFragmentAbsorber
                 // whose source text ended "…\r\n\r\n" round-trips exactly. Re-append
                 // one line break per trailing advance of the last visited page.
                 if (replayed.Length > 0)
-                    for (var k = 0; k < ta.TrailingBlankRows; k++)
-                        replayed += "\r\n";
+                    replayed += string.Concat(Enumerable.Repeat("\r\n", ta.TrailingBlankRows));
                 return replayed;
             }
 
@@ -327,78 +328,7 @@ public sealed partial class TextFragmentAbsorber
     {
         // Don't clear — public API accumulates results across multiple Accept() calls.
         // Call Visit(Document) for a fresh search, which does clear.
-        VisitInternal(page);
-    }
-
-    internal void VisitInternal(Page page, bool tolerantFonts = false, HashSet<object>? seenForms = null)
-    {
-        var fv = new FragmentVisitState();
-        fv.page = page;
-        fv.tolerantFonts = tolerantFonts;
-        fv.seenForms = seenForms;
-        fv.reader = fv.page.Reader;
-        fv.contentStreams = GetContentStreams(fv.page.Dict, fv.reader);
-        // A repeated Form XObject reference is deduped per absorber run (a document walk
-        // passes one set for all pages; a lone page visit is its own run). This holds for
-        // a phrase search too: the matches inside a shared form all address the SAME
-        // bytes, so reporting one per referencing page would hand the caller N handles
-        // onto one piece of text.
-        fv.seenForms ??= new HashSet<object>(ReferenceEqualityComparer.Instance);
-        fv.missingFontKeys = fv.page.Reader?.OwnerDocument?.EnableNotificationLogging == true
-            ? new List<string>() : null;
-
-        fv.rawFragments = new List<RawTextRun>();
-        fv.fillRects = new List<RawFillRect>();
-        fv.coverRects = new List<RawCoverRect>();
-
-        fv.rotCtm = PageRotationCtm(fv.page);
-
-        // Per PDF spec, a page's content streams are logically a single concatenated stream —
-        // text state and graphics state must persist across them. Concatenate with a space
-        // separator to prevent token adjacency.
-        if (fv.contentStreams.Count == 1)
-        {
-            ExtractRuns(fv.contentStreams[0], fv.page.Dict, fv.reader, fv.rawFragments, inheritedCtm: fv.rotCtm, fillRects: fv.fillRects, useFontEngineEncoding: _textSearchOptions?.UseFontEngineEncoding ?? false, keepAllFillRects: (_textSearchOptions?.SearchForTextRelatedGraphics ?? true) || (_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false), coverRects: fv.coverRects, strictFonts: !fv.tolerantFonts && !(_textSearchOptions?.IgnoreResourceFontErrors ?? false), seenForms: fv.seenForms, missingFontKeys: fv.missingFontKeys);
-        }
-        else if (fv.contentStreams.Count > 1)
-        {
-            var totalLen = 0;
-            foreach (var s in fv.contentStreams) totalLen += s.Length + 1;
-            var combined = new byte[totalLen];
-            int off = 0;
-            foreach (var s in fv.contentStreams)
-            {
-                Buffer.BlockCopy(s, 0, combined, off, s.Length);
-                off += s.Length;
-                combined[off++] = (byte)'\n';
-            }
-            ExtractRuns(combined, fv.page.Dict, fv.reader, fv.rawFragments, inheritedCtm: fv.rotCtm, fillRects: fv.fillRects, useFontEngineEncoding: _textSearchOptions?.UseFontEngineEncoding ?? false, keepAllFillRects: (_textSearchOptions?.SearchForTextRelatedGraphics ?? true) || (_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false), coverRects: fv.coverRects, strictFonts: !fv.tolerantFonts && !(_textSearchOptions?.IgnoreResourceFontErrors ?? false), seenForms: fv.seenForms, missingFontKeys: fv.missingFontKeys);
-        }
-
-        if (fv.missingFontKeys is { Count: > 0 })
-            foreach (var key in fv.missingFontKeys)
-                fv.page.NotificationLog +=
-                    $"Document error: Font key {key} is absent in page Resources\r\n";
-
-        fv.searchRect = _textSearchOptions?.Rectangle;
-
-        if (string.IsNullOrEmpty(_searchPhrase)) // empty phrase = absorb all
-        {
-            _absorbAllPages.Add(fv.page);
-            BuildAllFragmentsFromRuns(fv.rawFragments, fv.searchRect, sourcePage: fv.page,
-                sourceForm: null, pageIndex: fv.page.Index, fillRects: fv.fillRects, coverRects: fv.coverRects);
-        }
-        else
-        {
-            VisitSingleStream(fv);
-        }
-
-        // Also search the text drawn inside annotation appearance streams
-        // (form fields, FreeText, stamps, …) when the caller opts in.
-        if (_textSearchOptions?.SearchInAnnotations ?? false)
-        {
-            VisitAnnotationText(fv);
-        }
+        VisitInternal(Document.PageToRead(page));
     }
 
     /// <summary>
@@ -442,13 +372,80 @@ public sealed partial class TextFragmentAbsorber
             {
                 for (var i = _fragments.Count - 1; i >= 0; i--)
                 {
-                    if (!FragmentInSearchRect(searchRect, _fragments.GetInternal(i)))
-                    {
-                        if (_fragments.GetInternal(i).PageIndex == 0)
-                            _fragments.RemoveAt(i);
-                    }
+                    if (!FragmentInSearchRect(searchRect, _fragments.GetInternal(i)) && _fragments.GetInternal(i).PageIndex == 0)
+                        _fragments.RemoveAt(i);
                 }
             }
+        }
+    }
+
+    internal void VisitInternal(Page page, bool tolerantFonts = false, HashSet<object>? seenForms = null)
+    {
+        var fv = new FragmentVisitState();
+        fv.page = page;
+        fv.tolerantFonts = tolerantFonts;
+        fv.seenForms = seenForms;
+        fv.reader = fv.page.Reader;
+        fv.contentStreams = GetContentStreams(fv.page.Dict, fv.reader);
+        // A repeated Form XObject reference is deduped per absorber run (a document walk
+        // passes one set for all pages; a lone page visit is its own run). This holds for
+        // a phrase search too: the matches inside a shared form all address the SAME
+        // bytes, so reporting one per referencing page would hand the caller N handles
+        // onto one piece of text.
+        fv.seenForms ??= new FormDedupSet();
+        fv.missingFontKeys = fv.page.Reader?.OwnerDocument?.EnableNotificationLogging == true
+            ? new List<string>() : null;
+
+        fv.rawFragments = new List<RawTextRun>();
+        fv.fillRects = new List<RawFillRect>();
+        fv.coverRects = new List<RawCoverRect>();
+
+        fv.rotCtm = PageRotationCtm(fv.page);
+
+        // Per PDF spec, a page's content streams are logically a single concatenated stream —
+        // text state and graphics state must persist across them. Concatenate with a space
+        // separator to prevent token adjacency.
+        if (fv.contentStreams.Count == 1)
+        {
+            ExtractRuns(fv.contentStreams[0], fv.page.Dict, fv.reader, fv.rawFragments, inheritedCtm: fv.rotCtm, fillRects: fv.fillRects, useFontEngineEncoding: _textSearchOptions?.UseFontEngineEncoding ?? false, keepAllFillRects: (_textSearchOptions?.SearchForTextRelatedGraphics ?? true) || (_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false), coverRects: fv.coverRects, strictFonts: !fv.tolerantFonts && !(_textSearchOptions?.IgnoreResourceFontErrors ?? false), seenForms: fv.seenForms, missingFontKeys: fv.missingFontKeys);
+        }
+        else if (fv.contentStreams.Count > 1)
+        {
+            var totalLen = 0;
+            foreach (var s in fv.contentStreams) totalLen += s.Length + 1;
+            var combined = new byte[totalLen];
+            int off = 0;
+            foreach (var s in fv.contentStreams)
+            {
+                Buffer.BlockCopy(s, 0, combined, off, s.Length);
+                off += s.Length;
+                combined[off++] = (byte)'\n';
+            }
+            ExtractRuns(combined, fv.page.Dict, fv.reader, fv.rawFragments, inheritedCtm: fv.rotCtm, fillRects: fv.fillRects, useFontEngineEncoding: _textSearchOptions?.UseFontEngineEncoding ?? false, keepAllFillRects: (_textSearchOptions?.SearchForTextRelatedGraphics ?? true) || (_textEditOptions?.ToAttemptGetUnderlineFromSource ?? false), coverRects: fv.coverRects, strictFonts: !fv.tolerantFonts && !(_textSearchOptions?.IgnoreResourceFontErrors ?? false), seenForms: fv.seenForms, missingFontKeys: fv.missingFontKeys);
+        }
+
+        if (fv.missingFontKeys is { Count: > 0 })
+            fv.page.NotificationLog += string.Concat(fv.missingFontKeys.Select(
+                key => $"Document error: Font key {key} is absent in page Resources\r\n"));
+
+        fv.searchRect = _textSearchOptions?.Rectangle;
+
+        if (string.IsNullOrEmpty(_searchPhrase)) // empty phrase = absorb all
+        {
+            _absorbAllPages.Add(fv.page);
+            BuildAllFragmentsFromRuns(fv.rawFragments, fv.searchRect, sourcePage: fv.page,
+                sourceForm: null, pageIndex: fv.page.Index, fillRects: fv.fillRects, coverRects: fv.coverRects);
+        }
+        else
+        {
+            VisitSingleStream(fv);
+        }
+
+        // Also search the text drawn inside annotation appearance streams
+        // (form fields, FreeText, stamps, …) when the caller opts in.
+        if (_textSearchOptions?.SearchInAnnotations ?? false)
+        {
+            VisitAnnotationText(fv);
         }
     }
 
@@ -599,19 +596,19 @@ public sealed partial class TextFragmentAbsorber
             var key = ((int)Math.Floor((vb.Llx + vb.Urx) / 2 / cell),
                        (int)Math.Floor((vb.Lly + vb.Ury) / 2 / cell));
             for (var dgx = -1; dgx <= 1 && !occluded[i]; dgx++)
-            for (var dgy = -1; dgy <= 1 && !occluded[i]; dgy++)
-            {
-                if (!grid.TryGetValue((key.Item1 + dgx, key.Item2 + dgy), out var cand)) continue;
-                foreach (var j in cand)
+                for (var dgy = -1; dgy <= 1 && !occluded[i]; dgy++)
                 {
-                    if (j <= i) continue; // only LATER ink occludes
-                    var ob = boxes[j];
-                    var ix = Math.Min(vb.Urx, ob.Urx) - Math.Max(vb.Llx, ob.Llx);
-                    var iy = Math.Min(vb.Ury, ob.Ury) - Math.Max(vb.Lly, ob.Lly);
-                    if (ix <= 0 || iy <= 0) continue;
-                    if (ix * iy > area * OcclusionCoverageFraction) { occluded[i] = true; break; }
+                    if (!grid.TryGetValue((key.Item1 + dgx, key.Item2 + dgy), out var cand)) continue;
+                    foreach (var j in cand)
+                    {
+                        if (j <= i) continue; // only LATER ink occludes
+                        var ob = boxes[j];
+                        var ix = Math.Min(vb.Urx, ob.Urx) - Math.Max(vb.Llx, ob.Llx);
+                        var iy = Math.Min(vb.Ury, ob.Ury) - Math.Max(vb.Lly, ob.Lly);
+                        if (ix <= 0 || iy <= 0) continue;
+                        if (ix * iy > area * OcclusionCoverageFraction) { occluded[i] = true; break; }
+                    }
                 }
-            }
         }
         return (occluded, clippedAway, boxArea);
     }

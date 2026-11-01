@@ -67,7 +67,7 @@ public sealed class XmpField
     /// <summary>The xml:lang qualifier attached to this field (or null when
     /// none). Returned as a nested <see cref="XmpField"/> per the public
     /// signature; the xml:lang field's value carries the language tag.</summary>
-    public XmpField? Lang { get; private set; }
+    public XmpField? Lang { get;  }
 
     /// <summary>Unwrap the field's value as an array, or empty when the
     /// value isn't array-typed.</summary>

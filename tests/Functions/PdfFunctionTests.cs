@@ -119,6 +119,47 @@ public sealed class PdfFunctionTests
     }
 
     [Fact]
+    public void AnArrayOfOneOutputFunctionsIsOneFunctionOfTheirOutputs()
+    {
+        // A shading's /Function as [f0 f1 f2]: each member gives one output, in order.
+        var array = new PdfArray();
+        array.Add(Sampled([2], 8, [0, 255], [0, 1]));
+        array.Add(Sampled([2], 8, [255, 0], [0, 1]));
+        array.Add(Sampled([2], 8, [51, 51], [0, 1]));
+        var function = PdfFunction.Parse(array, null)!;
+
+        var result = function.Evaluate([0.25]);
+        Assert.Equal(3, result.Length);
+        Assert.Equal(0.25, result[0], Tolerance);
+        Assert.Equal(0.75, result[1], Tolerance);
+        Assert.Equal(0.2, result[2], Tolerance);
+        Assert.Equal(3, function.Range!.Length);
+        Assert.Equal([0.0, 1.0], function.Range[1]);
+
+        // The in-place evaluation a shading rasteriser uses gives the same outputs.
+        var outputs = new double[3];
+        Assert.Equal(3, function.EvaluateInto(0.25, outputs));
+        Assert.Equal(result, outputs);
+    }
+
+    [Fact]
+    public void AnArrayIsNoFunctionWhenEmptyOrWhenAMemberIsNot()
+    {
+        Assert.Null(PdfFunction.Parse(new PdfArray(), null));
+
+        var withName = new PdfArray();
+        withName.Add(Sampled([2], 8, [0, 255], [0, 1]));
+        withName.Add(new PdfName("Identity"));
+        Assert.Null(PdfFunction.Parse(withName, null));
+
+        var nested = new PdfArray();
+        var inner = new PdfArray();
+        inner.Add(Sampled([2], 8, [0, 255], [0, 1]));
+        nested.Add(inner);
+        Assert.Null(PdfFunction.Parse(nested, null));
+    }
+
+    [Fact]
     public void AStandaloneCalculatorStreamIsDecodedByItsOwnFilters()
     {
         var dict = new PdfDictionary();

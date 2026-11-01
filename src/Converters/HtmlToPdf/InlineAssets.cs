@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -52,7 +53,7 @@ internal static partial class HtmlToPdfConverter
         // <meta charset="…"> / <meta http-equiv="Content-Type" content="…; charset=…">, scanned
         // over the document prologue (ASCII-safe) before the encoding is known.
         var head = Encoding.ASCII.GetString(data, 0, Math.Min(data.Length, 2048));
-        var metaCs = Regex.Match(head, @"charset\s*=\s*[""']?\s*(?<cs>[\w-]+)", RegexOptions.IgnoreCase);
+        var metaCs = SafeRegex.Match(head, @"charset\s*=\s*[""']?\s*(?<cs>[\w-]+)", RegexOptions.IgnoreCase);
         if (metaCs.Success)
         {
             var metaName = metaCs.Groups["cs"].Value.Trim().ToLowerInvariant();
@@ -85,7 +86,7 @@ internal static partial class HtmlToPdfConverter
         if (string.IsNullOrEmpty(html) || html.IndexOf("<svg", StringComparison.OrdinalIgnoreCase) < 0)
             return (html, svgs);
         var list = svgs;
-        return (Regex.Replace(html, @"<svg\b[\s\S]*?</svg\s*>", m =>
+        return (SafeRegex.Replace(html, @"<svg\b[\s\S]*?</svg\s*>", m =>
         {
             var idx = list.Count;
             // Repair an UNTERMINATED attribute value on the root element
@@ -93,41 +94,34 @@ internal static partial class HtmlToPdfConverter
             // typed): a quoted value running into whitespace + another
             // attribute name is malformed (URIs and lengths carry no spaces),
             // and the XML load would otherwise reject the whole drawing.
-            var svgText = Regex.Replace(m.Value,
+            var svgText = SafeRegex.Replace(m.Value,
                 @"([A-Za-z-]+\s*=\s*""[^""\s>]*)\s+(?=[A-Za-z-]+\s*=)", "$1\" ");
             list.Add(Encoding.UTF8.GetBytes(svgText));
             var rootEnd = svgText.IndexOf('>');
             var root = rootEnd > 0 ? svgText[..(rootEnd + 1)] : svgText;
             // Element size resolution (all in CSS px):
-            // 1. an inline style width/height wins;
-            // 2. else width/height presentation attributes;
+            // 1. an inline style width/height wins,
+            // 2. else width/height presentation attributes,
             // 3. else a viewBox alone sizes the element to 150px high, width from the
-            //    viewBox aspect ratio;
+            //    viewBox aspect ratio,
             // 4. else (no viewBox, no size) leave unsized — the rasterizer's natural
             //    content extent decides.
             double w = 0, h = 0;
-            var stA = Regex.Match(root, @"style\s*=\s*['""]([^'""]*)['""]", RegexOptions.IgnoreCase);
+            var stA = SafeRegex.Match(root, @"style\s*=\s*['""]([^'""]*)['""]", RegexOptions.IgnoreCase);
             if (stA.Success)
             {
-                var sw = Regex.Match(stA.Groups[1].Value, @"(?:^|[;\s])width\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
-                var sh = Regex.Match(stA.Groups[1].Value, @"(?:^|[;\s])height\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
-                if (sw.Success) double.TryParse(sw.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out w);
-                if (sh.Success) double.TryParse(sh.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out h);
+                w = SvgRootLengthPx(SafeRegex.Match(stA.Groups[1].Value, @"(?:^|[;\s])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase));
+                h = SvgRootLengthPx(SafeRegex.Match(stA.Groups[1].Value, @"(?:^|[;\s])height\s*:\s*([^;]+)", RegexOptions.IgnoreCase));
             }
             if (w <= 0 && h <= 0)
             {
-                var wA = Regex.Match(root, @"\bwidth\s*=\s*['""]?([\d.]+)", RegexOptions.IgnoreCase);
-                var hA = Regex.Match(root, @"\bheight\s*=\s*['""]?([\d.]+)", RegexOptions.IgnoreCase);
-                if (wA.Success) double.TryParse(wA.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out w);
-                if (hA.Success) double.TryParse(hA.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out h);
+                // (a length in any CSS unit: 10in is 960 px, not 10)
+                w = SvgRootLengthPx(SafeRegex.Match(root, @"\bwidth\s*=\s*['""]?([^'""\s>]+)", RegexOptions.IgnoreCase));
+                h = SvgRootLengthPx(SafeRegex.Match(root, @"\bheight\s*=\s*['""]?([^'""\s>]+)", RegexOptions.IgnoreCase));
             }
             if (w <= 0 && h <= 0)
             {
-                var vb = Regex.Match(root, @"viewBox\s*=\s*['""]\s*[-\d.]+[,\s]+[-\d.]+[,\s]+([\d.]+)[,\s]+([\d.]+)", RegexOptions.IgnoreCase);
+                var vb = SafeRegex.Match(root, @"viewBox\s*=\s*['""]\s*[-\d.]+[,\s]+[-\d.]+[,\s]+([\d.]+)[,\s]+([\d.]+)", RegexOptions.IgnoreCase);
                 if (vb.Success
                     && double.TryParse(vb.Groups[1].Value, System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out var vbW)
@@ -146,6 +140,10 @@ internal static partial class HtmlToPdfConverter
         }, RegexOptions.IgnoreCase), svgs);
     }
 
+    /// <summary>An svg root's width or height in CSS px, any unit (em of the 16px root); 0 when absent or relative.</summary>
+    private static double SvgRootLengthPx(Match m) =>
+        m.Success && CssLengthPx(m.Groups[1].Value, ControlRemPx) is { } px ? px : 0;
+
     /// <summary>True when the bytes are an SVG document (optionally behind a BOM,
     /// XML declaration, comments, or a DOCTYPE).</summary>
     internal static bool IsSvgBytes(byte[]? d)
@@ -158,11 +156,11 @@ internal static partial class HtmlToPdfConverter
             while (i < head.Length && (char.IsWhiteSpace(head[i]) || head[i] == '\uFEFF')) i++;
             if (i + 4 >= head.Length || head[i] != '<') return false;
             if (head[i + 1] == '?')
-            { var e = head.IndexOf("?>", i, StringComparison.Ordinal); if (e < 0) return false; i = e + 2; continue; }
+            { var e = head.IndexOf("?>", i, StringComparison.Ordinal); if (e < 0) { return false; } i = e + 2; continue; }
             if (string.CompareOrdinal(head, i, "<!--", 0, 4) == 0)
-            { var e = head.IndexOf("-->", i, StringComparison.Ordinal); if (e < 0) return false; i = e + 3; continue; }
+            { var e = head.IndexOf("-->", i, StringComparison.Ordinal); if (e < 0) { return false; } i = e + 3; continue; }
             if (head[i + 1] == '!')
-            { var e = head.IndexOf('>', i); if (e < 0) return false; i = e + 1; continue; }
+            { var e = head.IndexOf('>', i); if (e < 0) { return false; } i = e + 1; continue; }
             return string.Compare(head, i, "<svg", 0, 4, StringComparison.OrdinalIgnoreCase) == 0;
         }
     }
@@ -175,11 +173,11 @@ internal static partial class HtmlToPdfConverter
     private static string InlineLinkedStylesheets(string html, HtmlLoadOptions? options)
     {
         if (html.IndexOf("<link", StringComparison.OrdinalIgnoreCase) < 0) return html;
-        return Regex.Replace(html,
+        return SafeRegex.Replace(html,
             @"<link(?=[^>]*\brel\s*=\s*[""']?stylesheet)[^>]*>",
             m =>
             {
-                var hrefM = Regex.Match(m.Value, @"\bhref\s*=\s*(?:""(?<h>[^""]*)""|'(?<h>[^']*)'|(?<h>[^\s>]+))",
+                var hrefM = SafeRegex.Match(m.Value, @"\bhref\s*=\s*(?:""(?<h>[^""]*)""|'(?<h>[^']*)'|(?<h>[^\s>]+))",
                     RegexOptions.IgnoreCase);
                 if (!hrefM.Success) return m.Value;
                 var bytes = LoadConverterImage(DecodeEntities(hrefM.Groups["h"].Value), options);
@@ -193,7 +191,7 @@ internal static partial class HtmlToPdfConverter
                 // collectors read every block regardless — a screen sheet still supplies
                 // the flow's rules — but a scan that must respect the medium (the page's
                 // own size, which only a print-applicable sheet may set) can now tell.
-                var mediaM = Regex.Match(m.Value,
+                var mediaM = SafeRegex.Match(m.Value,
                     @"\bmedia\s*=\s*(?:""(?<v>[^""]*)""|'(?<v>[^']*)'|(?<v>[^\s>]+))",
                     RegexOptions.IgnoreCase);
                 var media = mediaM.Success
@@ -202,24 +200,98 @@ internal static partial class HtmlToPdfConverter
             }, RegexOptions.IgnoreCase);
     }
 
-    /// <summary>Fetch a remote &lt;img&gt; source the way a browser does. Null on any
-    /// failure (timeout, non-success, non-image) — the caller then falls back to the
-    /// alt-text/placeholder path exactly as for an unreadable local file. Shared with
-    /// the markdown converter (an HTML image block inside a .md file).</summary>
-    internal static byte[]? FetchRemoteImage(string url) =>
-        RemoteImageCache.GetOrAdd(url, static u =>
+    /// <summary>The shortest base64 payload hoisted out of the markup: a picture or a font of a
+    /// kilobyte or more. Smaller payloads (icons, bullets, tiles) stay where they are.</summary>
+    private const int HoistedPayloadMinChars = 1024;
+
+    /// <summary>The run of a hoisted payload its token keeps, so a format sniff over the base64 text
+    /// (<c>iVBORw0KGgo</c> for a PNG, <c>R0lGOD</c> for a GIF) still reads the real bytes' head.</summary>
+    private const int HoistedPayloadKeptChars = 16;
+
+    private const string HoistedPayloadMark = "HOISTED";
+
+    /// <summary>A token's length is never a multiple of four, which every base64 text's is: a reader
+    /// that takes a token for a payload fails the way it fails on malformed base64, instead of
+    /// decoding it to a picture of noise.</summary>
+    private const int Base64QuantumChars = 4;
+
+    private const string Base64Marker = ";base64,";
+
+    /// <summary>How far ahead of its payload a data URI's <c>data:</c> may begin: the media type
+    /// and its parameters.</summary>
+    private const int DataUriHeadMaxChars = 64;
+
+    /// <summary>The payloads hoisted out of the markup under conversion, by token
+    /// (<see cref="HoistBase64Payloads"/>); null outside a conversion.</summary>
+    [ThreadStatic] private static Dictionary<string, string>? HoistedPayloads;
+
+    /// <summary>The markup with every long base64 picture or font payload replaced by a short token,
+    /// the payload kept in <see cref="HoistedPayloads"/>. The converter reads the document many times
+    /// over - every heuristic is a scan of the whole text - and with a megabyte photo inline each scan
+    /// walked the photo too, which on the .NET Framework's regex interpreter multiplied into seconds for
+    /// a two-page letter. Every reader of a payload goes through <see cref="Base64Payload"/>, which
+    /// hands back the real bytes.</summary>
+    private static string HoistBase64Payloads(string html)
+    {
+        StringBuilder? sb = null;
+        var pos = 0;
+        var at = html.IndexOf(Base64Marker, StringComparison.OrdinalIgnoreCase);
+        while (at >= 0)
         {
-            try
+            var start = at + Base64Marker.Length;
+            var end = start;
+            while (end < html.Length && IsBase64Char(html[end])) end++;
+            if (end - start >= HoistedPayloadMinChars && IsPictureOrFontDataUri(html, at))
             {
-                using var http = new System.Net.Http.HttpClient();
-                http.Timeout = TimeSpan.FromSeconds(15);
-                // Some CDNs refuse requests without a UA.
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
-                var bytes = http.GetByteArrayAsync(u).GetAwaiter().GetResult();
-                return bytes.Length > 0 ? bytes : null;
+                sb ??= new StringBuilder();
+                sb.Append(html, pos, start - pos).Append(HoistedToken(html.Substring(start, end - start)));
+                pos = end;
             }
-            catch { return null; }
-        });
+            at = html.IndexOf(Base64Marker, end, StringComparison.OrdinalIgnoreCase);
+        }
+        return sb is null ? html : sb.Append(html, pos, html.Length - pos).ToString();
+    }
+
+    private static bool IsBase64Char(char c)
+        => c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '+' or '/' or '=';
+
+    /// <summary>Whether the data URI whose base64 marker sits at <paramref name="markerAt"/> carries a
+    /// picture or a font: those are read through <see cref="Base64Payload"/>. Any other payload (a
+    /// download link's file, a page's own HTML) stays in the markup, where it is copied out as it is.</summary>
+    private static bool IsPictureOrFontDataUri(string html, int markerAt)
+    {
+        const string scheme = "data:";
+        var d = html.LastIndexOf(scheme, markerAt, StringComparison.OrdinalIgnoreCase);
+        if (d < 0 || markerAt - d > DataUriHeadMaxChars) return false;
+        var mime = html.Substring(d + scheme.Length, markerAt - d - scheme.Length);
+        return mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+            || mime.StartsWith("font/", StringComparison.OrdinalIgnoreCase)
+            || (mime.StartsWith("application/", StringComparison.OrdinalIgnoreCase)
+                && mime.IndexOf("font", StringComparison.OrdinalIgnoreCase) >= 0);
+    }
+
+    /// <summary>The token standing in for <paramref name="payload"/>: its first characters, the mark
+    /// and the payload's number, padded to a length no base64 text has. The same payload placed
+    /// again (a logo on every page) gets the token it already has.</summary>
+    private static string HoistedToken(string payload)
+    {
+        var table = HoistedPayloads ??= new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var kv in table)
+            if (kv.Value == payload) return kv.Key;
+        var token = new StringBuilder(payload, 0, HoistedPayloadKeptChars, HoistedPayloadKeptChars + HoistedPayloadMark.Length + Base64QuantumChars * 2)
+            .Append(HoistedPayloadMark).Append(table.Count.ToString(CultureInfo.InvariantCulture));
+        while (token.Length % Base64QuantumChars != 1) token.Append('X');
+        var key = token.ToString();
+        table[key] = payload;
+        return key;
+    }
+
+    /// <summary>The bytes of a base64 payload read out of the markup: a hoisted one through its token,
+    /// any other decoded as it stands. Throws what <see cref="System.Convert.FromBase64String(string)"/>
+    /// throws on malformed text.</summary>
+    internal static byte[] Base64Payload(string text)
+        => System.Convert.FromBase64String(
+            HoistedPayloads is { } table && table.TryGetValue(text, out var payload) ? payload : text);
 
     /// <summary>A local resource path, matched exactly and then case-insensitively
     /// within its directory. Windows resolves every href case-blind for free (NTFS),
@@ -238,10 +310,10 @@ internal static partial class HtmlToPdfConverter
             var dir = System.IO.Path.GetDirectoryName(path);
             var name = System.IO.Path.GetFileName(path);
             if (string.IsNullOrEmpty(dir) || name.Length == 0) return null;
-            foreach (var e in System.IO.Directory.GetFiles(dir))
-                if (string.Equals(System.IO.Path.GetFileName(e), name,
-                        StringComparison.OrdinalIgnoreCase))
-                    return e;
+            var e = System.IO.Directory.GetFiles(dir).FirstOrDefault(e => string.Equals(System.IO.Path.GetFileName(e), name,
+                        StringComparison.OrdinalIgnoreCase));
+            if (e is not null)
+                return e;
         }
         catch { /* unreadable directory: unresolved, like the exact miss */ }
         return null;
@@ -258,25 +330,47 @@ internal static partial class HtmlToPdfConverter
         var loader = options?.CustomLoaderOfExternalResources;
         if (loader is not null)
         {
+            // A result the loader hands back is its answer: the data, or a refusal - cancelled, or no
+            // data - that keeps the resource unloaded, so an application can stop the converter from
+            // requesting what untrusted markup names. A loader that throws refused it too. Only a loader
+            // that returns no result at all leaves the resource to the built-in resolution, and so does a
+            // refused data: URI, which carries its payload and requests nothing.
+            var isData = src.StartsWith("data:", StringComparison.OrdinalIgnoreCase);
             try
             {
-                var result = loader(src);
-                if (result?.Data is { Length: > 0 } data) return data;
+                // The loader is asked for the resource a browser would request: a relative reference
+                // resolved against the page's web base. It is asked first, so an application decides
+                // what the converter requests; only a loader with no answer leaves the fetch below.
+                var result = loader(isData ? src : ResolveAgainstWebBase(UrlSeparators(src), options));
+                if (result is not null && (result.Data is { Length: > 0 } || !isData))
+                    return result.LoadingCancelled || result.Data is not { Length: > 0 } data ? null : data;
             }
-            catch { /* fall through to the built-in resolution */ }
+            catch when (!isData) { return null; }
+            catch { /* a data: URI decodes below */ }
         }
         try
         {
             if (src.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
             {
                 var comma = src.IndexOf(',');
-                if (comma > 0 && src.IndexOf("base64", 0, comma, StringComparison.OrdinalIgnoreCase) >= 0)
-                    return GifToPng(System.Convert.FromBase64String(src[(comma + 1)..]));
-                return null;
+                if (comma <= 0) return null;
+                if (src.IndexOf("base64", 0, comma, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return GifToPng(Base64Payload(src[(comma + 1)..]));
+                // A data URI without base64 carries its payload percent-encoded (the way
+                // an inline SVG chart is commonly written); the decoded text is the picture.
+                return Encoding.UTF8.GetBytes(Uri.UnescapeDataString(src[(comma + 1)..]));
             }
             if (src.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
                 || src.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                 return FetchRemoteImage(src); // browsers fetch; an unreachable URL falls back to alt text
+            // Under a base path that is a site address, a relative reference names a resource on that
+            // site - document-, root- and parent-relative alike - never a file on this disk.
+            if (ResolveOnBasePathSite(src, options) is { } siteUrl)
+                return FetchRemoteImage(siteUrl);
+            // A protocol-relative URL ("//host/path") is a web address, as browsers read it; taken
+            // as a path it names a network share, and every look probed that host and waited.
+            if (src.StartsWith("//", StringComparison.Ordinal))
+                return FetchRemoteImage("https:" + src);
             var path = IO.CallerPaths.FileUriToPath(src);
             // A local reference is a URL: its percent-escapes name the file decoded
             // (the Word mail's `test%20Mail_files/image002.gif` lives in "test Mail_files").
@@ -361,7 +455,7 @@ internal static partial class HtmlToPdfConverter
     {
         int w = default;
         int h = default;
-        w = 0; h = 0;
+
         if (d is null || d.Length < 24) return null;
         if (d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47)
         {
@@ -397,6 +491,48 @@ internal static partial class HtmlToPdfConverter
         return null;
     }
 
+    /// <summary>The EXIF orientation tag.</summary>
+    private const int ExifOrientationTag = 0x0112;
+
+    /// <summary>The clockwise turn, in degrees, a JPEG's EXIF orientation asks of a viewer
+    /// (3 = 180, 6 = 90, 8 = 270); 0 when the picture is upright, carries no EXIF or is
+    /// mirrored. Read from the APP1 segment's first image directory only: no pixel is decoded.</summary>
+    private static int ReadJpegExifRotation(byte[] d)
+    {
+        if (d is null || d.Length < 4 || d[0] != 0xFF || d[1] != 0xD8) return 0;
+        var i = 2;
+        while (i + 4 <= d.Length && d[i] == 0xFF)
+        {
+            var marker = d[i + 1];
+            if (marker == 0xDA) return 0;                      // the scan: no EXIF ahead of it
+            var seg = (d[i + 2] << 8) | d[i + 3];
+            if (marker == 0xE1 && i + 2 + seg <= d.Length) return ExifRotation(d, i + 4, seg - 2);
+            i += 2 + seg;
+        }
+        return 0;
+    }
+
+    private static int ExifRotation(byte[] d, int at, int length)
+    {
+        // "Exif\0\0", then a TIFF header: byte order, 42, the offset of the first directory.
+        if (length < 14 || d[at] != 'E' || d[at + 1] != 'x' || d[at + 2] != 'i' || d[at + 3] != 'f') return 0;
+        var tiff = at + 6;
+        var little = d[tiff] == 'I';
+        int U16(int p) => little ? d[p] | (d[p + 1] << 8) : (d[p] << 8) | d[p + 1];
+        int U32(int p) => little ? U16(p) | (U16(p + 2) << 16) : (U16(p) << 16) | U16(p + 2);
+        var dir = tiff + U32(tiff + 4);
+        if (dir + 2 > at + length) return 0;
+        var entries = U16(dir);
+        for (var e = 0; e < entries; e++)
+        {
+            var entry = dir + 2 + e * 12;
+            if (entry + 12 > at + length) return 0;
+            if (U16(entry) != ExifOrientationTag) continue;
+            return U16(entry + 8) switch { 3 => 180, 6 => 90, 8 => 270, _ => 0 };
+        }
+        return 0;
+    }
+
     /// <summary>Parse the first CSS colour token (hex, rgb(), or a common
     /// named colour) found in <paramref name="text"/>. Null when none.</summary>
     internal static Color? ParseCssColor(string text)
@@ -405,8 +541,8 @@ internal static partial class HtmlToPdfConverter
         // A `url(...)` token names an image, never a colour - a data URI's base64 payload
         // spells any colour name (and any hex digit run) by chance, so the scan skips it.
         if (text.IndexOf("url(", StringComparison.OrdinalIgnoreCase) >= 0)
-            text = Regex.Replace(text, @"url\([^)]*\)", " ", RegexOptions.IgnoreCase);
-        var hex = Regex.Match(text, @"#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b");
+            text = SafeRegex.Replace(text, @"url\([^)]*\)", " ", RegexOptions.IgnoreCase);
+        var hex = SafeRegex.Match(text, @"#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b");
         if (hex.Success)
         {
             var h = hex.Groups[1].Value;
@@ -414,14 +550,14 @@ internal static partial class HtmlToPdfConverter
             return Color.FromRgbBytes(System.Convert.ToInt32(h[..2], 16),
                 System.Convert.ToInt32(h[2..4], 16), System.Convert.ToInt32(h[4..6], 16));
         }
-        var rgb = Regex.Match(text, @"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)");
+        var rgb = SafeRegex.Match(text, @"rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)");
         if (rgb.Success)
             return Color.FromRgbBytes(int.Parse(rgb.Groups[1].Value),
                 int.Parse(rgb.Groups[2].Value), int.Parse(rgb.Groups[3].Value));
         // rgba(): the expected render fills the base colour through a fill-alpha
         // graphics state; over the white page that composites to
         // c·a + 255·(1−a) per channel, which a flat fill reproduces ink-exactly.
-        var rgba = Regex.Match(text,
+        var rgba = SafeRegex.Match(text,
             @"rgba\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([\d.]+)\s*\)");
         if (rgba.Success && double.TryParse(rgba.Groups[4].Value,
                 System.Globalization.NumberStyles.Float,
@@ -432,7 +568,7 @@ internal static partial class HtmlToPdfConverter
             return Color.FromRgbBytes(Comp(rgba.Groups[1].Value),
                 Comp(rgba.Groups[2].Value), Comp(rgba.Groups[3].Value));
         }
-        foreach (Match nm in Regex.Matches(text, @"[a-zA-Z]+"))
+        foreach (Match nm in SafeRegex.Matches(text, @"[a-zA-Z]+"))
         {
             switch (nm.Value.ToLowerInvariant())
             {
@@ -481,24 +617,24 @@ internal static partial class HtmlToPdfConverter
     {
         if (string.IsNullOrEmpty(html) || html.IndexOf("<canvas", StringComparison.OrdinalIgnoreCase) < 0)
             return html;
-        var scripts = string.Join("\n", Regex.Matches(html, @"<script\b[^>]*>([\s\S]*?)</script\s*>", RegexOptions.IgnoreCase)
+        var scripts = string.Join("\n", SafeRegex.Matches(html, @"<script\b[^>]*>([\s\S]*?)</script\s*>", RegexOptions.IgnoreCase)
             .Cast<Match>().Select(m => m.Groups[1].Value));
-        return Regex.Replace(html, @"<canvas\b([^>]*)>[\s\S]*?</canvas\s*>", m =>
+        return SafeRegex.Replace(html, @"<canvas\b([^>]*)>[\s\S]*?</canvas\s*>", m =>
         {
             var attrs = m.Groups[1].Value;
-            string Attr(string name) => Regex.Match(attrs, name + @"\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase)
+            string Attr(string name) => SafeRegex.Match(attrs, name + @"\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase)
                 is { Success: true } am ? am.Groups[1].Value : "";
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             if (!double.TryParse(Attr("width"), System.Globalization.NumberStyles.Float, inv, out var w) || w <= 0) w = 300;
             if (!double.TryParse(Attr("height"), System.Globalization.NumberStyles.Float, inv, out var h) || h <= 0) h = 150;
             var id = Attr("id");
             var sb = new StringBuilder();
-            sb.Append(FormattableString.Invariant($"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:0.##}\" height=\"{h:0.##}\">"));
-            var style = Regex.Match(attrs, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+            sb.Append(Compat.Format(CultureInfo.InvariantCulture, $"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w:0.##}\" height=\"{h:0.##}\">"));
+            var style = SafeRegex.Match(attrs, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
             var border = style.Success
-                ? Regex.Match(style.Groups[1].Value, @"border\s*:\s*([\d.]+)px\s+\w+\s+([#\w(),.\s]+)", RegexOptions.IgnoreCase) : null;
+                ? SafeRegex.Match(style.Groups[1].Value, @"border\s*:\s*([\d.]+)px\s+\w+\s+([#\w(),.\s]+)", RegexOptions.IgnoreCase) : null;
             if (border is { Success: true })
-                sb.Append(FormattableString.Invariant($"<rect x=\"{double.Parse(border.Groups[1].Value, inv) / 2:0.##}\" y=\"{double.Parse(border.Groups[1].Value, inv) / 2:0.##}\" width=\"{w - double.Parse(border.Groups[1].Value, inv):0.##}\" height=\"{h - double.Parse(border.Groups[1].Value, inv):0.##}\" fill=\"none\" stroke=\"{border.Groups[2].Value.Trim()}\" stroke-width=\"{border.Groups[1].Value}\"/>"));
+                sb.Append(Compat.Format(CultureInfo.InvariantCulture, $"<rect x=\"{double.Parse(border.Groups[1].Value, inv) / 2:0.##}\" y=\"{double.Parse(border.Groups[1].Value, inv) / 2:0.##}\" width=\"{w - double.Parse(border.Groups[1].Value, inv):0.##}\" height=\"{h - double.Parse(border.Groups[1].Value, inv):0.##}\" fill=\"none\" stroke=\"{border.Groups[2].Value.Trim()}\" stroke-width=\"{border.Groups[1].Value}\"/>"));
             if (id.Length > 0) AppendCanvasScript(sb, scripts, id);
             sb.Append("</svg>");
             return sb.ToString();
@@ -508,9 +644,9 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The 2D-context calls of the script that took the canvas by id, as SVG elements.</summary>
     private static void AppendCanvasScript(StringBuilder sb, string scripts, string canvasId)
     {
-        var got = Regex.Match(scripts, @"(\w+)\s*=\s*document\.getElementById\(\s*[""']" + Regex.Escape(canvasId) + @"[""']\s*\)");
+        var got = SafeRegex.Match(scripts, @"(\w+)\s*=\s*document\.getElementById\(\s*[""']" + Regex.Escape(canvasId) + @"[""']\s*\)");
         if (!got.Success) return;
-        var ctxM = Regex.Match(scripts[got.Index..], @"(\w+)\s*=\s*" + got.Groups[1].Value + @"\.getContext\(\s*[""']2d[""']\s*\)");
+        var ctxM = SafeRegex.Match(scripts[got.Index..], @"(\w+)\s*=\s*" + got.Groups[1].Value + @"\.getContext\(\s*[""']2d[""']\s*\)");
         if (!ctxM.Success) return;
         var ctx = ctxM.Groups[1].Value;
         var body = scripts[(got.Index + ctxM.Index + ctxM.Length)..];
@@ -518,11 +654,11 @@ internal static partial class HtmlToPdfConverter
         var path = new StringBuilder();
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         string Num(string v) => double.TryParse(v.Trim(), System.Globalization.NumberStyles.Float, inv, out var d) ? d.ToString("0.##", inv) : "0";
-        foreach (Match st in Regex.Matches(body, ctx + @"\.(\w+)\s*(?:=\s*([""']?)([^;""']*)\2|\(([^)]*)\))\s*;"))
+        foreach (var groups in SafeRegex.Matches(body, ctx + @"\.(\w+)\s*(?:=\s*([""']?)([^;""']*)\2|\(([^)]*)\))\s*;").Select(st => st.Groups))
         {
-            var name = st.Groups[1].Value;
-            var value = st.Groups[3].Value.Trim();
-            var args = st.Groups[4].Value.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(Num).ToArray();
+            var name = groups[1].Value;
+            var value = groups[3].Value.Trim();
+            var args = groups[4].Value.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(Num).ToArray();
             switch (name)
             {
                 case "fillStyle": fill = value; break;

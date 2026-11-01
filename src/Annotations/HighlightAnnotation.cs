@@ -16,20 +16,32 @@ public partial class HighlightAnnotation : TextMarkupAnnotation
     }
     public new AnnotationType AnnotationType => AnnotationType.Highlight;
 
+    /// <summary>A colour set on a highlight that already has an appearance is drawn: the appearance
+    /// is painted again with it. A highlight painted for the first time when it joins the page
+    /// takes every property set by then.</summary>
+    private protected override void OnColorChanged()
+    {
+        if (NormalAppearance is not null) UpdateAppearances();
+    }
+
     /// <summary>Regenerate the normal appearance (/AP /N): each /QuadPoints quad is
     /// painted as a filled-and-stroked rectangle in the annotation colour, under a
-    /// Multiply blend graphics state so the highlighted text stays legible underneath.</summary>
+    /// Multiply blend graphics state so the highlighted text stays legible underneath.
+    /// A border width set to zero fills the quad only: the stroke reaches half a line
+    /// width past the quad, and where highlights sit side by side (one per character)
+    /// the blended strokes overlap into darker seams.</summary>
     public override void UpdateAppearances()
     {
         var r = Rect;
         var quads = QuadPoints;
         if (r is null || quads.Length < 4) { base.UpdateAppearances(); return; }
         var color = Color;
+        var stroked = GetBorderWidthValue() > 0;
         var b = new Content.ContentStreamBuilder();
         b.SaveState();
         b.SetExtGState("TransGs");
         b.SetFillColor(color);
-        b.SetStrokeColor(color);
+        if (stroked) b.SetStrokeColor(color);
         for (int i = 0; i + 3 < quads.Length; i += 4)
         {
             double minX = Math.Min(Math.Min(quads[i].X, quads[i + 1].X), Math.Min(quads[i + 2].X, quads[i + 3].X));
@@ -41,7 +53,8 @@ public partial class HighlightAnnotation : TextMarkupAnnotation
             b.LineTo(maxX, maxY);
             b.LineTo(maxX, minY);
             b.ClosePath();
-            b.FillAndStroke();
+            if (stroked) b.FillAndStroke();
+            else b.Fill();
         }
         b.RestoreState();
         SetHighlightAppearance(b.Build(), r);

@@ -9,20 +9,41 @@ public sealed partial class FontEmbedder
     private static void WriteFontDescriptor(FontDictEmbedState fe)
     {
         var widths = new PdfArray();
-        // The array is indexed by WinAnsi CODE, so each code must resolve
-        // through CP1252 to its character before the cmap lookup — the
-        // 0x80..0x9F block (€, curly quotes, dashes, ™ …) otherwise reads
-        // control codepoints and lands on the notdef advance.
-        for (var c = 32; c <= 255; c++)
-            widths.Add(new PdfInteger((int)(
-                fe.parser.GetCharWidth(Cp1252.GetString(new[] { (byte)c })[0]) * fe.scale)));
-        fe.fontDict.Set("FirstChar", new PdfInteger(32));
-        fe.fontDict.Set("LastChar", new PdfInteger(255));
+        // The array is indexed by CODE, so each code must resolve to the character its
+        // encoding names (WinAnsi through CP1252, a /Differences name through the glyph
+        // list) before the cmap lookup — the 0x80..0x9F block (€, curly quotes, dashes, ™ …)
+        // otherwise reads control codepoints and lands on the notdef advance. A control
+        // code /Differences names a glyph for is shown too, and has its width.
+        var characters = EncodedCharacters(fe);
+        var first = Array.FindIndex(characters, c => c is not null);
+        if (first < 0 || first > FirstPrintableCode) first = FirstPrintableCode;
+        for (var c = first; c <= LastCode; c++)
+            widths.Add(new PdfInteger((int)(fe.parser.GetCharWidth(
+                characters[c] ?? Cp1252.GetString(new[] { (byte)c })[0]) * fe.scale)));
+        fe.fontDict.Set("FirstChar", new PdfInteger(first));
+        fe.fontDict.Set("LastChar", new PdfInteger(LastCode));
         fe.fontDict.Set("Widths", widths);
     }
 
     // Two widths within this many thousandths of an em are the same width.
     private const double WidthTolerance = 1;
+
+    // The single-byte codes a simple font's /Widths covers when it is written for the
+    // face: from the space to the last code.
+    private const int FirstPrintableCode = 32;
+    private const int LastCode = 255;
+
+    /// <summary>The character each single-byte code shows through the dictionary's /Encoding
+    /// (WinAnsi when it states none); null where the code names no character.</summary>
+    private static int?[] EncodedCharacters(FontDictEmbedState fe)
+    {
+        var names = Optimization.FontSubsetter.EncodingGlyphNames(fe.fontDict, fe.document.Reader);
+        var characters = new int?[names.Length];
+        for (var code = 0; code < names.Length; code++)
+            if (names[code] is { } name && TextAbsorber.GlyphNameToUnicode.TryGetValue(name, out var text) && text.Length > 0)
+                characters[code] = char.ConvertToUtf32(text, 0);
+        return characters;
+    }
 
     /// <summary>The stages of the font dictionary embed: the subset and the descriptor.</summary>
     private static void SubsetEmbeddedFont(FontDictEmbedState fe)
@@ -30,6 +51,9 @@ public sealed partial class FontEmbedder
         var winAnsiCodes = new HashSet<int>();
         for (var b = 32; b <= 255; b++)
             winAnsiCodes.Add(Cp1252.GetString(new[] { (byte)b })[0]);
+        // A /Differences name may name a glyph outside the WinAnsi set (a ligature, a bullet).
+        foreach (var character in EncodedCharacters(fe))
+            if (character is { } named) winAnsiCodes.Add(named);
         // Widths the dictionary cannot be read for leave the program's own advances in place.
         // A dictionary that states widths says which codes it shows: the program carries the
         // glyphs of those, not the whole WinAnsi set - a face shared by fonts that state

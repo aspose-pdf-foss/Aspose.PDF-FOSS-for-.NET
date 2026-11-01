@@ -59,6 +59,39 @@ internal static class IndicShaper
         >= 0x0A00 and <= 0x0A7F => "guru",
         >= 0x0A80 and <= 0x0AFF => "gujr",
         >= 0x0B00 and <= 0x0B7F => "orya",
+        >= SinhalaFirst and <= SinhalaLast => "sinh",
+        _ => null,
+    };
+
+    private const int SinhalaFirst = 0x0D80;
+    private const int SinhalaLast = 0x0DFF;
+
+    /// <summary>
+    /// Sinhala is laid out unlike the other Indic blocks, so it is categorised by name. Its
+    /// vowel signs kombuva and kombu deka are drawn before the consonant, and the al-lakuna
+    /// stays a visible sign after it: Sinhala joins consonants only through a zero-width
+    /// joiner, so the shaper does not treat it as a virama that builds a cluster.
+    /// </summary>
+    private static int SinhalaCategory(int cp) => cp switch
+    {
+        0x0D82 or 0x0D83 => CatBindu,
+        >= 0x0D85 and <= 0x0D96 => CatVowel,
+        >= 0x0D9A and <= 0x0DC6 => CatConsonant,
+        0x0DD9 or 0x0DDB => CatMatraPre,
+        0x0DD2 or 0x0DD3 => CatMatraAbove,
+        0x0DD4 or 0x0DD6 => CatMatraBelow,
+        0x0DCA or (>= 0x0DCF and <= 0x0DDF) or 0x0DF2 or 0x0DF3 => CatMatraPost,
+        _ => CatOther,
+    };
+
+    /// <summary>A Sinhala two-part vowel sign as the kombuva drawn before the consonant and the
+    /// signs drawn after it (Unicode's canonical decomposition); null for any other character.</summary>
+    internal static string? SplitVowelSign(int cp) => cp switch
+    {
+        0x0DDA => "ේ",
+        0x0DDC => "ො",
+        0x0DDD => "ෝ",
+        0x0DDE => "ෞ",
         _ => null,
     };
 
@@ -85,6 +118,7 @@ internal static class IndicShaper
     {
         if (cp == 0x200D) return CatZwj;
         if (cp == 0x200C) return CatZwnj;
+        if (cp is >= SinhalaFirst and <= SinhalaLast) return SinhalaCategory(cp);
         var b = BlockBase(cp);
         if (b < 0) return CatOther;
         var o = cp - b;
@@ -150,8 +184,6 @@ internal static class IndicShaper
     /// <summary>True when the run contains any character this shaper handles.</summary>
     internal static bool NeedsShaping(string text)
     {
-        foreach (var ch in text)
-            if (ScriptTagOf(ch) is not null) return true;
-        return false;
+        return text.Any(ch => ScriptTagOf(ch) is not null);
     }
 }

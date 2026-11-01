@@ -49,21 +49,33 @@ internal static partial class ContentStreamOperatorParser
             // per the OperatorCollection contract
             var start = po.pos;
             var eiPos = FindInlineImageEnd(po);
+            po.operands.Clear();
+            if (po.sink is { } sink)
+            {
+                // The image's parameters are not operands; its three operators go by name.
+                sink(new ScannedOperator(po, "BI"));
+                sink(new ScannedOperator(po, "ID"));
+                sink(new ScannedOperator(po, "EI"));
+                return true;
+            }
             var fullText = po.text[start..eiPos].TrimEnd();
             // BI with its key-value pairs
             var idIdx = fullText.IndexOf("\nID", StringComparison.Ordinal);
             if (idIdx < 0) idIdx = fullText.IndexOf(" ID", StringComparison.Ordinal);
             if (idIdx >= 0)
             {
-                po.result.Add(fullText[..idIdx].TrimEnd()); // BI + parameters
-                po.result.Add("ID"); // ID operator
-                po.result.Add("EI"); // EI operator
+                po.result!.Add(fullText[..idIdx].TrimEnd()); // BI + parameters
+                // The image data rides on the ID operator (the bytes between ID and EI,
+                // their delimiting whitespace included), so a write-back of the list
+                // keeps the image instead of an empty ID EI pair.
+                var dataStart = idIdx + 1 + ID.Keyword.Length;
+                po.result.Add(ID.Keyword + fullText[dataStart..^EI.Keyword.Length]);
+                po.result.Add(EI.Keyword); // EI operator
             }
             else
             {
-                po.result.Add(fullText);
+                po.result!.Add(fullText);
             }
-            po.operands.Clear();
         }
         else if (IsOperatorChar(c))
         {
@@ -79,11 +91,12 @@ internal static partial class ContentStreamOperatorParser
     /// <summary>The stages of the operator scan: one token at a time.</summary>
     private static void EmitOperator(OperatorScanState po)
     {
+        var start = po.pos;
         var opName = ReadOperatorName(po);
         // Check for true/false/null which are operands
         if (opName == "true" || opName == "false" || opName == "null")
         {
-            po.operands.Add(opName);
+            po.operands.Add((start, po.pos));
         }
         else
         {
@@ -94,32 +107,13 @@ internal static partial class ContentStreamOperatorParser
                 && opName.All(ch => IsKnownSingleCharOp(ch));
             if (isConcatenated)
             {
-                // First operator gets any pending operands
-                if (po.operands.Count > 0)
-                {
-                    po.result.Add(string.Join(" ", po.operands) + " " + opName[0]);
-                    po.operands.Clear();
-                }
-                else
-                {
-                    po.result.Add(opName[0].ToString());
-                }
-                // Remaining characters are individual operators
-                for (int ci = 1; ci < opName.Length; ci++)
-                    po.result.Add(opName[ci].ToString());
+                // First operator gets any pending operands; the remaining characters are individual operators
+                for (int ci = 0; ci < opName.Length; ci++)
+                    Emit(po, opName[ci].ToString());
             }
             else
             {
-                // This is an operator — emit with operands
-                if (po.operands.Count > 0)
-                {
-                    po.result.Add(string.Join(" ", po.operands) + " " + opName);
-                    po.operands.Clear();
-                }
-                else
-                {
-                    po.result.Add(opName);
-                }
+                Emit(po, opName);
             }
         }
     }

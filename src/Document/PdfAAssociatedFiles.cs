@@ -41,4 +41,19 @@ public sealed partial class Document : IDisposable
         // Validate(PDF_A_3B) fails the claim gate).
         ApplyPartSpecificFixes(pa);
     }
+
+    // The file specifications of the file attachments a part-3 conversion keeps, collected by
+    // the annotation pass for the associated-file pass.
+    private List<PdfObject>? _attachmentFileSpecs;
+
+    /// <summary>The file specification a name-tree entry points at. A file embedded in this
+    /// session is still waiting to be written, and the reader cannot resolve its reference.</summary>
+    private PdfDictionary? ResolveFileSpecification(PdfObject? entry)
+    {
+        if (_reader.ResolveDict(entry) is { } written) return written;
+        if (entry is not PdfIndirectRef reference) return null;
+        foreach (var (number, pending) in _newObjects)
+            if (number == reference.ObjectNumber) return pending as PdfDictionary;
+        return null;
+    }
 }

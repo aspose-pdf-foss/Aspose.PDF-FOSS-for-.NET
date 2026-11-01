@@ -64,7 +64,9 @@ internal static class MarkedContentScan
 
     private sealed class CacheEntry
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public object[] Fingerprint = [];
+#pragma warning restore S3218
         public double[]? Shown;
         public ScanResult Result = new();
     }
@@ -267,7 +269,8 @@ internal static class MarkedContentScan
             open = new Piece
             {
                 Text = text, FontKey = state.FontName, FontDict = fontDict,
-                Size = state.FontSize * Math.Sqrt(rm[2] * rm[2] + rm[3] * rm[3]),
+                // (a negative font size turns the glyphs over: the text is as large as its magnitude)
+                Size = Math.Abs(state.FontSize) * Math.Sqrt(rm[2] * rm[2] + rm[3] * rm[3]),
                 X0 = rm[4], X1 = rm[4], Y = rm[5], Y1 = rm[5],
                 R = stroke ? state.StrokeR : state.FillR,
                 G = stroke ? state.StrokeG : state.FillG,

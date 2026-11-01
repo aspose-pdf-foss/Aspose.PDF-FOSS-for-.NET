@@ -24,7 +24,7 @@ internal static partial class SvgToPdfConverter
             var (r, g, b) = ParseColor(sr.strokeVal);
             sr.sb.Append($"{F(r)} {F(g)} {F(b)} RG\n");
         }
-        EmitStrokeState(sr.style, sr.sb, sr.ctx);
+        EmitStrokeState(sr.style, sr.sb);
     }
 
     /// <summary>The stages of the SVG shape render: the fill and the stroke.</summary>

@@ -189,7 +189,9 @@ internal sealed class PsPageWriter
         _content.Append(state.LineCap.ToString(CultureInfo.InvariantCulture)).Append(" J\n");
         if (state.LineJoin != 0)
             _content.Append(state.LineJoin.ToString(CultureInfo.InvariantCulture)).Append(" j\n");
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
         if (state.MiterLimit != PsGraphicsState.DefaultMiterLimit)
+#pragma warning restore S1244
             _content.Append(N(state.MiterLimit)).Append(" M\n");
         WriteDash(state, inUserSpace);
     }

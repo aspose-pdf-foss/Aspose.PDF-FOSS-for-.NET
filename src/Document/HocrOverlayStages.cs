@@ -59,16 +59,16 @@ public sealed partial class Document
     /// <summary></summary>
     private static void CollectHocrWords(HocrOverlayState ho)
     {
-        foreach (Match m in HocrLineOrWordRegex.Matches(ho.hocr))
+        foreach (var groups in SafeRegex.Matches(HocrLineOrWordRegex, ho.hocr).Select(m => m.Groups))
         {
-            if (m.Groups[1].Success) { ho.lineId++; continue; } // ocr_line marker — geometric grouping
+            if (groups[1].Success) { ho.lineId++; continue; } // ocr_line marker — geometric grouping
 
-            if (!int.TryParse(m.Groups[6].Value, out var bx0) ||
-                !int.TryParse(m.Groups[7].Value, out var by0) ||
-                !int.TryParse(m.Groups[8].Value, out var bx1) ||
-                !int.TryParse(m.Groups[9].Value, out var by1))
+            if (!int.TryParse(groups[6].Value, out var bx0) ||
+                !int.TryParse(groups[7].Value, out _) ||
+                !int.TryParse(groups[8].Value, out var bx1) ||
+                !int.TryParse(groups[9].Value, out var by1))
                 continue;
-            var raw = HocrInlineTagRegex.Replace(m.Groups[10].Value, string.Empty);
+            var raw = SafeRegex.Replace(HocrInlineTagRegex, groups[10].Value, string.Empty);
             var word = System.Net.WebUtility.HtmlDecode(raw)?.Trim();
             if (string.IsNullOrEmpty(word)) continue;
 
@@ -77,7 +77,7 @@ public sealed partial class Document
             // OCR layout uses, so the extractor's dominant-font grid cell matches.
             // Measure the FOLDED text so the rendered advance matches the box (the fi/fl
             // fold changes glyph widths); otherwise a folded word overshoots into the next.
-            var display = FoldLigatures(word!);
+            var display = FoldLigatures(word);
             var fontSize = WidthFitFontSize(display, (bx1 - bx0) * ho.sx);
             ho.words.Add((ho.anchorX + bx0 * ho.sx, ho.anchorY + ho.anchorH - by1 * ho.sy, fontSize, display, ho.lineId));
         }

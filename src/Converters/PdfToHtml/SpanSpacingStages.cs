@@ -7,38 +7,44 @@ namespace Aspose.Pdf.Converters;
 
 public sealed partial class PdfToHtmlConverter
 {
-    /// <summary>The stages of the span spacing resolve: the slot-based spacing.</summary>
-    private static void ResolveSlotSpacing(StlDivState sd, List<StlItem> its, double? inheritWs, int s, int slots)
+    /// <summary>The inline style that keeps a span's text in the order it is written. A right-to-left
+    /// run is written in the visual order the page draws it in; left to the browser's own bidi pass,
+    /// every word of it is mirrored.</summary>
+    private static string BidiOverrideCss(string text) =>
+        HasRtlCodepoint(text) ? "unicode-bidi:bidi-override;direction:ltr;" : "";
+
+    /// <summary>The css font size the em-compensation dialect emits for a drawn size: the em value rounded to
+    /// the dialect's 0.01-em grid (a drawn 11 pt is 0.92em).</summary>
+    private static double EmGridFontSizeEm(double fontSizePt) =>
+        Math.Round(fontSizePt / 12.0, 2, MidpointRounding.AwayFromZero);
+
+    /// <summary>The stages of the span spacing resolve: the slot-based spacing of the em-compensation dialect.</summary>
+    private static void ResolveSlotSpacing(StlDivState sd, List<StlItem> its, int slots, bool lineFinal)
     {
-        // THE EM-COMPENSATION SOLVE:
-        //   ws = R2( (S·ΣE − S·(S−1)·Σface − n·lsFloor) / (D·1000) )
-        // · The solve runs at the css size TRUNCATED to the
-        //   0.01-em grid (0.91em·12 = 10.92 pt for a drawn 11) while
-        //   the markup emits the ROUNDED size (0.92em); S is the
-        //   drawn/solve ratio, and the face side scales by S again
-        //   (the ws deliberately lands short of its own ink).
-        // · n = every region item (interior slots included; the
-        //   trailing inter-span slot of a title span included — that
-        //   slot extends the region to the next span's start, which
-        //   is what makes the solve track the following span rather
-        //   than the title's own ink).
-        // · D counts only KERN-CARRYING slots: a bare drawn space
-        //   (pen gap = its own advance) contributes no divisor. The
-        //   membership floor lies in the (0.1, 48.8) milli-em
-        //   bracket; 20 sits mid-bracket.
-        const double EmGridSlotKernFloorMilli = 20.0;
+        // THE EM-COMPENSATION SOLVE: the word-spacing that lands the
+        // region's browser width on its pen width,
+        //   ws = R2( ((ΣE + Σface) / R − Σface − n·lsFloor) / (slots·1000) )
+        // · ΣE + Σface is the pen width of the region in milli-em of the
+        //   DRAWN size; the browser draws the face at the EMITTED size,
+        //   rounded to the 0.01-em grid (R = emitted/drawn), and its
+        //   letter- and word-spacing are em of that size too.
+        // · n counts the letter-spacings inside the region: one after
+        //   every item (interior slots included; the trailing inter-span
+        //   slot of a title span included — that slot extends the region
+        //   to the next span's start), except the one after the line's
+        //   last character, which lands beyond the ink.
+        // · Every slot takes an equal share: css spreads the word-spacing
+        //   over every space of the span, so a share charged to the
+        //   kerned slots alone would be drawn several times over.
         var fsEm = sd.st.FontSize / 12.0;
-        var cssEm = Math.Floor(fsEm * 100.0) / 100.0;
-        var scale = cssEm > 0 ? fsEm / cssEm : 1.0;
+        var cssEm = EmGridFontSizeEm(sd.st.FontSize);
+        var ratio = cssEm > 0 ? cssEm / fsEm : 1.0;
         double sumE = 0, faceSum = 0;
         foreach (var x in its) { sumE += x.E; faceSum += x.FaceMilli; }
-        var dKern = its.Count(x => x.IsSlot
-            && Math.Abs(x.E) >= EmGridSlotKernFloorMilli);
-        if (dKern == 0) dKern = slots;   // all-bare span: every slot carries
-        var lsTerms = its.Count;
+        var lsTerms = lineFinal && !its[^1].IsSlot ? its.Count - 1 : its.Count;
         sd.wsEm = Math.Round(
-            (scale * sumE - scale * (scale - 1.0) * faceSum - lsTerms * sd.lsMilli)
-            / dKern / 1000.0,
+            ((sumE + faceSum) / ratio - faceSum - lsTerms * sd.lsMilli)
+            / slots / 1000.0,
             2, MidpointRounding.AwayFromZero);
         var fitEnv = Environment.GetEnvironmentVariable("ASPOSE_PH2_FIT");
         if (fitEnv is "1" or "2")
@@ -50,7 +56,7 @@ public sealed partial class PdfToHtmlConverter
                 head.Append(x.IsSlot ? ' ' : x.Ch);
             }
             Console.Error.WriteLine(
-                $"[fit] n={its.Count} D={dKern}/{slots} S={scale:F5} " +
+                $"[fit] n={lsTerms}/{its.Count} slots={slots} R={ratio:F5} " +
                 $"sumE={sumE:F2} face={faceSum:F1} ls={sd.lsMilli:F1} " +
                 $"ws={sd.wsEm:F2} |{head}|");
             if (fitEnv == "2")

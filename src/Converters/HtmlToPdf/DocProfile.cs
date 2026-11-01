@@ -4,6 +4,7 @@
 // the few measurements those imply. Held together so a block-layout method can take
 // "the document" instead of two score separate flags.
 
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -18,6 +19,8 @@ internal static partial class HtmlToPdfConverter
         /// <summary>Explicit page margins with a zero top margin.</summary>
         public bool hasZeroTopMargin;
         public bool rtlDoc;
+        /// <summary>The sheet's @font-face faces carried as data: URIs, decoded once (see ParseDataFontFaces); null without any.</summary>
+        public Dictionary<string, byte[]>? dataFaces;
         /// <summary>No usable authored font: the user-agent serif flow.</summary>
         public bool uaStdSerif;
         public bool uaBareDoc;
@@ -56,6 +59,10 @@ internal static partial class HtmlToPdfConverter
         /// percent width, a checkbox after its own margin - the rows pacing on their ink and
         /// banding on declared heights.</summary>
         public bool uaFormCells;
+        /// <summary>A stylesheet form (no UA-serif flow, no calibrated control dialect) with a table of
+        /// text-box controls: such a table draws as a grid, each control an AcroForm field inside its cell
+        /// (see FieldGridTable; Block.FieldGrid marks it).</summary>
+        public bool fieldCellGrids;
         public bool redlineDiffDoc;
         public bool sectionedReport;
         /// <summary>The document's grids lay out on the browser's own cell box model (the sectioned
@@ -103,9 +110,7 @@ internal static partial class HtmlToPdfConverter
         public bool minFloorSheet;
         public double bodyPinnedW;
         public double bodyCssFontPt;
-    // A PERCENT body size, in points of the 16 px UA root (`body { font-size: 62.5% }` = 7.5): the
-    // flow's root size only - it flips none of the dialect gates the px/pt body size does.
-    public double bodyPctFontPt;
+        public bool cssBoxBody;   // the sheet-typography body pads its own box: CSS page box, margins and line boxes
     /// <summary>The size the body's own tag or class states on the UA flow (0 = none): its cells inherit it.</summary>
     public double bodyOwnFontPt;
     // The field-list dialect (MEASURED, the change-control print page): a sheet whose `div > span:first-child`
@@ -152,6 +157,8 @@ internal static partial class HtmlToPdfConverter
         /// the metric flow already seats its baselines inside CSS line boxes).</summary>
         public bool sheetBoxFlow;
         public Dictionary<string, int> gridRadioCounts = new();
+        /// <summary>The option names each grid radio group has given out: a repeated value names no second option.</summary>
+        public Dictionary<string, HashSet<string>> gridRadioValues = new();
         public Dictionary<string, Aspose.Pdf.Forms.RadioButtonField> gridRadioGroups = new();
         /// <summary>UA fieldset boxes: a table inside the frame fills the frame's content box (see uaFieldsetBoxes).</summary>
         public bool uaFieldsetContent;
@@ -179,9 +186,9 @@ internal static partial class HtmlToPdfConverter
         p.fieldsInsetPt = 0;
         var em = cv.uaBodyFontPt > 0 ? cv.uaBodyFontPt : UaDefaultFontPt;
         foreach (var kv in cv.css)
-            if (Regex.Match(kv.Key, @"^div\.([\w-]+)$", RegexOptions.IgnoreCase) is { Success: true } dm
+            if (SafeRegex.Match(kv.Key, @"^div\.([\w-]+)$", RegexOptions.IgnoreCase) is { Success: true } dm
                 && kv.Value.TryGetValue("padding", out var pad)
-                && Regex.Matches(cv.html, @"class\s*=\s*[""'][^""']*\b" + Regex.Escape(dm.Groups[1].Value) + @"\b", RegexOptions.IgnoreCase).Count == 1)
+                && SafeRegex.Matches(cv.html, @"class\s*=\s*[""'][^""']*\b" + Regex.Escape(dm.Groups[1].Value) + @"\b", RegexOptions.IgnoreCase).Count == 1)
             {
                 p.fieldsClass = dm.Groups[1].Value;
                 p.fieldsInsetPt = ChainPadPt(pad, em).L;
@@ -201,8 +208,22 @@ internal static partial class HtmlToPdfConverter
         // would measure the merged monster and widen a sheet the render
         // never fills.
         if (b.IsTable && profile.uaStdSerif && !profile.deadExternalCss
-            && TrySplitWrapperStack(b.TableHtml ?? "") is (_, _))
+            && TrySplitWrapperStack(b.TableHtml ?? "") is (var wrapperAttrs, var wrapperChildren))
+        {
+            // …but a child grid wider than the frame overflows it, and the sheet grows to that
+            // child's natural box standing one wrapper inset in from the frame, as it grows to any
+            // over-wide grid: the probe measures the children, not the merged wrapper.
+            var before = cv.widestTable;
+            foreach (var (childHtml, _) in wrapperChildren)
+                DetectOverDeclaredGridFromTable(new Block { IsTable = true, TableHtml = childHtml, CssAncestors = b.CssAncestors },
+                    cv, profile, css, inlineSvgs, options, availContentW, bodyCssFace);
+            if (cv.widestTable > before)
+            {
+                var (wS, wP, wBw, _) = WrapperAttrChrome(wrapperAttrs);
+                cv.widestTable += 2 * wBw + wS + wP;
+            }
             continue;
+        }
         // An unpainted wrapper's declared box is not ink: the sheet follows the table it wraps
         // (its own declared width is what the width scan below still counts).
         if (profile.wordMailDoc && b.IsTable && b.TableHtml is { } wrapHtml
@@ -223,7 +244,7 @@ internal static partial class HtmlToPdfConverter
         // inside the page margins on BOTH sides (the UA body margin is already
         // baked into the 96pt default; the right margin mirrors the left).
         double wrapPad = 0;
-        var wpm = Regex.Match(cv.html,
+        var wpm = SafeRegex.Match(cv.html,
             @"<div\b[^>]*class\s*=\s*[""'][^""']*container[^""']*[""'][^>]*style\s*=\s*[""'][^""']*padding\s*:\s*(\d+(?:\.\d+)?)\s*px",
             RegexOptions.IgnoreCase);
         if (wpm.Success && double.TryParse(wpm.Groups[1].Value,
@@ -255,32 +276,32 @@ internal static partial class HtmlToPdfConverter
         foreach (var k in css.Keys) bandKeys.Add(k);
         foreach (var bandKey in bandKeys)
         {
-            var bkm = Regex.Match(bandKey, @"^\.([\w-]+) (h[1-6])$");
+            var bkm = SafeRegex.Match(bandKey, @"^\.([\w-]+) (h[1-6])$");
             if (!bkm.Success || !css[bandKey].TryGetValue("border-bottom", out var bandDecl2)) continue;
             var bandCol = ParseCssColor(bandDecl2);
             if (bandCol is null) continue;
-            var bwm = Regex.Match(bandDecl2, @"(\d+(?:\.\d+)?)\s*px");
+            var bwm = SafeRegex.Match(bandDecl2, @"(\d+(?:\.\d+)?)\s*px");
             var bandPxV = bwm.Success ? bwm.Groups[1].Value : "1";
             var bandPadV = "0";
             if (css[bandKey].TryGetValue("padding-bottom", out var bandPadDecl))
             {
-                var bpm = Regex.Match(bandPadDecl, @"(\d+(?:\.\d+)?)");
+                var bpm = SafeRegex.Match(bandPadDecl, @"(\d+(?:\.\d+)?)");
                 if (bpm.Success) bandPadV = bpm.Groups[1].Value;
             }
-            var attr = FormattableString.Invariant(
+            var attr = Compat.Format(CultureInfo.InvariantCulture,
                 $" band=\"{bandCol.R},{bandCol.G},{bandCol.B}|{bandPxV}|{bandPadV}\"");
             var hostRx = new Regex(@"<div\b[^>]*class\s*=\s*[""'][^""']*\b"
-                + Regex.Escape(bkm.Groups[1].Value) + @"\b[^""']*[""'][^>]*>", RegexOptions.IgnoreCase);
+                + Regex.Escape(bkm.Groups[1].Value) + @"\b[^""']*[""'][^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
             var hTag = bkm.Groups[2].Value;
             var hosts = new List<Match>();
-            foreach (Match hm in hostRx.Matches(cv.html)) hosts.Add(hm);
+            foreach (Match hm in SafeRegex.Matches(hostRx, cv.html)) hosts.Add(hm);
             for (var hi = hosts.Count - 1; hi >= 0; hi--)
             {
                 var contentStart = hosts[hi].Index + hosts[hi].Length;
                 var (divEnd, hostEnd) = FindDivEnd(cv.html, contentStart);
                 if (divEnd < 0) continue;
                 var region = cv.html[contentStart..hostEnd];
-                region = Regex.Replace(region, "<" + hTag + @"\b", "<" + hTag + attr, RegexOptions.IgnoreCase);
+                region = SafeRegex.Replace(region, "<" + hTag + @"\b", "<" + hTag + attr, RegexOptions.IgnoreCase);
                 cv.html = cv.html[..contentStart] + region + cv.html[hostEnd..];
             }
         }
@@ -294,10 +315,63 @@ internal static partial class HtmlToPdfConverter
     /// hospital letter: `62.5%` sizes its 1.02em runs 7.65 pt, the same as `10px`; without it 12.24).</summary>
     private static double? BodyPercentFontPt(string value)
     {
-        var m = System.Text.RegularExpressions.Regex.Match(value.Trim(), @"^([0-9.]+)\s*%$");
+        var m = SafeRegex.Match(value.Trim(), @"^([0-9.]+)\s*%$");
         return m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var pct) && pct > 0
             ? UaRootFontPt * pct / 100.0 : null;
+    }
+
+    /// <summary>The body box's insets in points - its margin (the UA 8 px where the rule sets none) plus its
+    /// padding, per side - for a body rule that pads its own box and sizes its text in px; null otherwise.
+    /// Declarations apply in source order, so a `padding` after `padding-top` overrides it (probed: the page
+    /// opens at 90 + 0.75 (margin + padding) on the left, ends at 505 - 0.75 (margin + padding) on the right
+    /// and starts at 72 + 0.75 (margin + padding) at the top).</summary>
+    private static (double top, double right, double bottom, double left)? BodyBoxInsetsPt(Dictionary<string, Dictionary<string, string>> css)
+    {
+        if (!css.TryGetValue("body", out var body)
+            || !body.TryGetValue("font-size", out var fs) || !fs.Trim().EndsWith("px", StringComparison.OrdinalIgnoreCase))
+            return null;
+        double[] margin = { UaBodyMarginPt, UaBodyMarginPt, UaBodyMarginPt, UaBodyMarginPt };
+        double[] padding = new double[4];
+        var padded = false;
+        foreach (var (prop, value) in body)
+        {
+            var target = prop.StartsWith("padding", StringComparison.OrdinalIgnoreCase) ? padding
+                : prop.StartsWith("margin", StringComparison.OrdinalIgnoreCase) ? margin : null;
+            if (target is null || !ApplyBoxSideDecl(target, prop, value)) continue;
+            if (ReferenceEquals(target, padding)) padded = true;
+        }
+        if (!padded || padding.All(p => p <= 0)) return null;
+        return (margin[0] + padding[0], margin[1] + padding[1], margin[2] + padding[2], margin[3] + padding[3]);
+    }
+
+    /// <summary>Applies one `margin`/`padding` declaration (the 1-4 value shorthand or a side longhand) to
+    /// top/right/bottom/left; false when a length does not parse.</summary>
+    private static bool ApplyBoxSideDecl(double[] sides, string prop, string value)
+    {
+        var dash = prop.IndexOf('-');
+        if (dash > 0)
+        {
+            var side = Array.IndexOf(new[] { "top", "right", "bottom", "left" }, prop[(dash + 1)..].ToLowerInvariant());
+            if (side < 0 || TryParseLength(value.Trim()) is not { } len) return false;
+            sides[side] = len;
+            return true;
+        }
+        var parts = value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var lens = new double[parts.Length];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            if (TryParseLength(parts[i]) is not { } len) return false;
+            lens[i] = len;
+        }
+        switch (lens.Length)
+        {
+            case 1: sides[0] = sides[1] = sides[2] = sides[3] = lens[0]; return true;
+            case 2: sides[0] = sides[2] = lens[0]; sides[1] = sides[3] = lens[1]; return true;
+            case 3: sides[0] = lens[0]; sides[1] = sides[3] = lens[1]; sides[2] = lens[2]; return true;
+            case 4: sides[0] = lens[0]; sides[1] = lens[1]; sides[2] = lens[2]; sides[3] = lens[3]; return true;
+            default: return false;
+        }
     }
 
     /// <summary>Reads the body's declared font and colour, and whether the page is an element grid.</summary>
@@ -308,8 +382,8 @@ internal static partial class HtmlToPdfConverter
     profile.bodyCssColor = null;
     SheetEmBasePt = 0;
     if (css.TryGetValue("body", out var bodyPctDecls) && bodyPctDecls.TryGetValue("font-size", out var bodyPctV)
-        && BodyPercentFontPt(bodyPctV) is { } bodyPctPt) { profile.bodyPctFontPt = bodyPctPt; SheetEmBasePt = bodyPctPt; }
-    if (profile.bodyZeroMargin && css.TryGetValue("body", out var bodyFontDecls)
+        && BodyPercentFontPt(bodyPctV) is { } bodyPctPt) { SheetEmBasePt = bodyPctPt; }
+    if ((profile.bodyZeroMargin || BodyBoxInsetsPt(css) is not null) && css.TryGetValue("body", out var bodyFontDecls)
         && bodyFontDecls.TryGetValue("font-size", out var bodyFontSize)
         && TryParseLength(bodyFontSize) is { } bodyFontPt && bodyFontPt > 0)
     {
@@ -336,13 +410,13 @@ internal static partial class HtmlToPdfConverter
     // and their text honours inline-block title columns and dash-break
     // overflow wrapping (both measured on the references).
     profile.quirksCssRun = cv.bodyCssFace is not null
-        && !Regex.IsMatch(html, @"<!doctype", RegexOptions.IgnoreCase);
+        && !SafeRegex.IsMatch(html, @"<!doctype", RegexOptions.IgnoreCase);
 
     // Element-styled fixed-grid document (quirks): the stylesheet sizes the
     // TABLE element itself and borders the cells by ELEMENT rule. Its
     // inter-table <br/>s keep their line boxes — each grid is separated
     // from the next by one.
-    profile.elementGridDoc = !Regex.IsMatch(html, @"<!doctype", RegexOptions.IgnoreCase)
+    profile.elementGridDoc = !SafeRegex.IsMatch(html, @"<!doctype", RegexOptions.IgnoreCase)
         && css.TryGetValue("table", out var egTbl) && egTbl.ContainsKey("width")
         && css.TryGetValue("td", out var egTd) && egTd.ContainsKey("border");
     }
@@ -352,14 +426,14 @@ internal static partial class HtmlToPdfConverter
     /// `.Form-table-cell-label { font-family: Tahoma }` beside `BODY { font-family: Tahoma }`).</summary>
     private static bool SheetCellClassCarriesBodyFace(Dictionary<string, Dictionary<string, string>> css, string html, string bodyFace)
     {
-        if (!Regex.IsMatch(html, @"<t[dh]\b[^>]*>(?:(?!</t[dh]\b).)*?<input\b[^>]*type\s*=\s*[""']?text\b",
+        if (!SafeRegex.IsMatch(html, @"<t[dh]\b[^>]*>(?:(?!</t[dh]\b).)*?<input\b[^>]*type\s*=\s*[""']?text\b",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
             return false;
         foreach (var (sel, rule) in css)
         {
             if (sel.Length < 2 || sel[0] != '.' || !rule.TryGetValue("font-family", out var fam)) continue;
             if (FirstFontFamily(fam) is not { } face || !face.Equals(bodyFace, StringComparison.OrdinalIgnoreCase)) continue;
-            if (Regex.IsMatch(html, @"<t[dh]\b[^>]*\bclass\s*=\s*[""']?" + Regex.Escape(sel[1..]) + @"\b", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(html, @"<t[dh]\b[^>]*\bclass\s*=\s*[""']?" + Regex.Escape(sel[1..]) + @"\b", RegexOptions.IgnoreCase))
                 return true;
         }
         return false;
@@ -402,7 +476,7 @@ internal static partial class HtmlToPdfConverter
     // request: Verdana 8 pt labels beside 284 px inputs, every table gridded inside a
     // fieldset, whatever the sheet's dead external links).
     profile.uaFormCells = ((profile.uaStdSerif && !profile.deadExternalCss) || profile.ptReportDoc)
-        && Regex.IsMatch(html, @"<t[dh]\b[^>]*>(?:(?!</t[dh]\b).)*?<input\b[^>]*type\s*=\s*[""']?text\b",
+        && SafeRegex.IsMatch(html, @"<t[dh]\b[^>]*>(?:(?!</t[dh]\b).)*?<input\b[^>]*type\s*=\s*[""']?text\b",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
     // SSRS report export (the ReportingServices HTML renderer's

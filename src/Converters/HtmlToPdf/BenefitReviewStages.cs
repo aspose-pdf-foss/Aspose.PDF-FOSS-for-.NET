@@ -10,17 +10,16 @@ internal static partial class HtmlToPdfConverter
     {
         foreach (var line in bv.lines)
         {
-            var subs = WrapLine(bv, line);
+            var subs = WrapLine(line);
             for (var si = 0; si < subs.Count; si++)
             {
                 var sub = subs[si];
-                bv.yBase = bv.prev is null
-                    ? TopSeat(bv, sub.Kind)
-                    : bv.yBase + (si == 0 ? Pitch(bv, bv.prev.Value, sub.Kind) : BrLinePt);
-                if (bv.yBase + FsOf(bv, sub.Kind) * BrDescFrac > BrBottomPt && bv.prev is not null)
+                if (bv.prev is null) bv.yBase = TopSeat(sub.Kind);
+                else bv.yBase = bv.yBase + (si == 0 ? Pitch(bv.prev.Value, sub.Kind) : BrLinePt);
+                if (bv.yBase + FsOf(sub.Kind) * BrDescFrac > BrBottomPt && bv.prev is not null)
                 {
                     OpenPage(bv);
-                    bv.yBase = TopSeat(bv, sub.Kind);
+                    bv.yBase = TopSeat(sub.Kind);
                 }
                 if (sub.Kind == BrKind.Li && si == 0)
                     bv.sb.AppendLine($"BT 0 0 0 rg /F5 {BrBodyFs.ToString("F2", bv.inv)} Tf "
@@ -59,11 +58,11 @@ internal static partial class HtmlToPdfConverter
         }
         if (!closing)
         {
-            var classM = Regex.Match(attrs, "class[ ]*=[ ]*\"([^\"]*)\"", RegexOptions.IgnoreCase);
-            var styleM = Regex.Match(attrs, "style[ ]*=[ ]*\"([^\"]*)\"", RegexOptions.IgnoreCase);
+            var classM = SafeRegex.Match(attrs, "class[ ]*=[ ]*\"([^\"]*)\"", RegexOptions.IgnoreCase);
+            var styleM = SafeRegex.Match(attrs, "style[ ]*=[ ]*\"([^\"]*)\"", RegexOptions.IgnoreCase);
             var hidden = attrs.Contains("aria-hidden=\"true\"", StringComparison.OrdinalIgnoreCase)
-                || (classM.Success && Regex.IsMatch(classM.Groups[1].Value, "(^| )ng-hide( |$)"))
-                || (styleM.Success && Regex.IsMatch(styleM.Groups[1].Value,
+                || (classM.Success && SafeRegex.IsMatch(classM.Groups[1].Value, "(^| )ng-hide( |$)"))
+                || (styleM.Success && SafeRegex.IsMatch(styleM.Groups[1].Value,
                     "display[ ]*:[ ]*none", RegexOptions.IgnoreCase));
             var isBold = tag.Equals("strong", StringComparison.OrdinalIgnoreCase)
                 || tag.Equals("b", StringComparison.OrdinalIgnoreCase);
@@ -71,7 +70,7 @@ internal static partial class HtmlToPdfConverter
             // one (the ng-click actions keep href=""); no attribute at all
             // (the nav tabs) draws as plain text
             var isLink = tag.Equals("a", StringComparison.OrdinalIgnoreCase)
-                && Regex.IsMatch(attrs, "(^|[ ])href[ ]*=", RegexOptions.IgnoreCase);
+                && SafeRegex.IsMatch(attrs, "(^|[ ])href[ ]*=", RegexOptions.IgnoreCase);
             var isLi = tag.Equals("li", StringComparison.OrdinalIgnoreCase);
             var isH1 = tag.Equals("h1", StringComparison.OrdinalIgnoreCase);
             var isH3 = tag.Equals("h3", StringComparison.OrdinalIgnoreCase)

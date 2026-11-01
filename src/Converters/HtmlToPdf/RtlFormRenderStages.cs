@@ -6,30 +6,30 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
 // The stages of the RTL Word-section form render: the paragraph read and the flow.
-    private static List<RtlPara> ReadRtlParas(RtlFormRenderState rl, string frag)
+    private static List<RtlPara> ReadRtlParas(string frag)
     {
         var list = new List<RtlPara>();
-        foreach (Match pm in Regex.Matches(frag, @"<p\b([^>]*)>([\s\S]*?)</p\s*>",
-                     RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(frag, @"<p\b([^>]*)>([\s\S]*?)</p\s*>",
+                     RegexOptions.IgnoreCase).Select(pm => pm.Groups))
         {
-            var inner = pm.Groups[2].Value;
-            var st = Regex.Match(pm.Groups[1].Value, @"style\s*=\s*([""'])([\s\S]*?)\1",
+            var inner = groups[2].Value;
+            var st = SafeRegex.Match(groups[1].Value, @"style\s*=\s*([""'])([\s\S]*?)\1",
                 RegexOptions.IgnoreCase);
-            var sz = Regex.Match(inner, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+            var sz = SafeRegex.Match(inner, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
             // the paragraph's own spans, each with the size it declares
             var runs = new List<(double, string)>();
             var last = 0.0;
-            foreach (Match sm2 in Regex.Matches(inner,
-                         @"<span\b([^>]*)>((?:(?!</?span)[\s\S])*)</span\s*>", RegexOptions.IgnoreCase))
+            foreach (var sm2Groups in SafeRegex.Matches(inner,
+                         @"<span\b([^>]*)>((?:(?!</?span)[\s\S])*)</span\s*>", RegexOptions.IgnoreCase).Select(sm2 => sm2.Groups))
             {
-                var rs = Regex.Match(sm2.Groups[1].Value, @"font-size\s*:\s*([\d.]+)\s*pt",
+                var rs = SafeRegex.Match(sm2Groups[1].Value, @"font-size\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase);
                 if (rs.Success && double.TryParse(rs.Groups[1].Value,
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out var rv) && rv > 0)
                     last = rv;
                 var rt = CollapseWs(DecodeEntities(
-                    Regex.Replace(sm2.Groups[2].Value, @"<[^>]+>", ""))).Trim();
+                    SafeRegex.Replace(sm2Groups[2].Value, @"<[^>]+>", ""))).Trim();
                 if (rt.Length > 0 && last > 0) runs.Add((last, rt));
             }
             list.Add(new RtlPara
@@ -38,11 +38,11 @@ internal static partial class HtmlToPdfConverter
                 Size = sz.Success && double.TryParse(sz.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var v) && v > 0 ? v : 12.0,
-                Text = CollapseWs(DecodeEntities(Regex.Replace(inner, @"<[^>]+>", ""))).Trim(),
+                Text = CollapseWs(DecodeEntities(SafeRegex.Replace(inner, @"<[^>]+>", ""))).Trim(),
                 Zeroed = st.Success
                     && st.Groups[2].Value.Replace(" ", "").Contains("margin:0cm",
                         StringComparison.OrdinalIgnoreCase),
-                Bold = Regex.IsMatch(inner, @"<b\b|font-weight\s*:\s*bold", RegexOptions.IgnoreCase),
+                Bold = SafeRegex.IsMatch(inner, @"<b\b|font-weight\s*:\s*bold", RegexOptions.IgnoreCase),
             });
         }
         return list;
@@ -73,7 +73,9 @@ internal static partial class HtmlToPdfConverter
                 // the serif's width pushes the line past the box edge.
                 var baseY = rl.pageHeight - (y + p.Size * RtlDropFactor);
                 // one span per size, laid right to left
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
                 var parts = p.Runs.Count > 1 && p.Runs.Exists(rr => rr.Size != p.Runs[0].Size)
+#pragma warning restore S1244
                     ? p.Runs : new List<(double Size, string Text)> { (p.Size, p.Text) };
                 var pen = right;
                 foreach (var (rsz, rtxt) in parts)

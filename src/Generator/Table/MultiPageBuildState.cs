@@ -14,8 +14,8 @@ public partial class Table
 /// invocation; never shared.</summary>
 private sealed class MultiPageBuildState
 {
-    // The MEDIA frame's height (see Page.LayoutFrameHeight): a /Rotate page's
-    // table seats against the media edges and paints upright in them.
+    // The layout frame's height (see Page.LayoutFrameHeight): a /Rotate page's
+    // table lays out in the page as shown.
     public double pageHeight;
     public double marginLeft;
     public double marginTop;

@@ -64,45 +64,61 @@ internal static partial class HtmlToPdfConverter
     /// during layout. Each option becomes a circle-styled <see cref="Forms.RadioButtonOptionField"/>
     /// kid with a visible border, so after save+reload it surfaces on Form.Fields.</summary>
     private static void EmitRadioGroups(Document doc,
-        List<(string group, bool chk, Page page, Rectangle rect)> options)
+        List<(string group, string value, bool chk, bool locked, Page page, Rectangle rect)> options)
     {
         if (options.Count == 0) return;
-        var groups = new List<(string key, List<(bool chk, Page page, Rectangle rect)> opts)>();
+        var groups = new List<(string key, bool named, List<(string value, bool chk, bool locked, Page page, Rectangle rect)> opts)>();
         var index = new Dictionary<string, int>(StringComparer.Ordinal);
         var anon = 0;
-        foreach (var (g, chk, page, rect) in options)
+        foreach (var (g, value, chk, locked, page, rect) in options)
         {
-            var key = string.IsNullOrEmpty(g) ? "__radio" + anon++ : g;
+            var named = !string.IsNullOrEmpty(g);
+            var key = named ? g : "__radio" + anon++;
             if (!index.TryGetValue(key, out var gi))
             {
                 gi = groups.Count; index[key] = gi;
-                groups.Add((key, new List<(bool, Page, Rectangle)>()));
+                groups.Add((key, named, new List<(string, bool, bool, Page, Rectangle)>()));
             }
-            groups[gi].opts.Add((chk, page, rect));
+            groups[gi].opts.Add((value, chk, locked, page, rect));
         }
 
-        foreach (var (key, opts) in groups)
+        foreach (var (key, named, opts) in groups)
         {
             try
             {
                 var firstPage = opts[0].page;
                 var rbf = new Forms.RadioButtonField(firstPage);
+                // The group answers to the name its buttons share.
+                if (named) rbf.PartialName = key;
                 var oi = 0;
-                foreach (var (chk, page, rect) in opts)
+                var selected = 0;
+                var taken = new HashSet<string>(StringComparer.Ordinal) { RadioOffState };
+                foreach (var (value, chk, _, page, rect) in opts)
                 {
+                    // An option is named by the button's value; a button without one, or one
+                    // repeating a value of its group, keeps the group name and its position.
+                    var generated = key + "_" + oi++;
                     var opt = new Forms.RadioButtonOptionField(page, rect)
                     {
                         Style = Forms.BoxStyle.Circle,
-                        OptionName = key + "_" + oi++,
+                        OptionName = value.Length > 0 && taken.Add(value) ? value : generated,
                     };
                     opt.Characteristics.Border = System.Drawing.Color.Black;
                     rbf.Add(opt);
+                    // The last button marked checked is the group's choice, as in a browser.
+                    if (chk) selected = oi;
                 }
+                if (selected > 0) rbf.Selected = selected;
+                // A group of disabled or readonly buttons cannot be changed.
+                if (opts.TrueForAll(o => o.locked)) rbf.ReadOnly = true;
                 doc.Form.Add(rbf, firstPage.Number);
             }
             catch { /* best-effort radio emission */ }
         }
     }
+
+    /// <summary>The appearance state every radio button has for "not chosen"; no option may take it.</summary>
+    private const string RadioOffState = "Off";
 
     /// <summary>Remove /Font entries on each page that no content stream references via a
     /// "/Name … Tf" operator. Only provably-unused fonts are dropped (rendering unchanged).</summary>
@@ -127,13 +143,13 @@ internal static partial class HtmlToPdfConverter
             var content = page.GetContentStreamBytes();
             if (content is null) continue;
             var text = Encoding.ASCII.GetString(content);
-            foreach (Match m in Regex.Matches(text, @"/([A-Za-z0-9.+\-]+)\s+[-\d.]+\s+Tf"))
+            foreach (Match m in SafeRegex.Matches(text, @"/([A-Za-z0-9.+\-]+)\s+[-\d.]+\s+Tf"))
                 used.Add(m.Groups[1].Value);
         }
 
         foreach (var (fontDict, used) in usedByDict)
-            foreach (var key in new List<string>(fontDict.Keys))
-                if (!used.Contains(key)) fontDict.Remove(key);
+            foreach (var key in new List<string>(fontDict.Keys).Where(key => !used.Contains(key)))
+                fontDict.Remove(key);
     }
 
     /// <summary>The block elements: divisions, headings, paragraphs and lists become their structure elements.</summary>
@@ -163,8 +179,8 @@ internal static partial class HtmlToPdfConverter
             }
             case "li":
             {
-                // A list item expands to LI → { Lbl (bullet/label), [Link], LBody (text) };
-                // its inline children are represented by these, not walked further.
+                // A list item expands to LI → { Lbl (bullet/label), [Link], LBody (text) }; its
+                // inline children are represented by these, not walked further.
                 var li = tc.CreateListLIElement();
                 parent.AppendChild(li);
                 li.AppendChild(tc.CreateListLblElement());
@@ -216,9 +232,7 @@ internal static partial class HtmlToPdfConverter
                 for (var a = node.Parent; a is not null; a = a.Parent)
                     if (a.Tag is "td" or "th") { inCell = true; break; }
                 var hasText = !string.IsNullOrWhiteSpace(node.Text);
-                if (!hasText)
-                    foreach (var dnode in node.Descendants())
-                        if (!string.IsNullOrWhiteSpace(dnode.Text)) { hasText = true; break; }
+                if (!hasText && node.Descendants().Any(dnode => !string.IsNullOrWhiteSpace(dnode.Text))) { hasText = true; }
                 if (!inCell || !hasText) break;
                 var sp = tc.CreateSpanElement();
                 parent.AppendChild(sp);

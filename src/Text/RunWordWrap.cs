@@ -192,8 +192,8 @@ internal static class RunWordWrap
         {
             if (extraOf is null) return 0;
             var extra = 0.0;
-            foreach (var piece in pieces)
-                if (!runsOnLine.Contains(piece.Run)) extra += extraOf(piece.Run);
+            foreach (var piece in pieces.Where(piece => !runsOnLine.Contains(piece.Run)))
+                extra += extraOf(piece.Run);
             return extra;
         }
         void NewLine()
@@ -403,11 +403,12 @@ internal static class RunWordWrap
         for (var p = 0; p < last; p++)
         {
             var piece = pieces[p];
-            for (var i = 0; i < piece.Text.Length; i++)
+            var i = 0;
+            while (i < piece.Text.Length)
             {
                 var n = char.IsHighSurrogate(piece.Text[i]) && i + 1 < piece.Text.Length ? 2 : 1;
                 glyphs.Add((piece.Run, piece.Text.Substring(i, n), piece.Start < 0 ? -1 : piece.Start + i));
-                i += n - 1;
+                i += n;
             }
         }
         return (glyphs, pieces.GetRange(last, pieces.Count - last));

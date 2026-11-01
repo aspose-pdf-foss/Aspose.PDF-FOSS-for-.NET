@@ -21,31 +21,25 @@ public sealed class MemoryFontSource : FontSource, IDisposable
     /// <summary>No-op: FOSS doesn't hold native handles for in-memory sources.</summary>
     public void Dispose() { }
 
+    // The face's names, read once: a document looks a font up for every fragment.
+    private FontFaceNames? _names;
+
     internal override FontData? FindFont(string name, bool ignoreCase)
     {
-        try
-        {
-            var actualName = FontRepository.ReadTtfFontName(FontBytes);
-            if (string.IsNullOrEmpty(actualName)) return null;
-            var comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-            var nName = name.Replace(" ", "").Replace("-", "");
-            var nActual = actualName.Replace(" ", "").Replace("-", "");
-            if (string.Equals(actualName, name, comparison) ||
-                string.Equals(nActual, nName, StringComparison.OrdinalIgnoreCase))
-            {
-                var fd = new FontData(actualName, FontType.TrueType);
-                fd.SetTtfData(FontBytes);
-                return fd;
-            }
-        }
-        catch { }
-        return null;
+        var names = _names ??= FontFaceNames.Read(FontBytes);
+        var comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        // Every name the face carries, as the folder and system sources match: a styled-only
+        // face ("Aharoni Bold") is asked for by its family ("Aharoni").
+        if (names.Match(name, comparison, name.Replace(" ", "").Replace("-", "")) == FaceNameMatch.None) return null;
+        var fd = new FontData(names.Full, FontType.TrueType);
+        fd.SetTtfData(FontBytes);
+        return fd;
     }
 
     internal override IEnumerable<FontData> EnumerateFaces()
     {
         var name = "Unknown";
-        try { name = FontRepository.ReadTtfFamilyName(FontBytes); } catch { }
+        try { name = FontRepository.ReadTtfFamilyName(FontBytes); } catch { /* an unreadable name table keeps the fallback name */ }
         if (name == "Unknown") yield break;
         var fd = new FontData(name, FontType.TrueType);
         fd.SetTtfData(FontBytes);

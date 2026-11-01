@@ -48,7 +48,10 @@ internal static partial class HtmlToPdfConverter
                 // white-on-white ink keeps its advance: an ideograph
                 // becomes an ideographic space, latin a plain space
                 foreach (var ch in ttext)
-                    mt.text.Append(char.IsWhiteSpace(ch) ? ch : ch >= '⺀' ? '　' : ' ');
+                {
+                    if (char.IsWhiteSpace(ch)) mt.text.Append(ch);
+                    else mt.text.Append(ch >= '⺀' ? '　' : ' ');
+                }
             else
             {
                 var ink = ttext.AsSpan().Trim().Length;
@@ -73,7 +76,9 @@ internal static partial class HtmlToPdfConverter
                 }
                 if (mt.stdSerif && !mt.reportCells) MarkMetricRun(mt);
                 mt.text.Append(ttext);
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
                 if (mt.mps.sizedSegs.Count == 0 || mt.mps.sizedSegs[^1].Fs != mt.mps.cell.FontSize)
+#pragma warning restore S1244
                     mt.mps.sizedSegs.Add((new StringBuilder(), mt.mps.cell.FontSize));
                 mt.mps.sizedSegs[^1].Sb.Append(ttext);
             }
@@ -144,7 +149,7 @@ internal static partial class HtmlToPdfConverter
     private static void CloseMetricDiv(MetricTableState mt)
     {
         if (mt.mps.absCapture is not null) { CloseMetricAbsText(mt); return; }
-        CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif); mt.mps.pendingAbsLeftFrac = -1.0;
+        CloseSeg(mt.mps, mt.text, mt.stdSerif); mt.mps.pendingAbsLeftFrac = -1.0;
         // (the div's own box closes with it)
         if (mt.wrapperStacks && (!mt.mps.collapsedGrid || mt.elemCollapseGrid) && mt.mps.cell is not null
             && mt.mps.divBoxStack.Count > 0)
@@ -230,7 +235,7 @@ internal static partial class HtmlToPdfConverter
                 if (mt.css.TryGetValue("." + tc, out var trBag))
                 {
                     var probe = new MetricCell();
-                    ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, probe, trBag);
+                    ApplyCellClassBag(mt.mps, mt.stdSerif, probe, trBag);
                     if (probe.FontSize is { } pf) { mt.mps.rowFs = pf; mt.mps.rowFsFromClass = true; }
                     if (probe.Face is { } pfa) mt.mps.rowFace = pfa;
                     if (probe.Bold) mt.mps.rowBold = true;
@@ -243,7 +248,7 @@ internal static partial class HtmlToPdfConverter
                     if (trBag.ContainsKey("text-align")) mt.mps.rowAlign = probe.Align;
                     if (trBag.TryGetValue("height", out var trkh))
                     {
-                        var hm3 = Regex.Match(trkh, @"([\d.]+)\s*px");
+                        var hm3 = SafeRegex.Match(trkh, @"([\d.]+)\s*px");
                         if (hm3.Success)
                         {
                             mt.mps.pendingRowH = DtpNum(hm3.Groups[1].Value) * PxPt;
@@ -259,7 +264,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void OpenMetricFont(MetricTableState mt, Token tok, string tag)
+    private static void OpenMetricFont(MetricTableState mt, Token tok)
     {
         // A <font> tag styles the rest of its cell — face, color, and the
         // legacy 1..7 size ladder (the expected render applies the tag's
@@ -274,7 +279,7 @@ internal static partial class HtmlToPdfConverter
             if (mt.stdSerif && mt.mps.ptFormCells && fa.TryGetValue("class", out var fClsV) && fClsV is not null)
                 foreach (var fc0 in fClsV.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                     if (mt.css.TryGetValue("." + fc0, out var fRule0) || mt.css.TryGetValue("font." + fc0, out fRule0))
-                        ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, fRule0, inlineBag: true);
+                        ApplyCellClassBag(mt.mps, mt.stdSerif, mt.mps.cell, fRule0, inlineBag: true);
             // A face the HTML engine does not resolve keeps the flow
             // default (David and friends draw the UA serif there).
             if (fa.TryGetValue("face", out var ffv)
@@ -299,7 +304,7 @@ internal static partial class HtmlToPdfConverter
             // an inline style on the font tag sizes the cell in points
             // (`<font style="FONT-SIZE: 14pt">` — the RTL grid's dates)
             if (fa.TryGetValue("style", out var fstv)
-                && Regex.Match(fstv, @"font-size\s*:\s*([\d.]+)\s*pt",
+                && SafeRegex.Match(fstv, @"font-size\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase) is { Success: true } fptM)
             {
                 mt.mps.cell.FontSize = double.Parse(fptM.Groups[1].Value,
@@ -320,7 +325,7 @@ internal static partial class HtmlToPdfConverter
         {
             Color? aFore = null;
             if (tok.Attributes is { } aatt && aatt.TryGetValue("style", out var ast)
-                && Regex.Match(ast, @"(?<![-\w])color\s*:\s*([^;]+)",
+                && SafeRegex.Match(ast, @"(?<![-\w])color\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase) is { Success: true } astm)
                 aFore = ParseCssColor(astm.Groups[1].Value.Trim());
             aFore ??= mt.rmtAnchorColor;
@@ -343,19 +348,19 @@ internal static partial class HtmlToPdfConverter
     // the report: the 2 pt padded paragraph cells, the AliceBlue footer cells, the
     // 1 pt rules over and under a section label).
     var spStV = tok.Attributes is { } spSt0 && spSt0.TryGetValue("style", out var spSt1) ? spSt1 : null;
-    var spanIsCellBox = spStV is not null && Regex.IsMatch(spStV, @"display\s*:\s*table-cell", RegexOptions.IgnoreCase);
+    var spanIsCellBox = spStV is not null && SafeRegex.IsMatch(spStV, @"display\s*:\s*table-cell", RegexOptions.IgnoreCase);
     var spanFsBefore = mt.mps.cell?.FontSize;
     var spanInkBefore = mt.mps.firstInkSeen;
     // (the typography the span's close restores is the cell's BEFORE the span's class dressed
-    // it - measured on the lab report: a 14 pt `span.header` before a grid left the grid at 14;
-    // a span that IS the cell box keeps its class on the cell, as before)
+    // it - measured on the lab report: a 14 pt `span.header` before a grid left the grid at 14; a
+    // span that IS the cell box keeps its class on the cell, as before)
     var spanRestore = mt.mps.cell is null ? default : (mt.mps.cell.FontSize, mt.mps.cell.Face, mt.mps.cell.Bold, mt.mps.cell.Fore);
     if (mt.stdSerif && mt.mps.cell is not null && tok.Attributes is { } spCls0
         && spCls0.TryGetValue("class", out var spClsV) && spClsV is not null)
         foreach (var sc0 in spClsV.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             // (…keyed `.cls` or `span.cls` - the lab report's `span.header { bold; 14pt }`)
             if (mt.css.TryGetValue("." + sc0, out var spRule0) || mt.css.TryGetValue("span." + sc0, out spRule0))
-                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, spRule0, inlineBag: !spanIsCellBox);
+                ApplyCellClassBag(mt.mps, mt.stdSerif, mt.mps.cell, spRule0, inlineBag: !spanIsCellBox);
     if ((mt.reportCells || mt.stdSerif) && !tok.IsSelfClosing && mt.mps.cell is not null)
         mt.spanSaves.Push(spanIsCellBox ? (mt.mps.cell.FontSize, mt.mps.cell.Face, mt.mps.cell.Bold, mt.mps.cell.Fore) : spanRestore);
     // …and its inline ABSOLUTE width when that is the LAST width declared, as the
@@ -363,15 +368,15 @@ internal static partial class HtmlToPdfConverter
     // right-align their text in that box, not in their text's own extent; a bare
     // `width:100%` table-cell span just fills its cell and sizes nothing).
     if (mt.stdSerif && spanIsCellBox && mt.mps.cell is not null
-        && Regex.Matches(spStV!, @"(?<![-\w])width\s*:\s*[^;]+", RegexOptions.IgnoreCase) is { Count: > 0 } spWidths
-        && Regex.IsMatch(spWidths[^1].Value, @"[\d.]\s*(mm|cm|in|pt|px)\s*$", RegexOptions.IgnoreCase))
+        && SafeRegex.Matches(spStV!, @"(?<![-\w])width\s*:\s*[^;]+", RegexOptions.IgnoreCase) is { Count: > 0 } spWidths
+        && SafeRegex.IsMatch(spWidths[^1].Value, @"[\d.]\s*(mm|cm|in|pt|px)\s*$", RegexOptions.IgnoreCase))
         ApplyMetricCellStyleSize(mt.mps.cell, spWidths[^1].Value);
     // The pt form's INLINE-BLOCK span with an absolute width holds its cell open at that width
     // plus the span class's own padding (probed: a 65 px span in a padding-left 5px class floors
     // its column at 48.75 + 3.75 before the cell's own pads).
     if (mt.stdSerif && mt.mps.ptFormCells && mt.mps.cell is not null && spStV is not null
-        && Regex.IsMatch(spStV, @"display\s*:\s*inline-block", RegexOptions.IgnoreCase)
-        && Regex.Match(spStV, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase) is { Success: true } ibW
+        && SafeRegex.IsMatch(spStV, @"display\s*:\s*inline-block", RegexOptions.IgnoreCase)
+        && SafeRegex.Match(spStV, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase) is { Success: true } ibW
         && double.TryParse(ibW.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ibWpx))
     {
         var spanPad = 0.0;
@@ -386,7 +391,7 @@ internal static partial class HtmlToPdfConverter
     }
     var sWhite = false;
     if (tok.Attributes is { } sa0 && sa0.TryGetValue("style", out var sst0)
-        && Regex.IsMatch(sst0, @"color\s*:\s*(white|#fff(?:fff)?)\b", RegexOptions.IgnoreCase))
+        && SafeRegex.IsMatch(sst0, @"color\s*:\s*(white|#fff(?:fff)?)\b", RegexOptions.IgnoreCase))
     {
         // White ink over an UNFILLED cell is invisible — it keeps its
         // advance as spaces (the official-letter dialect). Over a
@@ -405,7 +410,9 @@ internal static partial class HtmlToPdfConverter
     // (a span sizing the cell before its first ink stands round the cell's text like a sized
     // font tag: the quirks line-height quirk pitches the row on that size alone - measured on
     // the enterprise summary: `<td><span class=label>` Arial 9 rows pitch 10.5, no 13.5 strut)
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
     if (mt.stdSerif && mt.mps.cell is not null && !spanInkBefore && mt.mps.cell.FontSize != spanFsBefore)
+#pragma warning restore S1244
         mt.mps.cell.InlineSizedLead = true;
     }
 
@@ -414,7 +421,7 @@ internal static partial class HtmlToPdfConverter
     private static void OpenMetricDiv(MetricTableState mt, Token tok)
     {
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_CELL") == "1")
-            Console.Error.WriteLine($"[divopen] cell={(mt.mps.cell is not null)} curSeg={(mt.mps.curSeg is not null)} stacks={mt.wrapperStacks} collapsed={mt.mps.collapsedGrid} abs={(mt.mps.absCapture is not null)} style='{(tok.Attributes is { } da0 && da0.TryGetValue("style", out var ds0) ? ds0 : "")}'");
+            Console.Error.WriteLine($"[divopen] cell={(mt.mps.cell is not null)} curSeg={(mt.mps.curSeg is not null)} stacks={mt.wrapperStacks} collapsed={mt.mps.collapsedGrid} abs={(mt.mps.absCapture is not null)} serif={mt.stdSerif} block={mt.mps.uaBlockCells} text={mt.text.Length} style='{(tok.Attributes is { } da0 && da0.TryGetValue("style", out var ds0) ? ds0 : "")}'");
         if (mt.mps.absCapture is not null) { mt.mps.absDepth++; return; }
         if (mt.mps.uaFormCells && mt.mps.cell is not null && TryOpenMetricAbsText(mt, tok)) return;
         // Div-stacked cell content (the .t/.c ladders): each div is
@@ -425,28 +432,33 @@ internal static partial class HtmlToPdfConverter
         // green bar + abs image).
         if (mt.wrapperStacks && (!mt.mps.collapsedGrid || mt.elemCollapseGrid) && mt.mps.cell is not null)
         {
-            if (tok.IsClose) { CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif); return; }
-            // (a UA cell's text before its first block is a band of its own, in source order)
-            if (mt.stdSerif && !mt.mps.uaBlockCells && mt.mps.curSeg is null) FlushUaCellText(mt.mps, mt.text, mt.reportCells);
-            CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
+            if (tok.IsClose) { CloseSeg(mt.mps, mt.text, mt.stdSerif); return; }
+            // (a UA cell's text before its first block is a band of its own, in source order - in a
+            //  block cell too, where a caption written before its value's div was dropped)
+            if (mt.stdSerif && mt.mps.curSeg is null)
+            {
+                if (mt.mps.uaBlockCells) FlushUaBlockGridMarkers(mt.mps, mt.text);
+                else FlushUaCellText(mt.mps, mt.text, mt.reportCells);
+            }
+            CloseSeg(mt.mps, mt.text, mt.stdSerif);
             // (a nested block inherits the typography, alignment and side insets of the block it stands in)
             var seg = mt.stdSerif && mt.mps.divStyleStack.Count > 0 ? InheritedUaBlockSeg(mt.mps.divStyleStack[^1]) : new MetricDivSeg();
             var segProbe = new MetricCell();
             if (mt.mps.rowClasses is not null)
                 foreach (var rcn in mt.mps.rowClasses)
                     if (mt.css.TryGetValue("." + rcn + " div", out var rdivBag))
-                        ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, segProbe, rdivBag);
+                        ApplyCellClassBag(mt.mps, mt.stdSerif, segProbe, rdivBag);
             if (tok.Attributes is { } da && da.TryGetValue("class", out var dcls))
             {
                 seg.Classes = dcls.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 foreach (var dcn in seg.Classes)
                 {
                     if (mt.css.TryGetValue("." + dcn, out var dBag))
-                        ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, segProbe, dBag);
+                        ApplyCellClassBag(mt.mps, mt.stdSerif, segProbe, dBag);
                     if (mt.mps.rowClasses is not null)
                         foreach (var rcn in mt.mps.rowClasses)
                             if (mt.css.TryGetValue("." + rcn + " ." + dcn, out var rdBag))
-                                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, segProbe, rdBag);
+                                ApplyCellClassBag(mt.mps, mt.stdSerif, segProbe, rdBag);
                     if (mt.css.TryGetValue("." + dcn, out var dbb)
                         && dbb.ContainsKey("border-bottom"))
                         seg.BorderBottom = true;
@@ -465,7 +477,7 @@ internal static partial class HtmlToPdfConverter
             // fills it, its margins are a block's; it closes with the div.
             var boxStated = false;
             if (mt.mps.uaBlockCells && tok.Attributes is { } bxA && bxA.TryGetValue("style", out var bxSt) && bxSt is not null
-                && Regex.Match(bxSt, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } bxW
+                && SafeRegex.Match(bxSt, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } bxW
                 && TryParseLength(bxW.Groups[1].Value.Trim()) is { } bxWPt && bxWPt > 0)
             {
                 var bxEm = mt.mps.cell.FontSize ?? mt.mps.fontSize;
@@ -473,7 +485,7 @@ internal static partial class HtmlToPdfConverter
                 seg.BoxOpen = true;
                 seg.BoxWidthPt = bxWPt + bpL + bpR;
                 seg.BoxPadTopPt = bpT; seg.BoxPadRightPt = bpR; seg.BoxPadBottomPt = bpB; seg.BoxPadLeftPt = bpL;
-                if (Regex.Match(bxSt, @"(?<![-\w])background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } bxBg
+                if (SafeRegex.Match(bxSt, @"(?<![-\w])background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } bxBg
                     && ParseCssColor(bxBg.Groups[1].Value.Trim()) is { } bxBgC)
                     seg.Bg = bxBgC;
                 ReadUaBlockStyle(seg, tok, bxEm);
@@ -493,9 +505,9 @@ internal static partial class HtmlToPdfConverter
             // band flow — its image draws at the offset instead.
             if (tok.Attributes is { } absDa
                 && absDa.TryGetValue("style", out var absSt)
-                && Regex.IsMatch(absSt, @"position\s*:\s*absolute",
+                && SafeRegex.IsMatch(absSt, @"position\s*:\s*absolute",
                     RegexOptions.IgnoreCase)
-                && Regex.Match(absSt, @"left\s*:\s*([\d.]+)\s*%",
+                && SafeRegex.Match(absSt, @"left\s*:\s*([\d.]+)\s*%",
                     RegexOptions.IgnoreCase) is { Success: true } absLm
                 && double.TryParse(absLm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -514,7 +526,7 @@ internal static partial class HtmlToPdfConverter
         // level unless its style states one, closed like a paragraph.
         if (mt.mps.uaBlockCells && mt.reportCells && !mt.mps.collapsedGrid && mt.mps.cell is not null && !tok.IsClose)
         {
-            CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
+            CloseSeg(mt.mps, mt.text, mt.stdSerif);
             FlushUaBlockGridMarkers(mt.mps, mt.text);
             mt.mps.curSeg = new MetricDivSeg
             {
@@ -547,12 +559,12 @@ internal static partial class HtmlToPdfConverter
         {
             mt.mps.cell.Bold = true;
             if (mt.css.TryGetValue(tag, out var cellHeadRule))
-                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, cellHeadRule);
+                ApplyCellClassBag(mt.mps, mt.stdSerif, mt.mps.cell, cellHeadRule);
             // (...and the sheet's descendant rules through the blocks open round the grid: the
             //  e-mail cards' `.header_sub h2 { padding: 20px; font-size: 18px; color }` size, colour
             //  and pad the collapsed grid's heading cells)
             if (!tok.IsClose && AncestorClassRuleDecls(mt.css, mt.mps.divStyleStack, tag, mt.mps.hostBlockClasses) is { } cellAncDecls)
-                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, cellAncDecls);
+                ApplyCellClassBag(mt.mps, mt.stdSerif, mt.mps.cell, cellAncDecls);
         }
     }
 }

@@ -20,6 +20,9 @@ private sealed class BgColorFlushState
     // must live where the text lives, both for the paint order under nested
     // content and for consumers reading the form's own operator list.
     public Dictionary<Aspose.Pdf.Core.PdfStream, Aspose.Pdf.Content.ContentStreamBuilder> formBuilders = null!;
+    // The highlights of text that draws no ink of its own go OVER the page content under
+    // a Multiply blend (see FlushFragmentBackground); opened by the first such fragment.
+    public Content.ContentStreamBuilder? overlayBuilder;
     public byte[] bytes = null!;
 }
 }

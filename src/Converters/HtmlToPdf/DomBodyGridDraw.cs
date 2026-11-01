@@ -20,11 +20,16 @@ internal static partial class HtmlToPdfConverter
 
     // a cell boundary resets emphasis: the sheet leaves a stray unclosed <b>
     // at a cell's end, and the following cells draw regular
-    private static void CloseCell(GridTableState gd) { FlushRun(gd); if (gd.cell is not null) gd.row!.Add(gd.cell); gd.cell = null; gd.boldDepth = 0; gd.italDepth = 0; }
+    private static void CloseCell(GridTableState gd) { FlushRun(gd); if (gd.cell is not null) { gd.row!.Add(gd.cell); } gd.cell = null; gd.boldDepth = 0; gd.italDepth = 0; }
 
-    private static void CloseRow(GridTableState gd) { CloseCell(gd); if (gd.row is { Count: > 0 }) gd.rows.Add(gd.row); gd.row = null; }
+    private static void CloseRow(GridTableState gd) { CloseCell(gd); if (gd.row is { Count: > 0 }) { gd.rows.Add(gd.row); } gd.row = null; }
 
-    private static string RunFace(GridTableState gd, bool b, bool it) => b ? gd.face + " Bold" : it ? gd.face + " Italic" : gd.face;
+    private static string RunFace(GridTableState gd, bool b, bool it)
+    {
+        if (b) return gd.face + " Bold";
+        if (it) return gd.face + " Italic";
+        return gd.face;
+    }
 
     private static void EnsureGridFonts(GridTableState gd, Page p2)
     {

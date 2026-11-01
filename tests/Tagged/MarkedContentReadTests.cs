@@ -114,7 +114,7 @@ public class MarkedContentReadTests
         // A run per line: the lines' runs read as the paragraph, each joined word within one run.
         var items = Paragraphs(doc)[2].GetMarkedContent();
         Assert.Equal("notoriously self-attention state-of-the-art fjordling", string.Concat(items.Select(i => i.Text)));
-        Assert.All(items, i => Assert.DoesNotContain("  ", i.Text));
+        Assert.All(items, i => Assert.DoesNotContain("  ", i.Text, StringComparison.Ordinal));
         Assert.True(items.Count >= 2, "a run per line: the paragraph's lines are runs of their own");
     }
 

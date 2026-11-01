@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextReplacer
 {
     /// <summary>Collect text ops: one token of the content stream scanned into the op list.</summary>
-    private bool ScanTextOpToken(CollectTextOpsState ct)
+    private static bool ScanTextOpToken(CollectTextOpsState ct)
     {
         var sp = (int)ct.lexer2.Position;
         var tok = ct.lexer2.NextToken();
@@ -21,9 +21,12 @@ public sealed partial class TextReplacer
             case TokenKind.Integer:
             case TokenKind.Real:
             case TokenKind.Name:
-                ct.ops2.Add((tok.Kind, tok.Kind == TokenKind.Name ? new PdfName(tok.StringValue!) :
-                    tok.Kind == TokenKind.Integer ? new PdfInteger(tok.IntValue) :
-                    (PdfObject)new PdfReal(tok.RealValue), sp, ep));
+                ct.ops2.Add((tok.Kind, tok.Kind switch
+                {
+                    TokenKind.Name => new PdfName(tok.StringValue!),
+                    TokenKind.Integer => new PdfInteger(tok.IntValue),
+                    _ => (PdfObject)new PdfReal(tok.RealValue),
+                }, sp, ep));
                 break;
             case TokenKind.LiteralString:
                 ct.ops2.Add((tok.Kind, new PdfString(tok.BytesValue!), sp, ep));
@@ -36,6 +39,7 @@ public sealed partial class TextReplacer
                 ct.ops2.Add((TokenKind.ArrayStart, arr, sp, aep));
                 break;
             case TokenKind.Keyword:
+                TrackClip(ct, tok.StringValue!);
                 ApplyTextOpKeyword(ct, tok, sp, ep);
                 break;
             default:

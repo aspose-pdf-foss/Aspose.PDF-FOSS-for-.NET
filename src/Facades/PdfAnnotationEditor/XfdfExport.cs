@@ -64,6 +64,13 @@ public sealed partial class PdfAnnotationEditor
             xmlOutputStream.SetLength(xmlOutputStream.Position);
     }
 
+    /// <summary>Export annotations filtered by Subtype name strings.</summary>
+    public void ExportAnnotationsXfdf(Stream xmlOutputStream, int start, int end, string[] annotTypes)
+    {
+        var enumTypes = MapStringToAnnotationTypes(annotTypes);
+        ExportAnnotationsXfdf(xmlOutputStream, start, end, enumTypes);
+    }
+
     /// <summary>
     /// Writes a single annotation as an XFDF XML element.
     /// Maps PDF annotation dictionary entries back to XFDF attributes/elements
@@ -162,9 +169,6 @@ public sealed partial class PdfAnnotationEditor
 
     private static string F(double v) => v.ToString("G", CultureInfo.InvariantCulture);
 
-    private static string FormatPdfDate(System.DateTime dt)
-        => "D:" + dt.ToUniversalTime().ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture) + "Z";
-
     /// <summary>Write an embedded-stream payload as an XFDF &lt;data&gt; child:
     /// printable content is emitted filtered/ascii (decoded text); binary content
     /// is emitted raw/hex (the original encoded bytes). The original /Length and
@@ -182,8 +186,8 @@ public sealed partial class PdfAnnotationEditor
         writer.WriteAttributeString("encoding", isAscii ? "ascii" : "hex");
         writer.WriteAttributeString("length", length.ToString(CultureInfo.InvariantCulture));
         if (filterName is not null) writer.WriteAttributeString("filter", filterName);
-        // Raw/hex payloads carry a single leading space (XFDF convention);
-        // filtered/ascii payloads are written verbatim.
+        // Raw/hex payloads carry a single leading space (XFDF convention); filtered/ascii
+        // payloads are written verbatim.
         writer.WriteString(isAscii ? Encoding.ASCII.GetString(decoded) : " " + ToHex(raw));
         writer.WriteEndElement();
     }
@@ -201,12 +205,5 @@ public sealed partial class PdfAnnotationEditor
         var doc = Document;
         var allTypes = (AnnotationType[])System.Enum.GetValues(typeof(AnnotationType));
         ExportAnnotationsXfdf(xmlOutputStream, start: 1, end: doc.PageCount, allTypes);
-    }
-
-    /// <summary>Export annotations filtered by Subtype name strings.</summary>
-    public void ExportAnnotationsXfdf(Stream xmlOutputStream, int start, int end, string[] annotTypes)
-    {
-        var enumTypes = MapStringToAnnotationTypes(annotTypes);
-        ExportAnnotationsXfdf(xmlOutputStream, start, end, enumTypes);
     }
 }

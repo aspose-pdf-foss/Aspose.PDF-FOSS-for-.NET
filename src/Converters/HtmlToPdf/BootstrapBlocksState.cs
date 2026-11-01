@@ -9,7 +9,7 @@ internal static partial class HtmlToPdfConverter
 /// invocation; never shared.</summary>
 private sealed class BootstrapBlocksState
 {
-    public List<Aspose.Pdf.Converters.HtmlToPdfConverter.BsBlock> blocks = null!;
+    public List<Aspose.Pdf.Converters.HtmlToPdfConverter.IBsBlock> blocks = null!;
     public BsParagraph? p;
     public BsTable? table;
     public List<(string Text, bool Th)>? row;

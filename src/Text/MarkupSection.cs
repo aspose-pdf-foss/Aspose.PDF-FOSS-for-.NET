@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 public sealed class MarkupSection
 {
     private List<MarkupParagraph> _paragraphs;
-    private List<MarkupParagraph>? _commonParagraphs;
+    private readonly List<MarkupParagraph>? _commonParagraphs;
 
     internal MarkupSection(Rectangle rectangle, List<MarkupParagraph> paragraphs)
     {

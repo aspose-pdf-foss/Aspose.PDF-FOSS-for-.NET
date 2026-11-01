@@ -32,18 +32,19 @@ public sealed partial class Document
         {
             // Choose each page's object number:
             //  - an imported page is written at its reserved slot so GoTo/Link destinations
-            //    that target it (and point at that slot) resolve to this copy;
+            //    that target it (and point at that slot) resolve to this copy,
             //  - a page loaded from THIS document keeps its original object number, so the
             //    document's own internal links (bookmarks, link annotations, named
             //    destinations) — which reference pages by object number — still resolve
             //    after pages are deleted or reordered (imported pages carry
-            //    SourceObjectNumber = -1, so they never take this branch);
+            //    SourceObjectNumber = -1, so they never take this branch),
             //  - a newly created page takes a fresh writer-allocated number.
             int objNum;
             if (page.ImportSlotObjNum > 0) objNum = page.ImportSlotObjNum;
             else if (page.SourceObjectNumber > 0) objNum = page.SourceObjectNumber;
             else objNum = writer.AllocateObjectNumber();
 
+            MaterialiseInheritedAttributes(page.Dict);
             page.Dict.Set("Parent", new PdfIndirectRef(pagesObjNum, 0));
             writer.WriteIndirectObject(objNum, page.Dict);
             kids.Add(new PdfIndirectRef(objNum, 0));
@@ -72,6 +73,21 @@ public sealed partial class Document
         }
     }
 
+    // The page attributes a /Pages node may hold for its descendants.
+    private static readonly string[] InheritablePageKeys = ["MediaBox", "CropBox", "Rotate", "Resources"];
+
+    /// <summary>The rebuilt tree is one flat node holding none of the old nodes' attributes,
+    /// so what a page inherited from the tree it was read from goes onto the page itself.</summary>
+    private void MaterialiseInheritedAttributes(PdfDictionary pageDict)
+    {
+        foreach (var key in InheritablePageKeys)
+        {
+            if (pageDict.ContainsKey(key)) continue;
+            var inherited = PageCollection.ResolveInheritedRawValue(pageDict, key, _reader);
+            if (inherited is not null) pageDict.Set(key, inherited);
+        }
+    }
+
     /// <summary>
     /// Rebuild the in-memory catalog /Pages tree (/Kids and /Count) so it matches
     /// the current page order. <c>PageCollection.Insert</c> / Delete update
@@ -96,8 +112,8 @@ public sealed partial class Document
         CollectKidRefs(inMemPages, dictToRef);
 
         var inMemKids = new PdfArray();
-        foreach (var page in Pages)
-            inMemKids.Add(dictToRef.TryGetValue(page.Dict, out var r) ? r : page.Dict);
+        foreach (var dict in Pages.Select(page => page.Dict))
+            inMemKids.Add(dictToRef.TryGetValue(dict, out var r) ? r : dict);
         inMemPages.Set("Kids", inMemKids);
         inMemPages.Set("Count", new PdfInteger(Pages.Count));
     }
@@ -120,8 +136,8 @@ public sealed partial class Document
         SyncInMemoryPageTree();
 
         var survivingPages = new HashSet<int>();
-        foreach (var page in Pages)
-            if (page.SourceObjectNumber > 0) survivingPages.Add(page.SourceObjectNumber);
+        foreach (var sourceObjectNumber in Pages.Select(page => page.SourceObjectNumber).Where(sourceObjectNumber => sourceObjectNumber > 0))
+            survivingPages.Add(sourceObjectNumber);
 
         // Compute reachability but treat every removed page as a cut point: don't traverse a
         // /Type /Page object that isn't one of the survivors. This drops each removed page
@@ -174,8 +190,8 @@ public sealed partial class Document
                 continue;
             }
             if (obj is PdfArray arr)
-                foreach (var item in arr)
-                    if (item is not null) stack.Push(item);
+                foreach (var item in arr.Where(item => item is not null))
+                    stack.Push(item);
         }
     }
 

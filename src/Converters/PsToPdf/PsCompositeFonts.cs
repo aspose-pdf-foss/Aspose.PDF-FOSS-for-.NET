@@ -70,15 +70,18 @@ internal static class PsCompositeFonts
             : DefaultEscapeChar;
         var pen = 0.0;
         var chosen = 0;
-        for (var k = 0; k < text.Length; k++)
+        var k = 0;
+        while (k < text.Length)
         {
             if (text[k] == escape && k + 1 < text.Length)
             {
                 chosen = IndexFor(encoding, text[++k], descendants.Length);
+                k++;
                 continue;
             }
 
             pen += DrawWith(i, font, descendants, chosen, text[k], startX + pen, startY);
+            k++;
         }
 
         return pen;
@@ -102,7 +105,7 @@ internal static class PsCompositeFonts
     private static double DrawWith(PsInterpreter i, PsFontInstance font, PsArray descendants,
         int chosen, byte code, double x, double y)
     {
-        var descendant = Descendant(i, font, descendants, chosen);
+        var descendant = Descendant(font, descendants, chosen);
         return descendant is null ? 0 : DrawOne(i, descendant, code, x, y);
     }
 
@@ -122,7 +125,7 @@ internal static class PsCompositeFonts
 
     /// <summary>One descendant, carrying the root's scale so the character is drawn at
     /// the size the program set on the composite.</summary>
-    private static PsFontInstance? Descendant(PsInterpreter i, PsFontInstance root,
+    private static PsFontInstance? Descendant(PsFontInstance root,
         PsArray descendants, int index)
     {
         var dict = descendants[index].AsDictionary;

@@ -20,6 +20,12 @@ internal static class RawPage
     /// <summary>As <see cref="Build(string, string, Obj[])"/>, with entries added to the catalog and
     /// the page dictionaries.</summary>
     internal static byte[] Build(string content, string resources, string catalogEntries, string pageEntries,
+        params Obj[] extra) =>
+        Build(Encoding.ASCII.GetBytes(content), resources, catalogEntries, pageEntries, extra);
+
+    /// <summary>As <see cref="Build(string, string, Obj[])"/>, with a content stream given as bytes - one
+    /// that carries binary data, such as an inline image's.</summary>
+    internal static byte[] Build(byte[] content, string resources, string catalogEntries, string pageEntries,
         params Obj[] extra)
     {
         using var ms = new MemoryStream();
@@ -42,7 +48,7 @@ internal static class RawPage
         Object(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>", null);
         Object(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R " +
                   $"/Resources {resources} {pageEntries} >>", null);
-        Object(4, "<< >>", Encoding.ASCII.GetBytes(content));
+        Object(4, "<< >>", content);
         for (var i = 0; i < extra.Length; i++) Object(5 + i, extra[i].Dict, extra[i].Stream);
 
         var xref = ms.Position;

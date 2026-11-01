@@ -20,7 +20,9 @@ internal partial class HtmlToPdfConverter
 
         mg.groupOpen = false;
         mg.groupTop = 0;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var r in mg.rows)
+#pragma warning restore S3267
         {
             if (!RenderMsoFormRow(mg, r)) break;
         }

@@ -5,20 +5,38 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>A built table whose declared column widths overrun its own declared box marks the over-declared grid dialect.</summary>
+    /// <summary>The cell size the over-declared-grid probe measures at.</summary>
+    private static double ProbeCellFontPt(HtmlDocProfile profile)
+    {
+        if (profile.dwFormDoc) return 12.0;
+        // A scaled layout measures at the UA base size — the shrink
+        // factor multiplies it back to the final text size.
+        if (profile.scaleToPageWidth) return DefaultBodyFontPt;
+        if (profile.printGrid) return profile.printGridBase;
+        // UA-serif documents measure at the UA 16px base in the
+        // serif face — the 11pt Helvetica default under-measures
+        // the min-content the sheet widens for.
+        if (profile.uaStdSerif && !profile.deadExternalCss && profile.bodyCssFontPt <= 0) return 12;
+        return profile.bodyCssFontPt;
+    }
+
+    /// <summary>The cell face the over-declared-grid probe measures in (null: the probe's default).</summary>
+    private static string? ProbeCellFace(Block b, HtmlDocProfile profile)
+    {
+        if (profile.dwFormDoc) return "Times New Roman";
+        return profile.uaStdSerif && !profile.deadExternalCss
+            && SafeRegex.IsMatch(b.TableHtml ?? "",
+                "<img(?![^>]*(width|height)[ ]*=)", RegexOptions.IgnoreCase)
+            && !SafeRegex.IsMatch(b.TableHtml ?? "",
+                "class[ ]*=", RegexOptions.IgnoreCase)
+            ? "Times New Roman" : null;
+    }
+
     private static void DetectOverDeclaredGridFromTable(Block b, ConvertState cv, HtmlDocProfile profile, Dictionary<string, Dictionary<string, string>> css, List<byte[]> inlineSvgs, HtmlLoadOptions? options, double availContentW, string? bodyCssFace)
     {
         if (b.IsTable && BuildTableFromHtml(b.TableHtml ?? "", availContentW, options, inlineSvgs, css,
                 widenProbe: profile.floatBandDoc,
-                // A scaled layout measures at the UA base size — the shrink
-                // factor multiplies it back to the final text size.
-                defaultCellFontPt: profile.dwFormDoc ? 12.0
-                    : profile.scaleToPageWidth ? DefaultBodyFontPt
-                    : profile.printGrid ? profile.printGridBase
-                    // UA-serif documents measure at the UA 16px base in the
-                    // serif face — the 11pt Helvetica default under-measures
-                    // the min-content the sheet widens for.
-                    : profile.uaStdSerif && !profile.deadExternalCss && profile.bodyCssFontPt <= 0 ? 12
-                    : profile.bodyCssFontPt,
+                defaultCellFontPt: ProbeCellFontPt(profile),
                 tightExtras: profile.printGrid,
                 cssRunFace: bodyCssFace ?? (profile.uaStdSerif && !profile.deadExternalCss ? "Times New Roman" : null),
                 // …and when the run-face is dropped (no class styles the runs) the
@@ -34,13 +52,7 @@ internal static partial class HtmlToPdfConverter
                 // class-styled report re-measured in the UA face mis-sizes columns
                 // its own classes style, and the UA cell walk is far slower on a
                 // large data grid.
-                defaultCellFace: profile.dwFormDoc ? "Times New Roman"
-                    : profile.uaStdSerif && !profile.deadExternalCss
-                    && Regex.IsMatch(b.TableHtml ?? "",
-                        "<img(?![^>]*(width|height)[ ]*=)", RegexOptions.IgnoreCase)
-                    && !Regex.IsMatch(b.TableHtml ?? "",
-                        "class[ ]*=", RegexOptions.IgnoreCase)
-                    ? "Times New Roman" : null,
+                defaultCellFace: ProbeCellFace(b, profile),
                 // The probe must measure the same cell boxes the render will build,
                 // or the page is sized off a grid nothing draws.
                 uaCellBoxes: profile.uaGridBoxes,
@@ -56,6 +68,7 @@ internal static partial class HtmlToPdfConverter
                 uaSerifMin: profile.uaBareDoc || profile.uaNoWrapCellRule,
                 redlineCells: profile.redlineDiffDoc,
                 dwFormCells: profile.dwFormDoc,
+                fieldCells: b.FieldGrid,
                 wordMailCells: profile.wordMailDoc,
                 docElementGrid: profile.elementGridDoc,
                 pinnedBodyGrid: profile.bodyPinnedW > 0,
@@ -65,7 +78,9 @@ internal static partial class HtmlToPdfConverter
                 chainRules: profile.docChainRules,
                 // …through the same ancestor chain the render resolves the grid on, or the
                 // probe measures columns the scoped cell rules never dressed.
-                cssAncestors: b.CssAncestors) is ({ } probedTable, var natW))
+                cssAncestors: b.CssAncestors, hostChain: b.CssAncestors is null ? b.HostChain : null,
+                // (…and in the face the render draws the cells in)
+                bodyFaceGrid: profile.sheetTypographyDoc) is ({ } probedTable, var natW))
         {
             ReadProbedGridIntoProfile(probedTable, natW, b, cv, profile, availContentW, options);
         }

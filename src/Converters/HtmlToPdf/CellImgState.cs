@@ -13,10 +13,8 @@ private sealed class CellImgState
     public TableParseState ps = null!;
     /// <summary>The image resolved to the UA broken-image placeholder.</summary>
     public bool uaBrokenImage;
-    public TableColumnModel colModel = null!;
     public Table table = null!;
     public Token tok = null!;
-    public string tag = null!;
     public HtmlLoadOptions? options;
     public double cellFontSize;
     public bool dwFormCells;
@@ -24,49 +22,26 @@ private sealed class CellImgState
     public bool fullWidthCjkMin;
     public bool widenProbe;
     public bool redlineCells;
-    public bool breakAnywhereDoc;
     public bool cellFontShorthand;
-    public List<CssElem>? chainBase;
-    public double chainSpacingPt;
-    public List<(string Tag, int PrevBoldDepth)> chainUnbold = null!;
-    public string? cssBaseFamily;
-    public double cssBasePt;
-    public string? defaultCellFace;
-    public double formGridStrutDropPt;
-    public bool hasBorder;
-    public double inlineFaceRatio;
     public bool overDeclaredDraw;
     public double padSide;
-    public bool uaDocGrid;
-    public bool uaSerifMin;
-    public bool ptCellWidths;
-    public bool bandDialect;
-    public double cellLineHeightPt;
-    public string? cssRunFace;
-    public bool formGridDialect;
-    public double formGridStrutPt;
     public bool liftNestedTables;
-    public bool tightExtras;
-    public bool uaCellBoxes;
-    public double borderWidth;
     public double pad;
-    public Dictionary<string, Dictionary<string, string>> css = null!;
-    public IReadOnlyDictionary<string, Dictionary<string, string>>? docCss;
-    public List<CssChainRule>? chainRules;
-    public List<CssElem>? cssAncestors;
     public List<byte[]>? inlineSvgs;
-    public List<string> nestedHtml = null!;
-    public Func<string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio;
-    public double availWidthPt;
-    public double defaultCellFontPt;
-    public Dictionary<string, string> tblStyle = null!;
-    public bool docElementGrid;
-    public bool pinnedBodyGrid;
-    public bool authoredCellChrome;
-    public bool chainBorderSeparate;
-    public bool elemRuleBorder;
     public byte[]? cellImgBytes;
     public double ciw;
     public double cih;
+    /// <summary>The image's CSS width as a fraction of its cell's text box (`width: 50%`); 0 = none.</summary>
+    public double ciwFrac;
+    /// <summary>The image's `max-width` as a fraction of its cell's text box (its own style, else the sheet's
+    /// `img` rule): it then floors no column and draws no wider than that share; 0 = none.</summary>
+    public double maxFrac;
+    /// <summary>The image's `max-width` as a length in points (its own style, else the sheet's `img` rule): its box
+    /// lays out no wider; 0 = none.</summary>
+    public double maxWidthPt;
+    /// <summary>The box the image loaded at, as LoadCellImage gives it (the sides its markup gives, and any side it
+    /// completes from the file's size or aspect), as a max-width length's path found it, before completing or scaling
+    /// it; null when no such path ran.</summary>
+    public (double W, double H)? boxBeforeCap;
 }
 }

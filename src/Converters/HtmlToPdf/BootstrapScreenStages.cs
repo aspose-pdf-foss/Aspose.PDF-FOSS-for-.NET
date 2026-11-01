@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>Render one parsed block of the screen: a heading, a paragraph, a button row, a table or a list, each advancing the flow.</summary>
-    private static bool RenderBootstrapBlock(BootstrapScreenState bs, double pageWidth, double pageHeight, Aspose.Pdf.Converters.HtmlToPdfConverter.BsBlock blk)
+    private static bool RenderBootstrapBlock(BootstrapScreenState bs, double pageWidth, double pageHeight, Aspose.Pdf.Converters.HtmlToPdfConverter.IBsBlock blk)
     {
         switch (blk)
         {
@@ -73,7 +73,7 @@ internal static partial class HtmlToPdfConverter
             case BsTable t:
             {
                 bs.yTd = RenderBootstrapTable(bs.page, t, bs.yTd, bs.contentX, bs.contentW,
-                    pageHeight, bs.face, bs.boldFace, bs.fm, bs.bodyFs, bs.lineH, bs.drop,
+                    pageHeight, bs.face, bs.boldFace, bs.bodyFs, bs.lineH, bs.drop,
                     bs.cellPad, bs.borderCol, bs.tableBg, bs.bodyColor, bs);
                 bs.yTd += bs.tableMarB;
                 break;
@@ -152,7 +152,6 @@ internal static partial class HtmlToPdfConverter
                 Color.FromArgb(255, 255, 255), Color.FromRgbBytes(0xcc, 0xcc, 0xcc), 0.75);
             EmitRun(bs, pageHeight, "FB", bs.bodyFs, jX + JmbPadXPt + 0.75 + bs.btnPadX,
                 pen + 0.75 + bs.btnPadY + bs.drop, bs.jumboBtn2Label, bs.bodyColor);
-            pen += JmbBtnHPt;
         }
         bs.yTd = jTop + jH + JmbMarBPt;
     }
@@ -160,13 +159,13 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Read the body markup: the navbar brand and, for a jumbotron document, its heading, lead and button labels and colours.</summary>
     private static bool TryParseBootstrapHeader(BootstrapScreenState bs, IReadOnlyDictionary<string, Dictionary<string, string>> css, string html)
     {
-        bs.bodyM = Regex.Match(html, @"<body\b[^>]*>([\s\S]*)</body>", RegexOptions.IgnoreCase);
+        bs.bodyM = SafeRegex.Match(html, @"<body\b[^>]*>([\s\S]*)</body>", RegexOptions.IgnoreCase);
         if (!bs.bodyM.Success) return false;
         bs.bodyHtml = bs.bodyM.Groups[1].Value;
 
-        bs.jumboDoc = Regex.IsMatch(bs.bodyHtml, @"class\s*=\s*[""'][^""']*jumbotron",
+        bs.jumboDoc = SafeRegex.IsMatch(bs.bodyHtml, @"class\s*=\s*[""'][^""']*jumbotron",
                 RegexOptions.IgnoreCase)
-            && Regex.IsMatch(bs.bodyHtml, @"class\s*=\s*[""'][^""']*navbar-fixed-top",
+            && SafeRegex.IsMatch(bs.bodyHtml, @"class\s*=\s*[""'][^""']*navbar-fixed-top",
                 RegexOptions.IgnoreCase);
         bs.navBrand = "";
         bs.jumboH1 = "";
@@ -179,7 +178,7 @@ internal static partial class HtmlToPdfConverter
         {
             static (string inner, string rest) Cut(string s, string clsRe)
             {
-                var m = Regex.Match(s, @"<div\b[^>]*class\s*=\s*[""'][^""']*" + clsRe + @"[^>]*>",
+                var m = SafeRegex.Match(s, @"<div\b[^>]*class\s*=\s*[""'][^""']*" + clsRe + @"[^>]*>",
                     RegexOptions.IgnoreCase);
                 if (!m.Success) return ("", s);
                 var end = FindDivClose(s, m.Index + m.Length);
@@ -188,22 +187,22 @@ internal static partial class HtmlToPdfConverter
                 return (inner, s.Remove(m.Index, (close < 0 ? end : close + 1) - m.Index));
             }
             (var navHtml, bs.bodyHtml) = Cut(bs.bodyHtml, "navbar-fixed-top");
-            var brandM = Regex.Match(navHtml,
+            var brandM = SafeRegex.Match(navHtml,
                 @"class\s*=\s*[""'][^""']*navbar-brand[^>]*>(?<t>[\s\S]*?)</a>",
                 RegexOptions.IgnoreCase);
             if (brandM.Success)
-                bs.navBrand = Regex.Replace(DecodeEntities(Regex.Replace(
+                bs.navBrand = SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(
                     brandM.Groups["t"].Value, @"<[^>]+>", " ")), @"\s+", " ").Trim();
             (var jumboHtml, bs.bodyHtml) = Cut(bs.bodyHtml, "jumbotron");
             static string Flat1(string frag)
-                => Regex.Replace(DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")),
+                => SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(frag, @"<[^>]+>", " ")),
                     @"\s+", " ").Trim();
-            var h1M = Regex.Match(jumboHtml, @"<h1\b[^>]*>(?<t>[\s\S]*?)</h1>", RegexOptions.IgnoreCase);
+            var h1M = SafeRegex.Match(jumboHtml, @"<h1\b[^>]*>(?<t>[\s\S]*?)</h1>", RegexOptions.IgnoreCase);
             if (h1M.Success) bs.jumboH1 = Flat1(h1M.Groups["t"].Value);
-            var leadM = Regex.Match(jumboHtml,
+            var leadM = SafeRegex.Match(jumboHtml,
                 @"<p\b[^>]*class\s*=\s*[""']lead[""'][^>]*>(?<t>[\s\S]*?)</p>", RegexOptions.IgnoreCase);
             if (leadM.Success) bs.jumboLead = Flat1(leadM.Groups["t"].Value);
-            var btnAM = Regex.Match(jumboHtml,
+            var btnAM = SafeRegex.Match(jumboHtml,
                 @"<a\b[^>]*class\s*=\s*[""'][^""']*btn-lg[^>]*>(?<t>[\s\S]*?)</a>", RegexOptions.IgnoreCase);
             if (btnAM.Success)
             {
@@ -211,7 +210,7 @@ internal static partial class HtmlToPdfConverter
                 var (f2, b2, _) = BtnColors(bs, css, "btn btn-primary btn-lg");
                 bs.jumboBtnFill = f2; bs.jumboBtnBorder = b2;
             }
-            var btnBM = Regex.Match(jumboHtml,
+            var btnBM = SafeRegex.Match(jumboHtml,
                 @"<button\b[^>]*>(?<t>[\s\S]*?)</button>", RegexOptions.IgnoreCase);
             if (btnBM.Success) bs.jumboBtn2Label = Flat1(btnBM.Groups["t"].Value);
         }

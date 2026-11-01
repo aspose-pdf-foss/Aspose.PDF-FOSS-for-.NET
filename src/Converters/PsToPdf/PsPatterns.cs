@@ -137,7 +137,7 @@ internal static class PsPatterns
             i.Push(PsValue.Dict(pattern));
             i.Invoke(proc);
         }
-        catch (PsErrorSignal e)
+        catch (PsErrorException e)
         {
             i.RecordError(e.ErrorName);
         }

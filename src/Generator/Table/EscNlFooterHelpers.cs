@@ -14,16 +14,16 @@ public partial class Table
     // Tag-free text of a markup span, entities decoded, whitespace-only → "".
     private static string TextOf(string mk)
     {
-        var t = DecodeHtmlEntities(AnyTagRegex.Replace(mk, ""));
+        var t = DecodeHtmlEntities(SafeRegex.Replace(AnyTagRegex, mk, ""));
         return t.Trim().Length == 0 ? "" : t;
     }
 
     private static List<string> CellLines(string inner)
     {
         var outLines = new List<string>();
-        foreach (var piece in EscNlBrRegex.Split(inner))
+        foreach (var piece in SafeRegex.Split(EscNlBrRegex, inner))
         {
-            var t = DecodeHtmlEntities(AnyTagRegex.Replace(piece, "")).Trim(' ');
+            var t = DecodeHtmlEntities(SafeRegex.Replace(AnyTagRegex, piece, "")).Trim(' ');
             if (t.Length > 0) outLines.Add(t);
         }
         return outLines;
@@ -32,17 +32,17 @@ public partial class Table
     private static void AddRow(EscNlFooterState ef, string rowMk)
     {
         var cells = new List<(List<string>, bool)>();
-        foreach (Match cm in EscNlCellRegex.Matches(rowMk))
-            cells.Add((CellLines(cm.Groups["c"].Value),
-                cm.Groups[1].Value.Equals("th", StringComparison.OrdinalIgnoreCase)));
+        foreach (var groups in SafeRegex.Matches(EscNlCellRegex, rowMk).Select(cm => cm.Groups))
+            cells.Add((CellLines(groups["c"].Value),
+                groups[1].Value.Equals("th", StringComparison.OrdinalIgnoreCase)));
         if (cells.Count > 0) ef.rows.Add(cells);
     }
 
-    private static double Measure(EscNlFooterState ef, string s, bool bold) =>
+    private static double Measure(string s, bool bold) =>
         MeasureWidthKerned(s, EscNlFontSize, bold ? _serifBoldTtf! : _serifTtf!);
 
     // ── wrap the cells at their content widths ──
-    private static List<string> Wrap(EscNlFooterState ef, List<string> cellLines, bool bold, double contentW)
+    private static List<string> Wrap(List<string> cellLines, bool bold, double contentW)
     {
         var res = new List<string>();
         foreach (var ln in cellLines)
@@ -51,7 +51,7 @@ public partial class Table
             foreach (var w in ln.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
                 var cand = cur.Length == 0 ? w : cur + " " + w;
-                if (cur.Length == 0 || Measure(ef, cand, bold) <= contentW + 0.01) cur = cand;
+                if (cur.Length == 0 || Measure(cand, bold) <= contentW + 0.01) cur = cand;
                 else { res.Add(cur); cur = w; }
             }
             if (cur.Length > 0) res.Add(cur);
@@ -80,7 +80,7 @@ public partial class Table
         void Flush()
         {
             if (cur.Length == 0) return;
-            var w = Measure(ef, cur, false);
+            var w = Measure(cur, false);
             var x = centred ? ef.bandLeft + Math.Max(0, (ef.bandW - w) / 2) : ef.bandLeft;
             // A flow line whose baseline falls below the page bottom is not
             // drawn (measured: the after-</center> run renders at baseline
@@ -93,7 +93,7 @@ public partial class Table
         foreach (var w in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
             var cand = cur.Length == 0 ? w : cur + " " + w;
-            if (cur.Length == 0 || Measure(ef, cand, false) <= ef.bandW + 0.01) cur = cand;
+            if (cur.Length == 0 || Measure(cand, false) <= ef.bandW + 0.01) cur = cand;
             else { Flush(); cur = w; }
         }
         Flush();

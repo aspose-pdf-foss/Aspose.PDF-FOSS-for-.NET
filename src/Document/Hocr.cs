@@ -76,19 +76,19 @@ public sealed partial class Document
         // an empty / wordless hOCR result (e.g. "<test/>") makes it return false so
         // callers can tell that nothing was recognised.
         var appliedAny = false;
+        // A page is finished - its flattened image set, its text overlaid - one page late:
+        // the image stream deflates on another thread while the next page renders, and
+        // the pages are still finished in order on this thread.
+        RecognisedPage? pending = null;
         foreach (var page in Pages)
         {
+            // Render each page and hand it to the callback to OCR; the returned
+            // hOCR text is overlaid as invisible text. Pages without rasterised
+            // images still render (to a blank raster) and receive the callback so
+            // the caller can supply text for any page.
+            if (page is null) continue;
             try
             {
-                // Render each page and hand it to the callback to OCR; the returned
-                // hOCR text is overlaid as invisible text. Pages without rasterised
-                // images still render (to a blank raster) and receive the callback so
-                // the caller can supply text for any page.
-                if (page is null)
-                {
-                    continue;
-                }
-
                 // The image handed to the OCR callback is the page's own scan
                 // (its dominant raster image) when one exists; a page render is
                 // only the fallback for pages without images. A clean JPEG is
@@ -98,53 +98,59 @@ public sealed partial class Document
                 // decoded bitmap whose Save re-encodes the pixels.
                 var handImg = TryGetDominantImage(page);
 
-                byte[]? imageBytes = null;
-                if (flattenImages || handImg is null)
-                {
-                    using var ms = new MemoryStream();
-                    var device = new PngDevice();
-                    device.Process(page, ms);
-                    imageBytes = ms.ToArray();
-                }
-
-                System.Drawing.Image img;
-                if (handImg is not null)
-                {
-                    img = handImg;
-                }
-                else
-                {
-                    try
-                    {
-                        img = System.Drawing.Image.FromStream(new MemoryStream(imageBytes!));
-                    }
-                    catch
-                    {
-                        ok = false;
-                        continue;
-                    }
-                }
+                // One render serves both ends: the callback's image when the page has no
+                // scan of its own, and the flattened page. The callback's PNG is transient,
+                // so it is stored rather than deflated; the flattened page takes the pixels
+                // as they are, which is what decoding that PNG would have given.
+                var rendered = flattenImages || handImg is null ? new PngDevice().Render(page) : null;
 
                 string hocr;
-                using (img)
+                using (var img = handImg ?? ImageOfRender(rendered!))
                 {
                     hocr = invoke(img, page) ?? string.Empty;
                 }
 
-                if (flattenImages && imageBytes is not null)
-                {
-                    ReplacePageWithImage(page, imageBytes);
-                }
-
-                if (OverlayHocrAsInvisibleText(page, hocr) > 0)
-                    appliedAny = true;
+                var flattened = flattenImages && rendered is not null
+                    ? Task.Run(() => ImageStamp.FromRgba(rendered.Data, rendered.Width, rendered.Height))
+                    : null;
+                var done = pending;
+                pending = new RecognisedPage(page, flattened, hocr);
+                if (Finish(done)) appliedAny = true;
             }
             catch
             {
                 ok = false;
             }
         }
+        try
+        {
+            if (Finish(pending)) appliedAny = true;
+        }
+        catch
+        {
+            ok = false;
+        }
         return ok && appliedAny;
+    }
+
+    /// <summary>A page the callback has seen, waiting to be finished: its flattened image
+    /// (deflating), and the hOCR to overlay.</summary>
+    private sealed record RecognisedPage(Page Page, Task<ImageStamp>? Flattened, string Hocr);
+
+    /// <summary>Set the flattened image and overlay the text; true when words were overlaid.</summary>
+    private static bool Finish(RecognisedPage? done)
+    {
+        if (done is null) return false;
+        if (done.Flattened is { } flattened) ReplacePageWithImage(done.Page, flattened.Result);
+        return OverlayHocrAsInvisibleText(done.Page, done.Hocr) > 0;
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static System.Drawing.Image ImageOfRender(Devices.RgbaBuffer rendered)
+    {
+        var png = IO.PngEncoder.Encode(rendered.Data, rendered.Width, rendered.Height,
+            colorType: 6, level: IO.Filters.DeflateLevel.Store);
+        return System.Drawing.Image.FromStream(new MemoryStream(png));
     }
 
     /// <summary>Find the page's dominant (largest-area) raster-image placement.
@@ -202,10 +208,11 @@ public sealed partial class Document
                 }
                 return System.Drawing.Image.FromStream(new MemoryStream(raw));
             }
-            var ms = new MemoryStream();
-            placement.Image.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-            ms.Position = 0;
-            return System.Drawing.Image.FromStream(ms);
+            // A bilevel scan goes over as the 1 bpp bitmap it is. Anything else goes over as
+            // a PNG that only carries the pixels to GDI+ in this process, so it is stored,
+            // not deflated.
+            if (placement.Image.OneBitBitmap() is { } bilevel) return bilevel;
+            return System.Drawing.Image.FromStream(new MemoryStream(placement.Image.ToPng(IO.Filters.DeflateLevel.Store)));
         }
         catch
         {
@@ -238,9 +245,9 @@ public sealed partial class Document
     // the searchable overlay.
     private static readonly Regex HocrWordRegex = new(
         @"<span[^>]+class=['""]ocrx?_word['""][^>]*title=['""][^'""]*bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)[^'""]*['""][^>]*>(.*?)</span>",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline, RegexLimits.Timeout);
 
-    private static readonly Regex HocrInlineTagRegex = new(@"<[^>]+>", RegexOptions.Compiled);
+    private static readonly Regex HocrInlineTagRegex = new(@"<[^>]+>", RegexOptions.Compiled, RegexLimits.Timeout);
 
     // Combined scan over the hOCR body: each match is either an ocr_line container
     // (group 1 = "ocr_line", groups 2-5 = its bbox) or an ocrx_word (groups 6-9 =
@@ -251,7 +258,7 @@ public sealed partial class Document
     private static readonly Regex HocrLineOrWordRegex = new(
         @"class=['""](ocr_line)['""][^>]*title=['""][^'""]*bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)" +
         @"|<span[^>]+class=['""]ocrx?_word['""][^>]*title=['""][^'""]*bbox\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)[^'""]*['""][^>]*>(.*?)</span>",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline, RegexLimits.Timeout);
 
     /// <summary>The <c>ocr_page</c> element carries the source raster's pixel
     /// dimensions as <c>bbox 0 0 W H</c>. These are the correct denominators for
@@ -262,7 +269,7 @@ public sealed partial class Document
     /// bbox — match within the tag (up to '&gt;') instead.</summary>
     private static readonly Regex HocrPageBBoxRegex = new(
         @"class=['""]ocr_page['""][^>]*?bbox\s+\d+\s+\d+\s+(\d+)\s+(\d+)",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
     /// <summary>Overlay the recognised hOCR words on the page as an invisible
     /// text layer. Returns the number of words actually overlaid (0 when the hOCR
@@ -280,7 +287,7 @@ public sealed partial class Document
         ho.hocr = hocr;
         ho.mendModel = mendModel;
         if (string.IsNullOrWhiteSpace(ho.hocr)) return 0;
-        ho.matches = HocrWordRegex.Matches(ho.hocr);
+        ho.matches = SafeRegex.Matches(HocrWordRegex, ho.hocr);
         if (ho.matches.Count == 0) return 0;
 
         ho.rect = ho.page.GetPageRect(considerRotation: false);
@@ -310,7 +317,7 @@ public sealed partial class Document
 
         ho.imgW = 0;
         ho.imgH = 0;
-        ho.pageMatch = HocrPageBBoxRegex.Match(ho.hocr);
+        ho.pageMatch = SafeRegex.Match(HocrPageBBoxRegex, ho.hocr);
         if (ho.pageMatch.Success)
         {
             int.TryParse(ho.pageMatch.Groups[1].Value, out var pw);
@@ -320,10 +327,10 @@ public sealed partial class Document
         if (ho.imgW <= 0 || ho.imgH <= 0)
         {
             var maxX = 0; var maxY = 0;
-            foreach (Match m in ho.matches)
+            foreach (var groups in ho.matches.Select(m => m.Groups))
             {
-                if (int.TryParse(m.Groups[3].Value, out var x1) && x1 > maxX) maxX = x1;
-                if (int.TryParse(m.Groups[4].Value, out var y1) && y1 > maxY) maxY = y1;
+                if (int.TryParse(groups[3].Value, out var x1) && x1 > maxX) maxX = x1;
+                if (int.TryParse(groups[4].Value, out var y1) && y1 > maxY) maxY = y1;
             }
             ho.imgW = maxX > 0 ? maxX : 1;
             ho.imgH = maxY > 0 ? maxY : 1;
@@ -338,18 +345,18 @@ public sealed partial class Document
 
         ho.lineLift = new Dictionary<int, double>();
         if (!ho.mendModel)
-        foreach (var lineGroup in System.Linq.Enumerable.GroupBy(ho.words, w => w.line))
-        {
-            var counts = new Dictionary<int, int>();
-            foreach (var w in lineGroup)
-                counts[w.fontSize] = counts.TryGetValue(w.fontSize, out var c) ? c + 1 : 1;
-            var modal = 0; var best = 0;
-            foreach (var kv in counts)
-                if (kv.Value > best || (kv.Value == best && kv.Key > modal)) { modal = kv.Key; best = kv.Value; }
-            ho.lineLift[lineGroup.Key] = -Text.Standard14Fonts.GetDescent("Helvetica") * modal / 1000.0;
-        }
+            foreach (var lineGroup in System.Linq.Enumerable.GroupBy(ho.words, w => w.line))
+            {
+                var counts = new Dictionary<int, int>();
+                foreach (var wfontSize in lineGroup.Select(w => w.fontSize))
+                    counts[wfontSize] = counts.TryGetValue(wfontSize, out var c) ? c + 1 : 1;
+                var modal = 0; var best = 0;
+                foreach (var kv in counts)
+                    if (kv.Value > best || (kv.Value == best && kv.Key > modal)) { modal = kv.Key; best = kv.Value; }
+                ho.lineLift[lineGroup.Key] = -Text.Standard14Fonts.GetDescent("Helvetica") * modal / 1000.0;
+            }
 
-        ho.tb = new TextBuilder(ho.page);
+        ho.tb = new TextBuilder(ho.page) { SeatsInPageSpace = true };
         ho.overlaid = 0;
         OverlayHocrWords(ho);
         return ho.overlaid;
@@ -387,14 +394,14 @@ public sealed partial class Document
             ? s
             : s.Replace('ﬁ', '\0').Replace('ﬂ', '\0');
 
-    private void ReplacePageWithImage(Page page, byte[] pngBytes)
+    private static void ReplacePageWithImage(Page page, ImageStamp flattened)
     {
         var rect = page.GetPageRect(considerRotation: false);
         var width = rect.Width;
         var height = rect.Height;
         if (width <= 0 || height <= 0) return;
 
-        page.Resources.Images.Add(new MemoryStream(pngBytes));
+        page.Resources.Images.Add(flattened);
         var imageName = $"Im{page.Resources.Images.Count}";
 
         var sb = new System.Text.StringBuilder();

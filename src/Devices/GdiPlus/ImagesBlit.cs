@@ -55,7 +55,7 @@ public sealed partial class GdiPlusPageRenderer
             };
             if (softMask is not null) BlitImageMasked(bmp, world, dest, alpha, softMask);
             else if (overprint) BlitImageMultiply(bmp, world, dest);
-            else BlitImagePlain(bmp, world, dest, e, q.Magnified, alpha);
+            else BlitImagePlain(bmp, world, dest, e, q, alpha);
         }
         finally { _g.Transform = saved; _g.CompositingQuality = savedCq; _g.InterpolationMode = savedIm; }
     }
@@ -73,7 +73,10 @@ public sealed partial class GdiPlusPageRenderer
 
     /// <summary>The unit-square corners the blit maps the image onto, and whether the blit is
     /// magnified on either axis.</summary>
-    private readonly record struct BlitQuad(float X0, float X1, float Y0, float Y1, bool Magnified);
+    private readonly record struct BlitQuad(float X0, float X1, float Y0, float Y1, bool MagnifiedX, bool MagnifiedY)
+    {
+        public bool Magnified => MagnifiedX || MagnifiedY;
+    }
 
     /// <summary>The corners the image is drawn to, in the unit square the world transform
     /// carries: a sub-pixel-thin strip grown to one device pixel, a magnified blit seated back
@@ -103,6 +106,8 @@ public sealed partial class GdiPlusPageRenderer
         float x0 = 0f, x1 = 1f, y0 = 0f, y1 = 1f;
         if (devW > 1e-6 && devW < 1f) { var f = (float)(1.0 / devW); x0 = 0.5f - f / 2f; x1 = 0.5f + f / 2f; }
         if (devH > 1e-6 && devH < 1f) { var f = (float)(1.0 / devH); y0 = 0.5f - f / 2f; y1 = 0.5f + f / 2f; }
+        if (devW < 1f || devH < 1f)
+            (x0, x1, y0, y1) = SeatThinStripOnItsPixel(world, devW, devH, x0, x1, y0, y1);
 
         // A printed page image seats no image back: see DrawPrintedImage.
         if (magnified && !PrintedPageImage)
@@ -121,7 +126,46 @@ public sealed partial class GdiPlusPageRenderer
             && Math.Abs(devW - bmp.Width) <= IdentityBlitTolerance * bmp.Width
             && Math.Abs(devH - bmp.Height) <= IdentityBlitTolerance * bmp.Height)
             (x0, x1, y0, y1) = SnapBlitToIdentity(world, bmp, x0, x1, y0, y1);
-        return new BlitQuad(x0, x1, y0, y1, magnified);
+        return new BlitQuad(x0, x1, y0, y1, magnifiedX, magnifiedY);
+    }
+
+    /// <summary>How far, in device pixels, a strip's edge may lie off a pixel line and count as on
+    /// it: the page matrix is carried in single precision, a thousandth of a pixel out on a page
+    /// of a few thousand rows.</summary>
+    private const double StripEdgeSlack = 1.0 / 128;
+
+    /// <summary>
+    /// A strip thinner than a pixel whose band holds the centre of a pixel row (or column) is
+    /// drawn onto exactly that row. A picture set as hundreds of one-row images, each half a
+    /// pixel high under the clip rectangle of its own band, is painted by the strips whose clip
+    /// selects a row; grown about the centre of its band such a strip covered that row only in
+    /// part, and the paper showed through as a lighter stripe at every row. A strip whose band
+    /// holds no row centre keeps the centred growth.
+    /// </summary>
+    private (float x0, float x1, float y0, float y1) SeatThinStripOnItsPixel(GdiMatrix world, double devW, double devH,
+        float x0, float x1, float y0, float y1)
+    {
+        var e = world.Elements;
+        const float AxisAlignedTol = 1e-4f;
+        if (Math.Abs(e[1]) > AxisAlignedTol || Math.Abs(e[2]) > AxisAlignedTol || e[0] <= 0f || e[3] >= 0f)
+            return (x0, x1, y0, y1);
+        var centre = PixelCentre;
+        if (devW < 1f && PixelInBand(e[4], e[4] + e[0], centre) is { } column)
+            (x0, x1) = ((float)((column - e[4]) / e[0]), (float)((column + 1 - e[4]) / e[0]));
+        if (devH < 1f && PixelInBand(e[5] + e[3], e[5], centre) is { } row)
+            (y0, y1) = ((float)((row + 1 - e[5]) / e[3]), (float)((row - e[5]) / e[3]));
+        return (x0, x1, y0, y1);
+    }
+
+    /// <summary>Where a pixel's centre lies past its coordinate on the surface: half a pixel with
+    /// the half-pixel offset in force, on the coordinate itself without it.</summary>
+    private double PixelCentre => _g.PixelOffsetMode == PixelOffsetMode.None ? 0.0 : HalfDevicePixel;
+
+    /// <summary>The near line of the pixel whose centre lies in the band [from, to), if one does.</summary>
+    private static double? PixelInBand(double from, double to, double centre)
+    {
+        var pixel = Math.Ceiling(from - centre - StripEdgeSlack);
+        return pixel + centre < to - StripEdgeSlack ? pixel + centre - HalfDevicePixel : null;
     }
 
     /// <summary>The resampling kernel this blit takes.</summary>
@@ -144,5 +188,18 @@ public sealed partial class GdiPlusPageRenderer
         // kernel (see PrintedPageImage).
         if (devW < bmp.Width * MinifiedBlitMargin || devH < bmp.Height * MinifiedBlitMargin)
             _g.InterpolationMode = PrintedPageImage ? InterpolationMode.Bilinear : InterpolationMode.HighQualityBilinear;
+        // LAW (pixel art): a small image enlarged four times or more keeps hard pixel edges - a 20x20
+        // datamatrix drawn 12.7x stays two-level - whatever its depth, colour space or /Interpolate,
+        // as the reference draws it (measured: the switch lies between 3.98x and 4.02x on the larger
+        // axis scale, and 30 source pixels on the longer side already smooth).
+        else if (Math.Max(bmp.Width, bmp.Height) <= PixelArtMaxSourcePixels
+                 && Math.Max(devW / bmp.Width, devH / bmp.Height) >= PixelArtMinScale)
+            _g.InterpolationMode = InterpolationMode.NearestNeighbor;
     }
+
+    /// <summary>The longest side, in source pixels, of an image drawn as pixel art when enlarged.</summary>
+    private const int PixelArtMaxSourcePixels = 29;
+
+    /// <summary>The enlargement (device pixels per source pixel, the larger axis) from which it is.</summary>
+    private const double PixelArtMinScale = 4.0;
 }

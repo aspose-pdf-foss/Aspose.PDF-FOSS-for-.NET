@@ -58,7 +58,6 @@ public sealed partial class TextReplacer
         rf.replacement = replacement;
         rf.matchX = matchX;
         rf.lines = lines;
-        rf.leftX = leftX;
         rf.rightMargin = rightMargin;
         rf.pitch = pitch;
         rf.newLineSpacingFactor = newLineSpacingFactor;
@@ -75,24 +74,24 @@ public sealed partial class TextReplacer
         rf.yTol = Math.Max(1.0, Math.Min(3.0, rf.pitch * 0.2));
         rf.affected = new List<(CrossTextOp op, int li, double px)>();
         rf.mapped = new List<(CrossTextOp op, int li, double px)>();
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var o in rf.textOps)
+#pragma warning restore S3267
         {
             if (!CollectReflowTextOp(rf, o)) break;
         }
         if (rf.affected.Count == 0) return false;
         if (!SelectReflowHead(rf)) return false;
         rf.headAdvPad = rf.switchedFace is not null && rf.replacement.Length < rf.search.Length
-            ? rf.head.Tc * rf.search.Length * TmScaleOf(rf, rf.head) * ScaleOf(rf, rf.head)
+            ? rf.head.Tc * rf.search.Length * TmScaleOf(rf.head) * ScaleOf(rf.head)
             : 0.0;
 
         rf.lineBaseY = new double?[rf.lines.Count];
-        foreach (var (o, li, _) in rf.mapped) rf.lineBaseY[li] ??= PageY(rf, o);
+        foreach (var (o, li, _) in rf.mapped) rf.lineBaseY[li] ??= PageY(o);
         for (int li = 1; li < rf.lines.Count; li++) rf.lineBaseY[li] ??= rf.lineBaseY[li - 1] - rf.pitch;
-        rf.newPitch = rf.newLineSpacingFactor > 0
-            ? rf.newLineSpacingFactor * rf.head.FontSize * TmScaleOf(rf, rf.head) * ScaleOf(rf, rf.head)
-            : rf.lines.Count >= 2
-                ? (rf.lines[0].y - rf.lines[^1].y) / (rf.lines.Count - 1)
-                : rf.pitch;
+        if (rf.newLineSpacingFactor > 0) rf.newPitch = rf.newLineSpacingFactor * rf.head.FontSize * TmScaleOf(rf.head) * ScaleOf(rf.head);
+        else if (rf.lines.Count >= 2) rf.newPitch = (rf.lines[0].y - rf.lines[^1].y) / (rf.lines.Count - 1);
+        else rf.newPitch = rf.pitch;
         rf.pieces = new List<(CrossTextOp op, double x, int line, byte[] bytes, string? sw, int off)>();
         rf.cursor = 0;
         rf.curLi = 0;
@@ -116,14 +115,16 @@ public sealed partial class TextReplacer
         rf.lastWritePos = 0;
         rf.delIdx = 0;
         rf.insIdx = 0;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var o in rf.opOrder)
+#pragma warning restore S3267
         {
             if (!EmitReflowedOp(rf, o)) break;
         }
         CopyTo(rf, rf.streamBytes.Length);
 
         rf.maxLi = 0;
-        foreach (var pc in rf.pieces) if (pc.line > rf.maxLi) rf.maxLi = pc.line;
+        foreach (var pcline in rf.pieces.Select(pc => pc.line)) if (pcline > rf.maxLi) rf.maxLi = pcline;
         ReflowCreatedLines = Math.Max(0, rf.maxLi + 1 - rf.lines.Count);
 
         // Only a reflow that is actually committed reports its moves.

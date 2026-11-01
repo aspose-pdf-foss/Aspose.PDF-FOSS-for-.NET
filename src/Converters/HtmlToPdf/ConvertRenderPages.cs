@@ -32,7 +32,7 @@ internal static partial class HtmlToPdfConverter
         // paragraph — headings charge a different margin and keep their own model.
         SeatUaSerifTopMargin(cv);
         ResolveEscapedAttrDialect(cv);
-        ResetFlowCollections(cv, options);
+        ResetFlowCollections(cv);
         // Set right after a form-dialect <hr> draws: the next text block must drop by
         // its own line box before its baseline (text hangs above the cursor; the rule
         // would be overprinted otherwise). Tables/images consume the flag as a no-op.

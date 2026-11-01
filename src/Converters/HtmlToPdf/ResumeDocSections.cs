@@ -14,15 +14,9 @@ internal static partial class HtmlToPdfConverter
         rd.inner = BalancedInner(rd.c, secM.Index + secM.Length, "div") ?? "";
         if (rd.inner.Trim().Length == 0) return true;
 
-        rd.titleM = Regex.Match(rd.inner, @"class=""sectiontitle"">([^<]*)</div>");
-        if (rd.kind == "NAME")
-        {
-            if (RenderResumeName(rd)) return true;
-        }
-        if (rd.kind == "CNTC")
-        {
-            if (RenderResumeContact(rd)) return true;
-        }
+        rd.titleM = SafeRegex.Match(rd.inner, @"class=""sectiontitle"">([^<]*)</div>");
+        if (rd.kind == "NAME" && RenderResumeName(rd)) return true;
+        if (rd.kind == "CNTC" && RenderResumeContact(rd)) return true;
 
         // a titled body section
         rd.y += rd.firstSection ? 0 : 6.0;              // section margin-top
@@ -37,7 +31,9 @@ internal static partial class HtmlToPdfConverter
         }
         rd.seq++;
         rd.paraN = 0;
-        foreach (Match paraM in Regex.Matches(rd.inner,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match paraM in SafeRegex.Matches(rd.inner,
+#pragma warning restore S3267
             @"<div id=""PARAGRAPH_[^""]*"" class=""paragraph[^""]*""[^>]*>",
             RegexOptions.IgnoreCase))
         {
@@ -58,7 +54,7 @@ internal static partial class HtmlToPdfConverter
             && pInner.Contains("twocol", StringComparison.Ordinal))
         {
             // the two-column skills grid: bullets in 50% columns
-            var tds = Regex.Matches(pInner, @"<td[^>]*class=""field twocol_\d""[^>]*>(.*?)</td>",
+            var tds = SafeRegex.Matches(pInner, @"<td[^>]*class=""field twocol_\d""[^>]*>(.*?)</td>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             var colTops = rd.y;
             double maxY = rd.y;
@@ -74,20 +70,20 @@ internal static partial class HtmlToPdfConverter
         else if (pInner.Contains("paddedline", StringComparison.Ordinal))
         {
             // a JOB paragraph: title/date line, company line, bullets
-            var spl = Regex.Matches(pInner, @"<span class=""paddedline""[^>]*>(.*?)(?:<br>\s*)?</span>(?=\s*<span|\s*</div>|\s*$)",
+            var spl = SafeRegex.Matches(pInner, @"<span class=""paddedline""[^>]*>(.*?)(?:<br>\s*)?</span>(?=\s*<span|\s*</div>|\s*$)",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             var jobRuns = new List<(string, bool, Color)>();
             foreach (Match sM in spl)
             {
                 if (sM.Groups[1].Value.Contains("<ul", StringComparison.OrdinalIgnoreCase))
                     continue;
-                foreach (Match innerSpan in Regex.Matches(sM.Groups[1].Value,
-                    @"<span([^>]*)>(.*?)</span>", RegexOptions.Singleline))
+                foreach (var groups in SafeRegex.Matches(sM.Groups[1].Value,
+                    @"<span([^>]*)>(.*?)</span>", RegexOptions.Singleline).Select(innerSpan => innerSpan.Groups))
                 {
                     var txt = CollapseWs(DecodeEntities(
-                        Regex.Replace(innerSpan.Groups[2].Value, "<[^>]+>", "")));
+                        SafeRegex.Replace(groups[2].Value, "<[^>]+>", "")));
                     if (txt.Length == 0) continue;
-                    var boldSpan = Regex.IsMatch(innerSpan.Groups[1].Value,
+                    var boldSpan = SafeRegex.IsMatch(groups[1].Value,
                         @"jobtitle|companyname|degree", RegexOptions.IgnoreCase);
                     jobRuns.Add((txt, boldSpan, rd.black));
                 }
@@ -116,19 +112,19 @@ internal static partial class HtmlToPdfConverter
                 }
                 rd.y += RdLinePt;
             }
-            var ulM = Regex.Match(pInner, @"<ul>(.*?)</ul>",
+            var ulM = SafeRegex.Match(pInner, @"<ul>(.*?)</ul>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             if (ulM.Success) EmitLis(rd, ulM.Groups[1].Value, RdPadXPt, RdColWPt, rd.seq);
         }
         else if (pInner.Contains("<ul", StringComparison.OrdinalIgnoreCase))
         {
-            var ulM = Regex.Match(pInner, @"<ul>(.*?)</ul>",
+            var ulM = SafeRegex.Match(pInner, @"<ul>(.*?)</ul>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             if (ulM.Success) EmitLis(rd, ulM.Groups[1].Value, RdPadXPt, RdColWPt, rd.seq);
         }
         else
         {
-            var fieldM = Regex.Match(pInner,
+            var fieldM = SafeRegex.Match(pInner,
                 @"<div class=""field singlecolumn""[^>]*>(.*?)</div>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             if (fieldM.Success)
@@ -145,7 +141,7 @@ internal static partial class HtmlToPdfConverter
         // separators on one CENTRED 12 pt line, wrapping items whole
         rd.y += 4.0;                             // address margin-top
         var lis = new List<List<(string t, bool bold, Color col)>>();
-        foreach (Match liM in Regex.Matches(rd.inner, @"<li[^>]*>(.*?)</li>",
+        foreach (Match liM in SafeRegex.Matches(rd.inner, @"<li[^>]*>(.*?)</li>",
             RegexOptions.IgnoreCase | RegexOptions.Singleline))
             lis.Add(ParseRuns(rd, liM.Groups[1].Value));
         var lineFr = new List<(double w, double fs, double dy, string t)>();
@@ -197,7 +193,7 @@ internal static partial class HtmlToPdfConverter
     private static bool RenderResumeName(ResumeDocState rd)
     {
         rd.y += 6.0;                             // section margin-top
-        var nameM = Regex.Match(rd.inner, @"<div class=""name"">(.*?)</div>",
+        var nameM = SafeRegex.Match(rd.inner, @"<div class=""name"">(.*?)</div>",
             RegexOptions.Singleline);
         if (nameM.Success)
         {

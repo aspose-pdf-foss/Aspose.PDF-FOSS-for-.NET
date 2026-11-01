@@ -19,9 +19,11 @@ internal static partial class HtmlToPdfConverter
             {
                 if (hd.TryGetValue("font-size", out var hfs))
                 {
-                    var hBase = ps.curFontPt > 0 ? ps.curFontPt
-                        : ps.cellClassPt > 0 ? ps.cellClassPt : cfg.cellFontSize;
-                    var hpm = Regex.Match(hfs.Trim(), @"^([\d.]+)\s*%$");
+                    double hBase;
+                    if (ps.curFontPt > 0) hBase = ps.curFontPt;
+                    else if (ps.cellClassPt > 0) hBase = ps.cellClassPt;
+                    else hBase = cfg.cellFontSize;
+                    var hpm = SafeRegex.Match(hfs.Trim(), @"^([\d.]+)\s*%$");
                     if (hpm.Success && double.TryParse(hpm.Groups[1].Value,
                             System.Globalization.NumberStyles.Float,
                             System.Globalization.CultureInfo.InvariantCulture, out var hPct)
@@ -31,7 +33,7 @@ internal static partial class HtmlToPdfConverter
                         ps.curFontPt = hAbs;
                 }
                 if (hd.TryGetValue("font-weight", out var hfw)
-                    && Regex.IsMatch(hfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
+                    && SafeRegex.IsMatch(hfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
                 {
                     hBold = true;
                     ps.boldDepth++;

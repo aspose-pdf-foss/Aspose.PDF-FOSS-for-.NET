@@ -8,6 +8,7 @@ namespace Aspose.Pdf.Annotations.JavascriptExtensions;
 /// </summary>
 public class FieldNumberPercentFormatter
 {
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Format <paramref name="fieldValue"/> as a percentage string.
     /// </summary>
@@ -17,6 +18,7 @@ public class FieldNumberPercentFormatter
     /// <param name="fieldValue">Numeric string (will be multiplied by 100).</param>
     /// <returns>Formatted percentage string.</returns>
     public string Format(int precision, int sepStyle, bool isPrependPercent, string fieldValue)
+#pragma warning restore S2325
     {
         double num = double.Parse(fieldValue, CultureInfo.InvariantCulture) * 100;
         bool isNeg = num < 0;

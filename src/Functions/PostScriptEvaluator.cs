@@ -20,7 +20,7 @@ public static class PostScriptEvaluator
         var stack = new List<object>();
         foreach (var v in inputs) stack.Add(v);
         Eval(proc, stack);
-        return stack.Select(v => v is double d ? d : v is bool b ? (b ? 1.0 : 0.0) : Convert.ToDouble(v)).ToArray();
+        return stack.Select(v => v switch { double d => d, bool b => b ? 1.0 : 0.0, _ => Convert.ToDouble(v) }).ToArray();
     }
 
     /// <summary>
@@ -38,7 +38,7 @@ public static class PostScriptEvaluator
             if (i >= src.Length) break;
             var ch = src[i];
             if (ch == '{' || ch == '}') { tokens.Add(ch.ToString()); i++; continue; }
-            if (ch == '%') { while (i < src.Length && src[i] != '\n') i++; continue; }
+            if (ch == '%') { while (i < src.Length && src[i] != '\n') { i++; } continue; }
             var start = i;
             while (i < src.Length && !char.IsWhiteSpace(src[i]) && src[i] != '{' && src[i] != '}' && src[i] != '%') i++;
             var tok = src[start..i];
@@ -140,7 +140,9 @@ public static class PostScriptEvaluator
 
     private static new bool Equals(object? a, object? b)
     {
+#pragma warning disable S1244 // the script language compares numbers exactly - exact by specification
         if (a is double da && b is double db) return da == db;
+#pragma warning restore S1244
         if (a is bool ba && b is bool bb) return ba == bb;
         return object.Equals(a, b);
     }
@@ -155,14 +157,14 @@ public static class PostScriptEvaluator
             case "sub": { var b = PopN(stack); var a = PopN(stack); stack.Add(a - b); break; }
             case "mul": { var b = PopN(stack); var a = PopN(stack); stack.Add(a * b); break; }
             case "div": { var b = PopN(stack); var a = PopN(stack); stack.Add(a / b); break; }
-            case "idiv": { var b = PopN(stack); var a = PopN(stack); stack.Add((double)Math.Truncate(a / b)); break; }
+            case "idiv": { var b = PopN(stack); var a = PopN(stack); stack.Add(Math.Truncate(a / b)); break; }
             case "mod": { var b = PopN(stack); var a = PopN(stack); stack.Add(a - Math.Truncate(a / b) * b); break; }
             case "abs": stack.Add(Math.Abs(PopN(stack))); break;
             case "neg": stack.Add(-PopN(stack)); break;
             case "ceiling": stack.Add(Math.Ceiling(PopN(stack))); break;
             case "floor": stack.Add(Math.Floor(PopN(stack))); break;
             case "round": { var v = PopN(stack); stack.Add(Math.Floor(v + 0.5)); break; }
-            case "truncate": stack.Add((double)Math.Truncate(PopN(stack))); break;
+            case "truncate": stack.Add(Math.Truncate(PopN(stack))); break;
             case "sqrt": stack.Add(Math.Sqrt(PopN(stack))); break;
             case "exp": { var e = PopN(stack); var b2 = PopN(stack); stack.Add(Math.Pow(b2, e)); break; }
             case "ln": stack.Add(Math.Log(PopN(stack))); break;
@@ -269,7 +271,7 @@ public static class PostScriptEvaluator
             }
 
             // Type conversion
-            case "cvi": stack.Add((double)Math.Truncate(PopN(stack))); break;
+            case "cvi": stack.Add(Math.Truncate(PopN(stack))); break;
             case "cvr": stack.Add(PopN(stack)); break;
 
         }

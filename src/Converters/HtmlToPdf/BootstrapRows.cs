@@ -84,7 +84,7 @@ internal static partial class HtmlToPdfConverter
         sg.pageHeight = pageHeight;
         if (!sg.css.ContainsKey(".top_label") || !sg.css.ContainsKey(".grid_header")
             || !sg.css.ContainsKey(".grid_highlight_value")
-            || !Regex.IsMatch(sg.html, @"class\s*=\s*[""']left_panel[""']", RegexOptions.IgnoreCase))
+            || !SafeRegex.IsMatch(sg.html, @"class\s*=\s*[""']left_panel[""']", RegexOptions.IgnoreCase))
             return null;
         sg.segoe = Text.SystemFontResolver.Resolve("Segoe UI");
         // the resolver maps PDF-style names — the bold face answers to the
@@ -102,9 +102,9 @@ internal static partial class HtmlToPdfConverter
         sg.page = sg.doc.Pages.Add(sg.pageWidth, sg.pageHeight);
         EnsureFonts(sg.page);
 
-        sg.bodyM = Regex.Match(sg.html, @"<body\b[^>]*>\s*(?<t>[^<]+)", RegexOptions.IgnoreCase);
-        if (sg.bodyM.Success && SegoeFlat(sg, sg.bodyM.Groups["t"].Value).Length > 0)
-            SegoeRun(sg, false, 12, SaBodyX, SaBannerBaselinePt, SegoeFlat(sg, sg.bodyM.Groups["t"].Value), sg.black);
+        sg.bodyM = SafeRegex.Match(sg.html, @"<body\b[^>]*>\s*(?<t>[^<]+)", RegexOptions.IgnoreCase);
+        if (sg.bodyM.Success && SegoeFlat(sg.bodyM.Groups["t"].Value).Length > 0)
+            SegoeRun(sg, false, 12, SaBodyX, SaBannerBaselinePt, SegoeFlat(sg.bodyM.Groups["t"].Value), sg.black);
         SegoeLine(sg, SaBodyX, sg.pageWidth - SaBodyX, SaHrY1, 0.75, sg.black);
         SegoeLine(sg, SaBodyX, sg.pageWidth - SaBodyX, SaHrY2, 0.75, Color.FromRgbBytes(0x55, 0x55, 0x55));
 
@@ -115,7 +115,7 @@ internal static partial class HtmlToPdfConverter
         // placeholder is drawn for it (the area is bare white on the
         // template), it only holds the vertical space.
 
-        sg.gm = Regex.Match(sg.html,
+        sg.gm = SafeRegex.Match(sg.html,
             @"<table\b[^>]*border-collapse[^>]*>(?<b>[\s\S]*?)$", RegexOptions.IgnoreCase);
         if (sg.gm.Success)
         {
@@ -129,7 +129,7 @@ internal static partial class HtmlToPdfConverter
     private static int FindDivClose(string html, int afterOpen)
     {
         var depth = 1;
-        foreach (Match t in Regex.Matches(html[afterOpen..], @"<div\b|</div\s*>",
+        foreach (Match t in SafeRegex.Matches(html[afterOpen..], @"<div\b|</div\s*>",
             RegexOptions.IgnoreCase))
         {
             depth += t.Value.StartsWith("</") ? -1 : 1;

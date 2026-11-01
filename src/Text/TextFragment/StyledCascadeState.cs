@@ -24,6 +24,8 @@ private sealed class StyledCascadeState
     // Styled run stream: source text keeps its style; every oldText occurrence
     // becomes newText in the new style.
     public List<(string text, Aspose.Pdf.Text.Font? font, double fs, Aspose.Pdf.Color? fg)> runs = null!;
+    // The indices in runs of the replacement text: the fragment's own pieces once written.
+    public HashSet<int> newRuns = new();
     public Color? newFg;
     // Wrap geometry: left = the match line's left margin; right mirrors the left
     // inset against the page width (never tighter than the paragraph's extent).

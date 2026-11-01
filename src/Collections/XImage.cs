@@ -153,7 +153,7 @@ public class XImage : ImageXObject
                 return (rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2], alpha?[i] ?? (byte)255);
             });
         }
-        var data = IO.Filters.ManagedDeflater.DeflateZlib(packed);
+        var data = IO.Filters.ManagedDeflater.DeflateSamples(packed);
         var dict = new PdfDictionary();
         dict.Set("Type", new PdfName("XObject"));
         dict.Set("Subtype", new PdfName("Image"));
@@ -300,9 +300,7 @@ public class XImage : ImageXObject
             if (ownPg is not null) pgIsTarget = IsTargetPage(ownPg);
 
             var kids = reader.Resolve(element.Get("K"));
-            var kidList = kids is PdfArray arr ? arr.ToList()
-                : kids is not null ? new List<PdfObject> { kids }
-                : new List<PdfObject>();
+            var kidList = kids switch { PdfArray arr => arr.ToList(), not null => new List<PdfObject> { kids }, _ => new List<PdfObject>() };
 
             // Match the element's own marked-content kids first (pre-order: an
             // element precedes its descendants), then recurse into child elements.
@@ -454,32 +452,21 @@ public class XImage : ImageXObject
     /// <summary>Write the image bytes to a stream re-encoded as <paramref name="format"/>.</summary>
     public new void Save(Stream stream, System.Drawing.Imaging.ImageFormat format) => base.Save(stream, format);
 
-    /// <summary>Write the image re-encoded as the given <see cref="Aspose.Pdf.Drawing.ImageFormat"/>.
-    /// TIFF is encoded directly from the decoded pixels (the System.Drawing-format path has no
-    /// TIFF writer); other formats route through the existing GDI-format overload.</summary>
+    /// <summary>Write the image re-encoded as the given <see cref="Aspose.Pdf.Drawing.ImageFormat"/>,
+    /// through the GDI-format overload.</summary>
     public void Save(Stream stream, Aspose.Pdf.Drawing.ImageFormat format)
-    {
-        if (format == Aspose.Pdf.Drawing.ImageFormat.Tiff)
-        {
-            var getter = GetPixelSource();
-            if (getter is not null)
-            {
-                int w = Width, h = Height;
-                var rgba = new byte[w * h * 4];
-                for (int y = 0; y < h; y++)
-                    for (int x = 0; x < w; x++)
-                    {
-                        var (r, g, b) = getter(x, y);
-                        int o = (y * w + x) * 4;
-                        rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b; rgba[o + 3] = 255;
-                    }
-                Aspose.Pdf.Devices.TiffDevice.EncodeRgbaImage(rgba, w, h, stream,
-                    Aspose.Pdf.Devices.CompressionType.LZW);
-                return;
-            }
-        }
-        base.Save(stream, ToGdiImageFormat(format));
-    }
+        => base.Save(stream, ToGdiImageFormat(format));
+
+#pragma warning restore CA1416
+
+    /// <summary>Write the image re-encoded as <paramref name="format"/>, with <paramref name="resolution"/> (dpi)
+    /// written as the file's density; the pixels are the image's own.</summary>
+    public void Save(Stream stream, System.Drawing.Imaging.ImageFormat format, int resolution)
+        => SaveAtResolution(stream, format, resolution);
+
+    /// <summary>Write the image as <see cref="Save(Stream)"/> does, with <paramref name="resolution"/> (dpi)
+    /// written as the file's density; the pixels are the image's own.</summary>
+    public void Save(Stream stream, int resolution) => SaveAtResolution(stream, null, resolution);
 
 #pragma warning disable CA1416 // System.Drawing.Imaging.ImageFormat members are Windows-gated; the base writer only branches on the format's GUID.
     private static System.Drawing.Imaging.ImageFormat ToGdiImageFormat(Aspose.Pdf.Drawing.ImageFormat format) => format switch
@@ -490,24 +477,11 @@ public class XImage : ImageXObject
         Aspose.Pdf.Drawing.ImageFormat.Tiff => System.Drawing.Imaging.ImageFormat.Tiff,
         _ => System.Drawing.Imaging.ImageFormat.Png,
     };
-#pragma warning restore CA1416
 
-    /// <summary>Write the image bytes to a stream re-encoded as <paramref name="format"/> at the supplied resolution. Resolution is recorded but the underlying writer does not currently scale.</summary>
-    public void Save(Stream stream, System.Drawing.Imaging.ImageFormat format, int resolution)
-    {
-        _ = resolution;
-        base.Save(stream, format);
-    }
-
-    /// <summary>Write the image bytes to a stream at the supplied resolution. Resolution is recorded but the underlying writer does not currently scale.</summary>
-    public void Save(Stream stream, int resolution)
-    {
-        _ = resolution;
-        base.Save(stream);
-    }
-
-    /// <summary>Return the image bytes as a seekable stream.</summary>
-    public Stream ToStream() => new MemoryStream(GetDecodedData());
+    /// <summary>Return the image as an image file in a seekable stream: a JPEG image's own codestream,
+    /// any other image as PNG. The filter-decoded samples carry no header, so no reader - not even
+    /// <see cref="ImageCollection.Replace(int, Stream)"/> - can tell what picture they hold.</summary>
+    public Stream ToStream() => new MemoryStream(GetJpegBytes() ?? ToPng());
 
     /// <summary>
     /// Attach alternative text to this image via the page's structure tree.

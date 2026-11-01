@@ -33,7 +33,7 @@ internal sealed partial class PsInterpreter
         Def("findfont", i => i.Push(i.FindFontByName(i.PopName())));
         Def("scalefont", ScaleFontOperator);
         Def("makefont", MakeFontOperator);
-        Def("setfont", i => i.Graphics.State.Font = i.InstanceOf(i.Pop()));
+        Def("setfont", i => i.Graphics.State.Font = PsInterpreter.InstanceOf(i.Pop()));
         Def("currentfont", i => i.Push(CurrentFontValue(i)));
         Def("rootfont", i => i.Push(RootFontValue(i)));
         Def("selectfont", SelectFontOperator);
@@ -162,10 +162,10 @@ internal sealed partial class PsInterpreter
 
     /// <summary>Read a font operand back as an instance, keeping the scale a previous
     /// <c>scalefont</c> stored on the dictionary.</summary>
-    private PsFontInstance InstanceOf(PsValue value)
+    private static PsFontInstance InstanceOf(PsValue value)
     {
         var dict = value.AsDictionary;
-        if (dict is null) throw new PsErrorSignal("typecheck");
+        if (dict is null) throw new PsErrorException("typecheck");
         var name = dict.TryGet("FontName", out var n) ? n.Text : null;
         var face = dict.TryGet(FaceKey, out var f) ? f.Text : null;
         var matrix = dict.TryGet("PsToPdfScale", out var m) && m.AsArray != null
@@ -198,19 +198,19 @@ internal sealed partial class PsInterpreter
     private static void ScaleFontOperator(PsInterpreter i)
     {
         var size = i.PopNumber();
-        i.Push(ScaledFont(i, i.Pop(), PsMatrix.Scaling(size, size)));
+        i.Push(ScaledFont(i.Pop(), PsMatrix.Scaling(size, size)));
     }
 
     private static void MakeFontOperator(PsInterpreter i)
     {
         var matrix = MatrixFromArray(i.PopArray());
-        i.Push(ScaledFont(i, i.Pop(), matrix));
+        i.Push(ScaledFont(i.Pop(), matrix));
     }
 
-    private static PsValue ScaledFont(PsInterpreter i, PsValue font, PsMatrix by)
+    private static PsValue ScaledFont(PsValue font, PsMatrix by)
     {
         var source = font.AsDictionary;
-        if (source is null) throw new PsErrorSignal("typecheck");
+        if (source is null) throw new PsErrorException("typecheck");
         var copy = new PsDictionary(source.Count);
         foreach (var pair in source.Entries) copy.Put(pair.Key, pair.Value);
         var current = source.TryGet("PsToPdfScale", out var m) && m.AsArray != null
@@ -228,7 +228,7 @@ internal sealed partial class PsInterpreter
         var matrix = scale.Type == PsType.Array
             ? MatrixFromArray(scale.AsArray)
             : PsMatrix.Scaling(scale.Number, scale.Number);
-        i.Graphics.State.Font = i.InstanceOf(ScaledFont(i, font, matrix));
+        i.Graphics.State.Font = PsInterpreter.InstanceOf(ScaledFont(font, matrix));
     }
 
     /// <summary><c>definefont</c> registers a dictionary under a name and hands back
@@ -249,8 +249,8 @@ internal sealed partial class PsInterpreter
     {
         var g = i.Graphics;
         var font = g.State.Font;
-        if (!g.TryGetCurrentPoint(out var x, out var y)) throw new PsErrorSignal("nocurrentpoint");
-        if (font is null) throw new PsErrorSignal("invalidfont");
+        if (!g.TryGetCurrentPoint(out var x, out var y)) throw new PsErrorException("nocurrentpoint");
+        if (font is null) throw new PsErrorException("invalidfont");
         if (PsCompositeFonts.Applies(font))
         {
             g.MoveTo(x + PsCompositeFonts.Show(i, font, text, x, y), y);
@@ -384,7 +384,7 @@ internal sealed partial class PsInterpreter
         for (var k = 0; k < text.Length; k++)
         {
             var one = new PsString(new[] { text[k] });
-            if (!g.TryGetCurrentPoint(out var x, out var y)) throw new PsErrorSignal("nocurrentpoint");
+            if (!g.TryGetCurrentPoint(out var x, out var y)) throw new PsErrorException("nocurrentpoint");
             ShowString(i, one);
             var dx = ReadDisplacement(displacements, k * perChar, readX);
             var dy = ReadDisplacement(displacements, k * perChar + (readX ? 1 : 0), readY);
@@ -462,7 +462,7 @@ internal sealed partial class PsInterpreter
     {
         var text = i.PopString();
         var font = i.Graphics.State.Font;
-        if (font is null) throw new PsErrorSignal("invalidfont");
+        if (font is null) throw new PsErrorException("invalidfont");
         i.Push(i.MeasureString(font, text));
         i.Push(0);
     }
@@ -475,9 +475,9 @@ internal sealed partial class PsInterpreter
         i.PopBool();
         var text = i.PopString();
         var font = i.Graphics.State.Font;
-        if (font is null) throw new PsErrorSignal("invalidfont");
+        if (font is null) throw new PsErrorException("invalidfont");
         if (!i.Graphics.TryGetCurrentPoint(out var x, out var y))
-            throw new PsErrorSignal("nocurrentpoint");
+            throw new PsErrorException("nocurrentpoint");
         // Unlike showing, this needs the letter SHAPES, so a standard face is outlined
         // too. The search folders come first; a standard face they do not hold is
         // outlined from the face the library already substitutes for that name when it
@@ -662,11 +662,11 @@ internal sealed partial class PsInterpreter
     public PsFontProgram? ProgramFor(string? name)
     {
         if (string.IsNullOrEmpty(name)) return null;
-        if (_programs.TryGetValue(name!, out var cached)) return cached;
+        if (_programs.TryGetValue(name, out var cached)) return cached;
         var path = Fonts?.FindProgram(name);
         var program = path is null ? null : PsFontProgram.Load(path);
         if (program != null) program.NamesArePositions = PsEncodings.IsSymbolic(name);
-        _programs[name!] = program;
+        _programs[name] = program;
         return program;
     }
 

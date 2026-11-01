@@ -48,7 +48,7 @@ public class AutoTagFormulaTests
     };
 
     private static string Body(double top)
-        => $"BT /F1 12 Tf 72 {top} Td " + string.Join(" 0 -14 Td ", BodyLines.Select(l => $"({l}) Tj")) + " ET\n";
+        => FormattableString.Invariant($"BT /F1 12 Tf 72 {top} Td ") + string.Join(" 0 -14 Td ", BodyLines.Select(l => $"({l}) Tj")) + " ET\n";
 
     /// <summary>A centred formula in the math face with a raised index and a lowered one, numbered at the margin.</summary>
     private const string Formula =
@@ -66,6 +66,18 @@ public class AutoTagFormulaTests
     }
 
     private static string Text(StructureElement el) => string.Concat(el.GetMarkedContent(true).Select(i => i.Text));
+
+    [Fact]
+    public void AProseLineWithAParagraphNumberOpeningItAndANoteNumberAfterAWordIsNoFormula()
+    {
+        // A law's paragraph: its number raised at the margin, a note's number raised after "StGB", prose between them.
+        var paragraph = "BT /F1 8 Tf 72 653 Td (1) Tj ET\nBT /F1 12 Tf 78 650 Td (Der Bundesgerichtsbarkeit unterstehen folgende Straftaten des StGB) Tj ET\n"
+                        + "BT /F1 8 Tf 389 655 Td (5) Tj ET\nBT /F1 12 Tf 394 650 Td (:) Tj ET\n";
+        using var doc = Tag(Build(Body(720) + paragraph + Body(600)));
+
+        Assert.Empty(doc.TaggedContent.StructTreeRootElement.FindElements<FormulaElement>(true));
+        Assert.Contains(doc.TaggedContent.StructTreeRootElement.FindElements<ParagraphElement>(true), p => Text(p).Contains("unterstehen folgende Straftaten des StGB"));
+    }
 
     [Fact]
     public void ADisplayFormulaIsAFormulaStatingItsBox()
@@ -113,7 +125,7 @@ public class AutoTagFormulaTests
     {
         // Two columns of 9 pt text: the left one's last line runs full and ends no sentence, the right one opens
         // with a sum - its first line in lower case - and goes on with text.
-        static string Line(double x, double y, string text) => $"BT /F1 9 Tf {x} {y} Td ({text}) Tj ET\n";
+        static string Line(double x, double y, string text) => FormattableString.Invariant($"BT /F1 9 Tf {x} {y} Td ({text}) Tj ET\n");
         const string full = "the survey went on over the hills and along the river";
         var left = string.Concat(Enumerable.Range(0, 6).Select(i => Line(42, 700 - 12 * i, full)));
         var sum = Line(380, 700, "line 5d  \\(column 1\\)") + Line(360, 688, "x      0.009") + "0.5 w 360 686 m 410 686 l S\n"

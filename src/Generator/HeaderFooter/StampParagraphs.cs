@@ -37,13 +37,20 @@ public sealed partial class HeaderFooter
                     || (member is TextFragment mtf
                         && (mtf.IsInLineParagraph || FragmentLeading(mtf) > 0)))
                 { hf.probedFooterBand = false; break; }
-        hf.bodyBottom = hf.page.PageInfo?.Margin is { BottomTouched: true } bpm ? bpm.Bottom
-            : hf.document?.PageInfo?.Margin is { BottomTouched: true } bdm ? bdm.Bottom
-            : 72;
-        hf.y = hf.isHeader
-            ? hf.pageHeight - hf.mTop - hf.fontSize
-            : hf.probedFooterBand ? hf.bodyBottom - hf.mTop
-            : hf.mBottom + hf.fontSize;
+        // A footer holding an HTML member is that same top-down stack whatever its other
+        // members and its bottom margin (probed: HTML then text, text then HTML, two HTML
+        // members, an image between, a bottom margin of 30 - every member hangs in its
+        // added order from the body's bottom margin); it used to stand its HTML on the
+        // footer margin under a text member added before it.
+        if (!hf.isHeader && !hf.probedFooterBand)
+            foreach (var member in Paragraphs)
+                if (member is HtmlFragment) { hf.probedFooterBand = true; break; }
+        if (hf.page.PageInfo?.Margin is { BottomTouched: true } bpm) hf.bodyBottom = bpm.Bottom;
+        else if (hf.document?.PageInfo?.Margin is { BottomTouched: true } bdm) hf.bodyBottom = bdm.Bottom;
+        else hf.bodyBottom = 72;
+        if (hf.isHeader) hf.y = hf.pageHeight - hf.mTop - hf.fontSize;
+        else if (hf.probedFooterBand) hf.y = hf.bodyBottom - hf.mTop;
+        else hf.y = hf.mBottom + hf.fontSize;
         hf.x = hf.mLeft;
         hf.firstParagraph = true;
         hf.footerLineTop = double.NaN;
@@ -58,6 +65,7 @@ public sealed partial class HeaderFooter
         // would otherwise drop its hyperlink on the floor.
         EmitNestedHyperlinks(hf.page, Paragraphs, hf.x, hf.y, hf.fontSize);
 
+        var bandContentStart = hf.page.ContentStreamCount;
         foreach (var para in Paragraphs)
         {
             // ── Image ──────────────────────────────────────────────────
@@ -83,7 +91,26 @@ public sealed partial class HeaderFooter
             // A bare table in the header/footer renders at the running y.
             if (para is Table tbl) { StampTable(hf, tbl); continue; }
 
+            // ── Graph ──────────────────────────────────────────────────
+            // A rule or other drawing in the band draws at the running y.
+            if (para is Drawing.Graph graph) { StampGraph(hf, graph); continue; }
+
             StampText(hf, para);
         }
+        if (hf.probedFooterBand && !IsClipExtraContent) LiftFooterOntoPage(hf, bandContentStart);
+    }
+
+    /// <summary>A footer stack taller than the room under the body's bottom margin is lifted to
+    /// stand on the page's bottom edge (the band's own bottom margin when it names one), so its
+    /// last members stay on the page instead of running off it; the band's content streams are
+    /// wrapped in one translation. A clipping band keeps its seat and loses what runs off.</summary>
+    private void LiftFooterOntoPage(StampParagraphsState hf, int bandContentStart)
+    {
+        var floor = Margin.BottomTouched ? Margin.Bottom : 0;
+        var lift = floor - Math.Min(hf.y, hf.footerInkBottom);
+        if (lift <= 0 || hf.page.ContentStreamCount <= bandContentStart) return;
+        hf.page.InsertContentStreamAt(bandContentStart, System.Text.Encoding.ASCII.GetBytes(
+            "q 1 0 0 1 0 " + lift.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " cm\n"));
+        hf.page.AddContentStream(System.Text.Encoding.ASCII.GetBytes("Q\n"));
     }
 }

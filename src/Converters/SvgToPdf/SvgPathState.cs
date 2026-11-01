@@ -14,7 +14,7 @@ internal static partial class SvgToPdfConverter
 /// invocation; never shared.</summary>
 private sealed class SvgPathState
 {
-    public System.Text.RegularExpressions.MatchCollection tokens = null!;
+    public SafeMatchCollection tokens = null!;
     public double cx;
     public double cy;
     public double sx;

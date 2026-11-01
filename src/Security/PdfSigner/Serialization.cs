@@ -23,7 +23,7 @@ public sealed partial class PdfSigner
         Write("<< ");
         foreach (var key in dict.Keys)
         {
-            Write($"/{key} ");
+            WriteKey(ms, key);
             var val = dict.Get(key)!;
 
             if (key == "Contents")
@@ -57,27 +57,24 @@ public sealed partial class PdfSigner
             case PdfBoolean b:
                 Write(b.Value ? "true" : "false");
                 break;
+            // The objects' own writers: invariant, and a real never in exponent form.
             case PdfInteger i:
-                Write(i.Value.ToString());
+                Write(i.ToString());
                 break;
             case PdfReal r:
-                Write(r.Value.ToString("G"));
+                Write(r.ToString());
                 break;
             case PdfString s when s.IsHex:
                 Write($"<{Compat.ToHexString(s.Value)}>");
                 break;
+            // Names and strings as every writer of the library serialises them: a name's space or
+            // delimiter as #XX - raw, "/Arial Bold" reads as a name and a stray key, and the page
+            // the update rewrites is lost - and a string's end-of-line bytes escaped.
             case PdfString s:
-                Write("(");
-                foreach (var c in s.Value)
-                {
-                    if (c is (byte)'(' or (byte)')' or (byte)'\\')
-                        ms.WriteByte((byte)'\\');
-                    ms.WriteByte(c);
-                }
-                Write(")");
+                PdfWriter.WriteLiteralString(ms, s.Value);
                 break;
             case PdfName n:
-                Write($"/{n.Value}");
+                PdfWriter.WriteNameToken(ms, n.Value);
                 break;
             case PdfArray arr:
                 Write("[");
@@ -92,7 +89,7 @@ public sealed partial class PdfSigner
                 Write("<< ");
                 foreach (var key in d.Keys)
                 {
-                    Write($"/{key} ");
+                    WriteKey(ms, key);
                     SerializeValue(ms, d.Get(key)!);
                     Write(" ");
                 }
@@ -102,6 +99,13 @@ public sealed partial class PdfSigner
                 Write($"{iref.ObjectNumber} {iref.Generation} R");
                 break;
         }
+    }
+
+    /// <summary>A dictionary key, escaped as any name is, and the space before its value.</summary>
+    private static void WriteKey(MemoryStream ms, string key)
+    {
+        PdfWriter.WriteNameToken(ms, key);
+        ms.WriteByte((byte)' ');
     }
 
     /// <summary>zlib-deflate a stream payload for an appended object.</summary>
@@ -215,10 +219,7 @@ public sealed partial class PdfSigner
     {
         // Check if all characters fit in Latin-1 (0x00-0xFF)
         var needsUnicode = false;
-        foreach (var ch in text)
-        {
-            if (ch > 0xFF) { needsUnicode = true; break; }
-        }
+        if (text.Any(ch => ch > 0xFF)) { needsUnicode = true; }
 
         if (!needsUnicode)
             return new PdfString(Compat.Latin1.GetBytes(text));
@@ -301,7 +302,7 @@ public sealed partial class PdfSigner
         foreach (var key in dict.Keys)
         {
             if (key == "__StreamData") continue;
-            Write($"/{key} ");
+            WriteKey(ms, key);
             SerializeValue(ms, dict.Get(key)!);
             Write(" ");
         }

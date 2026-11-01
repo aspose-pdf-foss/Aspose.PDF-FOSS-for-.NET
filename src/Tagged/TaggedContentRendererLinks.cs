@@ -38,7 +38,7 @@ internal static partial class TaggedContentRenderer
                     annot.Set("A", action);
                 }
                 if (!string.IsNullOrEmpty(link.AlternateDescriptions))
-                    annot.Set("Contents", new PdfString(System.Text.Encoding.UTF8.GetBytes(link.AlternateDescriptions!)));
+                    annot.Set("Contents", Aspose.Pdf.Forms.Field.EncodePdfTextString(link.AlternateDescriptions));
 
                 var annotNum = _doc.AllocateObjectNumber();
                 _doc.AddNewObject(annotNum, annot);

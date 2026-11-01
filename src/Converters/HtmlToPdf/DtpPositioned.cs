@@ -17,13 +17,13 @@ internal static partial class HtmlToPdfConverter
         dp.html = html;
         dp.pageW = pageW;
         dp.pageH = pageH;
-        if (!Regex.IsMatch(dp.html, @"<body\b[^>]*\bid\s*=\s*[""']page[""']", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(dp.html, @"<body\b[^>]*\bid\s*=\s*[""']page[""']", RegexOptions.IgnoreCase))
             return null;
         dp.band = dp.pageH - 2 * DtpVertMarginPt;
         if (dp.band <= 0) return null;
         if (!ParseDtpStyles(dp)) return null;
 
-        dp.bodyM = Regex.Match(dp.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
+        dp.bodyM = SafeRegex.Match(dp.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
         if (!dp.bodyM.Success) return null;
         dp.bodyHtml = dp.html[(dp.bodyM.Index + dp.bodyM.Length)..];
         dp.inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -32,7 +32,7 @@ internal static partial class HtmlToPdfConverter
         dp.fontDict = new Core.PdfDictionary();
         dp.pageOps = new List<List<object>>();
         dp.pos = 0;
-        dp.tagRx = new Regex(@"<(div|input|img)\b", RegexOptions.IgnoreCase);
+        dp.tagRx = new Regex(@"<(div|input|img)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         while (true)
         {
             if (!WalkDtpTag(dp)) break;

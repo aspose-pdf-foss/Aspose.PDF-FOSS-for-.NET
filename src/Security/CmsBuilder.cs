@@ -14,6 +14,9 @@ internal static partial class CmsBuilder
     private const string OidSha256 = "2.16.840.1.101.3.4.2.1";
     private const string OidSha384 = "2.16.840.1.101.3.4.2.2";
     private const string OidSha512 = "2.16.840.1.101.3.4.2.3";
+    // id-aa-signatureTimeStampToken (RFC 3161 appendix A): an unsigned attribute of the
+    // SignerInfo holding a TSA token over the signature value.
+    private const string OidSignatureTimeStampToken = "1.2.840.113549.1.9.16.2.14";
 
     /// <summary>Hash <paramref name="data"/> with the algorithm named by a CMS
     /// digest OID (SHA-256/384/512), falling back to SHA-1 for the legacy OID or
@@ -99,10 +102,15 @@ internal static partial class CmsBuilder
 
     /// <summary>
     /// Create a PKCS#7 detached signature over a SHA-256 hash.
-    /// Returns DER-encoded ContentInfo containing SignedData.
+    /// Returns DER-encoded ContentInfo containing SignedData. When
+    /// <paramref name="timestamp"/> is given it is handed the signature value and returns
+    /// an RFC 3161 token over it, carried as the signer's signature-timestamp attribute.
+    /// When <paramref name="encapsulatedContent"/> is given it is carried as the eContent
+    /// (and <paramref name="hash"/> is its digest): the enveloping adbe.pkcs7.sha1 form.
     /// </summary>
     public static byte[] CreateDetachedSignature(byte[] hash, PdfCertificate certificate,
-        DigestHashAlgorithm digest = DigestHashAlgorithm.Sha256, Forms.SignHash? signer = null)
+        DigestHashAlgorithm digest = DigestHashAlgorithm.Sha256, Forms.SignHash? signer = null,
+        Func<byte[], byte[]>? timestamp = null, byte[]? encapsulatedContent = null)
     {
         // Sign the hash (SHA-256 by default, SHA-1 for adbe.pkcs7.sha1). RSA uses the
         // hand-rolled PKCS#1 v1.5 path; DSA/ECDSA delegate to the platform key (r,s emitted
@@ -112,6 +120,7 @@ internal static partial class CmsBuilder
             ? SignHash(hash, certificate, digest)
             : SignHashExternally(hash, certificate, digest, signer);
         var digestOid = DigestOid(digest);
+        var token = timestamp?.Invoke(signature);
 
         var w = new Asn1Writer();
         // ContentInfo { contentType: signedData, content: [0] SignedData }
@@ -136,11 +145,13 @@ internal static partial class CmsBuilder
                         });
                     });
 
-                    // encapContentInfo: ContentInfo { contentType: data }
-                    // (no content — detached signature)
+                    // encapContentInfo: ContentInfo { contentType: data, [0] EXPLICIT content }
+                    // (no content in a detached signature)
                     sd.WriteSequence(eci =>
                     {
                         eci.WriteOid(OidData);
+                        if (encapsulatedContent is not null)
+                            eci.WriteContextConstructed(0, content => content.WriteOctetString(encapsulatedContent));
                     });
 
                     // certificates: [0] IMPLICIT SET { certificate }
@@ -150,7 +161,7 @@ internal static partial class CmsBuilder
                     });
 
                     // signerInfos: SET { SignerInfo }
-                    WriteSignerInfos(sd, certificate, digestOid, sigAlgOid, sigAlgHasNullParams, signature);
+                    WriteSignerInfos(sd, certificate, digestOid, sigAlgOid, sigAlgHasNullParams, signature, token);
                 });
             });
         });
@@ -158,10 +169,24 @@ internal static partial class CmsBuilder
         return w.ToArray();
     }
 
+    /// <summary>The /Contents of an adbe.x509.rsa_sha1 signature: the bare RSA PKCS#1 v1.5
+    /// signature of <paramref name="sha1Hash"/>, as a DER OCTET STRING (ISO 32000-1 12.8.3.2).
+    /// An external signer takes the key's place over the same hash.</summary>
+    public static byte[] CreateRsaSha1Signature(byte[] sha1Hash, PdfCertificate certificate, Forms.SignHash? signer)
+    {
+        var signature = signer is null
+            ? SignHashWithKey(sha1Hash, certificate, DigestHashAlgorithm.Sha1)
+            : signer(sha1Hash, DigestHashAlgorithm.Sha1);
+        var w = new Asn1Writer();
+        w.WriteOctetString(signature);
+        return w.ToArray();
+    }
+
     /// <summary>signerInfos: SET { SignerInfo } - version 1, the issuer-and-serial sid, the
-    /// digest and signature algorithm identifiers and the signature itself.</summary>
+    /// digest and signature algorithm identifiers, the signature itself and, when a timestamp
+    /// token is given, the unsigned attribute carrying it.</summary>
     private static void WriteSignerInfos(Asn1Writer sd, PdfCertificate certificate, string digestOid,
-        string sigAlgOid, bool sigAlgHasNullParams, byte[] signature)
+        string sigAlgOid, bool sigAlgHasNullParams, byte[] signature, byte[]? timestampToken)
     {
         sd.WriteSet(infos =>
         {
@@ -195,6 +220,14 @@ internal static partial class CmsBuilder
 
                 // signature
                 si.WriteOctetString(signature);
+
+                // unsignedAttrs: [1] IMPLICIT SET { Attribute { signatureTimeStampToken, SET { token } } }
+                if (timestampToken is not null)
+                    si.WriteContextConstructed(1, attrs => attrs.WriteSequence(attr =>
+                    {
+                        attr.WriteOid(OidSignatureTimeStampToken);
+                        attr.WriteSet(values => values.WriteRaw(timestampToken));
+                    }));
             });
         });
     }
@@ -303,7 +336,7 @@ internal static partial class CmsBuilder
                 return dsa.VerifySignature(z, p1363);
             }
         }
-        catch { }
+        catch { /* a signature that does not verify cleanly is invalid - false */ }
         return false;
     }
 

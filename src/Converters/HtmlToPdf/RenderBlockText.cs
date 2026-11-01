@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -6,17 +7,19 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>The text stage of a block render: padding, line layout and the trailing cursor state, verbatim.</summary>
-    private static void RenderBlockText(ConvertState cv, RenderBlockState rb, HtmlLoadOptions? options, List<byte[]> inlineSvgs, Block block)
+    private static void RenderBlockText(ConvertState cv, RenderBlockState rb, HtmlLoadOptions? options, Block block)
     {
         // Padding is box space, not margin — it never collapses.
         var yBeforeSpacing = cv.flow.y;
         ApplyBlockTopSpacing(cv, rb, block);
+        // (a control taller than the text of its line stands the difference above it)
+        if (block.CtlSeat is { LeadDropPt: > 0 } ctlSeat) cv.flow.y -= ctlSeat.LeadDropPt;
         ResolveBlockWidth(cv, rb, block);
         WrapBlockLines(cv, rb, block);
         // ASPOSE_TRACE_SEAT=1: the vertical chain of every text block on the sheet-typography flow.
         if ((cv.profile.sheetTypographyDoc || cv.profile.escapedAttrDoc || cv.profile.uaStdSerif || cv.profile.wordMailDoc) && Environment.GetEnvironmentVariable("ASPOSE_TRACE_SEAT") == "1")
-            Console.WriteLine(FormattableString.Invariant(
-                $"[seat] cw={cv.flow.contentWidth:0.##} avail={rb.availWidth:0.##} li={block.LeftIndent:0.##} ri={block.RightInsetPt:0.##} top={cv.pageHeight - cv.marginTop:0.##} entry={rb.yAtBlockEntry:0.##} afterDrop={yBeforeSpacing:0.##} seat={cv.flow.y:0.##} fs={rb.metrics.blockFontSize:0.##} lh={rb.metrics.lineHeight:0.##} mt={block.MarginTop:0.##} mb={block.MarginBottom:0.##} prevLh={cv.flow.prevFlowLineHeight:0.##} prevFs={cv.flow.prevFlowFontSize:0.##} prevText={cv.flow.prevBlockWasText} hb={cv.flow.lastWasHardBreak} fam={block.FontFamily} mw={block.MaxWidthPt:0.##} band={rb.metrics.bandFace} qw={cv.quirksWrapW:0.##} fl={rb.floatLines} ua={cv.uaFlow} mf={cv.profile.metricFlow} md={rb.metrics.metricDrop:0.#} mface={rb.metrics.metricMeasureFace} pts={cv.profile.ptStyledFragment} l0w={(rb.metrics.lines.Length > 0 && !string.IsNullOrEmpty(block.FontFamily) ? MeasureFaceText(block.FontFamily!, rb.metrics.lines[0], rb.metrics.blockFontSize) : 0):0.#} lines={rb.metrics.lines.Length} '{(block.Text.Length > 24 ? block.Text[..24] : block.Text)}'"));
+            Console.WriteLine(Compat.Format(CultureInfo.InvariantCulture,
+                $"[seat] cw={cv.flow.contentWidth:0.##} avail={rb.availWidth:0.##} li={block.LeftIndent:0.##} ri={block.RightInsetPt:0.##} top={cv.pageHeight - cv.marginTop:0.##} entry={rb.yAtBlockEntry:0.##} afterDrop={yBeforeSpacing:0.##} seat={cv.flow.y:0.##} fs={rb.metrics.blockFontSize:0.##} lh={rb.metrics.lineHeight:0.##} mt={block.MarginTop:0.##} mb={block.MarginBottom:0.##} prevLh={cv.flow.prevFlowLineHeight:0.##} prevFs={cv.flow.prevFlowFontSize:0.##} prevText={cv.flow.prevBlockWasText} hb={cv.flow.lastWasHardBreak} fam={block.FontFamily} mw={block.MaxWidthPt:0.##} band={rb.metrics.bandFace} qw={cv.quirksWrapW:0.##} fl={rb.floatLines} ua={cv.uaFlow} mf={cv.profile.metricFlow} md={rb.metrics.metricDrop:0.#} mface={rb.metrics.metricMeasureFace} pts={cv.profile.ptStyledFragment} l0w={(rb.metrics.lines.Length > 0 && !string.IsNullOrEmpty(block.FontFamily) ? MeasureFaceText(block.FontFamily, rb.metrics.lines[0], rb.metrics.blockFontSize) : 0):0.#} lines={rb.metrics.lines.Length} '{(block.Text.Length > 24 ? block.Text[..24] : block.Text)}'"));
         ResolveBackgroundImage(block, options);
         WriteBlockLines(cv, rb, block);
         // The sheet-typography flow: the lines stepped one plain ascent side past the last
@@ -32,10 +35,13 @@ internal static partial class HtmlToPdfConverter
         cv.flow.y -= block.MarginBottom;
         // a label gives its row's height back — the span beside it advances
         // (…a field label the LAST of its lines only: the value seats on the inline-block's baseline)
-        if (block.NoAdvanceY) cv.flow.y = cv.profile.dwFormDoc ? rb.yAtBlockEntry
-            : block.FieldLabel && rb.metrics.lines.Length > 1
-                ? rb.metrics.yBeforeBlockLines - (rb.metrics.lines.Length - 1) * rb.metrics.lineHeight
-                : rb.metrics.yBeforeBlockLines;
+        if (block.NoAdvanceY)
+        {
+            if (cv.profile.dwFormDoc) cv.flow.y = rb.yAtBlockEntry;
+            else if (block.FieldLabel && rb.metrics.lines.Length > 1)
+                cv.flow.y = rb.metrics.yBeforeBlockLines - (rb.metrics.lines.Length - 1) * rb.metrics.lineHeight;
+            else cv.flow.y = rb.metrics.yBeforeBlockLines;
+        }
         cv.flow.prevFlowMarginBottom = block.MarginBottom;
         cv.flow.prevBlockWasBlank = string.IsNullOrWhiteSpace(block.Text.Replace('\u00A0', ' '));
         cv.flow.prevFlowLineHeight = rb.metrics.lineHeight;

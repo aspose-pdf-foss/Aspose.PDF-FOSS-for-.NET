@@ -6,9 +6,9 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
 // Covering letter: 
-    private static List<string> BrLines(CoveringLetterState cl, string frag)
+    private static List<string> BrLines(string frag)
     {
-        var parts = Regex.Split(frag, @"<br\s*/?>", RegexOptions.IgnoreCase)
+        var parts = SafeRegex.Split(frag, @"<br\s*/?>", RegexOptions.IgnoreCase)
             .Select(LtFlat).ToList();
         while (parts.Count > 0 && parts[^1].Length == 0) parts.RemoveAt(parts.Count - 1);
         return parts;
@@ -46,7 +46,7 @@ internal static partial class HtmlToPdfConverter
         cl.prevBottom = marginBottom;
     }
 
-    private static string ResFor(CoveringLetterState cl, string face) => face switch
+    private static string CoveringLetterResFor(string face) => face switch
     {
         "Arial Bold" => "F9",
         "Arial Italic" => "F11",
@@ -54,9 +54,9 @@ internal static partial class HtmlToPdfConverter
         _ => "F8",
     };
 
-    private static void Stream(CoveringLetterState cl, Page dst, string s) => dst.AddContentStream(Encoding.ASCII.GetBytes(s));
+    private static void Stream(Page dst, string s) => dst.AddContentStream(Encoding.ASCII.GetBytes(s));
 
-    private static double SegsW(CoveringLetterState cl, List<OsRun> segs)
+    private static double SegsW(List<OsRun> segs)
     {
         double w = 0;
         foreach (var r in segs) w += MeasureFaceText(r.Face, r.Text, r.Fs);
@@ -65,9 +65,9 @@ internal static partial class HtmlToPdfConverter
 
     private static void EmitRun(CoveringLetterState cl, Page dst, OsRun r, double x, double yTd)
     {
-        EmitPositionedRun(dst, ResFor(cl, r.Face), r.Fs, x, cl.pageHeight - yTd + r.Rise, r.Text);
+        EmitPositionedRun(dst, CoveringLetterResFor(r.Face), r.Fs, x, cl.pageHeight - yTd + r.Rise, r.Text);
         if (r.Under)
-            Stream(cl, dst, Compat.Format(cl.inv,
+            Stream(dst, Compat.Format(cl.inv,
                 $"q 1.05 w {x:F2} {cl.pageHeight - yTd - 1.05:F2} m {x + MeasureFaceText(r.Face, r.Text, r.Fs):F2} {cl.pageHeight - yTd - 1.05:F2} l S Q\n"));
     }
 
@@ -77,7 +77,7 @@ internal static partial class HtmlToPdfConverter
         if (ln.JustifyTo > 0)
         {
             // stretch the word spaces so the last glyph seats on the band edge
-            var natural = SegsW(cl, ln.Segs);
+            var natural = SegsW(ln.Segs);
             var spaces = ln.Segs.Sum(s => s.Text.Count(c => c == ' '));
             var extra = ln.JustifyTo - ln.X - natural;
             if (spaces > 0 && extra > 0.01)

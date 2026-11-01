@@ -10,13 +10,13 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Bootstrap rows: one matched construct - heading, row or panel - emitted.</summary>
     private static bool EmitBootstrapConstruct(BootstrapRowsState bs)
     {
-        var m = bs.construct.Match(bs.html, bs.pos);
+        var m = SafeRegex.Match(bs.construct, bs.html, bs.pos);
         if (!m.Success || bs.yTd > bs.limit) return false;
         bs.pos = m.Index + m.Length;
         if (m.Groups["h3"].Success)
         {
             Advance(bs, BrH3MarginTop);
-            var txt = Flat(bs, m.Groups["h3"].Value);
+            var txt = Flat(m.Groups["h3"].Value);
             var w = MeasureFaceText(bs.face, txt, BrH3FontPt);
             EmitRun(bs, "FA", BrH3FontPt, (bs.pageWidth - w) / 2, bs.yTd + bs.dropH3, txt, BrText);
             bs.yTd += BrH3LineH;
@@ -33,7 +33,7 @@ internal static partial class HtmlToPdfConverter
         else if (m.Groups["pc"].Success)
         {
             Advance(bs, 0);
-            var txt = Flat(bs, m.Groups["pc"].Value);
+            var txt = Flat(m.Groups["pc"].Value);
             var w = MeasureFaceText(bs.face, txt, BrFontPt);
             EmitRun(bs, "FA", BrFontPt, (bs.pageWidth - w) / 2, bs.yTd + bs.drop, txt, BrText);
             bs.yTd += BrLineH;

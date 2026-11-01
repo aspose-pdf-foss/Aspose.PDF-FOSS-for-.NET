@@ -84,7 +84,7 @@ internal static partial class SvgToPdfConverter
             {
                 var points = elem.GetAttribute("points");
                 if (string.IsNullOrEmpty(points)) break;
-                var nums = Regex.Matches(points, @"-?[\d.]+(?:[eE][+-]?\d+)?").Cast<Match>()
+                var nums = SafeRegex.Matches(points, @"-?[\d.]+(?:[eE][+-]?\d+)?").Cast<Match>()
                     .Select(m => double.Parse(m.Value, CultureInfo.InvariantCulture)).ToArray();
                 if (nums.Length < 4) break;
                 sb.Append($"{F(nums[0])} {F(nums[1])} m ");

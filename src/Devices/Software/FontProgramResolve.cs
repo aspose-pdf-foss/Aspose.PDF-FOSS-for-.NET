@@ -40,7 +40,7 @@ public sealed partial class SoftwarePageRenderer
             // glyph ids is the only thing available.
             if (!isClassicSubset && RegistryOrderingOf(fontDict, reader) is null)
             {
-                var systemTtf = SystemFontResolver.Resolve(baseFont);
+                var systemTtf = SystemFontResolver.ResolveDocumentFont(baseFont);
                 if (systemTtf is not null)
                     parser = new GlyphOutlineParser(systemTtf);
             }
@@ -81,20 +81,27 @@ public sealed partial class SoftwarePageRenderer
                 parser = LoadCharstringFont(ttfData, convertFontsToUnicodeTtf);
             else if (LooksLikeSfnt(ttfData) is (true, true))
                 parser = LoadCharstringFont(ttfData, convertFontsToUnicodeTtf);
-            else if (ttfData.Length > 0)
-                parser = new GlyphOutlineParser(ttfData);
+            // A TrueType program that parses to no outlines (damaged, truncated) is no program: the font
+            // keeps the face passed in, so the host substitute draws its text instead of nothing.
+            else if (ttfData.Length > 0 && new GlyphOutlineParser(ttfData) is { HasGlyphOutlines: true } outlines)
+                parser = outlines;
         }
 
         // CFF embedding: /FontFile3 with /Subtype /Type1C, /CIDFontType0C, or
         // /OpenType. CffGlyphSource unwraps the OpenType SFNT container if
-        // present before parsing the CFF structure.
+        // present before parsing the CFF structure. An /OpenType program whose
+        // outlines are TrueType (a glyf sfnt, not an 'OTTO' one) is a TrueType font
+        // under another key and is parsed as such, instead of as a CFF structure it
+        // does not have, which painted no glyph at all.
         if (parser is null)
         {
             var fontFile3 = reader.ResolveStream(descriptor.Get("FontFile3"));
             if (fontFile3 is not null)
             {
                 var cffData = reader.DecodeStream(fontFile3);
-                if (cffData.Length > 0)
+                if (LooksLikeSfnt(cffData) is (true, false))
+                    parser = new GlyphOutlineParser(cffData);
+                else if (cffData.Length > 0)
                     parser = LoadCharstringFont(cffData, convertFontsToUnicodeTtf);
             }
         }

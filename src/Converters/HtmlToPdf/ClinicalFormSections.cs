@@ -106,7 +106,7 @@ internal static partial class HtmlToPdfConverter
         cf.boldParts = new string[4]; cf.restParts = new string[4];
         for (var c = 0; c < 4; c++)
         {
-            var mSplit = Regex.Match(cf.headCells[c], @"^(\S+\s?\S*?:)\s*(.*)$");
+            var mSplit = SafeRegex.Match(cf.headCells[c], @"^(\S+\s?\S*?:)\s*(.*)$");
             cf.boldParts[c] = mSplit.Success ? mSplit.Groups[1].Value : cf.headCells[c];
             cf.restParts[c] = mSplit.Success ? mSplit.Groups[2].Value : "";
         }
@@ -156,37 +156,37 @@ internal static partial class HtmlToPdfConverter
             ?? Text.SystemFontResolver.Resolve("Segoe UI Italic");
         if (cf.segoe is null || cf.segoeBold is null || cf.segoeItalic is null) return false;
 
-        cf.bodyM = Regex.Match(html, @"<body[^>]*>([\s\S]*)</body>", RegexOptions.IgnoreCase);
+        cf.bodyM = SafeRegex.Match(html, @"<body[^>]*>([\s\S]*)</body>", RegexOptions.IgnoreCase);
         cf.body = cf.bodyM.Success ? cf.bodyM.Groups[1].Value : html;
 
-        cf.logoAlt = Regex.Match(cf.body, @"<img\b[^>]*\balt\s*=\s*""([^""]*)""[^>]*>",
+        cf.logoAlt = SafeRegex.Match(cf.body, @"<img\b[^>]*\balt\s*=\s*""([^""]*)""[^>]*>",
             RegexOptions.IgnoreCase) is { Success: true } lm ? lm.Groups[1].Value : "";
-        cf.titleM = Regex.Match(cf.body, @"<h5[^>]*>([\s\S]*?)</h5>", RegexOptions.IgnoreCase);
+        cf.titleM = SafeRegex.Match(cf.body, @"<h5[^>]*>([\s\S]*?)</h5>", RegexOptions.IgnoreCase);
         if (!cf.titleM.Success) return false;
-        cf.title = Flat(cf, cf.titleM.Groups[1].Value);
-        cf.headTableM = Regex.Match(cf.body,
+        cf.title = Flat(cf.titleM.Groups[1].Value);
+        cf.headTableM = SafeRegex.Match(cf.body,
             @"<table\b[^>]*id=""header-table""[^>]*>([\s\S]*?)</table>", RegexOptions.IgnoreCase);
         if (!cf.headTableM.Success) return false;
         cf.headCells = new List<string>();
-        foreach (Match cm in Regex.Matches(cf.headTableM.Groups[1].Value,
+        foreach (Match cm in SafeRegex.Matches(cf.headTableM.Groups[1].Value,
             @"<td[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase))
-            cf.headCells.Add(Flat(cf, cm.Groups[1].Value));
+            cf.headCells.Add(Flat(cm.Groups[1].Value));
         if (cf.headCells.Count < 4) return false;
-        cf.mainTextM = Regex.Match(cf.body,
+        cf.mainTextM = SafeRegex.Match(cf.body,
             @"<div\b[^>]*id=""header-maintext""[^>]*>([\s\S]*?)</div>", RegexOptions.IgnoreCase);
-        cf.mainText = cf.mainTextM.Success ? Flat(cf, cf.mainTextM.Groups[1].Value) : "";
+        cf.mainText = cf.mainTextM.Success ? Flat(cf.mainTextM.Groups[1].Value) : "";
 
         cf.sections = new List<(string Title, List<List<CfAtom>> Items)>();
-        foreach (Match sm in Regex.Matches(cf.body,
+        foreach (Match sm in SafeRegex.Matches(cf.body,
             @"<section\s+class=""section""[^>]*>([\s\S]*?)</section>", RegexOptions.IgnoreCase))
         {
             var sec = sm.Groups[1].Value;
-            var h3 = Regex.Match(sec, @"<h3[^>]*>([\s\S]*?)</h3>", RegexOptions.IgnoreCase);
+            var h3 = SafeRegex.Match(sec, @"<h3[^>]*>([\s\S]*?)</h3>", RegexOptions.IgnoreCase);
             var items = new List<List<CfAtom>>();
-            foreach (Match li in Regex.Matches(sec, @"<li\b[^>]*>([\s\S]*?)</li>",
+            foreach (Match li in SafeRegex.Matches(sec, @"<li\b[^>]*>([\s\S]*?)</li>",
                 RegexOptions.IgnoreCase))
                 items.Add(ParseCfAtoms(li.Groups[1].Value));
-            cf.sections.Add((h3.Success ? Flat(cf, h3.Groups[1].Value) : "", items));
+            cf.sections.Add((h3.Success ? Flat(h3.Groups[1].Value) : "", items));
         }
         if (cf.sections.Count == 0) return false;
 

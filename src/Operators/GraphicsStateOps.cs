@@ -82,7 +82,9 @@ public sealed class ConcatenateMatrix : Operator
         // the shortest round-trippable decimal, never in exponent form (invalid in a
         // content stream).
         var s6 = v.ToString("0.######", ci);
+#pragma warning disable S1244 // round-trip check - the short text is used only when it parses back to the very same double
         if (double.TryParse(s6, System.Globalization.NumberStyles.Float, ci, out var back) && back == v)
+#pragma warning restore S1244
             return s6;
         var r = v.ToString("R", ci);
         if (r.IndexOf('E') >= 0 || r.IndexOf('e') >= 0)
@@ -135,7 +137,7 @@ public sealed class SetLineCap : Operator
     public SetLineCap(LineCap cap) { Cap = cap; }
     /// <summary>Creates a <c>J</c> operator from a numeric line cap style: 0 butt, 1 round, 2 projecting square.</summary>
     public SetLineCap(int cap) { Cap = (LineCap)cap; }
-    public override string ToPdf() => $"{(int)Cap} J";
+    public override string ToPdf() => $"{((int)Cap).ToString(CultureInfo.InvariantCulture)} J";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
 }
 
@@ -150,7 +152,7 @@ public sealed class SetLineJoin : Operator
     public SetLineJoin(LineJoin join) { Join = join; }
     /// <summary>Creates a <c>j</c> operator from a numeric line join style: 0 miter, 1 round, 2 bevel.</summary>
     public SetLineJoin(int join) { Join = (LineJoin)join; }
-    public override string ToPdf() => $"{(int)Join} j";
+    public override string ToPdf() => $"{((int)Join).ToString(CultureInfo.InvariantCulture)} j";
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
 }
 

@@ -1,7 +1,9 @@
 namespace Aspose.Pdf.Text;
 
+#pragma warning disable S2094 // public API: the published base of the text option types
 /// <summary>Base class for text-processing options.</summary>
 public abstract class TextOptions
+#pragma warning restore S2094
 {
 }
 

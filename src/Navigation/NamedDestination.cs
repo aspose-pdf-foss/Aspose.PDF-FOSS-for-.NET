@@ -50,6 +50,9 @@ public sealed class NamedDestination : Aspose.Pdf.Annotations.IAppointment
     /// <summary>Zoom factor (for XYZ only; null = inherit current).</summary>
     public double? Zoom { get; }
 
+    /// <summary>The name an alias entry read from the file leads to, until it is resolved; null otherwise.</summary>
+    internal string? AliasOf { get; init; }
+
     /// <summary>Create a named destination reference (name only, destination details resolved later).</summary>
     public NamedDestination(string name) : this(name, 0, "Unknown") { }
 
@@ -71,6 +74,9 @@ public sealed class NamedDestination : Aspose.Pdf.Annotations.IAppointment
         Bottom = bottom;
         Zoom = zoom;
     }
+
+    /// <summary>The name as an action's /D or a bookmark's /Dest names it: a text string.</summary>
+    internal PdfString ToNameString() => OutlineItem.EncodePdfText(Name);
 
     // ── Static factory methods for creating destination arrays ─────────────
 
@@ -198,7 +204,24 @@ public sealed class NamedDestinationCollection : IEnumerable<NamedDestination>
             }
         }
 
-        _destinations = list.ToArray();
+        _destinations = ResolveAliases(list, reader).ToArray();
+    }
+
+    /// <summary>The destinations with every alias - an entry whose /D is another name rather than an array - read as the
+    /// destination that name holds, under its own name; an alias that leads nowhere is left out.</summary>
+    private static List<NamedDestination> ResolveAliases(List<NamedDestination> list, PdfReader reader)
+    {
+        if (!list.Exists(d => d.AliasOf is not null)) return list;
+        var byName = new Dictionary<string, NamedDestination>(StringComparer.Ordinal);
+        foreach (var d in list) if (d.AliasOf is null) byName[d.Name] = d;
+        var resolved = new List<NamedDestination>(list.Count);
+        foreach (var d in list)
+        {
+            if (d.AliasOf is null) { resolved.Add(d); continue; }
+            if (byName.TryGetValue(d.AliasOf, out var t))
+                resolved.Add(new NamedDestination(d.Name, t.PageIndex, t.Type, t.Left, t.Top, t.Right, t.Bottom, t.Zoom));
+        }
+        return resolved;
     }
 
     /// <summary>Number of named destinations.</summary>
@@ -216,8 +239,10 @@ public sealed class NamedDestinationCollection : IEnumerable<NamedDestination>
         return _destinations[index - 1];
     }
 
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
     /// <summary>All destinations as an array.</summary>
     public NamedDestination[] All => (NamedDestination[])_destinations.Clone();
+#pragma warning restore S2365
 
     private readonly System.Collections.Generic.Dictionary<string, Aspose.Pdf.Annotations.IAppointment> _userAdded = new();
 
@@ -326,27 +351,92 @@ public sealed class NamedDestinationCollection : IEnumerable<NamedDestination>
         return null;
     }
 
-    /// <summary>Add or replace the catalog-side /Dests entry so the destination
-    /// round-trips through Save. We use the legacy /Dests dict on the catalog
-    /// (not the /Names → /Dests name tree) because PdfReader walks both and the
-    /// dict shape is simpler to maintain when callers add a single entry.</summary>
+    /// <summary>Add or replace the catalog-side entry so the destination round-trips through Save: an explicit
+    /// destination as its array in the legacy /Dests dict on the catalog (simpler to maintain than the name tree for
+    /// a single entry); another name as a GoTo action naming it, beside that name - in the name tree when the tree
+    /// holds it, else in the /Dests dict - as the reference writes an alias.</summary>
     private void WriteToCatalog(string name, Aspose.Pdf.Annotations.IAppointment appointment)
     {
         if (_catalog is null || _reader is null) return;
+        if (Resolve(appointment, name) is not Aspose.Pdf.Annotations.ExplicitDestination destination) return;
+        PdfObject value = destination.ToPdfArrayPublic();
+        if (appointment is NamedDestination alias)
+        {
+            var action = new PdfDictionary();
+            action.Set("S", new PdfName("GoTo"));
+            action.Set("D", alias.ToNameString());
+            value = action;
+            if (_reader.ResolveDict(_reader.ResolveDict(_catalog.Get("Names"))?.Get("Dests")) is { } tree
+                && SetBesideInNameTree(tree, alias.Name, name, value))
+            {
+                if (_reader.OwnerDocument is { } treeOwner) treeOwner.NamedDestinationsTouched = true;
+                return;
+            }
+        }
         var destsDict = _reader.ResolveDict(_catalog.Get("Dests"));
         if (destsDict is null)
         {
             destsDict = new PdfDictionary();
             _catalog.Set("Dests", destsDict);
         }
-        // Build the PDF destination array from the appointment.
-        var arr = appointment switch
+        destsDict.Set(name, value);
+        if (_reader.OwnerDocument is { } owner) owner.NamedDestinationsTouched = true;
+    }
+
+    /// <summary>Puts <paramref name="name"/> into the leaf of the name tree that holds <paramref name="target"/>, in
+    /// key order, widening the /Limits of that leaf and of the nodes above it; false when the tree does not hold the
+    /// target.</summary>
+    private bool SetBesideInNameTree(PdfDictionary node, string target, string name, PdfObject value)
+    {
+        if (_reader!.Resolve(node.Get("Names")) is PdfArray leaf)
         {
-            Aspose.Pdf.Annotations.ExplicitDestination ed => ed.ToPdfArrayPublic(),
-            _ => null,
-        };
-        if (arr is null) return;
-        destsDict.Set(name, arr);
+            var holds = false;
+            for (var i = 0; i + 1 < leaf.Count && !holds; i += 2)
+                holds = (_reader.Resolve(leaf[i]) as PdfString)?.ToText() == target;
+            if (!holds) return false;
+            var at = 0;
+            while (at + 1 < leaf.Count && string.CompareOrdinal((_reader.Resolve(leaf[at]) as PdfString)?.ToText(), name) < 0) at += 2;
+            if (at + 1 < leaf.Count && (_reader.Resolve(leaf[at]) as PdfString)?.ToText() == name)
+                leaf.ReplaceAt(at + 1, value);
+            else
+            {
+                leaf.Insert(at, OutlineItem.EncodePdfText(name));
+                leaf.Insert(at + 1, value);
+            }
+            WidenLimits(node, name);
+            return true;
+        }
+        if (_reader.Resolve(node.Get("Kids")) is not PdfArray kids) return false;
+        foreach (var kid in kids)
+            if (_reader.ResolveDict(kid) is { } child && SetBesideInNameTree(child, target, name, value))
+            {
+                WidenLimits(node, name);
+                return true;
+            }
+        return false;
+    }
+
+    /// <summary>Widens a name-tree node's /Limits (when it has them) to take in <paramref name="name"/>.</summary>
+    private void WidenLimits(PdfDictionary node, string name)
+    {
+        if (_reader!.Resolve(node.Get("Limits")) is not PdfArray { Count: 2 } limits) return;
+        if (string.CompareOrdinal(name, (_reader.Resolve(limits[0]) as PdfString)?.ToText()) < 0)
+            limits.ReplaceAt(0, OutlineItem.EncodePdfText(name));
+        if (string.CompareOrdinal(name, (_reader.Resolve(limits[1]) as PdfString)?.ToText()) > 0)
+            limits.ReplaceAt(1, OutlineItem.EncodePdfText(name));
+    }
+
+    /// <summary>The destination an appointment leads to: another name stands for the destination it names here
+    /// (a /Dests entry holds a destination, not a name). A name that leads nowhere, or back to itself, gives null.</summary>
+    private Aspose.Pdf.Annotations.IAppointment? Resolve(Aspose.Pdf.Annotations.IAppointment appointment, string name)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal) { name };
+        while (appointment is NamedDestination alias)
+        {
+            if (!seen.Add(alias.Name) || this[alias.Name] is not { } target) return null;
+            appointment = target;
+        }
+        return appointment;
     }
 
     private void RemoveFromCatalog(string name)
@@ -456,6 +546,8 @@ public sealed class NamedDestinationCollection : IEnumerable<NamedDestination>
         {
             // Destination dictionary with /D key
             destObj = reader.Resolve(destDict.Get("D"));
+            // An alias: its /D names another destination, which is resolved once every entry is read.
+            if (destObj is PdfString target) return new NamedDestination(name, -1, "Unknown") { AliasOf = target.ToText() };
         }
 
         if (destObj is PdfArray arr && arr.Count >= 2)
@@ -566,7 +658,9 @@ public sealed class DestinationCollection
         // ExplicitDestination shape so callers can ask for the
         // typed object without us exposing the internal lookup type.
         var ctor = typeof(Aspose.Pdf.Annotations.ExplicitDestination)
+#pragma warning disable S3011 // deliberate: reaches a non-public member when present, falls back when not
             .GetConstructor(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+#pragma warning restore S3011
                 binder: null, types: new[] { typeof(int), typeof(string) }, modifiers: null);
         return (Aspose.Pdf.Annotations.ExplicitDestination?)ctor?.Invoke(new object[] { named.PageNumber, named.Type });
     }
@@ -588,8 +682,10 @@ public sealed class DestinationCollection
     /// plus locally-added overlay entries).</summary>
     public int Count => SnapshotPairs().Count;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers may extend via the local overlay.</summary>
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
     /// <summary>Indexed access to the flattened (name → destination) pair
     /// list. Indices are stable per snapshot; the returned pair is a
@@ -610,11 +706,8 @@ public sealed class DestinationCollection
     /// snapshot (named destinations or overlay).</summary>
     public bool Contains(System.Collections.Generic.KeyValuePair<string, object> value)
     {
-        foreach (var pair in SnapshotPairs())
-            if (string.Equals(pair.Key, value.Key, System.StringComparison.Ordinal)
-                && System.Collections.Generic.EqualityComparer<object>.Default.Equals(pair.Value, value.Value))
-                return true;
-        return false;
+        return SnapshotPairs().Any(pair => string.Equals(pair.Key, value.Key, System.StringComparison.Ordinal)
+                && System.Collections.Generic.EqualityComparer<object>.Default.Equals(pair.Value, value.Value));
     }
 
     /// <summary>Copy the snapshot into <paramref name="array"/> starting at

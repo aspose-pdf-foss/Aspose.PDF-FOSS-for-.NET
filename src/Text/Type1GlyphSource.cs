@@ -70,7 +70,7 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
         if (charStrings.Count == 0) return null;
 
         var src = new Type1GlyphSource(charStrings, ordering, subrs, lenIV,
-            unitsPerEm: ResolveUnitsPerEm(header));
+            unitsPerEm: ResolveUnitsPerEm(header)) { _shape = ResolveShape(header) };
         src.ParseHeaderEncoding(header);
         src.BuildUnicodeCMap();
         return src;
@@ -111,6 +111,7 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
         try
         {
             var outline = interp.Run(cs);
+            if (_shape is { } shape && outline is not null) outline = CffGlyphSource.Reshape(outline, shape);
             return QuantizeToFontUnits && outline is not null
                 ? GlyphOutlineQuantizer.Quantize(outline, UnitsPerEm)
                 : outline;
@@ -211,9 +212,10 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
             var b = data[i];
             if (b == ' ' || b == '\r' || b == '\n' || b == '\t') continue;
             if (!IsHexDigit(b)) break;
-            var v = b <= '9' ? b - '0'
-                  : b <= 'F' ? b - 'A' + 10
-                  :            b - 'a' + 10;
+            int v;
+            if (b <= '9') v = b - '0';
+            else if (b <= 'F') v = b - 'A' + 10;
+            else v = b - 'a' + 10;
             if (nibble < 0) { nibble = v; }
             else { buf.Add((byte)((nibble << 4) | v)); nibble = -1; }
         }
@@ -242,8 +244,11 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
         return stripped;
     }
 
+    /// <summary>A negative <paramref name="lenIV"/> (-1) states charstrings that are not encrypted:
+    /// they are returned as they stand.</summary>
     private static byte[] CharStringDecrypt(byte[] cipher, int lenIV)
     {
+        if (lenIV < 0) return cipher;
         const int c1 = 52845, c2 = 22719;
         ushort r = 4330;
         var plain = new byte[cipher.Length];
@@ -254,7 +259,7 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
             r = (ushort)((c + r) * c1 + c2);
         }
         if (lenIV >= plain.Length) return Array.Empty<byte>();
-        if (lenIV <= 0) return plain;
+        if (lenIV == 0) return plain;
         var stripped = new byte[plain.Length - lenIV];
         Array.Copy(plain, lenIV, stripped, 0, stripped.Length);
         return stripped;
@@ -271,8 +276,10 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
         // Skip whitespace.
         while (p < s.Length && char.IsWhiteSpace(s[p])) p++;
         var start = p;
+        if (p < s.Length && (s[p] == '-' || s[p] == '+')) p++;
+        var digits = p;
         while (p < s.Length && char.IsDigit(s[p])) p++;
-        if (p == start) return 4;
+        if (p == digits) return 4;
         return Compat.TryParseInt32(s.AsSpan(start, p - start), out var v) ? v : 4;
     }
 
@@ -291,9 +298,9 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
         var nEnd = s.IndexOf("array", pos, StringComparison.Ordinal);
         if (nEnd < 0) return Array.Empty<byte[]?>();
         var nStr = s.Substring(pos + "/Subrs".Length, nEnd - (pos + "/Subrs".Length)).Trim();
-        if (!int.TryParse(nStr, out var count) || count <= 0) return Array.Empty<byte[]?>();
+        if (!int.TryParse(nStr, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var count) || count <= 0) return Array.Empty<byte[]?>();
 
-        var result = new byte[count][]!;
+        var result = new byte[count][];
         // Find the byte offset of "array" in the plain stream.
         var binStart = nEnd + "array".Length;
         var p = binStart;
@@ -325,7 +332,7 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
                 result[subIdx] = CharStringDecrypt(rawCipher, lenIV);
             p = cursor;
         }
-        return result!;
+        return result;
     }
 
     private static (Dictionary<string, byte[]>, List<string>) ParseCharStrings(byte[] plain, int lenIV)
@@ -462,19 +469,6 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
         return -1;
     }
 
-    private static int ResolveUnitsPerEm(string header)
-    {
-        // /FontMatrix [a b c d e f] readonly def — a usually 0.001 → UnitsPerEm 1000.
-        var m = System.Text.RegularExpressions.Regex.Match(header,
-            @"/FontMatrix\s*\[\s*([0-9.+\-eE]+)\b");
-        if (!m.Success) return 1000;
-        if (!double.TryParse(m.Groups[1].Value,
-                System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out var a)) return 1000;
-        if (a <= 0) return 1000;
-        return (int)Math.Round(1.0 / a);
-    }
-
     // ── Header /Encoding parsing ─────────────────────────────────────────
 
     private void ParseHeaderEncoding(string header)
@@ -499,13 +493,13 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
         // Explicit table — scan all "dup <code> /<name> put" entries.
         var rx = new System.Text.RegularExpressions.Regex(
             @"dup\s+(\d+)\s+/([^\s]+)\s+put",
-            System.Text.RegularExpressions.RegexOptions.Compiled);
+            System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
         var any = false;
-        foreach (System.Text.RegularExpressions.Match m in rx.Matches(header))
+        foreach (var groups in SafeRegex.Matches(rx, header).Select(m => m.Groups))
         {
-            if (!int.TryParse(m.Groups[1].Value, out var code)) continue;
+            if (!int.TryParse(groups[1].Value, out var code)) continue;
             if (code < 0 || code >= 256) continue;
-            var name = m.Groups[2].Value;
+            var name = groups[2].Value;
             if (NameToGid.TryGetValue(name, out var gid)) { table[code] = gid; any = true; }
         }
         if (any) EncodingByteToGid = table;
@@ -520,7 +514,7 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
             // ResolveGlyphName also handles uniXXXX/uXXXX forms and AGL
             // underscore ligatures (/f_i → U+FB01); only a single-codepoint
             // resolution can occupy a cmap slot.
-            var u = TextAbsorber.ResolveGlyphName(name!);
+            var u = TextAbsorber.ResolveGlyphName(name);
             if (u is { Length: > 0 } && (u.Length == 1 || char.IsHighSurrogate(u[0])))
                 CMap.TryAdd(char.ConvertToUtf32(u, 0), gid);
         }
@@ -546,7 +540,6 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
         /// <summary>The advance width the charstring declared through hsbw/sbw,
         /// in the font's own units.</summary>
         public double Width => _wx;
-        private double _sbX;
 
         // Flex state — collected between callothersubr 1 .. callothersubr 0.
         private bool _inFlex;
@@ -564,7 +557,9 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
             {
                 // .notdef and empty glyphs are legitimate — return a zero-area outline
                 // so the renderer still advances the pen if needed via metrics.
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
                 if (_xMin == double.MaxValue) { _xMin = _yMin = _xMax = _yMax = 0; }
+#pragma warning restore S1244
                 return null;
             }
             var arr = new ContourPoint[_contours.Count][];
@@ -621,7 +616,7 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
             switch (op)
             {
                 case 13: // hsbw  sbx wx
-                    if (_sp >= 2) { _sbX = _stack[0]; _wx = _stack[1]; _x = _sbX; _y = 0; }
+                    if (_sp >= 2) { _wx = _stack[1]; _x = _stack[0]; _y = 0; }
                     _sp = 0; return true;
                 case 14: // endchar
                     return false;
@@ -697,7 +692,6 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
             switch (op)
             {
                 case 0: // dotsection
-                    _sp = 0; return true;
                 case 1: // vstem3
                 case 2: // hstem3
                     _sp = 0; return true;
@@ -706,7 +700,7 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
                     _sp = 0;
                     return false; // seac implies endchar
                 case 7: // sbw  sbx sby wx wy
-                    if (_sp >= 4) { _sbX = _stack[0]; _wx = _stack[2]; _x = _sbX; _y = _stack[1]; }
+                    if (_sp >= 4) { _wx = _stack[2]; _x = _stack[0]; _y = _stack[1]; }
                     _sp = 0; return true;
                 case 12: // div
                     if (_sp >= 2)
@@ -833,7 +827,7 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
             {
                 var offsetX = adx - asb;
                 var offsetY = ady;
-                var sub = new SeacInterpreter(_src, this, offsetX, offsetY);
+                var sub = new SeacInterpreter(this, offsetX, offsetY);
                 sub.Interpret(accentCs);
             }
         }
@@ -912,19 +906,20 @@ internal sealed partial class Type1GlyphSource : IGlyphOutlineSource
 
         private void Bound(double x, double y)
         {
-            if (x < _xMin) _xMin = x; if (y < _yMin) _yMin = y;
-            if (x > _xMax) _xMax = x; if (y > _yMax) _yMax = y;
+            if (x < _xMin) _xMin = x;
+            if (y < _yMin) _yMin = y;
+            if (x > _xMax) _xMax = x;
+            if (y > _yMax) _yMax = y;
         }
 
         /// <summary>Glue interpreter for seac's accent component — shares the
         /// parent's contour list and bbox; applies a fixed translation.</summary>
         private sealed class SeacInterpreter
         {
-            private readonly Type1GlyphSource _src;
             private readonly Type1Interpreter _parent;
             private readonly double _ox, _oy;
-            public SeacInterpreter(Type1GlyphSource src, Type1Interpreter parent, double ox, double oy)
-            { _src = src; _parent = parent; _ox = ox; _oy = oy; }
+            public SeacInterpreter(Type1Interpreter parent, double ox, double oy)
+            { _parent = parent; _ox = ox; _oy = oy; }
             public void Interpret(byte[] cs)
             {
                 var save = (_parent._x, _parent._y);

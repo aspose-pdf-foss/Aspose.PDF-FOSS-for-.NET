@@ -9,7 +9,9 @@ internal static partial class HtmlToPdfConverter
     /// the items' declared percent widths and their <c>flex</c> grow factors.</summary>
     internal sealed class FlexRow
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<FlexRowCell> Cells = new();
+#pragma warning restore S3218
     }
 
     internal sealed class FlexRowCell
@@ -64,16 +66,16 @@ internal static partial class HtmlToPdfConverter
                 continue;
             }
             if (IsHiddenElement(item.Tag, item.Attrs, css)) continue;
-            foreach (var d in item.Descendants())
-                if (d.Tag.Length > 0 && !InlineRowTags.Contains(d.Tag)) return null;
+            foreach (var tag in item.Descendants().Select(d => d.Tag))
+                if (tag.Length > 0 && !InlineRowTags.Contains(tag)) return null;
             var cell = new FlexRowCell { Text = DomText(item, css) };
             if (DomDecl(item, "width", css)?.Trim() is { } w
-                && Regex.Match(w, @"^([\d.]+)\s*%$") is { Success: true } pm
+                && SafeRegex.Match(w, @"^([\d.]+)\s*%$") is { Success: true } pm
                 && double.TryParse(pm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var pct))
                 cell.WidthFrac = pct / 100.0;
             if ((DomDecl(item, "flex", css) ?? DomDecl(item, "flex-grow", css))?.Trim() is { } flex
-                && Regex.Match(flex, @"^([\d.]+)") is { Success: true } fm
+                && SafeRegex.Match(flex, @"^([\d.]+)") is { Success: true } fm
                 && double.TryParse(fm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var grow))
             {
@@ -120,8 +122,8 @@ internal static partial class HtmlToPdfConverter
         for (var i = 0; i < n; i++)
         {
             var c = row.Cells[i];
-            widths[i] = c.WidthFrac > 0 ? basis[i]
-                : basis[i] + (growSum > 0 ? free * c.Grow / growSum : 0);
+            if (c.WidthFrac > 0) widths[i] = basis[i];
+            else widths[i] = basis[i] + (growSum > 0 ? free * c.Grow / growSum : 0);
             lines[i] = c.Text.Length > 0
                 ? MeasuredWordWrap(c.Text, widths[i] + WrapEqualityEpsilonPt, FlexRowFace, FlexRowFontPt, wordFirst: true)
                 : Array.Empty<string>();

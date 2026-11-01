@@ -59,7 +59,9 @@ public static partial class PageExtensions
         return result;
     }
 
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
     private readonly record struct Mat(double A, double B, double C, double D, double E, double F)
+#pragma warning restore S3218
     {
         public static readonly Mat Identity = new(1, 0, 0, 1, 0, 0);
 
@@ -78,8 +80,8 @@ public static partial class PageExtensions
 
         public void EmitInto(StringBuilder sb)
         {
-            foreach (var op in new[] { StrokeCs, FillCs, Width, Cap, Join, Miter, Dash, StrokeColor, FillColor })
-                if (!string.IsNullOrEmpty(op)) sb.Append(op).Append('\n');
+            foreach (var op in (new[] { StrokeCs, FillCs, Width, Cap, Join, Miter, Dash, StrokeColor, FillColor }).Where(op => !string.IsNullOrEmpty(op)))
+                sb.Append(op).Append('\n');
         }
     }
 
@@ -150,7 +152,7 @@ public static partial class PageExtensions
             {
                 var sb = new StringBuilder("[");
                 bool first = true;
-                foreach (var e in a) { if (!first) sb.Append(' '); sb.Append(OpText(e)); first = false; }
+                foreach (var e in a) { if (!first) { sb.Append(' '); } sb.Append(OpText(e)); first = false; }
                 return sb.Append(']').ToString();
             }
             default: return "";

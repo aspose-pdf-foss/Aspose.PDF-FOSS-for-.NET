@@ -8,72 +8,70 @@ internal static partial class HtmlToPdfConverter
     /// <summary>UBL invoice stages: the html parse and the header, items and footer draws.</summary>
     private static bool ParseUblInvoice(UblInvoiceState ub)
     {
-        ub.custM = Regex.Match(ub.html,
+        ub.custM = SafeRegex.Match(ub.html,
             @"class\s*=\s*[""']customerAddress[""'][^>]*>(?<body>[\s\S]*?)<br\s*/?>",
             RegexOptions.IgnoreCase);
         if (!ub.custM.Success) return false;
         ub.addrLines = new List<string>();
         // address lines are the text runs of the nested leaf divs, in source order
+        var t = ub.custM.Groups["body"].Value;
+        // each leaf div contributes one line; EAN trails outside a div
+        foreach (Match lm in SafeRegex.Matches(t,
+            @"<div\b[^>]*>(?<c>(?:(?!<div)[\s\S])*?)</div>", RegexOptions.IgnoreCase))
         {
-            var t = ub.custM.Groups["body"].Value;
-            // each leaf div contributes one line; EAN trails outside a div
-            foreach (Match lm in Regex.Matches(t,
-                @"<div\b[^>]*>(?<c>(?:(?!<div)[\s\S])*?)</div>", RegexOptions.IgnoreCase))
-            {
-                var line = Flat(ub, lm.Groups["c"].Value);
-                if (line.Length > 0) ub.addrLines.Add(line);
-            }
-            // a text run directly after a closing div (the EAN line) is its own line
-            foreach (Match tm in Regex.Matches(t, @"</div>\s*(?<txt>[^<>]+?)\s*<",
-                RegexOptions.IgnoreCase))
-            {
-                var line = Flat(ub, tm.Groups["txt"].Value);
-                if (line.Length > 0) ub.addrLines.Add(line);
-            }
+            var line = UblFlat(lm.Groups["c"].Value);
+            if (line.Length > 0) ub.addrLines.Add(line);
         }
-        ub.h2M = Regex.Match(ub.html, @"<h2\b[^>]*>([\s\S]*?)</h2>", RegexOptions.IgnoreCase);
-        ub.h2Text = ub.h2M.Success ? Flat(ub, ub.h2M.Groups[1].Value) : "";
-        ub.logoM = Regex.Match(ub.html, @"class\s*=\s*[""']logo[""'][^>]*>([\s\S]*?)</div>",
+        // a text run directly after a closing div (the EAN line) is its own line
+        foreach (Match tm in SafeRegex.Matches(t, @"</div>\s*(?<txt>[^<>]+?)\s*<",
+            RegexOptions.IgnoreCase))
+        {
+            var line = UblFlat(tm.Groups["txt"].Value);
+            if (line.Length > 0) ub.addrLines.Add(line);
+        }
+        ub.h2M = SafeRegex.Match(ub.html, @"<h2\b[^>]*>([\s\S]*?)</h2>", RegexOptions.IgnoreCase);
+        ub.h2Text = ub.h2M.Success ? UblFlat(ub.h2M.Groups[1].Value) : "";
+        ub.logoM = SafeRegex.Match(ub.html, @"class\s*=\s*[""']logo[""'][^>]*>([\s\S]*?)</div>",
             RegexOptions.IgnoreCase);
-        ub.logoText = ub.logoM.Success ? Flat(ub, ub.logoM.Groups[1].Value).ToUpperInvariant() : "";
+        ub.logoText = ub.logoM.Success ? UblFlat(ub.logoM.Groups[1].Value).ToUpperInvariant() : "";
         ub.refRows = new List<(string Label, string Value)>();
-        ub.refM = Regex.Match(ub.html, @"class\s*=\s*[""']references[""'][^>]*>([\s\S]*?)</table>",
+        ub.refM = SafeRegex.Match(ub.html, @"class\s*=\s*[""']references[""'][^>]*>([\s\S]*?)</table>",
             RegexOptions.IgnoreCase);
         if (ub.refM.Success)
-            foreach (Match rm in Regex.Matches(ub.refM.Groups[1].Value,
-                @"<tr[^>]*>\s*<td[^>]*>([\s\S]*?)</td>\s*<td[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase))
-                ub.refRows.Add((Flat(ub, rm.Groups[1].Value).ToUpperInvariant(), Flat(ub, rm.Groups[2].Value)));
-        ub.headlineM = Regex.Match(ub.html,
+            foreach (var groups in SafeRegex.Matches(ub.refM.Groups[1].Value,
+                @"<tr[^>]*>\s*<td[^>]*>([\s\S]*?)</td>\s*<td[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(rm => rm.Groups))
+                ub.refRows.Add((UblFlat(groups[1].Value).ToUpperInvariant(), UblFlat(groups[2].Value)));
+        ub.headlineM = SafeRegex.Match(ub.html,
             @"<div\b[^>]*class\s*=\s*[""']headline[""'][^>]*>([\s\S]*?)</div>", RegexOptions.IgnoreCase);
-        ub.headline = ub.headlineM.Success ? Flat(ub, ub.headlineM.Groups[1].Value).ToUpperInvariant() : "";
+        ub.headline = ub.headlineM.Success ? UblFlat(ub.headlineM.Groups[1].Value).ToUpperInvariant() : "";
         ub.itemThs = new List<(string Text, bool Right)>();
         ub.lineTds = new List<(string Text, bool Right)>();
-        ub.linesM = Regex.Match(ub.html,
+        ub.linesM = SafeRegex.Match(ub.html,
             @"class\s*=\s*[""']invoice-viewer invoice-lines[""'][^>]*>([\s\S]*?)</table>",
             RegexOptions.IgnoreCase);
         if (!ub.linesM.Success) return false;
-        foreach (Match th in Regex.Matches(ub.linesM.Groups[1].Value,
-            @"<th\b(?<a>[^>]*)>(?<c>[\s\S]*?)</th>", RegexOptions.IgnoreCase))
-            ub.itemThs.Add((Flat(ub, th.Groups["c"].Value).ToUpperInvariant(),
-                th.Groups["a"].Value.Contains("right", StringComparison.OrdinalIgnoreCase)));
-        ub.lineRowM = Regex.Match(ub.linesM.Groups[1].Value,
+        foreach (var thGroups in SafeRegex.Matches(ub.linesM.Groups[1].Value,
+            @"<th\b(?<a>[^>]*)>(?<c>[\s\S]*?)</th>", RegexOptions.IgnoreCase).Select(th => th.Groups))
+            ub.itemThs.Add((UblFlat(thGroups["c"].Value).ToUpperInvariant(),
+                thGroups["a"].Value.Contains("right", StringComparison.OrdinalIgnoreCase)));
+        ub.lineRowM = SafeRegex.Match(ub.linesM.Groups[1].Value,
             @"class\s*=\s*[""']UBLInvoiceLine[""'][\s\S]*?</tr>", RegexOptions.IgnoreCase);
         if (ub.lineRowM.Success)
-            foreach (Match td in Regex.Matches(ub.lineRowM.Value,
-                @"<td\b(?<a>[^>]*)>(?<c>[\s\S]*?)</td>", RegexOptions.IgnoreCase))
-                ub.lineTds.Add((Flat(ub, td.Groups["c"].Value),
-                    td.Groups["a"].Value.Contains("right", StringComparison.OrdinalIgnoreCase)));
+            foreach (var tdGroups in SafeRegex.Matches(ub.lineRowM.Value,
+                @"<td\b(?<a>[^>]*)>(?<c>[\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(td => td.Groups))
+                ub.lineTds.Add((UblFlat(tdGroups["c"].Value),
+                    tdGroups["a"].Value.Contains("right", StringComparison.OrdinalIgnoreCase)));
         ub.totRows = new List<(string Label, string Value, bool Bold, double PadTop)>();
-        ub.totM = Regex.Match(ub.html,
+        ub.totM = SafeRegex.Match(ub.html,
             @"class\s*=\s*[""']invoice-viewer invoice-lines-totals[""'][^>]*>([\s\S]*?)</table>",
             RegexOptions.IgnoreCase);
         if (ub.totM.Success)
-            foreach (Match rm in Regex.Matches(ub.totM.Groups[1].Value,
+            foreach (Match rm in SafeRegex.Matches(ub.totM.Groups[1].Value,
                 @"<tr[^>]*>\s*<td(?<a1>[^>]*)>(?<l>[\s\S]*?)</td>\s*<td(?<a2>[^>]*)>(?<v>[\s\S]*?)</td>",
                 RegexOptions.IgnoreCase))
             {
-                var label = Flat(ub, rm.Groups["l"].Value);
-                var value = Flat(ub, rm.Groups["v"].Value);
+                var label = UblFlat(rm.Groups["l"].Value);
+                var value = UblFlat(rm.Groups["v"].Value);
                 var bold = rm.Groups["v"].Value.Contains("<b>", StringComparison.OrdinalIgnoreCase)
                     || rm.Value.Contains("<b>", StringComparison.OrdinalIgnoreCase);
                 var padTop = rm.Value.Contains("padding-top", StringComparison.OrdinalIgnoreCase) ? 7.5 : 0;
@@ -82,16 +80,16 @@ internal static partial class HtmlToPdfConverter
                 ub.totRows.Add((label, value, bold || headlineLabel, padTop));
             }
         ub.supLines = new List<string>();
-        ub.supM = Regex.Match(ub.html,
+        ub.supM = SafeRegex.Match(ub.html,
             @"class\s*=\s*[""']invoice-viewer supplierAddress[""'][^>]*>([\s\S]*?)</table>",
             RegexOptions.IgnoreCase);
         if (ub.supM.Success)
         {
-            var cell = Regex.Match(ub.supM.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase);
+            var cell = SafeRegex.Match(ub.supM.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase);
             if (cell.Success)
-                foreach (var part in Regex.Split(cell.Groups[1].Value, @"<br\s*/?>", RegexOptions.IgnoreCase))
+                foreach (var part in SafeRegex.Split(cell.Groups[1].Value, @"<br\s*/?>", RegexOptions.IgnoreCase))
                 {
-                    var line = Flat(ub, part);
+                    var line = UblFlat(part);
                     if (line.Length > 0) ub.supLines.Add(line);
                 }
         }

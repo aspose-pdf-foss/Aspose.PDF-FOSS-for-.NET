@@ -204,7 +204,15 @@ internal static class ContentMarker
     {
         var eff = new int[ops.Count];
         for (var i = 0; i < ops.Count; i++)
-            eff[i] = Paints(ops[i]) ? (targets[i] != Neutral ? targets[i] : ops[i].Expanded ? Bare : Artifact) : Neutral;
+        {
+            if (Paints(ops[i]))
+            {
+                if (targets[i] != Neutral) eff[i] = targets[i];
+                else if (ops[i].Expanded) eff[i] = Bare;
+                else eff[i] = Artifact;
+            }
+            else eff[i] = Neutral;
+        }
 
         for (var i = 0; i < ops.Count; i++)
         {
@@ -216,7 +224,9 @@ internal static class ContentMarker
             var end = j < ops.Count ? ops[j] : null;
             var t = end is { Kind: ContentOpKind.PathPaint } ? eff[j] : Neutral;
             for (var k = i; k < j; k++) eff[k] = t;
+#pragma warning disable S127 // an operator group just marked - the scan steps past the group
             i = j - 1;
+#pragma warning restore S127
         }
         return eff;
     }
@@ -226,9 +236,10 @@ internal static class ContentMarker
     private static Dictionary<int, int?> TextObjectTargets(List<ContentOp> ops, int[] eff)
     {
         var result = new Dictionary<int, int?>();
-        for (var i = 0; i < ops.Count; i++)
+        var i = 0;
+        while (i < ops.Count)
         {
-            if (ops[i].Kind != ContentOpKind.BeginText) continue;
+            if (ops[i].Kind != ContentOpKind.BeginText) { i++; continue; }
             var set = new HashSet<int>();
             var marks = false;
             var j = i + 1;
@@ -238,7 +249,7 @@ internal static class ContentMarker
                 if (eff[j] != Neutral) set.Add(eff[j]);
             }
             result[i] = !marks && set.Count == 1 ? set.First() : null;
-            i = j;
+            i = j + 1;
         }
         return result;
     }

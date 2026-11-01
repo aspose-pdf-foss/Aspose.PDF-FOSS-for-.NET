@@ -23,15 +23,17 @@ public sealed partial class PdfToHtmlConverter
             || fi.AdvanceOf is null) return (double.NaN, double.NaN);
         var bytes = ps.Value;
         double pen = 0, glyphs = 0;
+        // Horizontal scaling scales each advance whole: the glyph's width and the spacing after it.
+        var th = ct.horizScale;
         if (fi.IsCidFont)
         {
             for (var i = 0; i + 1 < bytes.Length; i += 2)
             {
                 var code = (bytes[i] << 8) | bytes[i + 1];
-                var a = fi.AdvanceOf(code) * ct.fontSize;
+                var a = fi.AdvanceOf(code) * ct.fontSize * th;
                 glyphs += a;
-                pen += a + ct.charSpacing;
-                perChar?.Add((a + ct.charSpacing, a));
+                pen += a + ct.charSpacing * th;
+                perChar?.Add((a + ct.charSpacing * th, a));
                 perCode?.Add(code);
             }
         }
@@ -39,9 +41,9 @@ public sealed partial class PdfToHtmlConverter
         {
             foreach (var b8 in bytes)
             {
-                var a = fi.AdvanceOf(b8) * ct.fontSize;
+                var a = fi.AdvanceOf(b8) * ct.fontSize * th;
                 glyphs += a;
-                var p1 = a + ct.charSpacing + (b8 == 32 ? ct.wordSpacing : 0);
+                var p1 = a + (ct.charSpacing + (b8 == 32 ? ct.wordSpacing : 0)) * th;
                 pen += p1;
                 perChar?.Add((p1, a));
                 perCode?.Add(b8);
@@ -95,8 +97,8 @@ public sealed partial class PdfToHtmlConverter
             var seg = step == 2 ? new[] { bytes[i], bytes[i + 1] } : new[] { bytes[i] };
             var dec = DecodeString(new PdfString(seg), ct.currentFontKey, ct.fonts);
             if (dec.Length == 0) continue;
-            var a = fi.AdvanceOf(code) * ct.fontSize;
-            var p1 = a + ct.charSpacing + (step == 1 && code == 32 ? ct.wordSpacing : 0);
+            var a = fi.AdvanceOf(code) * ct.fontSize * ct.horizScale;
+            var p1 = a + (ct.charSpacing + (step == 1 && code == 32 ? ct.wordSpacing : 0)) * ct.horizScale;
             for (var k = 0; k < dec.Length; k++)
             {
                 sbT.Append(dec[k]);

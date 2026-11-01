@@ -49,9 +49,8 @@ private sealed class PageLayoutState
     // paragraphs lay out in the VISIBLE page (a square CropBox
     // at the media bottom receives a full-bleed image at crop top, not
     // 284 pt below the A4 top edge).
-    // The layout frame is the MEDIA box: a /Rotate page's paragraphs seat
-    // against the media edges and paint upright in them
-    // (see Page.LayoutFrameHeight; Page.Height answers the DISPLAY frame).
+    // The layout frame is the page as shown: a /Rotate page's paragraphs lay
+    // out in it and are turned into media space as one (see Page.LayoutFrameHeight).
     public double layoutTopY;
     public double curY;
     // TOC entry rendering: every heading whose TocPage is this page renders

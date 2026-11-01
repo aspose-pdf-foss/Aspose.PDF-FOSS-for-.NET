@@ -13,7 +13,7 @@ public partial class TextBoxField
         var shown = wa.text.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ');
         // Widget quadding from /Q (widget kid first, else the field).
         double tx = 2;
-        int q = (int)((wa.widgetDict?.Get("Q") is PdfInteger wq ? wq.Value : Dict.GetInt("Q")));
+        int q = (int)(wa.widgetDict?.Get("Q") is PdfInteger wq ? wq.Value : Dict.GetInt("Q"));
         if (q is 1 or 2 && shown.Length > 0)
         {
             double em = 0;
@@ -44,14 +44,7 @@ public partial class TextBoxField
     private void ResolveUnicodeWidgetFont(WidgetApState wa)
     {
         wa.wuFam = NormalizeStdFontName(wa.fontName);
-        wa.wuTtf = Aspose.Pdf.Text.SystemFontResolver.Resolve(wa.wuFam)
-                ?? Aspose.Pdf.Text.SystemFontResolver.Resolve("Arial");
-        if ((wa.wuTtf is not { Length: > 12 } || !CoversBeyondAnsi(wa.wuTtf, wa.text))
-            && TextStamp.TryResolveCjkTtf(wa.text) is { } cjk)
-        {
-            wa.wuTtf = cjk.ttf;
-            wa.wuFam = cjk.name;
-        }
+        (wa.wuTtf, wa.wuFam) = ResolveUnicodeFace(wa.wuFam, wa.text);
         if (wa.wuTtf is { Length: > 12 })
         {
             wa.wuFonts = new PdfDictionary();

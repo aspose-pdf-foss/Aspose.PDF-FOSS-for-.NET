@@ -11,5 +11,5 @@ public class InterruptMonitor
     public InterruptMonitor() { }
 
     /// <summary>Requests that the monitored operation stop. Has no effect in this library.</summary>
-    public void Interrupt() { }
+    public void Interrupt() { /* no operation in this library is interruptible */ }
 }

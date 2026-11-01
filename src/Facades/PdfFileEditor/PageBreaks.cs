@@ -75,6 +75,9 @@ public sealed partial class PdfFileEditor
                 if (rect is null) continue;
                 var size = tf.TextState?.FontSize ?? 0;
                 if (size <= 0) continue;
+                // Only level text forms a line band: the box of turned text (a diagonal
+                // watermark) spans many lines and would lift the break past all of them.
+                if (!IsLevel(tf.TextState!.Rotation)) continue;
                 // Descent is negative in a descriptor; the band sits that far ABOVE the
                 // glyph box the absorber reports.
                 var metrics = tf.TextState?.Font?.GetMetrics();
@@ -89,7 +92,21 @@ public sealed partial class PdfFileEditor
         catch { return y; }
     }
 
+    /// <summary>How far from level (degrees) text may turn and still count as a line.</summary>
+    private const double LevelToleranceDegrees = 0.5;
+
+    private const double HalfTurnDegrees = 180;
+
+    /// <summary>True for text that runs level, left to right or upside down.</summary>
+    private static bool IsLevel(double rotation)
+    {
+        var off = System.Math.Abs(rotation % HalfTurnDegrees);
+        return off < LevelToleranceDegrees || HalfTurnDegrees - off < LevelToleranceDegrees;
+    }
+
+#pragma warning disable S2325 // public API: the published instance member
     public void AddPageBreak(Document src, Document dest, PageBreak[] pageBreaks)
+#pragma warning restore S2325
     {
         if (src is null || dest is null) return;
 
@@ -152,6 +169,15 @@ public sealed partial class PdfFileEditor
                 var clip = string.Format(System.Globalization.CultureInfo.InvariantCulture,
                     "q 1 0 0 1 0 {0:0.####} cm {1:0.####} {2:0.####} {3:0.####} {4:0.####} re W n\n",
                     dy, media.LLX, bandBottom, media.URX - media.LLX, bandTop - bandBottom);
+                // Every band of the page is imported from the same source, so the bands share one
+                // /Contents array: each takes its own copy before its clip goes in, or every band
+                // carries every band's clip and shows nothing.
+                if (added.Reader.Resolve(added.Dict.Get("Contents")) is PdfArray shared)
+                {
+                    var own = new PdfArray();
+                    foreach (var item in shared) own.Add(item);
+                    added.Dict.Set("Contents", own);
+                }
                 added.PrependContentStream(System.Text.Encoding.ASCII.GetBytes(clip));
                 added.AddContentStream(System.Text.Encoding.ASCII.GetBytes("\nQ"));
 
@@ -161,6 +187,28 @@ public sealed partial class PdfFileEditor
                 ClipAnnotationsToBand(added, bandBottom, bandTop, dy);
             }
         }
+    }
+
+    /// <summary>Stream overload of <see cref="AddPageBreak(Document, Document, PageBreak[])"/>.
+    /// Reads <paramref name="src"/> into a <see cref="Document"/>, runs the page-break
+    /// logic, and writes the result to <paramref name="dest"/>.</summary>
+    public void AddPageBreak(Stream src, Stream dest, PageBreak[] pageBreaks)
+    {
+        if (src is null || dest is null) return;
+        using var srcDoc = new Document(src);
+        var dstDoc = new Document();
+        AddPageBreak(srcDoc, dstDoc, pageBreaks);
+        dstDoc.Save(dest);
+    }
+
+    /// <summary>File-path overload of <see cref="AddPageBreak(Document, Document, PageBreak[])"/>.</summary>
+    public void AddPageBreak(string src, string dest, PageBreak[] pageBreaks)
+    {
+        if (src is null || dest is null) return;
+        using var srcDoc = new Document(src);
+        var dstDoc = new Document();
+        AddPageBreak(srcDoc, dstDoc, pageBreaks);
+        dstDoc.Save(dest);
     }
 
     private static void ClipAnnotationsToBand(Page page, double bandBottom, double bandTop, double dy)
@@ -284,27 +332,5 @@ public sealed partial class PdfFileEditor
 
             if (degenerate) figure.EnsureNormalizedAppearance();
         }
-    }
-
-    /// <summary>Stream overload of <see cref="AddPageBreak(Document, Document, PageBreak[])"/>.
-    /// Reads <paramref name="src"/> into a <see cref="Document"/>, runs the page-break
-    /// logic, and writes the result to <paramref name="dest"/>.</summary>
-    public void AddPageBreak(Stream src, Stream dest, PageBreak[] pageBreaks)
-    {
-        if (src is null || dest is null) return;
-        using var srcDoc = new Document(src);
-        var dstDoc = new Document();
-        AddPageBreak(srcDoc, dstDoc, pageBreaks);
-        dstDoc.Save(dest);
-    }
-
-    /// <summary>File-path overload of <see cref="AddPageBreak(Document, Document, PageBreak[])"/>.</summary>
-    public void AddPageBreak(string src, string dest, PageBreak[] pageBreaks)
-    {
-        if (src is null || dest is null) return;
-        using var srcDoc = new Document(src);
-        var dstDoc = new Document();
-        AddPageBreak(srcDoc, dstDoc, pageBreaks);
-        dstDoc.Save(dest);
     }
 }

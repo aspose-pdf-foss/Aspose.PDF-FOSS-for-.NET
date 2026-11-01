@@ -125,7 +125,9 @@ internal static class PdfDocElementsInBytes
             case PdfDocElements.Subtype: return Subtype;
             case PdfDocElements.Linearized: return Linearized;
             default:
+#pragma warning disable S112 // public API: the exception type callers catch
                 throw new Exception("Unknown PDF document element: " + pdfType);
+#pragma warning restore S112
         }
     }
 

@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 internal sealed partial class TextStateModifier
 {
     /// <summary>Font size stream: one content operator applied to the scan state.</summary>
-    private void ScanFontSizeOperator(FontSizeStreamState fz, Token token, int startPos, int endPos)
+    private static void ScanFontSizeOperator(FontSizeStreamState fz, Token token, int endPos)
     {
         var op = token.StringValue!;
         switch (op)
@@ -60,7 +60,7 @@ internal sealed partial class TextStateModifier
                 if (fz.operands.Count >= 6)
                 {
                     static double Num((TokenKind kind, PdfObject obj, int startPos, int endPos) o)
-                        => o.obj is PdfReal r ? r.Value : o.obj is PdfInteger i ? i.Value : 0;
+                        => o.obj switch { PdfReal r => r.Value, PdfInteger i => i.Value, _ => 0 };
                     var det = Math.Abs(Num(fz.operands[0]) * Num(fz.operands[3])
                         - Num(fz.operands[1]) * Num(fz.operands[2]));
                     if (det > 1e-9) fz.ctmScale *= Math.Sqrt(det);

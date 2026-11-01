@@ -194,7 +194,8 @@ public sealed class SetGlyphsPositionShowText : TextShowOperator
     {
         get
         {
-            for (int i = 0; i < Items.Length; i++)
+            int i = 0;
+            while (i < Items.Length)
             {
                 if (Items[i] is string s)
                 {
@@ -213,6 +214,7 @@ public sealed class SetGlyphsPositionShowText : TextShowOperator
                         yield return new GlyphPosition(s);
                     }
                 }
+                i++;
             }
         }
     }
@@ -245,22 +247,6 @@ public sealed class SetGlyphsPositionShowText : TextShowOperator
     public SetGlyphsPositionShowText(GlyphPosition[] glyphPositions, Aspose.Pdf.Text.Font font)
         : this((System.Collections.Generic.IEnumerable<GlyphPosition>)glyphPositions) => _font = font;
 
-    private readonly FontInfo? _font;
-
-    // One entry per element of Items: the glyph ids a string element resolved to
-    // against the face, or null for the numeric adjustments and for anything not
-    // yet resolved.
-    private byte[]?[]? _glyphIds;
-
-    /// <summary>The font these runs were created against, if any.</summary>
-    internal FontInfo? Font => _font;
-
-    /// <summary>Record what each string element resolved to against its font.</summary>
-    internal void UseGlyphIds(byte[]?[] glyphIds) => _glyphIds = glyphIds;
-
-    /// <inheritdoc cref="ShowText.Features"/>
-    public System.Collections.Generic.IReadOnlyList<string>? Features { get; set; }
-
     /// <summary>An array of glyph positions: the exact overload keeps a call with a
     /// <see cref="GlyphPosition"/> array from being ambiguous between the object array and
     /// the enumerable.</summary>
@@ -281,6 +267,22 @@ public sealed class SetGlyphsPositionShowText : TextShowOperator
         }
         Items = list.ToArray();
     }
+
+    private readonly FontInfo? _font;
+
+    // One entry per element of Items: the glyph ids a string element resolved to
+    // against the face, or null for the numeric adjustments and for anything not
+    // yet resolved.
+    private byte[]?[]? _glyphIds;
+
+    /// <summary>The font these runs were created against, if any.</summary>
+    internal FontInfo? Font => _font;
+
+    /// <summary>Record what each string element resolved to against its font.</summary>
+    internal void UseGlyphIds(byte[]?[] glyphIds) => _glyphIds = glyphIds;
+
+    /// <inheritdoc cref="ShowText.Features"/>
+    public System.Collections.Generic.IReadOnlyList<string>? Features { get; set; }
 
     /// <summary>Concatenated string parts (numeric adjustments dropped).
     /// Overrides the base so polymorphic access through TextShowOperator
@@ -344,6 +346,13 @@ public sealed class ShowText : TextShowOperator
     /// <summary>Record the glyph ids this run resolved to against its font.</summary>
     internal void UseGlyphIds(byte[] glyphIds) => _glyphIds = glyphIds;
 
+    // Set when this run is shown in a core face declared with WinAnsiEncoding: the
+    // run's characters as that encoding's codes, one char per byte.
+    private string? _codes;
+
+    /// <summary>Record the run as the single-byte codes of the simple font it is shown in.</summary>
+    internal void UseCodes(string codes) => _codes = codes;
+
     /// <summary>
     /// OpenType features to apply to this run, such as `liga` for the fi and fl
     /// ligatures or `onum` for old-style figures. None are applied unless named: a
@@ -377,7 +386,7 @@ public sealed class ShowText : TextShowOperator
         if (_glyphIds is not null)
             return $"<{Compat.ToHexString(_glyphIds)}> Tj";
 
-        var escaped = _text.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+        var escaped = (_codes ?? _text).Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
         return $"({escaped}) Tj";
     }
     public override string ToString() => ToPdf();
@@ -391,8 +400,10 @@ public sealed class ShowText : TextShowOperator
 /// <summary>Common base for all text-related operators (BT/ET, Tx state, text-show, text-place).</summary>
 public abstract class TextOperator : Operator
 {
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     public TextOperator() { }
     public TextOperator(Aspose.Pdf.Facades.TextProperties textProperties) { TextProperties = textProperties; }
+#pragma warning restore S3442
 
     /// <summary>Optional appearance metadata.</summary>
     public Aspose.Pdf.Facades.TextProperties? TextProperties { get; }
@@ -405,22 +416,28 @@ public abstract class TextOperator : Operator
 /// <summary>Common base for text-state operators (Tc, Tw, Tz, TL, Tf, Tr, Ts).</summary>
 public abstract class TextStateOperator : TextOperator
 {
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     public TextStateOperator() { }
     public TextStateOperator(Aspose.Pdf.Facades.TextProperties textProperties) : base(textProperties) { }
+#pragma warning restore S3442
 }
 
 /// <summary>Common base for text-positioning operators (Td, TD, T*, Tm).</summary>
 public abstract class TextPlaceOperator : TextOperator
 {
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     public TextPlaceOperator() { }
     public TextPlaceOperator(Aspose.Pdf.Facades.TextProperties textProperties) : base(textProperties) { }
+#pragma warning restore S3442
 }
 
 /// <summary>Common base for the BT / ET delimiters.</summary>
 public abstract class BlockTextOperator : TextOperator
 {
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     public BlockTextOperator() { }
     public BlockTextOperator(Aspose.Pdf.Facades.TextProperties textProperties) : base(textProperties) { }
+#pragma warning restore S3442
 }
 
 /// <summary>Tc — Set character spacing.</summary>

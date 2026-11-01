@@ -18,8 +18,6 @@ private sealed class FloatingBoxBuildState
     // Left/Top are in page coordinates where Top is measured from the top edge.
     public double marginLeft;
     public double marginTop;
-    public double marginRight;
-    public double marginBottom;
     // Box origin (bottom-left corner in PDF coordinates)
     public double boxX;
     public double boxY;

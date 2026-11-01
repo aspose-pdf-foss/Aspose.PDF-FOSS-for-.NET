@@ -32,7 +32,7 @@ public sealed partial class Document
 
         /// <summary>How wide a marker is: its runs measured in their own faces and sizes, a
         /// picture by its box. Zero for a marker this writer cannot lay.</summary>
-        public double MeasureMarker(Text.TextFragment marker)
+        public static double MeasureMarker(Text.TextFragment marker)
         {
             if (CollectSegmentRuns(marker) is not { Count: > 0 } runs) return 0;
             double width = 0;
@@ -83,7 +83,7 @@ public sealed partial class Document
         /// page once it exists.</summary>
         private void PlacePictureOnSlot(int slot, byte[] data, Rectangle rect)
         {
-            if (slot < 0) { _startPage.AddImage(data, rect); return; }
+            if (slot < 0) { _startPage.AddLayoutImage(data, rect); return; }
             _pendingImages.Add((slot, data, rect, false));
         }
     }

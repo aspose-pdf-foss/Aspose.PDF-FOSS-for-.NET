@@ -63,6 +63,12 @@ public sealed partial class Document
         return result;
     }
 
+    /// <summary>Import a source object as it is held - by reference or inline - through the shared clone map: an
+    /// object imported by its reference becomes an object of this document, the one every other reference to it
+    /// in the imported graph names, and its reference is returned.</summary>
+    internal PdfObject ImportObject(PdfObject source, PdfReader sourceReader, Dictionary<int, int> cloneMap)
+        => DeepCloneObject(source, sourceReader, cloneMap);
+
     private PdfObject DeepCloneObject(PdfObject? obj, PdfReader sourceReader,
         Dictionary<int, int> cloneMap)
     {
@@ -102,8 +108,8 @@ public sealed partial class Document
         if (obj is PdfStream stream)
         {
             var clonedDict = DeepCloneDict(stream.Dict, sourceReader, cloneMap);
-            // Copy raw stream data
-            return new PdfStream(clonedDict, stream.RawData);
+            // The raw data without the source's encryption: this document writes it under its own, or none.
+            return new PdfStream(clonedDict, sourceReader.PlaintextRawData(stream));
         }
 
         if (obj is PdfDictionary dict)
@@ -135,7 +141,7 @@ public sealed partial class Document
             if (key is "Pg" or "P" or "K") continue;
             var v = src.Get(key);
             if (v is PdfName or PdfString or PdfInteger or PdfReal or PdfBoolean)
-                clone.Set(key, v!);
+                clone.Set(key, v);
         }
         var children = new PdfArray();
         foreach (var childDict in ResolveStructKids(src, srcReader))

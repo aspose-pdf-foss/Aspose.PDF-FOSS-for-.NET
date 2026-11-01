@@ -154,7 +154,9 @@ internal static class TaggedXmlExporter
     };
 
     private static string FormatNumber(double v)
+#pragma warning disable S1244 // integrality test - exact by definition
         => v == Math.Floor(v) && Math.Abs(v) < long.MaxValue
+#pragma warning restore S1244
             ? ((long)v).ToString(CultureInfo.InvariantCulture)
             : v.ToString("0.####", CultureInfo.InvariantCulture);
 
@@ -172,9 +174,8 @@ internal static class TaggedXmlExporter
         var k = reader.Resolve(elem.Get("K"));
         if (k is PdfArray arr)
         {
-            foreach (var item in arr)
-                if (item is not null)
-                    yield return item;
+            foreach (var item in arr.Where(item => item is not null))
+                yield return item;
         }
         else if (k is not null)
         {
@@ -252,7 +253,7 @@ internal static class TaggedXmlExporter
                 if (!cidFonts.TryGetValue(key, out var cid))
                 {
                     Text.CidFontInfo? info = null;
-                    try { info = Text.CidFontInfo.TryBuild(fontDict, reader); } catch { }
+                    try { info = Text.CidFontInfo.TryBuild(fontDict, reader); } catch { /* a font program that does not parse leaves the fallback metrics in place */ }
                     cid = info is { IsTwoByteEncoding: true }
                         ? (fontDict, Text.TextAbsorber.ParseToUnicodeFromDict(fontDict, reader))
                         : null;

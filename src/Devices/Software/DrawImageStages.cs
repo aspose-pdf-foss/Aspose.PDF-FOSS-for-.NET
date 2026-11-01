@@ -17,6 +17,7 @@ public sealed partial class SoftwarePageRenderer
         // 4-bpc indexed is common for palette-based screenshots; 8-bpc indexed also appears.
         if (di.csInfo.Palette is not null)
         {
+            (di.smask, di.smaskW, di.smaskH) = FoldIndexColorKeyMask(di);
             BlitIndexed(di.ctx, di.decoded, di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.bpc, di.csInfo, di.flipY, di.flipX,
                 di.smask, di.smaskW, di.smaskH, di.state.FillAlpha);
             return;
@@ -24,17 +25,22 @@ public sealed partial class SoftwarePageRenderer
 
         // Raw 8-bpc samples take the same /Matte correction as the JPEG path above.
         if (di.bpc == 8 && (di.cs == "DeviceRGB" || di.cs == "DeviceGray"))
-            UnpremultiplyMatte(di.decoded, di.cs == "DeviceRGB" ? 3 : 1, di.dict.Get("SMask"), di.smask, di.ctx.Reader);
+            UnpremultiplyMatte(di.decoded, di.cs == "DeviceRGB" ? 3 : 1, di.imgW, di.imgH, di.dict.Get("SMask"), di.smask, di.smaskW, di.smaskH, di.ctx.Reader);
 
         if (di.bpc == 8 && (di.cs == "DeviceRGB" || di.cs == "DeviceGray"))
             (di.smask, di.smaskW, di.smaskH) = FoldColorKeyMask(di.dict, di.ctx.Reader, di.decoded, di.imgW, di.imgH, di.cs == "DeviceRGB" ? 3 : 1,
                 di.smask, di.smaskW, di.smaskH);
 
+        // An 8-bit sample is remapped through the image's /Decode before it is read as a colour.
+        if (di.bpc == 8 && DirectComponents(di.cs) is var comps and > 0
+            && IO.Filters.SampleDecode.Remap(di.decoded, di.imgW * di.imgH * comps, comps, di.dict.Get("Decode"), di.ctx.Reader) is { } remapped)
+            di.decoded = remapped;
+
         // Render raw pixel data
         if (di.cs == "DeviceRGB" && di.bpc == 8 && di.decoded.Length >= di.imgW * di.imgH * 3)
             BlitRGB(di.ctx, di.decoded, di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX, di.overprint);
         else if (di.cs == "DeviceCMYK" && di.bpc == 8 && di.decoded.Length >= di.imgW * di.imgH * 4)
-            BlitCMYK(di.ctx, di.decoded, di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.overprint);
+            BlitCMYK(di.ctx, di.decoded, di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX, di.overprint);
         else if (di.cs == "DeviceGray" && di.bpc == 8 && di.decoded.Length >= di.imgW * di.imgH)
             BlitGray(di.ctx, di.decoded, di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX);
         else if (di.cs == "DeviceGray" && (di.bpc == 2 || di.bpc == 4))
@@ -45,7 +51,7 @@ public sealed partial class SoftwarePageRenderer
         else if (di.cs == "DeviceRGB" && di.bpc is 1 or 2 or 4)
             BlitRGB(di.ctx, UnpackComponentSamples(di.decoded, di.imgW, di.imgH, di.bpc, 3), di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX);
         else if (di.cs == "DeviceCMYK" && di.bpc is 1 or 2 or 4)
-            BlitCMYK(di.ctx, UnpackComponentSamples(di.decoded, di.imgW, di.imgH, di.bpc, 4), di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha);
+            BlitCMYK(di.ctx, UnpackComponentSamples(di.decoded, di.imgW, di.imgH, di.bpc, 4), di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX);
         else if (di.csInfo.TintTransform is not null && (di.bpc is 1 or 2 or 4 or 8))
             // Single-colorant /Separation (or /DeviceN) image: map each sample through the
             // tint transform. A 1-bpc /Separation/Black image (sample 1 ⇒ full ink) would
@@ -53,11 +59,33 @@ public sealed partial class SoftwarePageRenderer
             // graphic comes out black-on-white).
             BlitRGB(di.ctx, SeparationSamplesToRgb(di.decoded, di.imgW, di.imgH, di.bpc, BuildSeparationLut(di.csInfo, GrayDecodeInverts(di.dict))),
                 di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX);
+        // A 1-bit grey image under a stencil /Mask or an /SMask is drawn through that mask like an 8-bit one:
+        // the bilevel blit knows no mask, so a masked scan's white box painted over the page in black.
+        else if (di.bpc == 1 && di.smask is not null)
+            BlitGray(di.ctx, UnpackGraySamples(di.decoded, di.imgW, di.imgH, di.bpc, GrayDecodeInverts(di.dict)), di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX);
         else if (di.bpc == 1)
             BlitBilevel(di.ctx, di.decoded, di.imgW, di.imgH, di.px, di.py, di.pw, di.ph, GrayDecodeInverts(di.dict));
         // No fallback — a solid gray rectangle over an unrecognised image is false
         // content. Leaving the area white (page background) is less damaging
         // than painting a false rectangle over the area's real content.
+    }
+
+    /// <summary>The samples per pixel of a device colour space an image's samples are read in directly; zero for another.</summary>
+    internal static int DirectComponents(string? colorSpace) => colorSpace switch
+    {
+        "DeviceGray" => 1,
+        "DeviceRGB" => 3,
+        "DeviceCMYK" => 4,
+        _ => 0,
+    };
+
+    /// <summary>Grey or RGB JPEG samples remapped through the image's /Decode; a CMYK JPEG takes its
+    /// inversion in the decoder.</summary>
+    internal static byte[] DecodedJpegSamples(byte[] pixels, int pixelCount, int comps, string? colorSpace,
+        PdfObject? decode, PdfReader reader)
+    {
+        var direct = comps == 1 && colorSpace == "DeviceGray" || comps == 3 && colorSpace == "DeviceRGB";
+        return direct ? IO.Filters.SampleDecode.Remap(pixels, pixelCount * comps, comps, decode, reader) ?? pixels : pixels;
     }
 
     /// <summary>Software image draw: a JPEG or JPEG 2000 stream decoded and blitted.</summary>
@@ -79,8 +107,8 @@ public sealed partial class SoftwarePageRenderer
             {
                 var jpeg = IO.Filters.JpegDecoder.Decode(di.decoded, CmykDecodeInverts(di.dict));
                 if (jpeg.components is 1 or >= 3)
-                    UnpremultiplyMatte(jpeg.pixels, jpeg.components >= 3 ? 3 : 1,
-                        di.dict.Get("SMask"), di.smask, di.ctx.Reader);
+                    UnpremultiplyMatte(jpeg.pixels, jpeg.components >= 3 ? 3 : 1, jpeg.width, jpeg.height,
+                        di.dict.Get("SMask"), di.smask, di.smaskW, di.smaskH, di.ctx.Reader);
                 // A single-component DCT image in a /Separation or /DeviceN space carries TINT
                 // values, not grey levels: high tint = more ink = DARKER, the opposite of
                 // DeviceGray. The raw-sample path below already runs them through the tint
@@ -100,9 +128,9 @@ public sealed partial class SoftwarePageRenderer
                     BlitRGB(di.ctx, sepRgb, jpeg.width, jpeg.height, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX, di.overprint);
                 }
                 else if (jpeg.components == 1)
-                    BlitGray(di.ctx, jpeg.pixels, jpeg.width, jpeg.height, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX, di.overprint);
+                    BlitGray(di.ctx, DecodedJpegSamples(jpeg.pixels, jpeg.width * jpeg.height, 1, di.cs, di.dict.Get("Decode"), di.ctx.Reader), jpeg.width, jpeg.height, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX, di.overprint);
                 else if (jpeg.components >= 3)
-                    BlitRGB(di.ctx, jpeg.pixels, jpeg.width, jpeg.height, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX, di.overprint);
+                    BlitRGB(di.ctx, DecodedJpegSamples(jpeg.pixels, jpeg.width * jpeg.height, jpeg.components, di.cs, di.dict.Get("Decode"), di.ctx.Reader), jpeg.width, jpeg.height, di.px, di.py, di.pw, di.ph, di.smask, di.smaskW, di.smaskH, di.state.FillAlpha, di.flipY, di.flipX, di.overprint);
                 return false;
             }
             catch
@@ -152,8 +180,8 @@ public sealed partial class SoftwarePageRenderer
             if (di.dict.Get("Decode") is PdfArray decodeArr && decodeArr.Count >= 2)
                 invertDecode = NumFrom(decodeArr[0]) > NumFrom(decodeArr[1]);
             // A mask painted while a /Pattern fill is active (e.g. PowerPoint masks a
-            // gradient pattern through a stencil) shows the pattern, not a flat colour;
-            // painting the stale solid fill over-inks it dark. Fill the stencil with the
+            // gradient pattern through a stencil) shows the pattern, not a flat colour; painting
+            // the stale solid fill over-inks it dark. Fill the stencil with the
             // pattern instead.
             if (di.state.FillPatternName is not null)
             {

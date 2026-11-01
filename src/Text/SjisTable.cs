@@ -30,6 +30,44 @@ internal static class SjisTable
         return u == 0 ? (int?)null : u;
     }
 
+    private const int AsciiLast = 0x7F;
+    private const int KatakanaFirst = 0xA1;
+    private const int KatakanaLast = 0xDF;
+    private const int TrailFirst = 0x40;
+    private const int TrailLast = 0xFC;
+    private const int TrailSkipped = 0x7F;
+
+    private static readonly System.Lazy<System.Collections.Generic.Dictionary<int, int>> Inverse = new(BuildInverse);
+
+    /// <summary>Unicode codepoint -> the Shift-JIS code that writes it (one byte, or two as
+    /// lead &lt;&lt; 8 | trail), or null when Shift-JIS has no code for it. A character
+    /// two codes decode to is written as the lower of them.</summary>
+    public static int? FromUnicode(int unicode) =>
+        Inverse.Value.TryGetValue(unicode, out var code) ? code : null;
+
+    private static System.Collections.Generic.Dictionary<int, int> BuildInverse()
+    {
+        var inverse = new System.Collections.Generic.Dictionary<int, int>();
+        for (var code = 0; code <= AsciiLast; code++) inverse[code] = code;
+        for (var code = KatakanaFirst; code <= KatakanaLast; code++) inverse[(int)ToUnicode(code)!] = code;
+        foreach (var lead in LeadBytes())
+        {
+            for (var trail = TrailFirst; trail <= TrailLast; trail++)
+            {
+                if (trail == TrailSkipped) continue;
+                var code = (lead << 8) | trail;
+                if (ToUnicode(code) is { } u && !inverse.ContainsKey(u)) inverse[u] = code;
+            }
+        }
+        return inverse;
+    }
+
+    private static System.Collections.Generic.IEnumerable<int> LeadBytes()
+    {
+        for (var lead = 0x81; lead <= 0x9F; lead++) yield return lead;
+        for (var lead = 0xE0; lead <= 0xFC; lead++) yield return lead;
+    }
+
     private static ushort[] Decode(string b64)
     {
         var raw = System.Convert.FromBase64String(b64);

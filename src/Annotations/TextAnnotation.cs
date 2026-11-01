@@ -17,6 +17,13 @@ public partial class TextAnnotation : MarkupAnnotation
         Dict.Set("Subtype", new PdfName("Text"));
     }
 
+    /// <summary>Document-bound ctor; rectangle defaults to empty.</summary>
+    public TextAnnotation(Document document) : base(document)
+    {
+        Dict.Set("Type", new PdfName("Annot"));
+        Dict.Set("Subtype", new PdfName("Text"));
+    }
+
     /// <summary>Gets or sets whether the note is initially shown open (/Open). Defaults to false.</summary>
     public bool Open
     {
@@ -46,8 +53,18 @@ public partial class TextAnnotation : MarkupAnnotation
         }
         set
         {
-            if (value == Aspose.Pdf.Annotations.AnnotationState.None) Dict.Remove("State");
-            else Dict.Set("State", new PdfName(value.ToString()));
+            if (value == Aspose.Pdf.Annotations.AnnotationState.None)
+            {
+                Dict.Remove("State");
+                Dict.Remove("StateModel");
+                return;
+            }
+            // /State and /StateModel are text strings, and a state means something only
+            // within its model: a bare /State name is no state to a viewer.
+            var marked = value is Aspose.Pdf.Annotations.AnnotationState.Marked
+                or Aspose.Pdf.Annotations.AnnotationState.Unmarked;
+            Dict.Set("State", new PdfString(Compat.Latin1.GetBytes(value.ToString())));
+            Dict.Set("StateModel", new PdfString(Compat.Latin1.GetBytes(marked ? "Marked" : "Review")));
         }
     }
 
@@ -67,7 +84,7 @@ public partial class TextAnnotation : MarkupAnnotation
         set
         {
             if (value == Aspose.Pdf.Annotations.AnnotationStateModel.Undefined) Dict.Remove("StateModel");
-            else Dict.Set("StateModel", new PdfName(value.ToString()));
+            else Dict.Set("StateModel", new PdfString(Compat.Latin1.GetBytes(value.ToString())));
         }
     }
 
@@ -99,12 +116,14 @@ public partial class TextAnnotation : MarkupAnnotation
     /// <summary>Generate the normal appearance (/AP /N) for the note icon
     /// (PDF 32000 §12.5.6.4) so the annotation renders and flattens. Uses the
     /// standard icon path for the current /Name; /C fills the icon body while
-    /// outlines stay black.</summary>
+    /// outlines stay black. A note without /C has no colour of its own: its body
+    /// stays the stream's white, so flattened on a page it shows nothing, as
+    /// the reference flattens it, instead of a black bar.</summary>
     public override void UpdateAppearances()
     {
         var rect = Rect;
         if (rect is null) return;
-        var c = Color;
+        var c = Dict.Get("C") is null ? null : Color;
         var content = TextAnnotationIcons.ContentFor(
             Dict.GetName("Name") ?? "Note",
             c is null ? null : (c.R / 255.0, c.G / 255.0, c.B / 255.0));
@@ -133,13 +152,6 @@ public partial class TextAnnotation : MarkupAnnotation
         SetNormalAppearance(data, new Rectangle(0, 0, w, h));
     }
 
-    /// <summary>Document-bound ctor; rectangle defaults to empty.</summary>
-    public TextAnnotation(Document document) : base(document)
-    {
-        Dict.Set("Type", new PdfName("Annot"));
-        Dict.Set("Subtype", new PdfName("Text"));
-    }
-
     /// <summary>Always <see cref="AnnotationType.Text"/>.</summary>
     public new AnnotationType AnnotationType => AnnotationType.Text;
 
@@ -165,7 +177,12 @@ public partial class TextAnnotation : MarkupAnnotation
         set
         {
             if (value is null) Dict.Remove("Popup");
-            else Dict.Set("Popup", value.Dict);
+            else
+            {
+                // The popup is an object of its own that knows the annotation it belongs to.
+                Dict.Set("Popup", ReferenceTo(value));
+                value.Dict.Set("Parent", value.ReferenceTo(this));
+            }
         }
     }
 }

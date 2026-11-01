@@ -82,6 +82,16 @@ public sealed class Cell
     /// wraps them, even when the width estimate says they overflow the column.</summary>
     internal bool HtmlNoWrap { get; set; }
 
+    /// <summary>HTML break-word (<c>word-wrap: break-word</c>, <c>overflow-wrap</c>, <c>word-break:
+    /// break-all</c>): a token wider than the column breaks inside it instead of spilling
+    /// past the cell edge.</summary>
+    internal bool HtmlBreakWord { get; set; }
+
+    /// <summary>HTML: the `border` shorthand of a converted page's cell whose content is placed as a
+    /// layout table's block (a cell hosting a nested grid); that placement strokes it round the cell's
+    /// box. Null when the cell declares none.</summary>
+    internal BorderInfo? HtmlHostFrame { get; set; }
+
     /// <summary>Vertical alignment of the cell content. None = unset: plain
     /// rows seat content at the top, while a row-spanning cell centres its
     /// block; an EXPLICIT Top pins a spanning block to the span top.</summary>

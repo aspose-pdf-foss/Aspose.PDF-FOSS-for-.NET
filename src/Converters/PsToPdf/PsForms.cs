@@ -33,7 +33,7 @@ internal static class PsForms
             i.Push(PsValue.Dict(form));
             i.Invoke(proc);
         }
-        catch (PsErrorSignal e)
+        catch (PsErrorException e)
         {
             i.RecordError(e.ErrorName);
         }

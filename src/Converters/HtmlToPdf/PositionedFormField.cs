@@ -20,7 +20,7 @@ internal static partial class HtmlToPdfConverter
 
         RenderFieldQuestion(ff);
 
-        ff.respM = Regex.Match(ff.fBody,
+        ff.respM = SafeRegex.Match(ff.fBody,
             @"class=""pan-question-response[^""]*""[^>]*>([\s\S]*)$", RegexOptions.IgnoreCase);
         if (!ff.respM.Success) return true;
         ff.resp = ff.respM.Groups[1].Value;

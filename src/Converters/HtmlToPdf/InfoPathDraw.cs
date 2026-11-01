@@ -25,7 +25,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (text.Length == 0) return;
         var latin = true;
-        foreach (var ch in text) if (ch > 0x7E) { latin = false; break; }
+        if (text.Any(ch => ch > 0x7E)) { latin = false; }
         if (latin)
         {
             ip.sb.Append(Compat.Format(ip.invc, $"BT {rgb} rg /{IpRes(face)} {fs:0.###} Tf 1 0 0 1 {x:0.###} {ip.pageH - baseTd:0.###} Tm ({EscapePdfString(text)}) Tj ET\n"));
@@ -57,7 +57,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The tr / tbody backgrounds at their grid boxes (the reference converter fills a
     /// rect with the band's right and bottom edges as its width and height, clipped to the
     /// band itself - so the band is what shows).</summary>
-    private static void IpPaintBands(InfoPathState ip, IpNode table, List<(IpNode tr, List<IpCell> cells, double h)> rows,
+    private static void IpPaintBands(InfoPathState ip, List<(IpNode tr, List<IpCell> cells, double h)> rows,
         List<(IpNode group, int first, int count)> bands, double[] gridX, double[] gridY)
     {
         for (var r = 0; r < rows.Count; r++)

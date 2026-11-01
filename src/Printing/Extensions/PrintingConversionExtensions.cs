@@ -196,7 +196,7 @@ namespace Aspose.Pdf.Printing
             if (!pageSettings.IsDefaultLandscape)
                 nativeSettings.Landscape = pageSettings.Landscape;
             var margins = pageSettings.Margins;
-            if (!pageSettings.IsDefaultMargins && margins is not null)
+            if (pageSettings.MarginsGiven && margins is not null)
                 nativeSettings.Margins = new NativeMargins(margins.Left, margins.Right, margins.Top, margins.Bottom);
             if (!pageSettings.IsDefaultPaperSize && pageSettings.PaperSize is not null)
                 nativeSettings.PaperSize = pageSettings.PaperSize.ToNativePaperSize();

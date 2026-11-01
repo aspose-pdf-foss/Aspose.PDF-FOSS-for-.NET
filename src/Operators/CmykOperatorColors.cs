@@ -51,17 +51,17 @@ internal static class CmykOperatorColors
         var (k0, dk) = Cell(k);
         double r = 0, g = 0, b = 0;
         for (var ci = 0; ci <= 1; ci++)
-        for (var mi = 0; mi <= 1; mi++)
-        for (var yi = 0; yi <= 1; yi++)
-        for (var ki = 0; ki <= 1; ki++)
-        {
-            var w = (ci == 1 ? dc : 1 - dc) * (mi == 1 ? dm : 1 - dm) * (yi == 1 ? dy : 1 - dy) * (ki == 1 ? dk : 1 - dk);
-            if (w == 0) continue;
-            var p = ((((c0 + ci) * Grid + m0 + mi) * Grid + y0 + yi) * Grid + k0 + ki) * 3;
-            r += w * lut[p];
-            g += w * lut[p + 1];
-            b += w * lut[p + 2];
-        }
+            for (var mi = 0; mi <= 1; mi++)
+                for (var yi = 0; yi <= 1; yi++)
+                    for (var ki = 0; ki <= 1; ki++)
+                    {
+                        var w = (ci == 1 ? dc : 1 - dc) * (mi == 1 ? dm : 1 - dm) * (yi == 1 ? dy : 1 - dy) * (ki == 1 ? dk : 1 - dk);
+                        if (w == 0) continue;
+                        var p = ((((c0 + ci) * Grid + m0 + mi) * Grid + y0 + yi) * Grid + k0 + ki) * 3;
+                        r += w * lut[p];
+                        g += w * lut[p + 1];
+                        b += w * lut[p + 2];
+                    }
         return ((int)Math.Round(r), (int)Math.Round(g), (int)Math.Round(b));
     }
 

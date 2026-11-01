@@ -34,11 +34,14 @@ public sealed partial class PdfToHtmlConverter
         xd.page = xd.doc.Pages[xd.i];
         xd.reader = xd.page.Reader;
         RenderPageTextLayer(xd);
+        xd.band = TrimBand(xd);
+        if (xd.band is { } band) xd.styleReg.PinBand(band);
 
         // page_N container -> optional SVG background -> stl_view/stl_05/stl_06 text layer.
         // No inline style: the page box (width/height/margin/border) lives in the
-        // structural stl_02 CSS class, and tests match the exact div markup.
-        xd.sb.AppendLine($"<div id=\"page_{xd.i - 1}\" class=\"{xd.namer.PageCls()}\">");
+        // structural stl_02 CSS class, and tests match the exact div markup. A page trimmed
+        // to its content states inline only what differs from the stylesheet's first page.
+        xd.sb.AppendLine($"<div id=\"page_{xd.i - 1}\" class=\"{xd.namer.PageCls()}\"{PageDivStyleAttr(xd)}>");
 
         if (xd.emitPngBackground)
         {
@@ -53,16 +56,24 @@ public sealed partial class PdfToHtmlConverter
             ? $"{xd.namer.Cls("05")} {xd.namer.Cls("06")}"
             : $"{xd.namer.Cls("03")} {xd.namer.Cls("04")}";
         xd.sb.AppendLine($"<div class=\"{xd.namer.Cls("view")}\"><div class=\"{xd.layerCls}\">");
+        // A quarter-turned page's text is laid out in its unrotated frame and turned onto the page with it.
+        var quarter = xd.page.RotationQuarter is 90 or 270 ? xd.page.RotationQuarter : 0;
         if (xd.pageTurnedOver)
             xd.sb.Append($"<div class=\"{xd.namer.Cls(xd.styleReg.PageRotation(180))}\">");
-        xd.sb.Append(ReorderStlLineDivs(xd.textBuf.ToString(), xd.namer.Cls("01")));
-        if (xd.pageTurnedOver) xd.sb.Append("</div>");
+        else if (quarter != 0)
+        {
+            var shiftEm = Math.Floor(quarter == 90 ? xd.mb.Height : xd.mb.Width) / 12.0;
+            xd.sb.Append($"<div class=\"{xd.namer.Cls(xd.styleReg.PageQuarterTurn(quarter, shiftEm))}\">");
+        }
+        xd.sb.Append(ReorderStlLineDivs(xd.textBuf.ToString(), xd.namer.Cls("01"), xd.model, xd.band?.TopEm ?? 0));
+        if (xd.pageTurnedOver || quarter != 0) xd.sb.Append("</div>");
         // Internal-link destinations into THIS page materialize as positioned,
         // named anchors at the end of the text layer — the "#page_index" hrefs
         // land on them.
+        // Under the trim the band's top is the page's top for the anchors and overlays as well.
+        var yTop = xd.mb.LLY + Math.Floor(xd.mb.URY - xd.mb.LLY) - (xd.band?.TopEm ?? 0) * 12.0;
         if (xd.destAnchors.PageDests.TryGetValue(xd.i, out var pageDests))
         {
-            var yTop = xd.mb.LLY + Math.Floor(xd.mb.URY - xd.mb.LLY);
             for (var di = 0; di < pageDests.Count; di++)
             {
                 var (dx, dy) = pageDests[di];
@@ -79,7 +90,7 @@ public sealed partial class PdfToHtmlConverter
         // The z-ordered variant never emits overlays — text runs under a link
         // rect already carry inline anchors, so no overlay is needed there.
         if (xd.options?.UseZOrder != true)
-            EmitGrlinkOverlays(xd.linkTargets, xd.sb, xd.page.Height, xd.namer);
+            EmitGrlinkOverlays(xd.linkTargets, xd.sb, xd.mb.LLX, yTop, xd.namer);
         xd.sb.AppendLine("</div>");
     }
 }

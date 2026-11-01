@@ -80,6 +80,13 @@ public sealed partial class Form
         return results;
     }
 
+    /// <summary>Read form-field values from a JSON file and apply them.</summary>
+    public IEnumerable<FieldSerializationResult> ImportFromJson(string fileName)
+    {
+        using var fs = new FileStream(fileName, FileMode.Open, FileAccess.Read);
+        return ImportFromJson(fs);
+    }
+
     /// <summary>Reconstruct a field (and its child fields) from a FieldExportingData
     /// JSON entry. Top-level fields are added to the form; child fields are wired
     /// as /Kids of their parent (so a group field contributes a single Form entry).
@@ -110,7 +117,7 @@ public sealed partial class Form
         if (string.IsNullOrEmpty(name)) return null;
 
         fe.dict = new PdfDictionary();
-        fe.partial = fe.parent is not null && name!.Contains('.') ? name.Substring(name.LastIndexOf('.') + 1) : name!;
+        fe.partial = fe.parent is not null && name.Contains('.') ? name.Substring(name.LastIndexOf('.') + 1) : name;
         fe.dict.Set("T", new PdfString(Compat.Latin1.GetBytes(fe.partial)));
         if (hasFieldType)
         {
@@ -360,12 +367,5 @@ public sealed partial class Form
             acroForm.Set("DR", drDict);
             DefaultResources = new Aspose.Pdf.Resources(drDict, reader);
         }
-    }
-
-    /// <summary>Read form-field values from a JSON file and apply them.</summary>
-    public IEnumerable<FieldSerializationResult> ImportFromJson(string fileName)
-    {
-        using var fs = new FileStream(fileName, FileMode.Open, FileAccess.Read);
-        return ImportFromJson(fs);
     }
 }

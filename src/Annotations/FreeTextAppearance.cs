@@ -14,6 +14,55 @@ public partial class FreeTextAnnotation
     /// seats the first baseline one font size under the top edge, 2 pt in from the left).</summary>
     private const double FreeTextLeadingEm = 1.149;
 
+    /// <summary>The annotation with the appearance a renderer paints when the file stores it without one:
+    /// its contents laid out from the default appearance on a COPY of the dictionary, so the document
+    /// keeps the annotation as it was. Null when there is nothing to lay out.</summary>
+    internal static PdfDictionary? WithRenderAppearance(PdfDictionary annot, PdfReader reader)
+    {
+        var copy = new PdfDictionary();
+        foreach (var key in annot.Keys) copy.Set(key, annot.Get(key)!);
+        new FreeTextAnnotation(copy, reader).GenerateAppearance();
+        return copy.ContainsKey("AP") ? copy : null;
+    }
+
+    /// <summary>The face a free-text appearance is drawn in when the standard-14 dictionary cannot show it: the
+    /// font the default appearance was built from, else the installed or registered face its name gives; and
+    /// a covering face when the text holds characters beyond Latin-1 the face lacks. Standard-14 names and
+    /// the Acrobat aliases keep the standard dictionary.</summary>
+    private void ResolveFreeTextFace(FreeTextAppearanceState ft)
+    {
+        var name = ft.fontName.Replace(" ", "");
+        byte[]? face = null;
+        if (!IsStandardFreeTextFont(name))
+            face = AppearanceFace()?.ProgramBytes() ?? Aspose.Pdf.Text.FontRepository.GetTtfData(ft.fontName)
+                   ?? Aspose.Pdf.Text.SystemFontResolver.Resolve(name);
+        if (ft.text!.Any(c => c > LastLatin1Char) && (face is null || !Covers(face, ft.text!)))
+            face = Aspose.Pdf.TextStamp.TryResolveCjkTtf(ft.text!)?.ttf
+                   ?? (Aspose.Pdf.Text.SystemFontResolver.Resolve("Arial") is { } arial && Covers(arial, ft.text!) ? arial : face);
+        if (face is not { Length: > 0 }) return;
+        ft.faceTtf = face;
+        ft.faceName = Aspose.Pdf.Text.FontRepository.ReadTtfPostScriptName(face) ?? name;
+    }
+
+    private const char LastLatin1Char = (char)0xFF;
+
+    /// <summary>A standard-14 face or an Acrobat alias of one: drawn with the standard dictionary.</summary>
+    private static bool IsStandardFreeTextFont(string name) =>
+        name is "Helv" or "HeBo" or "TiRo" or "Cour" or "Times" or "ZaDb" or "Symb"
+        || Aspose.Pdf.Text.Standard14Fonts.CanonicalName(name) == name;
+
+    /// <summary>True when the face has a glyph for every character of the text beyond Latin-1.</summary>
+    private static bool Covers(byte[] face, string text)
+    {
+        try
+        {
+            var parser = new Aspose.Pdf.Text.GlyphOutlineParser(face);
+            return text.Where(c => c > LastLatin1Char && !char.IsSurrogate(c))
+                .All(c => parser.CMap.TryGetValue(c, out var gid) && gid != 0);
+        }
+        catch { return false; }
+    }
+
     internal void GenerateAppearance()
     {
         if (InternalReader.ResolveDict(Dict.Get("AP")) is not null) return;
@@ -25,7 +74,7 @@ public partial class FreeTextAnnotation
         if (ft.rect is null || ft.rect.Width <= 0 || ft.rect.Height <= 0) return;
 
         ft.da = DefaultAppearanceObject;
-        ft.fontName = string.IsNullOrWhiteSpace(ft.da.FontName) ? "Helvetica" : ft.da.FontName!;
+        ft.fontName = string.IsNullOrWhiteSpace(ft.da.FontName) ? "Helvetica" : ft.da.FontName;
         ft.fontSize = ft.da.FontSize > 0 ? ft.da.FontSize : 12.0;
         ft.color = ft.da.TextColor;
 
@@ -76,15 +125,30 @@ public partial class FreeTextAnnotation
         // that comfortably fits the length it is actually drawn along.
         if (ft.quarterTurn && (System.Math.Abs(ft.rotateDeg % 180.0) > 1e-6))
             ft.avail = System.Math.Max(1.0, ft.h - 2 * ft.inset);
+        ft.callout = PrepareCallout(ft);
 
-        ft.fontDict = MakeFreeTextFontDict(ft.fontName);
-        ft.metrics = Aspose.Pdf.Text.FontMetrics.FromFontDict(ft.fontDict, InternalReader);
-        ft.lines = WrapText(ft.text, ft.metrics, ft.fontSize, ft.avail);
+        ResolveFreeTextFace(ft);
+        if (ft.faceTtf is { } face)
+        {
+            ft.fonts = new PdfDictionary();
+            var (resName, _) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(ft.fonts, face, ft.faceName, "",
+                resNameHint: ResName(ft.fontName));
+            ft.fontDict = InternalReader.ResolveDict(ft.fonts.Get(resName))!;
+            ft.measure = s => Aspose.Pdf.Text.Type0FontEmbedder.MeasureText(ft.fonts, face, ft.faceName, s, ft.fontSize);
+        }
+        else
+        {
+            ft.fontDict = MakeFreeTextFontDict(ft.fontName);
+            ft.metrics = Aspose.Pdf.Text.FontMetrics.FromFontDict(ft.fontDict, InternalReader);
+            ft.measure = s => ft.metrics.MeasureString(s, ft.fontSize);
+        }
+        ft.lines = WrapText(ft.text, ft.measure, ft.avail);
 
         ft.ci = System.Globalization.CultureInfo.InvariantCulture;
 
         ft.leading = ft.fontSize * FreeTextLeadingEm;
         ft.sb = new System.Text.StringBuilder();
+        if (ft.callout is not null) BeginCalloutBox(ft);
 
         // A FreeText annotation's /C entry is its background colour: fill the
         // rectangle with it (behind border and text) when
@@ -105,6 +169,7 @@ public partial class FreeTextAnnotation
         ft.sb.Append("BT\n");
         EmitFreeTextLines(ft);
         ft.sb.Append("ET\nQ\nEMC\n");
+        if (ft.callout is not null) EndCalloutBox(ft, ft.callout);
 
         StoreFreeTextAppearanceStream(ft);
     }

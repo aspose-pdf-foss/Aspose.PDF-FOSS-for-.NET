@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Annotations.JavascriptExtensions;
 public static partial class FieldDateTimeFormatter
 {
     /// <summary>The stages of the field date format: one format token at a time.</summary>
-    private static void FormatDateToken(DateFormatState df, Aspose.Pdf.Annotations.JavascriptExtensions.FieldDateTimeFormatter.FormatToken tok)
+    private static void FormatDateToken(DateFormatState df, Aspose.Pdf.Annotations.JavascriptExtensions.FieldDateTimeFormatter.IFormatToken tok)
     {
         if (tok is LiteralToken lt)
         {

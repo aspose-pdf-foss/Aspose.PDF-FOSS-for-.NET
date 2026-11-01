@@ -38,8 +38,8 @@ namespace Aspose.Pdf.Comparison
         {
             var entries = new List<Entry>();
             if (differences is not null)
-                foreach (var d in differences)
-                    if (d is not null) entries.Add(Entry.From(d));
+                foreach (var d in differences.Where(d => d is not null))
+                    entries.Add(Entry.From(d));
             Write(entries, targetFilePath);
         }
 
@@ -54,8 +54,8 @@ namespace Aspose.Pdf.Comparison
                 {
                     var entries = new List<Entry>();
                     if (group is not null)
-                        foreach (var d in group)
-                            if (d is not null) entries.Add(Entry.From(d));
+                        foreach (var d in group.Where(d => d is not null))
+                            entries.Add(Entry.From(d));
                     groups.Add(entries);
                 }
             }

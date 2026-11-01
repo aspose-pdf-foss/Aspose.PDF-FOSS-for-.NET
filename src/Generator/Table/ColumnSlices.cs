@@ -84,7 +84,8 @@ public partial class Table
             row.CellGridPublished = true;
             var cells = row.Cells;
             var col = 0;
-            for (var i = 0; i < cells.Count && col < colWidths.Length; i++)
+            var i = 0;
+            while (i < cells.Count && col < colWidths.Length)
             {
                 var cell = cells.At(i);
                 // The published width is the DECLARED column, without the border pitch.
@@ -100,6 +101,7 @@ public partial class Table
                 }
                 i += k - 1;
                 col += span;
+                i++;
             }
         }
     }
@@ -247,7 +249,7 @@ public partial class Table
     /// <see cref="CellImage.LineOffset"/> moved to the first line of the NEXT slice, so
     /// the render pass (which draws an image on the slice covering its line) carries it
     /// there whole.</summary>
-    private (double result, bool deferred) GeneratorImageSliceH(RowPlan plan, int lineIdx, int take, double budget)
+    private static (double result, bool deferred) GeneratorImageSliceH(RowPlan plan, int lineIdx, int take, double budget)
     {
         bool deferred = default;
         deferred = false;
@@ -285,14 +287,16 @@ public partial class Table
     /// vertical padding, floored by an authored MinRowHeight.</summary>
     private double RowPlanHeight(RowPlan plan)
     {
-        var h = plan.LineCount == 0
-            ? plan.MinBlankHeight
-            : (plan.ExactTotalH > 0 && plan.CellTables is not null
-                ? plan.ExactTotalH
-                : plan.CssContentH > 0
-                    ? CssRowContentH(plan)
-                    : (plan.LineCount - 1) * plan.LineHeight + plan.TightLine)
-              + plan.VertPadding;
+        double h;
+        if (plan.LineCount == 0) h = plan.MinBlankHeight;
+        else
+            h = ((plan.ExactTotalH, plan.CellTables, plan.CssContentH) switch
+            {
+                (> 0, not null, _) => plan.ExactTotalH,
+                (_, _, > 0) => CssRowContentH(plan),
+                _ => (plan.LineCount - 1) * plan.LineHeight + plan.TightLine,
+            })
+                + plan.VertPadding;
         var floor = MinRowFloor(plan);
         return floor > h ? floor : h;
     }
@@ -300,8 +304,11 @@ public partial class Table
     /// <summary>A row's MinRowHeight floor. A generator cell measures the authored
     /// height INSIDE its rules: 30 pt rows with 0.5 pt rules pitch 31, with or without
     /// cell padding (probed); the other dialects floor the whole row.</summary>
-    private double MinRowFloor(RowPlan p) => p.Row.MinRowHeight <= 0 ? 0
-        : p.Row.MinRowHeight + (GeneratorCellModel && !p.Row.MinRowHeightIncludesRules ? p.RuleBand : 0);
+    private double MinRowFloor(RowPlan p)
+    {
+        if (p.Row.MinRowHeight <= 0) return 0;
+        return p.Row.MinRowHeight + (GeneratorCellModel && !p.Row.MinRowHeightIncludesRules ? p.RuleBand : 0);
+    }
 
     /// <summary>Record one image a cell draws, keeping the ones already recorded for that
     /// column — a cell may hold several, each on its own line.</summary>
@@ -347,11 +354,11 @@ public partial class Table
         {
             if (li >= cellLines.Count) continue;
             var cl = cellLines[li];
-            var lh = cl.BoxH > 0 ? cl.BoxH
-                : cl.ImgReserve ? cl.FontSize
-                : cl.Text.Length > 0 || cl.Boxes is { Count: > 0 } || cl.HtmlEngine
-                    ? CssLineBoxPt(cl.FontSize > 0 ? cl.FontSize : DefaultCellFontPt)
-                    : 0;
+            double lh = 0;
+            if (cl.BoxH > 0) lh = cl.BoxH;
+            else if (cl.ImgReserve) lh = cl.FontSize;
+            else if (cl.Text.Length > 0 || cl.Boxes is { Count: > 0 } || cl.HtmlEngine)
+                lh = CssLineBoxPt(cl.FontSize > 0 ? cl.FontSize : DefaultCellFontPt);
             if (lh > h) h = lh;
         }
         return h;
@@ -370,7 +377,9 @@ public partial class Table
     private sealed class RowPlan
     {
         public Row Row = null!;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<List<CellLine>> CellLines = new();  // [cell][line]
+#pragma warning restore S3218
         public double LineHeight;        // uniform per-row line height (max across cells)
         public double TightLine;         // tight (no-leading) height of the tallest line; used so a
                                          // block of n lines is (n-1)·LineHeight + TightLine tall
@@ -455,6 +464,9 @@ public partial class Table
         /// its caller laid out for the cell: the part is told where the cell put it.</summary>
         public ReservedBlock? Block;
         public ReservedPart? Part;
+
+        /// <summary>A turned text standing in the cell instead of a picture.</summary>
+        public RotatedCellText? Rotated;
         public double Width;
         public double Height;
         public HorizontalAlignment Align;

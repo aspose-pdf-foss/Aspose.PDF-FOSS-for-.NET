@@ -12,13 +12,16 @@ internal static partial class HtmlToPdfConverter
         public HtmlNode? Node;
         public FbStyle St = null!;
         public FbBoxProps P = null!;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double X, Y, W, H;                              // border box
         public List<FbBox> Kids = new();
         public List<FbLine> Lines = new();
+#pragma warning restore S3218
         public bool IsBfc, IsFloat, IsTable, IsInline;         // IsInline: an inline-block or control seated on a line
         public FbTableGrid? Grid;                              // a table's grid geometry, for the borders
         public FbControl? Ctl;                                 // a form control's widget
         public FbReplaced? Img;                                // a picture that could not load, boxed
+        public byte[]? Picture;                                // a loaded picture's encoded bytes (the column claim)
         public double ContentX => X + P.Border.L + P.Pad.L;
         public double ContentY => Y + P.Border.T + P.Pad.T;
         public double ContentW => W - P.ChromeH;
@@ -26,7 +29,7 @@ internal static partial class HtmlToPdfConverter
         public double OuterH => H + P.Margin.V;
         public bool HasBlockKids
         {
-            get { foreach (var k in Kids) if (!k.IsFloat && !k.IsInline) return true; return false; }
+            get { foreach (var k in Kids) if (!k.IsFloat && !k.IsInline) { return true; } return false; }
         }
     }
 
@@ -57,8 +60,8 @@ internal static partial class HtmlToPdfConverter
         public double NextBottom(double y)
         {
             var next = double.MaxValue;
-            foreach (var f in Floats)
-                if (f.y1 > y + FbEpsilon) next = Math.Min(next, f.y1);
+            foreach (var fy1 in Floats.Select(f => f.y1).Where(fy1 => fy1 > y + FbEpsilon))
+                next = Math.Min(next, fy1);
             return next;
         }
     }
@@ -67,7 +70,9 @@ internal static partial class HtmlToPdfConverter
     /// the last block, not yet spent (it collapses with the next block's top margin).</summary>
     private sealed class FbFlow
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<FbItem> Run = new();
+#pragma warning restore S3218
         public double PendingMb;
         public double Collapsed;                               // the margin already spent above the container's top, which its first content's margin collapses into
     }
@@ -78,6 +83,11 @@ internal static partial class HtmlToPdfConverter
     /// earlier floats; the last block's bottom margin ends the content.</summary>
     private static void FbLayoutChildren(FbState fb, FbBox parent, HtmlNode el, FbStyle st, double cx, double cw, ref double cursor, FbBfc bfc, double collapsedTop = 0)
     {
+        if (fb.columns && ReferenceEquals(parent.Node, el) && FbIsFlexRow(fb, el, parent.P))
+        {
+            FbLayoutFlexRow(fb, parent, el, st, cx, cw, ref cursor);
+            return;
+        }
         var flow = new FbFlow { Collapsed = collapsedTop };
         FbWalkInline(fb, parent, el, st, cx, cw, ref cursor, bfc, flow);
         FbFlushFlow(fb, parent, flow, cx, cw, ref cursor, bfc);
@@ -104,6 +114,7 @@ internal static partial class HtmlToPdfConverter
             var cst = FbStyleOf(fb, c, st);
             var p = FbPropsOf(fb, c, cw, parent.P.HeightAuto ? 0 : parent.P.HeightPt, cst.Px);
             if (p.Display == "none") continue;
+            if (fb.columns && FbColumnChild(fb, parent, c, cst, p, cx, cw, ref cursor, bfc, flow)) continue;
             if (c.Tag == "img")
             {
                 FbAddPicture(fb, parent, c, cst, p, cx, cw, ref cursor, bfc, flow);
@@ -123,13 +134,13 @@ internal static partial class HtmlToPdfConverter
                 if (FbControlItem(fb, parent, c, cst, p) is { } ctl) flow.Run.Add(ctl);
                 continue;
             }
-            var block = c.Tag == "table" ? p.Display != "inline" && p.Display != "inline-block" : FbIsBlock(c, p);
+            var block = c.Tag == "table" ? p.Display != "inline" && p.Display != "inline-block" : FbIsBlock(c, p) || (fb.columns && FbIsColumnBlockDisplay(p.Display));
             if (block)
             {
                 FbLayoutBlockChild(fb, parent, c, cst, p, cx, cw, ref cursor, bfc, flow);
                 continue;
             }
-            if (p.Display == "inline-block")
+            if (p.Display == "inline-block" || (fb.columns && p.Display == "inline-flex"))
             {
                 flow.Run.Add(FbInlineBoxItem(fb, parent, c, cst, p, cw));
                 continue;
@@ -154,7 +165,7 @@ internal static partial class HtmlToPdfConverter
         var top = cursor + (gap < 0 ? gap : Math.Max(0, gap - flow.Collapsed));
         // clearance: the border top lands below the floats it clears, margin and all
         if (p.Clear != "none") top = Math.Max(top, FbClearBottom(bfc, p.Clear));
-        var passedOn = fb.quirks && p.Border.T <= 0 && p.Pad.T <= 0 ? Math.Max(gap, flow.Collapsed) : 0;
+        var passedOn = (fb.quirks || fb.columns) && p.Border.T <= 0 && p.Pad.T <= 0 ? Math.Max(gap, flow.Collapsed) : 0;
         var floatsBefore = bfc.Floats.Count;
         var box = c.Tag == "table" ? FbLayoutTable(fb, c, cst, p, cx, cw, top) : FbLayoutBlock(fb, c, cst, p, cx, cw, top, bfc, p.Bfc, passedOn);
         if (box.H <= FbEpsilon && !p.HasVisibleBorder && p.Pad.V <= 0 && box.Lines.Count == 0 && box.Kids.Count == 0)
@@ -166,7 +177,7 @@ internal static partial class HtmlToPdfConverter
             return;
         }
         var pageBottom = FbPageBottom(fb, FbPageOf(fb, top).page);
-        if (!box.HasBlockKids && box.Y < pageBottom - FbEpsilon && box.Y + box.H > pageBottom + FbEpsilon && box.H <= fb.laterPageStep)
+        if ((!box.HasBlockKids || (fb.columns && p.Display is "flex" or "inline-flex")) && box.Y < pageBottom - FbEpsilon && box.Y + box.H > pageBottom + FbEpsilon && box.H <= fb.laterPageStep)
         {
             bfc.Floats.RemoveRange(floatsBefore, bfc.Floats.Count - floatsBefore);
             box = c.Tag == "table" ? FbLayoutTable(fb, c, cst, p, cx, cw, pageBottom) : FbLayoutBlock(fb, c, cst, p, cx, cw, pageBottom, bfc, p.Bfc, passedOn);
@@ -180,7 +191,11 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Two adjoining vertical margins collapsed (CSS 2.1): the larger of two positives, the more
     /// negative of two negatives, the sum of a positive and a negative.</summary>
     private static double FbCollapsedMargin(double a, double b)
-        => a >= 0 && b >= 0 ? Math.Max(a, b) : a < 0 && b < 0 ? Math.Min(a, b) : a + b;
+    {
+        if (a >= 0 && b >= 0) return Math.Max(a, b);
+        if (a < 0 && b < 0) return Math.Min(a, b);
+        return a + b;
+    }
 
     private static double FbClearBottom(FbBfc bfc, string clear)
     {
@@ -201,6 +216,7 @@ internal static partial class HtmlToPdfConverter
         if (p.WidthAuto)
         {
             contentW = Math.Max(0, cbW - p.Margin.H - p.ChromeH);
+            if (p.MaxWidthPt > 0) contentW = Math.Min(contentW, p.MaxWidthPt);
             box.X = cbX + p.Margin.L;
         }
         else
@@ -216,7 +232,9 @@ internal static partial class HtmlToPdfConverter
         box.Y = top;
         var inner = isBfc ? new FbBfc() : bfc;
         var cursor = box.ContentY;
+        if (p.Positioned) fb.positioned.Push(box);
         FbLayoutChildren(fb, box, el, st, box.ContentX, contentW, ref cursor, inner, isBfc ? 0 : collapsedTop);
+        if (p.Positioned) fb.positioned.Pop();
         var contentH = cursor - box.ContentY;
         if (isBfc) contentH = Math.Max(contentH, inner.Bottom() - box.ContentY);
         box.H = p.ChromeV + (p.HeightAuto ? contentH : p.HeightPt);
@@ -244,7 +262,9 @@ internal static partial class HtmlToPdfConverter
             var (s0, s1) = bfc.Segment(y, cbX, cbW);
             if (s1 - s0 + FbEpsilon >= outerW) break;
             var next = bfc.NextBottom(y);
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
             if (next == double.MaxValue) break;
+#pragma warning restore S1244
             y = next;
         }
         var (x0, x1) = bfc.Segment(y, cbX, cbW);
@@ -270,8 +290,6 @@ internal static partial class HtmlToPdfConverter
         var contentH = Math.Max(cursor, inner.Bottom()) - box.ContentY;
         box.H = box.P.ChromeV + (box.P.HeightAuto ? contentH : box.P.HeightPt);
     }
-
-    private static bool FbIsInlineTag(string tag) => tag is "span" or "b" or "strong" or "i" or "em" or "a" or "font" or "label" or "u" or "small" or "big" or "sup" or "sub" or "code";
 
     /// <summary>The shrink-to-fit width of a widthless box: the larger of its floats' row (their
     /// margin boxes side by side), its widest line's content and its sized children.</summary>
@@ -313,6 +331,7 @@ internal static partial class HtmlToPdfConverter
         if (p.WidthAuto)
         {
             var avail = Math.Max(0, cbW - p.Margin.H - p.ChromeH);
+            if (p.MaxWidthPt > 0) avail = Math.Min(avail, p.MaxWidthPt);
             p.WidthAuto = false;
             p.WidthPt = el.Tag == "table" ? 0 : Math.Min(FbShrinkToFit(fb, el, st, p, avail), avail);
             if (el.Tag == "table") p.WidthAuto = true;

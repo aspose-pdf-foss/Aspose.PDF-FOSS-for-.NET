@@ -51,10 +51,12 @@ public sealed partial class Document
     /// did not name one.</summary>
     private static string PdfAClauseFor(string rule) => rule switch
     {
+#pragma warning disable S1313 // a PDF/A or PDF/UA clause number, not an IP address
         "FontCmap" => "7.21.4.2",
         "FontEmbedding" or "FontNotEmbedded" => "6.2.11.4",
         "MetadataPdfAId" or "MetadataPdfAConformance" or "Metadata" => "6.6.4",
         "TaggedPdf" or "StructureTree" => "6.7.3.3",
+#pragma warning restore S1313
         "DocumentTitle" => "7.1",
         _ => "",
     };

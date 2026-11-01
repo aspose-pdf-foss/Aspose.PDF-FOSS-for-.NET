@@ -1,4 +1,5 @@
-﻿using System;
+﻿using System.Globalization;
+using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -44,8 +45,8 @@ internal static partial class HtmlToPdfConverter
         var (rn, hex) = Text.Type0FontEmbedder.Embed(
             (dl.page.Dict.Get("Resources") as Core.PdfDictionary)!.Get("Font") as Core.PdfDictionary
                 ?? throw new InvalidOperationException(),
-            PosFace(dl.face + (bold ? " Bold" : "")).ttf ?? PosFace(dl.face!).ttf!,
-            dl.face!.Replace(" ", "") + (bold ? "Bold" : ""), text, stripSpacesInBaseFont: true);
+            PosFace(dl.face + (bold ? " Bold" : "")).ttf ?? PosFace(dl.face).ttf!,
+            dl.face.Replace(" ", "") + (bold ? "Bold" : ""), text, stripSpacesInBaseFont: true);
         var cc = col ?? dl.ink;
         dl.sb.AppendLine(Compat.Format(dl.inv,
             $"q {cc.R / 255.0:0.###} {cc.G / 255.0:0.###} {cc.B / 255.0:0.###} rg " +
@@ -60,13 +61,13 @@ internal static partial class HtmlToPdfConverter
         EmitRun(dl, value, fs, false, x + Measure(dl, label, true, fs), baseline, null);
     }
 
-    private static string Inner(DecisionLetterState dl, string tagged) => CollapseWs(DecodeEntities(
-        Regex.Replace(tagged, "<[^>]+>", " "))).Trim();
+    private static string Inner(string tagged) => CollapseWs(DecodeEntities(
+        SafeRegex.Replace(tagged, "<[^>]+>", " "))).Trim();
 
     private static void BrokenFrame(DecisionLetterState dl, double x, double top)
     {
         (var phName, dl.iconRef) = RegisterPlaceholderIcon(dl.doc, dl.page, dl.iconRef, masked: true);
-        dl.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+        dl.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
             $"q 32 0 0 32 {x + 1:0.##} {dl.pageHeight - top - 33:0.##} cm /{phName} Do Q\n")));
         var dk = ParseCssColor("#555555");
         var lt = ParseCssColor("#AAAAAA");

@@ -8,11 +8,13 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public sealed class PdfJavaScriptStripper
 {
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Strip all JavaScript from the PDF.
     /// Returns true if any JavaScript was found and removed.
     /// </summary>
     public bool Strip(byte[] input, out byte[] output)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         var removed = StripJavaScript(doc);
@@ -77,9 +79,9 @@ public sealed class PdfJavaScriptStripper
         }
 
         // Remove JavaScript from page-level actions
-        foreach (var page in doc.Pages)
+        foreach (var dict in doc.Pages.Select(page => page.Dict))
         {
-            var pageDict = page.Dict;
+            var pageDict = dict;
 
             // Remove /AA from page
             if (pageDict.ContainsKey("AA"))
@@ -103,7 +105,8 @@ public sealed class PdfJavaScriptStripper
                 // leaving a zero-length script
                 // in place instead of removing the trigger outright.
                 var action = reader.ResolveDict(annotDict.Get("A"));
-                if (action is not null && action.GetName("S") == "JavaScript")
+                // A script already emptied is not JavaScript found: a stripped file has none.
+                if (action is not null && action.GetName("S") == "JavaScript" && HasScript(reader, action))
                 {
                     action.Set("JS", new PdfString(System.Array.Empty<byte>()));
                     removed = true;
@@ -118,6 +121,37 @@ public sealed class PdfJavaScriptStripper
             }
         }
 
+        // The scripts of an XFA form are in its template packet, outside every action.
+        if (StripXfaTemplateScripts(doc)) removed = true;
+
+        // What was unlinked is still an object of the file: the save leaves it out.
+        if (removed) reader.MayHaveOrphansOnSave = true;
         return removed;
     }
+
+    // A script element of an XFA template, empty or with its content.
+    private const string XfaScriptElement = @"<script\b[^>]*?(?:/>|>[\s\S]*?</script\s*>)";
+
+    /// <summary>Remove every script element from the XFA template: the events, calculations and
+    /// validations that held them stay, with nothing to run.</summary>
+    private static bool StripXfaTemplateScripts(Document doc)
+    {
+        var acroForm = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("AcroForm"));
+        if (acroForm is null || !acroForm.ContainsKey("XFA")) return false;
+        var form = doc.Form;
+        var template = form.GetXfaTemplateXml();
+        if (template is null || template.IndexOf("<script", StringComparison.Ordinal) < 0) return false;
+        var stripped = SafeRegex.Replace(template, XfaScriptElement, string.Empty);
+        if (stripped.Length == template.Length) return false;
+        form.SetXfaTemplateXml(stripped);
+        return true;
+    }
+
+    private static bool HasScript(IO.PdfReader reader, PdfDictionary action) =>
+        reader.Resolve(action.Get("JS")) switch
+        {
+            PdfString script => script.Value.Length > 0,
+            PdfStream => true,
+            _ => false,
+        };
 }

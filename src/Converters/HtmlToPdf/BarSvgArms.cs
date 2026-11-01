@@ -17,15 +17,15 @@ internal static partial class HtmlToPdfConverter
             Text = DecodeEntities(t.Groups["body"].Value).Trim(),
         };
         if (el.Text.Length == 0) return;
-        var dxm = Regex.Match(bv.attrs, @"dx\s*=\s*['""](-?[\d.]+)em", RegexOptions.IgnoreCase);
+        var dxm = SafeRegex.Match(bv.attrs, @"dx\s*=\s*['""](-?[\d.]+)em", RegexOptions.IgnoreCase);
         if (dxm.Success) el.DxEm = double.Parse(dxm.Groups[1].Value, bv.invc);
         else el.DxEm = AttrF(bv, bv.attrs, "dx", 0) / 12.0;
-        var dym = Regex.Match(bv.attrs, @"dy\s*=\s*['""](-?[\d.]+)em", RegexOptions.IgnoreCase);
+        var dym = SafeRegex.Match(bv.attrs, @"dy\s*=\s*['""](-?[\d.]+)em", RegexOptions.IgnoreCase);
         if (dym.Success) el.DyEm = double.Parse(dym.Groups[1].Value, bv.invc);
         else el.DyEm = AttrF(bv, bv.attrs, "dy", 0) / 12.0;
-        el.AnchorEnd = Regex.IsMatch(bv.attrs, @"text-anchor\s*:\s*end|text-anchor\s*=\s*['""]end",
+        el.AnchorEnd = SafeRegex.IsMatch(bv.attrs, @"text-anchor\s*:\s*end|text-anchor\s*=\s*['""]end",
             RegexOptions.IgnoreCase);
-        el.Rotate45 = Regex.IsMatch(bv.attrs, @"rotate\(\s*-45", RegexOptions.IgnoreCase);
+        el.Rotate45 = SafeRegex.IsMatch(bv.attrs, @"rotate\(\s*-45", RegexOptions.IgnoreCase);
         var fsPt = el.FontPx * 0.75;
         var w = MeasureFaceText("Times New Roman", el.Text, fsPt);
         var em = el.FontPx;
@@ -62,15 +62,15 @@ internal static partial class HtmlToPdfConverter
         // The two axis-domain shapes: an area path fills its polygon
         // (the thick x-axis band); a degenerate zero-width one
         // strokes the hairline that is still expected to show.
-        var dAttr = Regex.Match(bv.attrs, @"\bd\s*=\s*['""]([^'""]*)['""]",
+        var dAttr = SafeRegex.Match(bv.attrs, @"\bd\s*=\s*['""]([^'""]*)['""]",
             RegexOptions.IgnoreCase) is { Success: true } dm
             ? dm.Groups[1].Value : "";
         var pts = new List<(double x, double y)>();
         double cx = 0, cy = 0;
-        foreach (Match c in Regex.Matches(dAttr, @"([MVHmvh])\s*([\d.,\s-]*)"))
+        foreach (var groups in SafeRegex.Matches(dAttr, @"([MVHmvh])\s*([\d.,\s-]*)").Select(c => c.Groups))
         {
-            var vals = Regex.Matches(c.Groups[2].Value, @"-?[\d.]+");
-            switch (char.ToUpperInvariant(c.Groups[1].Value[0]))
+            var vals = SafeRegex.Matches(groups[2].Value, @"-?[\d.]+");
+            switch (char.ToUpperInvariant(groups[1].Value[0]))
             {
                 case 'M':
                     if (vals.Count >= 2)
@@ -79,8 +79,8 @@ internal static partial class HtmlToPdfConverter
                         cy = double.Parse(vals[1].Value, bv.invc);
                     }
                     break;
-                case 'V': if (vals.Count >= 1) cy = double.Parse(vals[0].Value, bv.invc); break;
-                case 'H': if (vals.Count >= 1) cx = double.Parse(vals[0].Value, bv.invc); break;
+                case 'V': if (vals.Count >= 1) { cy = double.Parse(vals[0].Value, bv.invc); } break;
+                case 'H': if (vals.Count >= 1) { cx = double.Parse(vals[0].Value, bv.invc); } break;
             }
             pts.Add((cx, cy));
         }

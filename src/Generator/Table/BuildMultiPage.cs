@@ -36,6 +36,9 @@ public partial class Table
         _pageImages.Clear();
         _pageBlocks.Clear();
         _pageCheckboxes.Clear();
+        _pageLinks.Clear();
+        _pageOptions.Clear();
+        _builtControls.Clear();
         _pageGraphs.Clear();
         _pageFootnotes.Clear();
         mp.fontName = RegisterFont(mp.page);

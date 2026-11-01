@@ -11,7 +11,7 @@ public static partial class FieldDateTimeFormatter
 /// invocation; never shared.</summary>
 private sealed class DateFormatState
 {
-    public List<Aspose.Pdf.Annotations.JavascriptExtensions.FieldDateTimeFormatter.FormatToken> allTokens = null!;
+    public List<Aspose.Pdf.Annotations.JavascriptExtensions.FieldDateTimeFormatter.IFormatToken> allTokens = null!;
     public List<Aspose.Pdf.Annotations.JavascriptExtensions.FieldDateTimeFormatter.ComponentToken> components = null!;
     public int[] rawVals = null!;
     // Per-token final numeric values

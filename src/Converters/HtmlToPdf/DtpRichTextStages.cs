@@ -35,7 +35,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static bool DtpRichTextStep(DtpRichTextState rt)
     {
-        rt.tm = rt.tokRx.Match(rt.inner, rt.idx);
+        rt.tm = SafeRegex.Match(rt.tokRx, rt.inner, rt.idx);
         rt.textEnd = rt.tm.Success ? rt.tm.Index : rt.inner.Length;
         if (rt.textEnd > rt.idx)
         {

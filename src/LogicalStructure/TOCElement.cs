@@ -3,8 +3,10 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.LogicalStructure;
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>A table-of-contents structure element (tag <c>/TOC</c>) that holds TOC items.</summary>
 public sealed class TOCElement : StructureElement
+#pragma warning restore S101
 {
     internal TOCElement() : base("TOC") { }
     internal TOCElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
@@ -27,7 +29,7 @@ public sealed class TOCElement : StructureElement
             throw new TOCpageHasNoTitleException();
         _linkedTocPage = tocPage;
         _linkedTitleHeader = tocTitleHeader;
-        tocPage.TocInfo!.TitleHeader = tocTitleHeader;
+        tocPage.TocInfo.TitleHeader = tocTitleHeader;
     }
 
     /// <summary>Save-time consistency check for the linked title (called from

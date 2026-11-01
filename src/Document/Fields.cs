@@ -25,10 +25,9 @@ public sealed partial class Document
         // Collect ALL fields with this fully-qualified name (the PDF spec
         // permits duplicate-named siblings — every match is removed).
         var targets = new List<Forms.Field>();
-        foreach (var f in Form.Fields)
+        foreach (var f in Form.Fields.Where(f => string.Equals(f.FullName, fieldName, StringComparison.Ordinal)))
         {
-            if (string.Equals(f.FullName, fieldName, StringComparison.Ordinal))
-                targets.Add(f);
+            targets.Add(f);
         }
         if (targets.Count == 0) return false;
 
@@ -55,9 +54,9 @@ public sealed partial class Document
         }
 
         // Remove widget annotation from all pages
-        foreach (var page in Pages)
+        foreach (var pageDict in Pages.Select(page => page.Dict))
         {
-            var annots = _reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
+            var annots = _reader.Resolve(pageDict.Get("Annots")) as PdfArray;
             if (annots is null) continue;
 
             var remaining = new PdfArray();
@@ -72,9 +71,9 @@ public sealed partial class Document
             if (remaining.Count < annots.Count)
             {
                 if (remaining.Count > 0)
-                    page.Dict.Set("Annots", remaining);
+                    pageDict.Set("Annots", remaining);
                 else
-                    page.Dict.Remove("Annots");
+                    pageDict.Remove("Annots");
             }
         }
 
@@ -102,7 +101,7 @@ public sealed partial class Document
         return true;
     }
 
-    private bool MatchesFieldName(PdfDictionary dict, string fieldName)
+    private static bool MatchesFieldName(PdfDictionary dict, string fieldName)
     {
         var t = dict.Get("T");
         if (t is PdfString s) return s.ToText() == fieldName;
@@ -119,23 +118,33 @@ public sealed partial class Document
         if (_generatedFormFieldsRegistered) return;
         _generatedFormFieldsRegistered = true;
 
-        var already = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
-        if (_reader.ResolveDict(_reader.Catalog.Get("AcroForm")) is { } af
-            && _reader.Resolve(af.Get("Fields")) is PdfArray existing)
-            foreach (var item in existing)
-                if (_reader.ResolveDict(item) is { } d) already.Add(d);
-
+        // The form's own fields are read only once a page holds a generated one: a document
+        // without generator fields does not walk its form on save.
+        HashSet<PdfDictionary>? already = null;
         var seenRadios = new HashSet<Forms.RadioButtonField>();
         for (var pi = 0; pi < Pages.Count; pi++)
         {
             var fields = new List<Forms.Field>();
             var radios = new List<Forms.RadioButtonField>();
             CollectGeneratorFormFields(Pages[pi + 1].Paragraphs, fields, radios);
-            foreach (var f in fields)
-                if (!already.Contains(f.Dict)) { Form.Add(f, pi + 1); already.Add(f.Dict); }
-            foreach (var rb in radios)
-                if (seenRadios.Add(rb) && !already.Contains(rb.Dict)) { Form.Add(rb, pi + 1); already.Add(rb.Dict); }
+            if (fields.Count == 0 && radios.Count == 0) continue;
+            already ??= ExistingFormFieldDicts();
+            foreach (var f in fields.Where(f => !already.Contains(f.Dict)))
+            { Form.Add(f, pi + 1); already.Add(f.Dict); }
+            foreach (var rb in radios.Where(rb => seenRadios.Add(rb) && !already.Contains(rb.Dict)))
+            { Form.Add(rb, pi + 1); already.Add(rb.Dict); }
         }
+    }
+
+    /// <summary>The field dictionaries the form's /Fields already lists.</summary>
+    private HashSet<PdfDictionary> ExistingFormFieldDicts()
+    {
+        var already = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        if (_reader.ResolveDict(_reader.Catalog.Get("AcroForm")) is { } af
+            && _reader.Resolve(af.Get("Fields")) is PdfArray existing)
+            foreach (var item in existing)
+                if (_reader.ResolveDict(item) is { } d) already.Add(d);
+        return already;
     }
 
     private static void CollectGeneratorFormFields(IEnumerable<BaseParagraph> paragraphs,

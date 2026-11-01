@@ -26,7 +26,9 @@ public sealed partial class SoftwarePageRenderer
     {
         public double Half;
         public int Cap;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public int Join;
+#pragma warning restore S3218
         public double MiterLimit;
         public int ArcSteps;
         public double JoinGap;

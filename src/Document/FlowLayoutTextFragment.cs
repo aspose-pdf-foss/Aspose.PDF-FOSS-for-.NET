@@ -88,7 +88,9 @@ public sealed partial class Document
             foreach (var c in marker)
             {
                 // the bullet is U+2022 in the text, the WinAnsi bullet in the metrics
-                var code = c == '\u2022' ? WinAnsiBullet : c < 256 ? c : '?';
+                int code = '?';
+                if (c == '\u2022') code = WinAnsiBullet;
+                else if (c < 256) code = c;
                 var cw = Text.Standard14Fonts.GetWidth(fontName, code);
                 w += (cw < 0 ? 500 : cw) * fontSize / 1000.0;
             }
@@ -112,6 +114,7 @@ public sealed partial class Document
             if (tf.XmlGeneratorModel) return WriteXmlModelFragment(tf);
             if (TryWriteSelfPlacedFragment(tf) is { } placed) return placed;
             PromoteSegmentStylesToFragment(tf);
+            ApplyPageDefaultTextState(tf);
             SubstituteFaceForUncoveredText(tf);
             // Invisible and clipping text rendering modes need the legacy writer;
             // the flow's own writer strokes (modes 1 and 2) itself.
@@ -120,7 +123,10 @@ public sealed partial class Document
 
             var wtf = new FlowTextFragmentState();
             wtf.useEmbeddedFont = HasFaceProgram(tf.TextState);
-            wtf.unclippedLines = tf.TextState.FormattingOptions?.UnclippedLines ?? false;
+            // A turned paragraph is not clipped: the clip is the unturned line band, which
+            // cut a 90-degree line down to the sliver of it crossing the band.
+            wtf.unclippedLines = (tf.TextState.FormattingOptions?.UnclippedLines ?? false)
+                || tf.TextState.Rotation % FullTurnDegrees != 0;
             if (!InitFragmentWrap(wtf, tf)) return false;
             InitFragmentLineHeight(wtf, tf);
             InitFragmentLinksAndAlignment(wtf, tf);
@@ -179,10 +185,28 @@ public sealed partial class Document
                 if (_curY - tabLine < _marginBottom) StartNewPage(flushEmpty: true);
                 AdvanceY(tabLine);
                 tf.Position = new Text.Position(_marginLeft, _curY);
-                new Text.TextBuilder(_startPage).AppendTextInline(tf);
+                // Written where the cursor is: past a page break that is the overflow page, not the start page.
+                new Text.TextBuilder(_startPage) { ContentSink = WriteContent }.AppendTextInline(tf);
                 return true;
             }
             return null;
+        }
+
+        /// <summary>The page's default text state (else the document's) supplies the face, size
+        /// and leading a fragment set none of its own for. It used to be read for HTML
+        /// paragraphs alone, so a page default of a 16 pt face laid its text fragments out in
+        /// the built-in face at 10.</summary>
+        private void ApplyPageDefaultTextState(Text.TextFragment tf)
+        {
+            var defaults = _startPage.PageInfo?.AssignedDefaultTextState
+                ?? _startPage.Reader.OwnerDocument?.PageInfo?.AssignedDefaultTextState;
+            if (defaults is null) return;
+            var state = tf.TextState;
+            if (!state.FontTouched && defaults.FontTouched && defaults.Font is { } font) state.Font = font;
+            if (!state.FontSizeTouched && defaults.FontSizeTouched) state.FontSize = defaults.FontSize;
+            if (!state.LineSpacingTouched && defaults.LineSpacingTouched) state.LineSpacing = defaults.LineSpacing;
+            // ...and the style (a bold default draws the face's bold member).
+            if (!state.FontStyleTouched && defaults.FontStyleTouched) state.FontStyle = defaults.FontStyle;
         }
 
         /// <summary>Lifts a font, size or leading a caller attached to a SEGMENT up onto the
@@ -201,7 +225,9 @@ public sealed partial class Document
             // so any segment that brings one wins.
             if (tf.Segments is { Count: > 0 } promoteSegs)
             {
+#pragma warning disable S3267 // Select would read the member once, before calls in the body that can change it
                 foreach (var s in promoteSegs)
+#pragma warning restore S3267
                 {
                     var fragHasEmbedded = tf.TextState.Font?.SourceFontData is not null
                                           || tf.TextState.FontData is not null;
@@ -250,13 +276,19 @@ public sealed partial class Document
             {
                 var wholeText = tf.Text ?? string.Empty;
                 var curFd = tf.TextState.Font?.SourceFontData;
-                if (curFd?.TtfData is null || !Text.FontRepository.CoversText(curFd.TtfData, wholeText))
+                // A Standard-14 face moves only for a character its encoding cannot carry.
+                if (curFd?.TtfData is null)
+                {
+                    if (Text.FontRepository.SubstituteForUnencodableStandard14Text(wholeText, tf.TextState.Font,
+                            Text.TextBuilder.MapToStandard14Public(tf.TextState)) is { TtfData: not null } std14Sub)
+                        tf.TextState.FontData = std14Sub;
+                }
+                else if (!Text.FontRepository.CoversText(curFd.TtfData, wholeText))
                 {
                     var sub = Text.FontRepository.SubstituteForMissingGlyphs(wholeText, tf.TextState.Font);
                     if (sub?.TtfData is not null
-                        && (curFd?.TtfData is null
-                            || Text.FontRepository.CoverCount(sub.TtfData, wholeText)
-                               > Text.FontRepository.CoverCount(curFd.TtfData, wholeText)))
+                        && Text.FontRepository.CoverCount(sub.TtfData, wholeText)
+                           > Text.FontRepository.CoverCount(curFd.TtfData, wholeText))
                         tf.TextState.FontData = sub;
                 }
             }
@@ -268,8 +300,8 @@ public sealed partial class Document
         /// flows normally.</summary>
         private bool? FragmentSegmentsRefuseFlow(Text.TextFragment tf)
         {
-            // Per-segment explicit Position means the caller wants precise control;
-            // otherwise tf.Text (concatenated from all segments via RefreshTextFromSegments)
+            // Per-segment explicit Position means the caller wants precise control; otherwise
+            // tf.Text (concatenated from all segments via RefreshTextFromSegments)
             // is the paragraph's logical content and flow-wraps correctly even when the
             // fragment was constructed via `new TextFragment()` + `.Segments.Add(seg)`
             // (which produces Segments.Count == 2: a default empty segment + caller's).
@@ -301,7 +333,10 @@ public sealed partial class Document
         {
             wtf.baseFont = Text.TextBuilder.MapToStandard14Public(tf.TextState);
             wtf.fontSize = tf.TextState.FontSize > 0 ? tf.TextState.FontSize : 12;
-            wtf.contentWidth = CurWidth;
+            // The fragment's left and right margins narrow its band and seat its lines inside the region; a
+            // block-boxed fragment's box takes them itself (see WriteBlockBoxFragment).
+            wtf.marginLeft = tf.HasBlockBox ? 0 : tf.Margin.Left;
+            wtf.contentWidth = CurWidth - (tf.HasBlockBox ? 0 : tf.Margin.Left + tf.Margin.Right);
             if (wtf.contentWidth <= 0) return false;
 
             wtf.noWrap = tf.TextState.FormattingOptions?.WrapMode
@@ -310,11 +345,14 @@ public sealed partial class Document
             wtf.subsequentLinesIndent = (double)(tf.TextState.FormattingOptions?.SubsequentLinesIndent ?? 0f);
             wtf.rawText = tf.Text ?? string.Empty;
             wtf.charSpacing = tf.TextState.CharacterSpacing;
+            // A hanging indent narrows every line but the first, so the lines wrap at the
+            // width they are drawn in: the paginator takes the narrowed width and a first-line
+            // indent relative to it (negative when the first line is the wider one).
             wtf.allLines = wtf.noWrap
                 ? new List<string>(wtf.rawText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
                 : Text.TextPaginator.WrapToWidth(wtf.rawText, wtf.baseFont, wtf.fontSize,
-                    (wtf.contentWidth - OccupiedExtra(tf.TextState.FormattingOptions, wtf.fontSize)) / ScaleOf(tf.TextState),
-                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, wtf.firstLineIndent, wtf.charSpacing,
+                    (wtf.contentWidth - OccupiedExtra(tf.TextState.FormattingOptions, wtf.fontSize) - wtf.subsequentLinesIndent) / ScaleOf(tf.TextState),
+                    tf.TextState.FontData ?? tf.TextState.Font?.SourceFontData, wtf.firstLineIndent - wtf.subsequentLinesIndent, wtf.charSpacing,
                     tf.TextState.FormattingOptions?.HangingBreakSpace ?? false, tf.TextState.WordSpacing);
             // WrapLinesCount caps the wrapped paragraph at its first N lines; the
             // rest of the text is dropped (a one-line cell shows only its first line).
@@ -394,16 +432,18 @@ public sealed partial class Document
                 && (tf.HorizontalAlignment == HorizontalAlignment.Justify
                     || tf.TextState.HorizontalAlignment == HorizontalAlignment.Justify);
 
-            wtf.alignMode = tf.HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right
-                ? tf.HorizontalAlignment
-                : tf.TextState.HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right
-                    ? tf.TextState.HorizontalAlignment : HorizontalAlignment.Left;
+            if (tf.HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right) wtf.alignMode = tf.HorizontalAlignment;
+            else if (tf.TextState.HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right)
+                wtf.alignMode = tf.TextState.HorizontalAlignment;
+            else wtf.alignMode = HorizontalAlignment.Left;
             wtf.alignsLines = !wtf.noWrap && wtf.alignMode != HorizontalAlignment.Left;
         }
 
         /// <summary>The paragraph clip reaches this many line boxes above the bottom of the
         /// last one (the same 1.16 the table cell clip and the TextParagraph clip use).</summary>
         private const double ParagraphClipLineBoxEm = 1.16;
+
+        private const double FullTurnDegrees = 360;
 
         /// <summary>The AFM extent (ascender + descender) of a Standard-14 face in em, 0 for
         /// any other name.</summary>

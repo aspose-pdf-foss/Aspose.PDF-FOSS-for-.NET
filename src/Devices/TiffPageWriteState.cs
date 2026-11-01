@@ -43,6 +43,8 @@ private sealed class TiffPageWriteState
     public byte[] rgba = default!;
     public int w = 0;
     public int h = 0;
+    // X/YResolution tags: the resolution the frame was drawn at.
+    public (int X, int Y) dpi;
     public long ifdOffsetPos = 0;
     public CompressionType compression = default!;
     public ColorDepth depth = default!;

@@ -17,6 +17,8 @@ private sealed class RenderBlockState
     public double yAtBlockEntry;
     public bool tableAfterText;
     public bool breakAfterTable;
+    // the block before this one was a table (see HtmlFlowCursor.lastBlockWasTable)
+    public bool afterTable;
     public bool tableAfterSpacer;
     // Margin-collapse partner: the previous FLOW block's bottom margin. Any
     // non-flow block (table, image, input, spacer) between two flow blocks

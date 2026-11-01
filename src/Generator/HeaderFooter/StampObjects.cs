@@ -12,17 +12,19 @@ public sealed partial class HeaderFooter
     {
         var si = new StampImageState();
         si.imgData = null;
-        if (!LoadStampImageData(hf, si, img)) return;
+        if (!LoadStampImageData(si, img)) return;
 
         MeasureStampImageBox(hf, si, img);
         if (hf.isHeader)
         {
-            // Header: image top edge at current y, growing downward. The FIRST
-            // paragraph's image starts at the band top itself — the font-size
-            // drop in y is a text baseline allowance, and an image has no baseline.
-            var boxTop = (hf.firstParagraph ? hf.pageHeight - hf.mTop : hf.y) - si.boxOffY;
+            // Header: the image's box seats on the stack top (the band top itself for a first
+            // member - the font-size drop in y is a text baseline allowance, and an image has no
+            // baseline), and the members after it stack under its box (probed: an HTML line seats
+            // right under a 30 pt logo); they used to seat from the band top over it.
+            var boxTop = hf.HeaderStackTop - si.boxOffY;
             si.rect = new Rectangle(si.imgX, boxTop - si.imgH, si.imgX + si.imgW, boxTop);
             hf.y = boxTop - si.imgH - si.boxOffY - 4;
+            hf.headerStackH += si.boxH;
         }
         else if (hf.probedFooterBand)
         {
@@ -45,9 +47,28 @@ public sealed partial class HeaderFooter
         catch (ArgumentException) { return; }
     }
 
+    /// <summary>A graph member draws at the band's cursor with its top where the next line
+    /// would start (the band top for a header's first member), and the cursor moves one
+    /// text line below it: a rule drawn above a band text stays above it.</summary>
+    private static void StampGraph(StampParagraphsState hf, Drawing.Graph graph)
+    {
+        double top;
+        if (hf.isHeader) top = hf.firstParagraph ? hf.pageHeight - hf.mTop : hf.y;
+        else top = hf.firstParagraph ? hf.y + hf.fontSize : hf.y;
+        var bottom = top - graph.Height;
+        hf.page.AddContentStream(graph.Build(hf.page, hf.x, bottom));
+        hf.y = bottom - hf.fontSize * BandLinePitch;
+        // A header's text members stack from the band top by the stack height.
+        if (hf.isHeader) hf.headerStackH += graph.Height;
+        hf.firstParagraph = false;
+    }
+
+    /// <summary>The band's line pitch in em: a text member steps its cursor by it.</summary>
+    private const double BandLinePitch = 1.2;
+
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private void StampFloatingBox(StampParagraphsState hf, FloatingBox fb)
+    private static void StampFloatingBox(StampParagraphsState hf, FloatingBox fb)
     {
         var hm = hf.page.PageInfo?.Margin;
         var leftMargin = hm?.LeftTouched == true ? hm.Left : 90;
@@ -103,11 +124,11 @@ public sealed partial class HeaderFooter
                      && tbl.FlowLeftOffset == 0)
                 tbl.FlowLeftOffset = DefaultBandMargin;
         }
-        // A header table anchors at the top margin itself — the running y
-        // already carries the first text line's font-size inset, which
-        // applies to text baselines, not to a table's top edge. The
+        // A header table anchors at the stack top (the top margin itself for a first member -
+        // the running y already carries the first text line's font-size inset, which
+        // applies to text baselines, not to a table's top edge). The
         // header's left margin becomes the table's flow offset.
-        hf.tableTop = hf.isHeader ? hf.pageHeight - hf.mTop : hf.y;
+        hf.tableTop = hf.isHeader ? hf.HeaderStackTop : hf.y;
         hf.fieldSwaps = null;
         hf.footerBottomBound = 36.0;
         PlaceFooterTable(hf, tbl);
@@ -149,7 +170,9 @@ public sealed partial class HeaderFooter
             foreach (var g in tbl.LastGraphDraws[0])
                 hf.page.AddContentStream(g);
         RestoreCellMacros(macroSwaps);
-        hf.y -= tbl.LastRenderedHeight;
+        hf.y = hf.probedFooterBand ? hf.tableTop - tbl.LastRenderedHeight : hf.y - tbl.LastRenderedHeight;
+        if (hf.isHeader) hf.headerStackH += tbl.LastRenderedHeight;
+        hf.firstParagraph = false;
     }
 
     /// <summary>Seats a footer table above the page's bottom margin and swaps its check boxes for the page's own.</summary>
@@ -162,8 +185,7 @@ public sealed partial class HeaderFooter
             {
                 foreach (var c in r.Cells)
                 {
-                    foreach (var p in c.Paragraphs)
-                        if (p is Aspose.Pdf.Forms.CheckboxField) { hasFields = true; break; }
+                    if (c.Paragraphs.Any(p => p is Aspose.Pdf.Forms.CheckboxField)) { hasFields = true; }
                     if (hasFields) break;
                 }
                 if (hasFields) break;
@@ -195,6 +217,11 @@ public sealed partial class HeaderFooter
                                 }
                 }
             }
+            else if (hf.probedFooterBand && !hf.firstParagraph)
+            {
+                // A table under other members of the stacked footer band seats on its running top.
+                hf.footerBottomBound = -hf.pageHeight;
+            }
             else
             {
                 // A plain FOOTER table hangs BELOW the page's content
@@ -202,9 +229,9 @@ public sealed partial class HeaderFooter
                 // top edge sits at the page margin, not at the footer's own
                 // Margin.Bottom), so pass an extended bottom bound to keep
                 // the whole table on this page.
-                hf.tableTop = hf.page.PageInfo?.Margin is { BottomTouched: true } pbm ? pbm.Bottom
-                    : hf.document?.PageInfo?.Margin is { BottomTouched: true } dbm ? dbm.Bottom
-                    : 72;
+                if (hf.page.PageInfo?.Margin is { BottomTouched: true } pbm) hf.tableTop = pbm.Bottom;
+                else if (hf.document?.PageInfo?.Margin is { BottomTouched: true } dbm) hf.tableTop = dbm.Bottom;
+                else hf.tableTop = 72;
                 // The footer's own Margin.Top is the gap between the page's
                 // bottom margin line and the table's top edge (probed: a
                 // 14 pt Margin.Top on a 72 pt page margin seats the table
@@ -218,8 +245,8 @@ public sealed partial class HeaderFooter
     /// <summary>The image's drawn size, its box and its horizontal seat in the band.</summary>
     private void MeasureStampImageBox(StampParagraphsState hf, StampImageState si, Image img)
     {
-        si.imgW = img.FixWidth > 0 ? img.FixWidth
-            : hf.page.Width - hf.mLeft - (Margin.RightTouched ? Margin.Right : 20);
+        if (img.FixWidth > 0) si.imgW = img.FixWidth;
+        else si.imgW = hf.page.Width - hf.mLeft - (Margin.RightTouched ? Margin.Right : 20);
         if (img.FixHeight > 0)
             si.imgH = img.FixHeight;
         else
@@ -232,8 +259,9 @@ public sealed partial class HeaderFooter
             try
             {
                 var probe = new ImageStamp(new System.IO.MemoryStream(si.imgData!));
-                si.imgH = hf.probedFooterBand ? probe.PixelHeight
-                    : probe.PixelWidth > 0 ? si.imgW * probe.PixelHeight / (double)probe.PixelWidth : si.imgW;
+                if (hf.probedFooterBand) si.imgH = probe.PixelHeight;
+                else if (probe.PixelWidth > 0) si.imgH = si.imgW * probe.PixelHeight / (double)probe.PixelWidth;
+                else si.imgH = si.imgW;
             }
             catch { si.imgH = si.imgW; }
         }
@@ -262,7 +290,7 @@ public sealed partial class HeaderFooter
     }
 
     /// <summary>Reads the image's bytes (a file or a stream) and rasterises an SVG; false when there is nothing to draw.</summary>
-    private bool LoadStampImageData(StampParagraphsState hf, StampImageState si, Image img)
+    private static bool LoadStampImageData(StampImageState si, Image img)
     {
         if (img.ImageStream is not null)
         {

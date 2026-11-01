@@ -136,7 +136,7 @@ public sealed partial class Document
     private static readonly System.Text.RegularExpressions.Regex GeneratedFieldName = new(
         @"^(text|text ?field|field|check ?box|radio|radio ?button|button|push ?button|combo ?box|list ?box|" +
         @"drop ?down|untitled|undefined|group)[\s_.-]*\d*$",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant, RegexLimits.Timeout);
     // The fewest letters a field name needs to say anything.
     private const int MinNameLetters = 3;
     // The share of a field name that must be letters (the rest spaces and punctuation).
@@ -150,7 +150,7 @@ public sealed partial class Document
         if (_reader.Resolve(field.Get("T")) is not PdfString t) return null;
         var name = string.Join(" ", t.ToText().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         var letters = name.Count(char.IsLetter);
-        if (letters < MinNameLetters || name.Contains('_') || GeneratedFieldName.IsMatch(name)) return null;
+        if (letters < MinNameLetters || name.Contains('_') || SafeRegex.IsMatch(GeneratedFieldName, name)) return null;
         var nonSpace = name.Count(c => !char.IsWhiteSpace(c));
         return letters >= nonSpace * MinNameLetterShare ? CleanLabel(name) : null;
     }

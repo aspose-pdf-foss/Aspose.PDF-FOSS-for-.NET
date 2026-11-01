@@ -7,18 +7,18 @@ internal static partial class HtmlToPdfConverter
 {
     /// <summary>The text of a markup fragment: tags dropped, entities decoded, whitespace collapsed.</summary>
     private static string FlatPrintText(string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")),
+        => SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(frag, @"<[^>]+>", " ")),
             @"\s+", " ").Trim();
 
     /// <summary>The flattened text of the band div carrying the class, empty when absent.</summary>
     private static string PrintBandText(PrintPageState pp, string cls)
     {
-        var m = Regex.Match(pp.html,
+        var m = SafeRegex.Match(pp.html,
             @"<div\b[^>]*class\s*=\s*['""]" + cls + @"['""][^>]*>(?<body>[\s\S]*?)</div>",
             RegexOptions.IgnoreCase);
         if (!m.Success) return "";
         // display:none controls (the demo's PRINT ME button) leave no text
-        return FlatPrintText(Regex.Replace(m.Groups["body"].Value,
+        return FlatPrintText(SafeRegex.Replace(m.Groups["body"].Value,
             @"<button\b[\s\S]*?</button>", " ", RegexOptions.IgnoreCase));
     }
 
@@ -97,23 +97,23 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Collect the leaf .page divs' text and line-box height.</summary>
     private static void ReadPrintPageDivs(PrintPageState pp)
     {
-        foreach (Match pm in Regex.Matches(pp.html,
+        foreach (Match pm in SafeRegex.Matches(pp.html,
             @"<div\b[^>]*class\s*=\s*['""]page['""](?<attrs>[^>]*)>", RegexOptions.IgnoreCase))
         {
             // find the matching close by depth
             var depth = 1;
             var end = pp.html.Length;
-            foreach (Match t in Regex.Matches(pp.html[(pm.Index + pm.Length)..],
+            foreach (Match t in SafeRegex.Matches(pp.html[(pm.Index + pm.Length)..],
                 @"<div\b|</div\s*>", RegexOptions.IgnoreCase))
             {
                 depth += t.Value.StartsWith("</") ? -1 : 1;
                 if (depth == 0) { end = pm.Index + pm.Length + t.Index; break; }
             }
             var body = pp.html[(pm.Index + pm.Length)..end];
-            if (Regex.IsMatch(body, @"class\s*=\s*['""]page['""]", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(body, @"class\s*=\s*['""]page['""]", RegexOptions.IgnoreCase))
                 continue;                           // the outer wrapper
             var lb = PpLineBoxPt;
-            var lhM = Regex.Match(pm.Groups["attrs"].Value,
+            var lhM = SafeRegex.Match(pm.Groups["attrs"].Value,
                 @"line-height\s*:\s*([\d.]+)\s*[;'""]", RegexOptions.IgnoreCase);
             if (lhM.Success && double.TryParse(lhM.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,

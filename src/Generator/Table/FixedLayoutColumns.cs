@@ -32,9 +32,9 @@ public partial class Table
         var undeclared = 0;
         for (var i = 0; i < columns; i++)
         {
-            widths[i] = i < percents.Length && percents[i] is { } share ? share * span
-                : i < declared.Length ? declared[i]
-                : null;
+            if (i < percents.Length && percents[i] is { } share) widths[i] = share * span;
+            else if (i < declared.Length) widths[i] = declared[i];
+            else widths[i] = null;
             if (widths[i] is { } w) declaredTotal += w;
             else undeclared++;
         }

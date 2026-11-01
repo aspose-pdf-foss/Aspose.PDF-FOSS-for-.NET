@@ -32,7 +32,7 @@ public sealed partial class GdiPlusPageRenderer
     /// image is clipped to its own parallelogram, which GDI+ rasterises aliased, and drawn one
     /// pixel larger. Together: every case 0 but the 2x photo (4) and the turned one (28).</para>
     /// </remarks>
-    private void DrawPrintedImage(Graphics g, Bitmap bmp, GdiMatrix world, PointF[] dest, ImageAttributes? attributes)
+    private static void DrawPrintedImage(Graphics g, Bitmap bmp, GdiMatrix world, PointF[] dest, ImageAttributes? attributes)
     {
         using var ownAttributes = attributes is null ? new ImageAttributes() : null;
         var ia = attributes ?? ownAttributes!;

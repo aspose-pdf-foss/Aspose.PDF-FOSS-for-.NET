@@ -304,13 +304,13 @@ public sealed partial class PdfAnnotationEditor
         }
         var llObj = annot.Dict.Get("LL");
         if (llObj is PdfReal || llObj is PdfInteger)
-            writer.WriteAttributeString("leaderLength", F(GetDouble(llObj!)));
+            writer.WriteAttributeString("leaderLength", F(GetDouble(llObj)));
         var lleObj = annot.Dict.Get("LLE");
         if (lleObj is PdfReal || lleObj is PdfInteger)
-            writer.WriteAttributeString("leaderExtend", F(GetDouble(lleObj!)));
+            writer.WriteAttributeString("leaderExtend", F(GetDouble(lleObj)));
         var lloObj = annot.Dict.Get("LLO");
         if (lloObj is PdfReal || lloObj is PdfInteger)
-            writer.WriteAttributeString("leaderOffset", F(GetDouble(lloObj!)));
+            writer.WriteAttributeString("leaderOffset", F(GetDouble(lloObj)));
         if (annot.Dict.Get("Cap") is PdfBoolean cap)
             writer.WriteAttributeString("caption", cap.Value ? "yes" : "no");
         var cpName = annot.Dict.GetName("CP");
@@ -373,7 +373,7 @@ public sealed partial class PdfAnnotationEditor
             if (dObj is PdfArray dArr && dArr.Count > 0)
             {
                 var ds = new StringBuilder();
-                for (int i = 0; i < dArr.Count; i++) { if (i > 0) ds.Append(','); ds.Append(F(GetDouble(dArr[i]))); }
+                for (int i = 0; i < dArr.Count; i++) { if (i > 0) { ds.Append(','); } ds.Append(F(GetDouble(dArr[i]))); }
                 writer.WriteAttributeString("dashes", ds.ToString());
             }
         }
@@ -385,7 +385,7 @@ public sealed partial class PdfAnnotationEditor
             if (!styleWritten) writer.WriteAttributeString("style", "cloudy");
             var beI = beDict.Get("I");
             if (beI is PdfInteger || beI is PdfReal)
-                writer.WriteAttributeString("intensity", F(GetDouble(beI!)));
+                writer.WriteAttributeString("intensity", F(GetDouble(beI)));
         }
 
         // Fringe (/RD rectangle differences — square/circle/caret)
@@ -393,7 +393,7 @@ public sealed partial class PdfAnnotationEditor
         if (rdObj is PdfArray rdArr && rdArr.Count >= 4)
         {
             var fr = new StringBuilder();
-            for (int i = 0; i < rdArr.Count; i++) { if (i > 0) fr.Append(','); fr.Append(F(GetDouble(rdArr[i]))); }
+            for (int i = 0; i < rdArr.Count; i++) { if (i > 0) { fr.Append(','); } fr.Append(F(GetDouble(rdArr[i]))); }
             writer.WriteAttributeString("fringe", fr.ToString());
         }
 
@@ -413,7 +413,7 @@ public sealed partial class PdfAnnotationEditor
         if (clObj is PdfArray clArr && clArr.Count >= 4)
         {
             var co = new StringBuilder();
-            for (int i = 0; i < clArr.Count; i++) { if (i > 0) co.Append(','); co.Append(F(GetDouble(clArr[i]))); }
+            for (int i = 0; i < clArr.Count; i++) { if (i > 0) { co.Append(','); } co.Append(F(GetDouble(clArr[i]))); }
             writer.WriteAttributeString("callout", co.ToString());
         }
 

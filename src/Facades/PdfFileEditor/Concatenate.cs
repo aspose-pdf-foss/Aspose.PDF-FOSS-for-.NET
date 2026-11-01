@@ -21,8 +21,8 @@ public sealed partial class PdfFileEditor
     }
 
     /// <summary>
-    /// Mirrors <c>PdfFileEditor.CorruptedFileAction</c>. Stored only;
-    /// Concatenate currently stops on any PDF parse error regardless of this value.
+    /// What Concatenate does with an input it cannot open: stop with an error (the default), or leave
+    /// the input out and report it in <see cref="CorruptedItems"/>.
     /// </summary>
     public ConcatenateCorruptedFileAction CorruptedFileAction { get; set; }
 
@@ -70,6 +70,130 @@ public sealed partial class PdfFileEditor
         }
     }
 
+    /// <summary>
+    /// Concatenate multiple PDF files into one output file.
+    /// </summary>
+    public bool Concatenate(string[] inputFiles, string outputFile)
+    {
+        _corrupted.Clear();
+        List<(byte[], string?)> named;
+        try
+        {
+            named = inputFiles.Select<string, (byte[], string?)>(f => (File.ReadAllBytes(f), f)).ToList();
+        }
+        catch (IOException ex)
+        {
+            // Missing/unreadable inputs surface as a PdfException
+            // WRAPPING the IO error — callers (and TryConcatenate's LastException)
+            // pattern-match on InnerException being e.g. FileNotFoundException.
+            throw new PdfException(ex.Message, ex);
+        }
+        var inputs = FilterCorruptedInputs(named).ToArray();
+        var result = Concatenate(inputs);
+        File.WriteAllBytes(outputFile, result);
+        return true;
+    }
+
+    /// <summary>
+    /// Concatenate two PDF files into one output file.
+    /// </summary>
+    public bool Concatenate(string firstInputFile, string secInputFile, string outputFile)
+    {
+        return Concatenate(new[] { firstInputFile, secInputFile }, outputFile);
+    }
+
+    /// <summary>
+    /// Concatenate two PDF files with a blank-page separator inserted between them.
+    /// </summary>
+    public bool Concatenate(string firstInputFile, string secInputFile, string blankPageFile, string outputFile)
+    {
+        return Concatenate(new[] { firstInputFile, blankPageFile, secInputFile }, outputFile);
+    }
+
+    /// <summary>Concatenate multiple PDF streams into one output stream.</summary>
+    public bool Concatenate(Stream[] inputStream, Stream outputStream)
+    {
+        _corrupted.Clear();
+        var inputs = inputStream.Select(ReadStream).ToArray();
+        // A lone input is handed back as it is, unread: when damaged inputs are to be reported it is
+        // opened once here, or nothing would tell that it is no document.
+        var loneInputIsDamaged = inputs.Length == 1
+            && CorruptedFileAction == ConcatenateCorruptedFileAction.ConcatenateIgnoringCorruptedObjects
+            && FilterCorruptedInputs([(inputs[0], null)]).Count == 0;
+        var result = loneInputIsDamaged ? [] : Concatenate(inputs);
+        outputStream.Write(result, 0, result.Length);
+        // A seekable output is left rewound so callers can read
+        // the concatenated bytes back without seeking.
+        if (outputStream.CanSeek) outputStream.Position = 0;
+        if (CloseConcatenatedStreams)
+        {
+            foreach (var s in inputStream) s.Dispose();
+            outputStream.Dispose();
+        }
+        return !loneInputIsDamaged;
+    }
+
+    /// <summary>Concatenate two PDF streams into one output stream.</summary>
+    public bool Concatenate(Stream firstInputStream, Stream secInputStream, Stream outputStream)
+    {
+        _corrupted.Clear();
+        var result = Concatenate(new[] { ReadStream(firstInputStream), ReadStream(secInputStream) });
+        outputStream.Write(result, 0, result.Length);
+        // A seekable output is left rewound so callers can read
+        // the concatenated bytes back without seeking.
+        if (outputStream.CanSeek) outputStream.Position = 0;
+        if (CloseConcatenatedStreams)
+        {
+            firstInputStream.Dispose();
+            secInputStream.Dispose();
+            outputStream.Dispose();
+        }
+        return true;
+    }
+
+    /// <summary>Concatenate two PDF streams with a blank-page separator inserted between them.</summary>
+    public bool Concatenate(Stream firstInputStream, Stream secInputStream, Stream blankPageStream, Stream outputStream)
+    {
+        _corrupted.Clear();
+        var result = Concatenate(new[]
+        {
+            ReadStream(firstInputStream),
+            ReadStream(blankPageStream),
+            ReadStream(secInputStream),
+        });
+        outputStream.Write(result, 0, result.Length);
+        // A seekable output is left rewound so callers can read
+        // the concatenated bytes back without seeking.
+        if (outputStream.CanSeek) outputStream.Position = 0;
+        if (CloseConcatenatedStreams)
+        {
+            firstInputStream.Dispose();
+            secInputStream.Dispose();
+            blankPageStream.Dispose();
+            outputStream.Dispose();
+        }
+        return true;
+    }
+
+    /// <summary>Concatenate the pages of <paramref name="src"/> into the
+    /// existing <paramref name="dest"/> document. Each source is left
+    /// untouched; the target receives all pages in source-order. Honours
+    /// the same flag set as the file/stream Concatenate overloads.</summary>
+    public bool Concatenate(Document[] src, Document dest)
+    {
+        if (dest is null) throw new ArgumentNullException(nameof(dest));
+        if (src is null) return false;
+        foreach (var s in src)
+        {
+            if (s is null) continue;
+            var pagesBefore = dest.Pages.Count;
+            dest.Pages.Add(s.Pages);
+            if (!ReferenceEquals(s, dest)) AppendOutlines(s, dest, pagesBefore);
+            if (CopyLogicalStructure) dest.MergeLogicalStructure(s);
+        }
+        return true;
+    }
+
     /// <summary>Post-Concatenate pass that honours the RemoveSignatures /
     /// OwnerPassword / ConvertTo properties on the facade. Real implementations
     /// — each flag triggers a follow-on Document open/operate/save.</summary>
@@ -112,8 +236,10 @@ public sealed partial class PdfFileEditor
     // CompactAfterPageRemoval only detaches the deleted pages; objects the source reached by
     // other routes still travel with the extract, so a one-page cut of a large document keeps
     // paying for the whole original. Under OptimizeSize the extract is additionally reduced to
-    // what the surviving pages actually reach. Streams are left alone — this is a pure
-    // reachability prune, not a re-encode.
+    // what the surviving pages actually use: the resource entries their content never names
+    // are dropped first (a page that shared one /Resources dictionary with the whole document
+    // otherwise keeps every other page's patterns, fonts and images reachable), then the
+    // objects nothing reaches any more. Streams are not re-encoded.
     //
     // The prune runs on the serialized extract rather than on the still-open document: page
     // deletions live in the in-memory page tree, while the reachability walk starts from the
@@ -126,33 +252,9 @@ public sealed partial class PdfFileEditor
         doc.OptimizeResources(new Aspose.Pdf.Optimization.OptimizationOptions
         {
             RemoveUnusedObjects = true,
-            RemoveUnusedStreams = false,
+            RemoveUnusedStreams = true,
         });
         return doc.ToArray();
-    }
-
-    /// <summary>
-    /// Concatenate multiple PDF files into one output file.
-    /// </summary>
-    public bool Concatenate(string[] inputFiles, string outputFile)
-    {
-        _corrupted.Clear();
-        List<(byte[], string?)> named;
-        try
-        {
-            named = inputFiles.Select(f => (File.ReadAllBytes(f), (string?)f)).ToList();
-        }
-        catch (IOException ex)
-        {
-            // Missing/unreadable inputs surface as a PdfException
-            // WRAPPING the IO error — callers (and TryConcatenate's LastException)
-            // pattern-match on InnerException being e.g. FileNotFoundException.
-            throw new PdfException(ex.Message, ex);
-        }
-        var inputs = FilterCorruptedInputs(named).ToArray();
-        var result = Concatenate(inputs);
-        File.WriteAllBytes(outputFile, result);
-        return true;
     }
 
     /// <summary>Parse-probe each input and honour <see cref="CorruptedFileAction"/>.
@@ -185,96 +287,6 @@ public sealed partial class PdfFileEditor
             }
         }
         return valid;
-    }
-
-    /// <summary>
-    /// Concatenate two PDF files into one output file.
-    /// </summary>
-    public bool Concatenate(string firstInputFile, string secInputFile, string outputFile)
-    {
-        return Concatenate(new[] { firstInputFile, secInputFile }, outputFile);
-    }
-
-    /// <summary>
-    /// Concatenate two PDF files with a blank-page separator inserted between them.
-    /// </summary>
-    public bool Concatenate(string firstInputFile, string secInputFile, string blankPageFile, string outputFile)
-    {
-        return Concatenate(new[] { firstInputFile, blankPageFile, secInputFile }, outputFile);
-    }
-
-    /// <summary>Concatenate multiple PDF streams into one output stream.</summary>
-    public bool Concatenate(Stream[] inputStream, Stream outputStream)
-    {
-        var inputs = inputStream.Select(ReadStream).ToArray();
-        var result = Concatenate(inputs);
-        outputStream.Write(result, 0, result.Length);
-        // A seekable output is left rewound so callers can read
-        // the concatenated bytes back without seeking.
-        if (outputStream.CanSeek) outputStream.Position = 0;
-        if (CloseConcatenatedStreams)
-        {
-            foreach (var s in inputStream) s.Dispose();
-            outputStream.Dispose();
-        }
-        return true;
-    }
-
-    /// <summary>Concatenate two PDF streams into one output stream.</summary>
-    public bool Concatenate(Stream firstInputStream, Stream secInputStream, Stream outputStream)
-    {
-        var result = Concatenate(ReadStream(firstInputStream), ReadStream(secInputStream));
-        outputStream.Write(result, 0, result.Length);
-        // A seekable output is left rewound so callers can read
-        // the concatenated bytes back without seeking.
-        if (outputStream.CanSeek) outputStream.Position = 0;
-        if (CloseConcatenatedStreams)
-        {
-            firstInputStream.Dispose();
-            secInputStream.Dispose();
-            outputStream.Dispose();
-        }
-        return true;
-    }
-
-    /// <summary>Concatenate two PDF streams with a blank-page separator inserted between them.</summary>
-    public bool Concatenate(Stream firstInputStream, Stream secInputStream, Stream blankPageStream, Stream outputStream)
-    {
-        var result = Concatenate(new[]
-        {
-            ReadStream(firstInputStream),
-            ReadStream(blankPageStream),
-            ReadStream(secInputStream),
-        });
-        outputStream.Write(result, 0, result.Length);
-        // A seekable output is left rewound so callers can read
-        // the concatenated bytes back without seeking.
-        if (outputStream.CanSeek) outputStream.Position = 0;
-        if (CloseConcatenatedStreams)
-        {
-            firstInputStream.Dispose();
-            secInputStream.Dispose();
-            blankPageStream.Dispose();
-            outputStream.Dispose();
-        }
-        return true;
-    }
-
-    /// <summary>Concatenate the pages of <paramref name="src"/> into the
-    /// existing <paramref name="dest"/> document. Each source is left
-    /// untouched; the target receives all pages in source-order. Honours
-    /// the same flag set as the file/stream Concatenate overloads.</summary>
-    public bool Concatenate(Document[] src, Document dest)
-    {
-        if (dest is null) throw new ArgumentNullException(nameof(dest));
-        if (src is null) return false;
-        foreach (var s in src)
-        {
-            if (s is null) continue;
-            dest.Pages.Add(s.Pages);
-            if (CopyLogicalStructure) dest.MergeLogicalStructure(s);
-        }
-        return true;
     }
 
     /// <summary>Read a stream fully into a byte array.</summary>

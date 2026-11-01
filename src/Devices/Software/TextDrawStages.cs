@@ -31,10 +31,13 @@ public sealed partial class SoftwarePageRenderer
             // for the ORIGINAL program's glyph ids, so it is dropped with the program.
             var simpleParser = dt.parser ?? ResolveSimpleFallback(dt.ctx, dt.state.FontName);
             var substituted = dt.parser is null && simpleParser is not null;
-            dt.px = DrawSimpleText(dt.ctx, dt.text, dt.rawBytes, simpleParser, dt.fontMetrics,
+            var embeddedProgram = HasEmbeddedProgram(dt.ctx.FontDicts, dt.ctx.Reader, dt.state.FontName);
+            // The standard dingbats face is addressed by what its codes stand for.
+            var text = substituted && dt.rawBytes is not null ? DingbatText(dt.ctx, dt.state.FontName, dt.rawBytes) ?? dt.text : dt.text;
+            dt.px = DrawSimpleText(dt.ctx, text, dt.rawBytes, simpleParser, dt.fontMetrics,
                 substituted ? null : GetEncodingGidMap(dt.ctx, dt.state.FontName, dt.parser),
                 dt.px, dt.py, dt.effectiveSize, dt.hScale, dt.charSpacingPx, dt.wordSpacingPx, dt.r, dt.g, dt.b, dt.a,
-                substituted, GetUndefinedCodes(dt.ctx, dt.state.FontName));
+                substituted, GetUndefinedCodes(dt.ctx, dt.state.FontName), embeddedProgram);
         }
     }
 
@@ -43,11 +46,14 @@ public sealed partial class SoftwarePageRenderer
     {
         (dt.parser, dt.hScale) = GetGlyphParser(dt.ctx, dt.state.FontName);
         dt.hScale *= dt.textHScale;
-        if (dt.ctx.GlyphEmMatrix is null) dt.hScale *= dt.anisotropy;
+        // The advances are measured with the glyph size, the text matrix's vertical length;
+        // the baseline's own length takes them the rest of the way, on the em-matrix path
+        // too, whose matrix carries the glyph shapes but not the pen.
+        dt.hScale *= dt.anisotropy;
         dt.fontMetrics = GetFontMetrics(dt.ctx, dt.state.FontName);
         dt.cidInfo = GetCidFontInfo(dt.ctx, dt.state.FontName);
 
-        dt.textSpaceScale = Math.Sqrt(dt.trm[0] * dt.trm[0] + dt.trm[2] * dt.trm[2]);
+        dt.textSpaceScale = dt.trmXLen;
         dt.charSpacingPx = dt.state.CharSpacing * dt.textSpaceScale * dt.ctx.Scale * dt.textHScale;
         dt.wordSpacingPx = dt.state.WordSpacing * dt.textSpaceScale * dt.ctx.Scale * dt.textHScale;
     }
@@ -74,6 +80,11 @@ public sealed partial class SoftwarePageRenderer
             var blen = Math.Sqrt(bx0 * bx0 + by0 * by0);
             dt.ctx.BaselineUx = blen > 1e-12 ? bx0 / blen : 1;
             dt.ctx.BaselineUy = blen > 1e-12 ? by0 / blen : 0;
+            // The pen's vertical pixels are measured with the glyph size (trmYLen); one of
+            // them is the text space's -y axis over that length, on the glyphs' own side.
+            var downSign = ky < 0 ? -1.0 : 1.0;
+            dt.ctx.PenDownX = dt.trmYLen > 1e-12 ? -downSign * dt.trm[2] / dt.trmYLen : 0;
+            dt.ctx.PenDownY = dt.trmYLen > 1e-12 ? downSign * dt.trm[3] / dt.trmYLen : 1;
             dt.ctx.GlyphOriginX = dt.px;
             dt.ctx.GlyphOriginY = dt.py;
         }
@@ -86,15 +97,16 @@ public sealed partial class SoftwarePageRenderer
     /// <summary>The pen origin in pixels, the fill colour bytes and the horizontal scale of the run.</summary>
     private static void ComputeTextPen(TextDrawState dt)
     {
-        dt.trmXLen = Math.Sqrt(dt.trm[0] * dt.trm[0] + dt.trm[2] * dt.trm[2]);
+        // The length the text space's x axis maps to: the baseline every advance runs along.
+        dt.trmXLen = Math.Sqrt(dt.trm[0] * dt.trm[0] + dt.trm[1] * dt.trm[1]);
         dt.trmYLen = Math.Sqrt(dt.trm[1] * dt.trm[1] + dt.trm[3] * dt.trm[3]);
         dt.anisotropy = dt.trmYLen > 1e-12 ? dt.trmXLen / dt.trmYLen : 1.0;
 
         dt.x = dt.trm[4];
         dt.y = dt.trm[5];
 
-        dt.px = (double)((dt.x - dt.ctx.MediaBox.LLX) * dt.ctx.Scale);
-        dt.py = (double)(dt.ctx.PixelH - (dt.y - dt.ctx.MediaBox.LLY) * dt.ctx.Scale);
+        dt.px = ((dt.x - dt.ctx.MediaBox.LLX) * dt.ctx.Scale);
+        dt.py = (dt.ctx.PixelH - (dt.y - dt.ctx.MediaBox.LLY) * dt.ctx.Scale);
 
         dt.r = (byte)(dt.state.FillR * 255);
         dt.g = (byte)(dt.state.FillG * 255);

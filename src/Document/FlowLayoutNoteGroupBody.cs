@@ -75,7 +75,9 @@ public sealed partial class Document
                     var st = seg.TextState;
                     if (st.LineSpacing > groupLs) groupLs = st.LineSpacing;
                     if (string.IsNullOrEmpty(seg.Text)) continue;
-                    var size = st.FontSizeTouched ? (double)st.FontSize : pfs > 0 ? pfs : 10;
+                    double size = 10;
+                    if (st.FontSizeTouched) size = (double)st.FontSize;
+                    else if (pfs > 0) size = pfs;
                     if (size > groupFs) groupFs = size;
                     var merged = new Text.TextState
                     {
@@ -84,8 +86,9 @@ public sealed partial class Document
                         IsBold = st.IsBold || parent.IsBold,
                         IsItalic = st.IsItalic || parent.IsItalic,
                     };
-                    var font = st.Font?.SourceFontData is not null ? st.Font
-                        : parent.Font?.SourceFontData is not null ? parent.Font : null;
+                    Text.Font? font = null;
+                    if (st.Font?.SourceFontData is not null) font = st.Font;
+                    else if (parent.Font?.SourceFontData is not null) font = parent.Font;
                     if (font is not null) merged.Font = font;
                     if ((st.FontData ?? parent.FontData) is { } fd) merged.FontData = fd;
                     var name = st.FontName ?? parent.FontName;
@@ -98,9 +101,10 @@ public sealed partial class Document
                 }
             }
             var headTf = head as Text.TextFragment;
-            var align = headTf is null ? HorizontalAlignment.Left
-                : headTf.HorizontalAlignment != HorizontalAlignment.Left ? headTf.HorizontalAlignment
-                : headTf.TextState.HorizontalAlignment;
+            HorizontalAlignment align;
+            if (headTf is null) align = HorizontalAlignment.Left;
+            else if (headTf.HorizontalAlignment != HorizontalAlignment.Left) align = headTf.HorizontalAlignment;
+            else align = headTf.TextState.HorizontalAlignment;
             // ⚠ TextFragment SHADOWS BaseParagraph.Margin with `new`, so reading it
             // through the base-typed head returns the fragment's UNSET base object
             // and a margined note paragraph loses its box.

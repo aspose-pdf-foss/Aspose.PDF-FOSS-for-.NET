@@ -15,7 +15,7 @@ public sealed partial class TextFragmentAbsorber
         if (xr.currentFontMissing) return;
         if (xr.operands.Count >= 1 && xr.operands[0] is PdfString s)
         {
-            var text = DecodeBytes(s.Value, xr.toUnicode, xr.fontDict, xr.reader, xr.useFontEngineEncoding);
+            var text = DecodeBytes(s.Value, xr.toUnicode, xr.fontDict, xr.reader);
             var rawWidth = xr.metrics?.MeasureStringExact(s.Value, xr.fontSize) ?? 0;
             var numChars = text.Length;
             var numSpaces = text.Count(c => c == ' ');
@@ -30,8 +30,8 @@ public sealed partial class TextFragmentAbsorber
             double[]? tjCharCumWidths = null;
             if (xr.metrics is not null && text.Length == s.Value.Length)
             {
-                // n+1 entries: cumWidths[i] = advance to start of char i;
-                // cumWidths[n] = total advance past last char (incl. trailing Tc).
+                // n+1 entries: cumWidths[i] = advance to start of char i; cumWidths[n]
+                // = total advance past last char (incl. trailing Tc).
                 var cumWidths = new double[text.Length + 1];
                 double cumW = 0;
                 for (var ci = 0; ci < s.Value.Length; ci++)
@@ -120,7 +120,7 @@ public sealed partial class TextFragmentAbsorber
         if (xr.currentFontMissing) return;
         if (xr.operands.Count >= 1 && xr.operands[0] is PdfString s2)
         {
-            var text2 = DecodeBytes(s2.Value, xr.toUnicode, xr.fontDict, xr.reader, xr.useFontEngineEncoding);
+            var text2 = DecodeBytes(s2.Value, xr.toUnicode, xr.fontDict, xr.reader);
             var rawW2 = xr.metrics?.MeasureString(s2.Value, xr.fontSize) ?? 0;
             var nSp2 = text2.Count(c => c == ' ');
             var unscW2 = rawW2 + xr.charSpacing * text2.Length + xr.wordSpacing * nSp2;
@@ -153,7 +153,7 @@ public sealed partial class TextFragmentAbsorber
             xr.result.Add(new RawTextRun("\r\n", xr.tx, xr.ty, xr.fontSize, xr.currentFontName, 0, xr.ctm, xr.metrics));
         if (!xr.currentFontMissing && xr.operands.Count >= 3 && xr.operands[2] is PdfString s3)
         {
-            var text3 = DecodeBytes(s3.Value, xr.toUnicode, xr.fontDict, xr.reader, xr.useFontEngineEncoding);
+            var text3 = DecodeBytes(s3.Value, xr.toUnicode, xr.fontDict, xr.reader);
             var rawW3 = xr.metrics?.MeasureString(s3.Value, xr.fontSize) ?? 0;
             var nSp3 = text3.Count(c => c == ' ');
             var unscW3 = rawW3 + xr.charSpacing * text3.Length + xr.wordSpacing * nSp3;

@@ -19,8 +19,8 @@ internal sealed class IdRegistry
 
     internal void Unregister(string? id, StructureElement element)
     {
-        if (!string.IsNullOrEmpty(id) && _ids.TryGetValue(id!, out var owner) && ReferenceEquals(owner, element))
-            _ids.Remove(id!);
+        if (!string.IsNullOrEmpty(id) && _ids.TryGetValue(id, out var owner) && ReferenceEquals(owner, element))
+            _ids.Remove(id);
     }
 }
 

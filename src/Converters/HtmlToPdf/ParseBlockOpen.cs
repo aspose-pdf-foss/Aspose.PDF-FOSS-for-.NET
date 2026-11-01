@@ -63,12 +63,12 @@ internal static partial class HtmlToPdfConverter
         }
         else if (tag == "li" && pb.parent.ListKind != 0)
         {
-            OpenListItemBlock(pb);
+            OpenListItemBlock(pb, tok);
         }
         // A container that paints a background opens a BOX: remember where its first child
         // block will land. The fill is emitted per LINE, so a container whose content turns out
-        // to be block-level children flushes no line of its own and would paint nothing at all;
-        // the close decides whether that happened and, if so, brackets the children with markers.
+        // to be block-level children flushes no line of its own and would paint nothing at all; the
+        // close decides whether that happened and, if so, brackets the children with markers.
         // Never the BODY: its background is the page canvas, painted once behind the whole
         // content box rather than as a box around the blocks it happens to contain.
         if (pb.style.BackgroundColor is { } bgSpanFill

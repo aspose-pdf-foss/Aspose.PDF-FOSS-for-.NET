@@ -14,7 +14,9 @@ internal static partial class HtmlToPdfConverter
         sn.secH = double.Parse(secM.Groups[2].Value, pf.inv) * PxPt;
         sn.body = DivBodyAt(pf.html, secM.Index + secM.Length);
 
-        foreach (Match fb in Regex.Matches(sn.body,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match fb in SafeRegex.Matches(sn.body,
+#pragma warning restore S3267
             @"<div\b[^>]*style\s*=\s*(['""])position:\s*absolute;left:\s*(-?\d+(?:\.\d+)?)px;top:\s*(-?\d+(?:\.\d+)?)px;?(?:width:\s*(\d+(?:\.\d+)?)px;?)?(?:height:\s*(\d+(?:\.\d+)?)px;?)?\s*\1[^>]*>",
             RegexOptions.IgnoreCase))
         {

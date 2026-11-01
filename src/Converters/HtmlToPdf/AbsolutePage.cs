@@ -49,35 +49,29 @@ internal static partial class HtmlToPdfConverter
 
     private sealed class AbsPageBox
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double WidthPt, HeightPt, MarginLeftPt, LeftFrac, TopPt;
         public bool Outset;
         public List<AbsPageLine> Lines = new();
+#pragma warning restore S3218
     }
 
     private static readonly Regex AbsPageContainerRx = new Regex(
         @"<div\b(?<attrs>[^>]*\bstyle\s*=\s*(?<q>[""'])(?<st>[^""']*position\s*:\s*absolute[^""']*)\k<q>[^>]*)>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    /// <summary>True for the absolutely positioned page shape: one sized absolute container after
-    /// the body open holding only absolute children, with no table and no flowing text.</summary>
-    private static bool IsAbsolutePageHtml(string html)
-    {
-        if (Regex.IsMatch(html, @"<table\b", RegexOptions.IgnoreCase)) return false;
-        return ReadAbsolutePage(html, null) is not null;
-    }
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The container box and its lines, or null when the markup is not this shape.</summary>
     private static AbsPageBox? ReadAbsolutePage(string html, HtmlLoadOptions? options)
     {
         var trace = Environment.GetEnvironmentVariable("ASPOSE_TRACE_ABSPAGE") == "1";
         void Why(string reason) { if (trace) Console.Error.WriteLine("[abspage] no: " + reason); }
-        var bodyM = Regex.Match(html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
+        var bodyM = SafeRegex.Match(html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
         if (!bodyM.Success) { Why("no body"); return null; }
         var body = html[(bodyM.Index + bodyM.Length)..];
         var bodyEnd = body.IndexOf("</body", StringComparison.OrdinalIgnoreCase);
         if (bodyEnd >= 0) body = body[..bodyEnd];
-        body = HtmlCommentRx.Replace(body, "");
-        var open = AbsPageContainerRx.Match(body);
+        body = SafeRegex.Replace(HtmlCommentRx, body, "");
+        var open = SafeRegex.Match(AbsPageContainerRx, body);
         if (!open.Success || body[..open.Index].Trim().Length > 0) { Why("no leading absolute container"); return null; }
         var st = open.Groups["st"].Value;
         if (!(StylePxPt(st, "width") is { } wPt && wPt > 0) || !(StylePxPt(st, "height") is { } hPt && hPt > 0)) { Why("container unsized"); return null; }
@@ -88,44 +82,45 @@ internal static partial class HtmlToPdfConverter
             WidthPt = wPt, HeightPt = hPt,
             MarginLeftPt = StylePxPt(st, "margin-left") ?? 0,
             TopPt = StylePxPt(st, "top") ?? 0,
-            Outset = Regex.IsMatch(st, @"border-style\s*:\s*outset", RegexOptions.IgnoreCase),
+            Outset = SafeRegex.IsMatch(st, @"border-style\s*:\s*outset", RegexOptions.IgnoreCase),
         };
-        var leftM = Regex.Match(st, @"(?<![-\w])left\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase);
+        var leftM = SafeRegex.Match(st, @"(?<![-\w])left\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase);
         if (leftM.Success) box.LeftFrac = double.Parse(leftM.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) / 100.0;
         var css = ParseStyleSheet(StripStyleCommentMarkers(html));
         var inner = body[(open.Index + open.Length)..divEnd];
         var pos = 0;
-        foreach (Match child in Regex.Matches(inner, @"<div\b(?<attrs>[^>]*)>", RegexOptions.IgnoreCase))
+        foreach (Match child in SafeRegex.Matches(inner, @"<div\b(?<attrs>[^>]*)>", RegexOptions.IgnoreCase))
         {
             if (child.Index < pos) continue;   // inside the previous child
             if (inner[pos..child.Index].Trim().Length > 0) { Why("text between children: " + inner[pos..child.Index].Trim()); return null; }
-            var cst = Regex.Match(child.Groups["attrs"].Value, @"\bstyle\s*=\s*([""'])(?<v>[^""']*)\1", RegexOptions.IgnoreCase).Groups["v"].Value;
-            if (!Regex.IsMatch(cst, @"position\s*:\s*absolute", RegexOptions.IgnoreCase)) { Why("child not absolute: " + child.Value); return null; }
+            var cst = SafeRegex.Match(child.Groups["attrs"].Value, @"\bstyle\s*=\s*([""'])(?<v>[^""']*)\1", RegexOptions.IgnoreCase).Groups["v"].Value;
+            if (!SafeRegex.IsMatch(cst, @"position\s*:\s*absolute", RegexOptions.IgnoreCase)) { Why("child not absolute: " + child.Value); return null; }
             var (cAfterClose, cEnd) = FindDivEnd(inner, child.Index + child.Length);
             if (cAfterClose < 0) { Why("child unclosed: " + child.Value); return null; }
             var content = inner[(child.Index + child.Length)..cEnd];
             pos = cAfterClose;
             var line = new AbsPageLine { LeftPt = StylePxPt(cst, "left") ?? 0, TopPt = StylePxPt(cst, "top") ?? 0 };
-            var img = Regex.Match(content, @"<img\b[^>]*>", RegexOptions.IgnoreCase);
+            var img = SafeRegex.Match(content, @"<img\b[^>]*>", RegexOptions.IgnoreCase);
             if (img.Success)
             {
                 line.IsImage = true;
-                var wa = Regex.Match(img.Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
-                var ha = Regex.Match(img.Value, @"\bheight\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+                var wa = SafeRegex.Match(img.Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+                var ha = SafeRegex.Match(img.Value, @"\bheight\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
                 line.ImageWPt = wa.Success ? DtpNum(wa.Groups[1].Value) * PxPt : 0;
                 line.ImageHPt = ha.Success ? DtpNum(ha.Groups[1].Value) * PxPt : 0;
-                var src = Regex.Match(img.Value, @"\bsrc\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+                var src = SafeRegex.Match(img.Value, @"\bsrc\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
                 if (options is not null && src.Success) line.ImageBytes = LoadConverterImage(src.Groups[1].Value, options);
                 box.Lines.Add(line);
                 continue;
             }
-            if (Regex.IsMatch(content, @"<(?!/?(b|i|strong|em|span|br)\b)[a-z]", RegexOptions.IgnoreCase)) { Why("child holds markup: " + content); return null; }
-            line.Text = CollapseWs(DecodeEntities(Regex.Replace(content, "<[^>]*>", ""))).Trim();
-            var cls = Regex.Match(child.Groups["attrs"].Value, @"\bclass\s*=\s*(?:[""']([^""']*)[""']|([\w-]+))", RegexOptions.IgnoreCase);
-            var clsName = cls.Success ? (cls.Groups[1].Success ? cls.Groups[1].Value : cls.Groups[2].Value).Trim() : "";
+            if (SafeRegex.IsMatch(content, @"<(?!/?(b|i|strong|em|span|br)\b)[a-z]", RegexOptions.IgnoreCase)) { Why("child holds markup: " + content); return null; }
+            line.Text = CollapseWs(DecodeEntities(SafeRegex.Replace(content, "<[^>]*>", ""))).Trim();
+            var cls = SafeRegex.Match(child.Groups["attrs"].Value, @"\bclass\s*=\s*(?:[""']([^""']*)[""']|([\w-]+))", RegexOptions.IgnoreCase);
+            string clsName = "";
+            if (cls.Success) clsName = (cls.Groups[1].Success ? cls.Groups[1].Value : cls.Groups[2].Value).Trim();
             ApplyAbsPageClass(line, css, clsName);
-            if (Regex.IsMatch(content, @"<(b|strong)\b", RegexOptions.IgnoreCase)) line.Bold = true;
-            if (Regex.IsMatch(content, @"<(i|em)\b", RegexOptions.IgnoreCase)) line.Italic = true;
+            if (SafeRegex.IsMatch(content, @"<(b|strong)\b", RegexOptions.IgnoreCase)) line.Bold = true;
+            if (SafeRegex.IsMatch(content, @"<(i|em)\b", RegexOptions.IgnoreCase)) line.Italic = true;
             if (line.Text.Length > 0) box.Lines.Add(line);
         }
         if (inner[pos..].Trim().Length > 0) { Why("trailing text: " + inner[pos..].Trim()); return null; }
@@ -136,7 +131,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A px (or pt) length of a style declaration in points, or null.</summary>
     private static double? StylePxPt(string style, string prop)
     {
-        var m = Regex.Match(style, @"(?<![-\w])" + Regex.Escape(prop) + @"\s*:\s*(-?[\d.]+)\s*(px|pt)?", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(style, @"(?<![-\w])" + Regex.Escape(prop) + @"\s*:\s*(-?[\d.]+)\s*(px|pt)?", RegexOptions.IgnoreCase);
         if (!m.Success || !double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var v)) return null;
         return m.Groups[2].Value.Equals("pt", StringComparison.OrdinalIgnoreCase) ? v : v * PxPt;
@@ -152,8 +147,8 @@ internal static partial class HtmlToPdfConverter
             if (!css.TryGetValue(key, out var rule)) continue;
             if (rule.TryGetValue("font-size", out var fs) && TryParseLength(fs) is { } fsPt && fsPt > 0) line.FontPt = fsPt;
             if (rule.TryGetValue("font-family", out var ff) && ResolveFixedFace(ff) is { Length: > 0 } face) line.Face = face;
-            if (rule.TryGetValue("font-weight", out var fw) && Regex.IsMatch(fw, @"bold|[6-9]00", RegexOptions.IgnoreCase)) line.Bold = true;
-            if (rule.TryGetValue("font-style", out var fst) && Regex.IsMatch(fst, @"italic|oblique", RegexOptions.IgnoreCase)) line.Italic = true;
+            if (rule.TryGetValue("font-weight", out var fw) && SafeRegex.IsMatch(fw, @"bold|[6-9]00", RegexOptions.IgnoreCase)) line.Bold = true;
+            if (rule.TryGetValue("font-style", out var fst) && SafeRegex.IsMatch(fst, @"italic|oblique", RegexOptions.IgnoreCase)) line.Italic = true;
             if (rule.TryGetValue("color", out var col) && ParseCssColorRgb(col) is { } rgb) line.Color = rgb;
         }
     }
@@ -161,7 +156,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Lays the absolutely positioned page out: the sheet, the container's bevel, its lines.</summary>
     private static Document? TryConvertAbsolutePage(string html, HtmlLoadOptions? options)
     {
-        if (Regex.IsMatch(html, @"<table\b", RegexOptions.IgnoreCase)) return null;
+        if (SafeRegex.IsMatch(html, @"<table\b", RegexOptions.IgnoreCase)) return null;
         if (ReadAbsolutePage(html, options) is not { } box) return null;
         var pageInfo = options?.PageInfo;
         var pageW = pageInfo?.Width is > 0 ? pageInfo.Width : 595.0;
@@ -248,8 +243,12 @@ internal static partial class HtmlToPdfConverter
             try
             {
                 ttf = Text.FontRepository.FindFont(line.Face,
-                        line.Bold && line.Italic ? Text.FontStyles.Bold | Text.FontStyles.Italic
-                        : line.Bold ? Text.FontStyles.Bold : Text.FontStyles.Italic, ignoreCase: true)
+                        (line.Bold, line.Italic) switch
+                        {
+                            (true, true) => Text.FontStyles.Bold | Text.FontStyles.Italic,
+                            (true, _) => Text.FontStyles.Bold,
+                            _ => Text.FontStyles.Italic,
+                        }, ignoreCase: true)
                     ?.SourceFontData?.TtfData;
             }
             catch { ttf = null; }

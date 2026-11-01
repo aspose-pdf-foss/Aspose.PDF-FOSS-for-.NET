@@ -10,11 +10,11 @@ internal static partial class HtmlToPdfConverter
     {
         if (!cv.marginsExplicit && cv.pageWidth <= 612.0)
         {
-            var rbodyM = Regex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])([^'""]*)\1",
+            var rbodyM = SafeRegex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])([^'""]*)\1",
                 RegexOptions.IgnoreCase);
             if (rbodyM.Success)
             {
-                var rbw = Regex.Match(rbodyM.Groups[2].Value,
+                var rbw = SafeRegex.Match(rbodyM.Groups[2].Value,
                     @"(?<![-\w])width\s*:\s*([\d.]+\s*(?:cm|mm|in|pt))", RegexOptions.IgnoreCase);
                 if (rbw.Success && TryParseLength(rbw.Groups[1].Value.Replace(" ", "")) is { } rbwPt
                     && rbwPt > 0 && cv.marginLeft + rbwPt + ReportPageRightPt > cv.pageWidth)
@@ -33,9 +33,9 @@ internal static partial class HtmlToPdfConverter
                 {
                     if (!wsel.StartsWith('.') || wsel.Contains(' ')) continue;
                     if (!wprops.TryGetValue("width", out var wv)) continue;
-                    if (!Regex.IsMatch(wv, @"^\s*[\d.]+\s*(cm|mm|in|pt)\s*$",
+                    if (!SafeRegex.IsMatch(wv, @"^\s*[\d.]+\s*(cm|mm|in|pt)\s*$",
                             RegexOptions.IgnoreCase)) continue;
-                    if (!Regex.IsMatch(cv.html,
+                    if (!SafeRegex.IsMatch(cv.html,
                             @"<div\b[^>]*class\s*=\s*[""'][^""']*\b" + Regex.Escape(wsel[1..]) + @"\b",
                             RegexOptions.IgnoreCase)) continue;
                     if (TryParseLength(wv.Trim()) is not { } wclsPt || wclsPt <= 0) continue;

@@ -7,9 +7,6 @@ namespace Aspose.Pdf.Text;
 /// </summary>
 public sealed class ParagraphAbsorberOptions
 {
-    private double _vOverride = double.NaN;
-    private double _hOverride = double.NaN;
-
     /// <summary>Creates options with no vertical or horizontal override (both <c>NaN</c>, so the default heuristics apply).</summary>
     public ParagraphAbsorberOptions() { }
 
@@ -17,24 +14,16 @@ public sealed class ParagraphAbsorberOptions
     /// Vertical distance override (as fraction of font size) below which lines are
     /// considered part of the same section. NaN means "use the default heuristic".
     /// </summary>
-    public double SectionUnbreakingVerticalOverride
-    {
-        get => _vOverride;
-        set => _vOverride = value;
-    }
+    public double SectionUnbreakingVerticalOverride { get; set; } = double.NaN;
 
     /// <summary>
     /// Horizontal distance override (as fraction of page width) below which fragments
     /// are considered part of the same section. NaN means "use the default heuristic".
     /// </summary>
-    public double SectionUnbreakingHorizontalOverride
-    {
-        get => _hOverride;
-        set => _hOverride = value;
-    }
+    public double SectionUnbreakingHorizontalOverride { get; set; } = double.NaN;
 
-    internal bool HasVerticalOverride => !double.IsNaN(_vOverride);
-    internal bool HasHorizontalOverride => !double.IsNaN(_hOverride);
+    internal bool HasVerticalOverride => !double.IsNaN(SectionUnbreakingVerticalOverride);
+    internal bool HasHorizontalOverride => !double.IsNaN(SectionUnbreakingHorizontalOverride);
 
     /// <summary>Optional rectangle restricting the absorber to a page region. Stored only.</summary>
     public Aspose.Pdf.Rectangle? SearchRectangle { get; set; }

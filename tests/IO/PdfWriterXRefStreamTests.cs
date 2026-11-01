@@ -20,7 +20,7 @@ public class PdfWriterXRefStreamTests
         Assert.Contains("trailer", text);
 
         // Should not contain /Type /XRef (xref stream marker)
-        Assert.DoesNotContain("/Type /XRef", text);
+        Assert.DoesNotContain("/Type /XRef", text, StringComparison.Ordinal);
 
         // Verify round-trip
         using var doc2 = Document.Open(saved);
@@ -45,8 +45,8 @@ public class PdfWriterXRefStreamTests
         // Should have startxref but no "xref\n" or "trailer" keywords
         var text = Encoding.ASCII.GetString(saved);
         Assert.Contains("startxref", text);
-        Assert.DoesNotContain("\nxref\n", text);
-        Assert.DoesNotContain("\ntrailer\n", text);
+        Assert.DoesNotContain("\nxref\n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("\ntrailer\n", text, StringComparison.Ordinal);
 
         // Verify round-trip: PdfReader should be able to read the xref stream
         using var doc2 = Document.Open(saved);

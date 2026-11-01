@@ -12,7 +12,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (tok.IsSelfClosing)
             {
-                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
                 pb.pendingEmptyPMarginPt = Math.Max(pb.pendingEmptyPMarginPt,
                     UaBlockMarginEm * pb.styleStack.Peek().FontSize);
                 return false;
@@ -65,7 +65,7 @@ internal static partial class HtmlToPdfConverter
         if (pb.browserUa && pb.style.BorderTopOnly && pb.style.BorderColor is { } tdCol
             && pb.style.BorderWidth > 0)
         {
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             pb.blocks.Add(new Block
             {
                 Text = "", IsHardBreak = true,
@@ -91,7 +91,7 @@ internal static partial class HtmlToPdfConverter
             && pb.style.ExplicitHeight > 0
             && tok.Attributes is not null
             && tok.Attributes.TryGetValue("style", out var bbSt) && bbSt is not null
-            && Regex.Match(bbSt, @"(?<![-\w])width\s*:\s*([^;""']+)",
+            && SafeRegex.Match(bbSt, @"(?<![-\w])width\s*:\s*([^;""']+)",
                 RegexOptions.IgnoreCase) is { Success: true } bbW
             && TryParseLength(bbW.Groups[1].Value.Trim()) is { } bbWPt)
         {
@@ -102,6 +102,7 @@ internal static partial class HtmlToPdfConverter
             pb.style.BorderWidth = 0;
             pb.style.BorderColor = null;
         }
+        if (DirAttributeRtl(tok) is { } dirRtl) pb.style.Rtl = dirRtl;
         // The legacy ALIGN attribute: justify stretches word gaps at draw time,
         // center centres each measured line — both layout-neutral (wrap points
         // and pagination are unchanged).
@@ -115,8 +116,9 @@ internal static partial class HtmlToPdfConverter
         }
         // An element opening with page-break-before must break even when it emits
         // no block itself (the `<div style="page-break-before:always"></div>` idiom):
-        // carry the break to whatever block flushes next.
-        if (pb.style.PageBreakBefore) pb.pendingPageBreak = true;
+        // carry the break to whatever block flushes next. The break is the element's start only:
+        // its own text after a child block (a heading's "required" line) does not break again.
+        if (pb.style.PageBreakBefore) { pb.pendingPageBreak = true; pb.style.PageBreakBefore = false; }
         // Entering a differently NAMED page (CSS3 paged media) breaks like a declared
         // page break: the flow carries a page name, and an element whose own `page`
         // names another one starts a fresh sheet and renames the flow (MEASURED, the Word
@@ -219,7 +221,7 @@ internal static partial class HtmlToPdfConverter
             // `margin-top: 5px` boxes).
             if (pb.style.BackgroundColor is not null && tok.Attributes is not null
                 && tok.Attributes.TryGetValue("style", out var dbSt) && dbSt is not null
-                && Regex.Match(dbSt, @"(?<![-\w])margin-top\s*:\s*([\d.]+)\s*px",
+                && SafeRegex.Match(dbSt, @"(?<![-\w])margin-top\s*:\s*([\d.]+)\s*px",
                     RegexOptions.IgnoreCase) is { Success: true } dbMt
                 && double.TryParse(dbMt.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -244,7 +246,7 @@ internal static partial class HtmlToPdfConverter
         if (pb.cv?.profile is { fieldListDoc: true, fieldsClass: { } fieldsCls } flp
             && tag.Equals("div", StringComparison.OrdinalIgnoreCase)
             && tok.Attributes is { } fbAttrs && fbAttrs.TryGetValue("class", out var fbCls) && fbCls is not null
-            && Regex.IsMatch(fbCls, @"(^|\s)" + Regex.Escape(fieldsCls) + @"(\s|$)"))
+            && SafeRegex.IsMatch(fbCls, @"(^|\s)" + Regex.Escape(fieldsCls) + @"(\s|$)"))
         {
             pb.style.FieldsBox = true;
             pb.style.LeftIndent += flp.fieldsInsetPt;
@@ -257,7 +259,7 @@ internal static partial class HtmlToPdfConverter
         if (!(pb.metricLayout && pb.uaPMargins)
             && tok.Attributes is not null
             && tok.Attributes.TryGetValue("style", out var optSt) && !string.IsNullOrEmpty(optSt)
-            && Regex.Match(optSt, @"padding-top\s*:\s*(\d+(?:\.\d+)?)\s*(px|pt)",
+            && SafeRegex.Match(optSt, @"padding-top\s*:\s*(\d+(?:\.\d+)?)\s*(px|pt)",
                 RegexOptions.IgnoreCase) is { Success: true } optM
             && double.TryParse(optM.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -265,23 +267,23 @@ internal static partial class HtmlToPdfConverter
             && optV > 0)
             pb.style.OwnPadTopPt = optM.Groups[2].Value.Equals("pt", StringComparison.OrdinalIgnoreCase)
                 ? optV : optV * 0.75;
-        // A div's ABSOLUTE width (style="width:680" — quirks unitless = px, or
-        // "width:680px") is recorded on every flow; only the form-document
-        // dialect honors it as the wrap box at layout time.
+        // A div's ABSOLUTE width (style="width:680" — quirks unitless = px, or a
+        // length in any unit, kept in px) is recorded on every flow as its wrap box.
         if (tok.Attributes is not null
-            && tok.Attributes.TryGetValue("style", out var awSt) && !string.IsNullOrEmpty(awSt))
+            && tok.Attributes.TryGetValue("style", out var awSt) && !string.IsNullOrEmpty(awSt)
+            && SafeRegex.Match(awSt, @"(?:^|[;\s])width\s*:\s*([^;]+)") is { Success: true } awm
+            && CssLengthPx(awm.Groups[1].Value, pb.style.FontSize / PxPt) is { } awPx && awPx > 0)
         {
-            var awm = Regex.Match(awSt, @"(?:^|[;\s])width\s*:\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*(?:;|$)");
-            if (awm.Success && double.TryParse(awm.Groups[1].Value,
-                    System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var awPx)
-                && awPx > 0)
-                pb.style.WidthPx = awPx;
+            pb.style.WidthPx = awPx;
+            pb.style.WidthBoxAuto = SafeRegex.IsMatch(awSt, @"(?:^|[;\s])margin(?:-left)?\s*:[^;]*\bauto\b", RegexOptions.IgnoreCase);
         }
         // CSS rules: type selector then class selector(s), each overriding the
         // previous, before the inline style="…" (highest specificity).
+        // (the metric flow lays the page out by its sheet, so the descendant rules the open
+        //  containers satisfy reach the block too: a date styled `.post-date .date { font-size }`)
         ApplyCssRules(pb.css, tag, tok.Attributes, pb.style, pb.metricLayout, pb.coverStyles,
-            floatFlow: pb.floatFlow);
+            floatFlow: pb.floatFlow, ancestors: pb.metricLayout || ShipsOwnFaces(pb) ? OpenAncestors(pb) : null,
+            chainRules: pb.chainRules);
         // Ledger: a class WIDTH on a block element is that element's box —
         // the wrap/centring frame its lines lay out in.
         if (pb.absSpanLedger && pb.css is not null && tok.Attributes is not null
@@ -289,7 +291,7 @@ internal static partial class HtmlToPdfConverter
             foreach (var dc in lgDivCls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
                 if (pb.css.TryGetValue("." + dc, out var dcr)
                     && dcr.TryGetValue("width", out var dcw)
-                    && Regex.Match(dcw, @"([\d.]+)\s*px", RegexOptions.IgnoreCase)
+                    && SafeRegex.Match(dcw, @"([\d.]+)\s*px", RegexOptions.IgnoreCase)
                         is { Success: true } dcwM
                     && double.TryParse(dcwM.Groups[1].Value,
                         System.Globalization.NumberStyles.Float,
@@ -328,7 +330,7 @@ internal static partial class HtmlToPdfConverter
                     if (pb.css.TryGetValue("." + c + " " + tag.ToLowerInvariant(), out var bandRule)
                         && bandRule.TryGetValue("border-bottom", out var bandDecl))
                     {
-                        var bw = Regex.Match(bandDecl, @"(\d+(?:\.\d+)?)\s*px");
+                        var bw = SafeRegex.Match(bandDecl, @"(\d+(?:\.\d+)?)\s*px");
                         pb.style.BandColor = ParseCssColor(bandDecl);
                         pb.style.BandPx = bw.Success ? double.Parse(bw.Groups[1].Value,
                             System.Globalization.CultureInfo.InvariantCulture) : 1;
@@ -344,7 +346,7 @@ internal static partial class HtmlToPdfConverter
         if (pb.browserUa && tok.Attributes is not null
             && tok.Attributes.TryGetValue("style", out var uaSt) && !string.IsNullOrEmpty(uaSt))
         {
-            var uwm = Regex.Match(uaSt, @"(?:^|[;\s])width\s*:\s*(\d+(?:\.\d+)?)\s*%");
+            var uwm = SafeRegex.Match(uaSt, @"(?:^|[;\s])width\s*:\s*(\d+(?:\.\d+)?)\s*%");
             if (uwm.Success && double.TryParse(uwm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var uwPct)
@@ -353,7 +355,7 @@ internal static partial class HtmlToPdfConverter
             // Shorthand only — the padding-top LONGHAND is OwnPadTopPt's
             // (parsed below for every flow): it cascades down wrapper
             // opens and the first flushing block spends it once.
-            var upm = Regex.Match(uaSt, @"(?<![-\w])padding\s*:\s*(\d+(?:\.\d+)?)\s*(px|pt)");
+            var upm = SafeRegex.Match(uaSt, @"(?<![-\w])padding\s*:\s*(\d+(?:\.\d+)?)\s*(px|pt)");
             if (upm.Success && double.TryParse(upm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var upPx)
@@ -367,7 +369,7 @@ internal static partial class HtmlToPdfConverter
             && tok.Attributes is not null
             && tok.Attributes.TryGetValue("style", out var mpSt) && !string.IsNullOrEmpty(mpSt))
         {
-            var mpm = Regex.Match(mpSt, @"padding(?:-top)?\s*:\s*(\d+(?:\.\d+)?)\s*px");
+            var mpm = SafeRegex.Match(mpSt, @"padding(?:-top)?\s*:\s*(\d+(?:\.\d+)?)\s*px");
             if (mpm.Success && double.TryParse(mpm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var mpPx)
@@ -437,7 +439,7 @@ internal static partial class HtmlToPdfConverter
         if (pb.containerBoxIndents && pb.css is not null
             && pb.css.TryGetValue(tag.ToLowerInvariant(), out var tagReset)
             && tagReset.TryGetValue("margin", out var tagResetMargin)
-            && Regex.IsMatch(tagResetMargin.Trim(), @"^0(px)?(\s+0(px)?){0,3}$"))
+            && SafeRegex.IsMatch(tagResetMargin.Trim(), @"^0(px)?(\s+0(px)?){0,3}$"))
         {
             pb.style.MarginTop = 0;
             pb.style.MarginBottom = 0;
@@ -472,7 +474,7 @@ internal static partial class HtmlToPdfConverter
                 pb.style.MarginBottom = 0;
             }
             if (uaTagRule.TryGetValue("text-decoration", out var uaTagDeco)
-                && Regex.IsMatch(uaTagDeco, "(^|[^a-z-])underline([^a-z-]|$)", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(uaTagDeco, "(^|[^a-z-])underline([^a-z-]|$)", RegexOptions.IgnoreCase))
             {
                 pb.blockUnderStart = pb.currentText.Length;
             }
@@ -491,7 +493,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (!pb.wordMail || tok.Attributes is not { } wmAttrs
             || !wmAttrs.TryGetValue("style", out var wmSt) || wmSt is null) return;
-        var wmTi = Regex.Match(wmSt, @"text-indent\s*:\s*(-?[\d.]+)\s*(pt|px)", RegexOptions.IgnoreCase);
+        var wmTi = SafeRegex.Match(wmSt, @"text-indent\s*:\s*(-?[\d.]+)\s*(pt|px)", RegexOptions.IgnoreCase);
         if (wmTi.Success && double.TryParse(wmTi.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var wmTiv))
             pb.style.TextIndentPt = wmTi.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase) ? wmTiv * PxPt : wmTiv;
@@ -504,14 +506,14 @@ internal static partial class HtmlToPdfConverter
             && rlpAttrs.TryGetValue("style", out var rlpSt) && rlpSt is not null)
         {
             if (pb.style.MarginTop <= 0
-                && Regex.Match(rlpSt, @"(?<![-\w])margin\s*:\s*([\d.]+)\s*pt",
+                && SafeRegex.Match(rlpSt, @"(?<![-\w])margin\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase) is { Success: true } rlpM
                 && double.TryParse(rlpM.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var rlpMt)
                 && rlpMt > 0)
                 pb.style.MarginTop = rlpMt;
-            if (Regex.Match(rlpSt, @"text-indent\s*:\s*([\d.]+)\s*pt",
+            if (SafeRegex.Match(rlpSt, @"text-indent\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase) is { Success: true } rlpTi
                 && double.TryParse(rlpTi.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -524,16 +526,16 @@ internal static partial class HtmlToPdfConverter
         // shorthand parser never sees the spelled-out triplet.
         if (pb.spanPtTypography && tok.Attributes is { } btAttrs
             && btAttrs.TryGetValue("style", out var btSt) && btSt is not null
-            && Regex.IsMatch(btSt, @"border-top-style\s*:\s*solid", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(btSt, @"border-top-style\s*:\s*solid", RegexOptions.IgnoreCase))
         {
             pb.style.BorderTopOnly = true;
-            pb.style.BorderWidth = Regex.Match(btSt, @"border-top-width\s*:\s*([\d.]+)\s*pt",
+            pb.style.BorderWidth = SafeRegex.Match(btSt, @"border-top-width\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase) is { Success: true } btw
                 && double.TryParse(btw.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var btwv)
                 ? btwv : 0.75;
-            pb.style.BorderColor = Regex.Match(btSt, @"border-top-color\s*:\s*([^;]+)",
+            pb.style.BorderColor = SafeRegex.Match(btSt, @"border-top-color\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase) is { Success: true } btc
                 ? ParseCssColor(btc.Groups[1].Value.Trim()) ?? Color.FromArgb(0, 0, 0)
                 : Color.FromArgb(0, 0, 0);
@@ -544,7 +546,7 @@ internal static partial class HtmlToPdfConverter
         // the right content edge.
         if (pb.spanPtTypography && tok.Attributes is { } ptpAttrs
             && ptpAttrs.TryGetValue("style", out var ptpSt) && ptpSt is not null
-            && Regex.Match(ptpSt,
+            && SafeRegex.Match(ptpSt,
                 @"margin\s*:\s*[\d.]+pt\s+([\d.]+)pt\s+[\d.]+pt\s+([\d.]+)pt",
                 RegexOptions.IgnoreCase) is { Success: true } ptpM)
         {
@@ -561,8 +563,8 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The pending run flushes, the parent style is read, and the block's style starts from the tag defaults, the parent's padding and the UA margins.</summary>
     private static void BeginBlockStyle(ParseBlocksState pb, string tag)
     {
-        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false,pb.styleStack.Peek());
-        pb.inlineRunId = 0; pb.runPrevWasControl = false;
+        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography,pb.styleStack.Peek());
+        pb.inlineRunId = 0; pb.runPrevWasControl = false; pb.ctlLineId = 0;
         pb.parent = pb.styleStack.Peek();
         pb.parent.ChildOpened = true;
         // (the field-list dialect: a BLOCK opening after a label - a pre, a grid's div - stands on its
@@ -657,16 +659,14 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>A list item opens with its marker, its indent from the list depth and its item spacing.</summary>
-    private static void OpenListItemBlock(ParseBlocksState pb)
+    private static void OpenListItemBlock(ParseBlocksState pb, Token tok)
     {
+        pb.style.ListStyleType = ListStyleTypeFor(pb, tok.Attributes, "li");
         // Panel items pitch one line box + the link's block pad.
         if (pb.articleRhythm && pb.parent.TocLinkPadPt > 0)
             pb.style.MarginBottom = pb.parent.TocLinkPadPt;
         pb.parent.ChildIndex++;
-        BeforeMarker? before = null;
-        if (pb.parent.BeforeRules is not null)
-            foreach (var r in pb.parent.BeforeRules)
-                if (r.Matches(pb.parent.ChildIndex)) { before = r; break; }
+        var before = pb.parent.BeforeRules?.FirstOrDefault(r => r.Matches(pb.parent.ChildIndex));
         if (before is not null)
         {
             // CSS-supplied generated marker (list-style:none + ::before): render it as
@@ -677,11 +677,9 @@ internal static partial class HtmlToPdfConverter
         }
         else if (pb.parent.BeforeRules is null)
         {
-            // No CSS markers for this list → ordinal (decimal, or the
-            // list's alpha/roman list-style-type) / bullet default.
-            pb.pendingMarker = pb.parent.ListKind == 1
-                ? FormatListOrdinal(++pb.parent.ListCounter, pb.parent.ListStyleType) + "."
-                : UaBulletMarker(pb);
+            // No CSS markers for this list → the item's list-style-type (its own or
+            // its list's), else the ordinal / bullet default.
+            pb.pendingMarker = ListItemMarker(pb, tok.Attributes);
             pb.pendingMarkerAfter = false;
         }
         // BeforeRules present but no rule matched this index → no marker.
@@ -693,11 +691,12 @@ internal static partial class HtmlToPdfConverter
     /// disc at every depth.</summary>
     private static string UaBulletMarker(ParseBlocksState pb)
     {
-        if (!pb.browserUa) return "•";
+        if (!pb.browserUa && !pb.cssBoxBody) return "•";
         var depth = 0;
         foreach (var anc in pb.styleStack)
             if (anc.ListKind == 2) depth++;
-        return depth switch { <= 1 => "•", 2 => "◦", _ => "▪" };
+        // (the CSS-box flow's square is the medium small square the reference draws, U+25FE)
+        return depth switch { <= 1 => "•", 2 => "◦", _ => pb.cssBoxBody ? "◾" : "▪" };
     }
 
     /// <summary>An ordered or unordered list opens: its kind, start number, marker style, nesting depth and the indents that follow from them.</summary>
@@ -716,30 +715,9 @@ internal static partial class HtmlToPdfConverter
                     pb.style.MarginBottom = 0;
                     break;
                 }
-        if (tag == "ol")
-        {
-            pb.style.ListCounter = ParseListStart(tok.Attributes);
-            // list-style-type from the list's own inline style (or the
-            // legacy type= attribute): alpha/roman ordinals instead of
-            // the decimal default.
-            pb.style.ListStyleType = "";
-            if (tok.Attributes is not null)
-            {
-                if (tok.Attributes.TryGetValue("style", out var olSt) && olSt is not null
-                    && Regex.Match(olSt,
-                        @"list-style-type\s*:\s*(upper-alpha|lower-alpha|upper-roman|lower-roman|upper-latin|lower-latin)",
-                        RegexOptions.IgnoreCase) is { Success: true } lst)
-                    pb.style.ListStyleType = lst.Groups[1].Value.ToLowerInvariant()
-                        .Replace("latin", "alpha");
-                else if (tok.Attributes.TryGetValue("type", out var olTy))
-                    pb.style.ListStyleType = olTy?.Trim() switch
-                    {
-                        "A" => "upper-alpha", "a" => "lower-alpha",
-                        "I" => "upper-roman", "i" => "lower-roman",
-                        _ => "",
-                    };
-            }
-        }
+        if (tag == "ol") pb.style.ListCounter = ParseListStart(tok.Attributes);
+        // The list's own list-style-type (sheet, style or legacy type attribute): its items' markers.
+        pb.style.ListStyleType = ListStyleTypeFor(pb, tok.Attributes, tag);
         // Styled-article: an enclosing container class may restyle the
         // list wholesale (`.td-toc ol { list-style-type: disc }` bullets
         // an <ol>), and its `a { padding-bottom }` block-link rule sets

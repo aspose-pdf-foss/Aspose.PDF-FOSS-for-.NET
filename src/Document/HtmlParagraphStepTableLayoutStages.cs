@@ -53,7 +53,7 @@ public sealed partial class Document
         // a column the sheet cuts off before it starts is
         // never measured - the row is only as tall as what
         // can actually be drawn on the page
-        if (pl.colX < pl.page.Width - 0.5) pl.rowH = Math.Max(pl.rowH, pl.cellH);
+        if (pl.colX < pl.page.LayoutFrameWidth - 0.5) pl.rowH = Math.Max(pl.rowH, pl.cellH);
         pl.colX += pl.colWc + PsCellGap(pl.pt);
     }
 

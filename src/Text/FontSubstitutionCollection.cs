@@ -55,15 +55,15 @@ public sealed class SimpleFontSubstitution : CustomFontSubstitutionBase
         SubstitutionFontName = substitutionFontName ?? throw new ArgumentNullException(nameof(substitutionFontName));
     }
 
-    /// <summary>Whether the substitution is forced by save-option configuration. Stored only.</summary>
-    public bool IsForcedBySaveOption { get; }
-
     /// <summary>Creates a substitution that replaces <c>originalFontName</c> with <c>substitutionFontName</c> and records whether it is forced by save options (stored only).</summary>
     public SimpleFontSubstitution(string originalFontName, string substitutionFontName, bool isForcedBySaveOption)
         : this(originalFontName, substitutionFontName)
     {
         IsForcedBySaveOption = isForcedBySaveOption;
     }
+
+    /// <summary>Whether the substitution is forced by save-option configuration. Stored only.</summary>
+    public bool IsForcedBySaveOption { get; }
 
     public override bool TrySubstitute(OriginalFontSpecification originalFontSpecification, out Font? substitutionFont)
     {
@@ -88,7 +88,9 @@ public sealed class FontSubstitutionCollection : IReadOnlyCollection<FontSubstit
     /// <summary>Gets the number of substitutions in the collection.</summary>
     public int Count => _items.Count;
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => false;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>Gets the substitution at the given zero-based index.</summary>

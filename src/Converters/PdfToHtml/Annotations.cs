@@ -27,20 +27,20 @@ public sealed partial class PdfToHtmlConverter
     /// items, in menu order. Null when the script is not that shape.</summary>
     private static List<(string Label, string Href)>? ParsePopupMenuItems(string js)
     {
-        var menu = System.Text.RegularExpressions.Regex.Match(js,
+        var menu = SafeRegex.Match(js,
             @"app\.popUpMenu\s*\(([^)]*)\)", System.Text.RegularExpressions.RegexOptions.Singleline);
         if (!menu.Success) return null;
         var labels = new List<string>();
         foreach (System.Text.RegularExpressions.Match m in
-            System.Text.RegularExpressions.Regex.Matches(menu.Groups[1].Value, @"""((?:[^""\\]|\\.)*)"""))
+            SafeRegex.Matches(menu.Groups[1].Value, @"""((?:[^""\\]|\\.)*)"""))
             labels.Add(m.Groups[1].Value);
         if (labels.Count == 0) return null;
         var pageByLabel = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (System.Text.RegularExpressions.Match m in
-            System.Text.RegularExpressions.Regex.Matches(js,
+        foreach (var groups in
+            SafeRegex.Matches(js,
                 @"case\s+""((?:[^""\\]|\\.)*)""\s*:\s*this\.pageNum\s*=\s*(\d+)",
-                System.Text.RegularExpressions.RegexOptions.Singleline))
-            pageByLabel[m.Groups[1].Value] = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+                System.Text.RegularExpressions.RegexOptions.Singleline).Select(m => m.Groups))
+            pageByLabel[groups[1].Value] = int.Parse(groups[2].Value, CultureInfo.InvariantCulture);
         var items = new List<(string, string)>();
         foreach (var label in labels)
             if (pageByLabel.TryGetValue(label, out var p))
@@ -61,13 +61,22 @@ public sealed partial class PdfToHtmlConverter
         /// <summary>Page dictionary → 1-based page number, for dest resolution.</summary>
         public readonly Dictionary<PdfDictionary, int> PageNumbers = new();
 
-        /// <summary>The fragment href for a destination point, or null when the
-        /// point is not registered.</summary>
+        /// <summary>The file each page is written to when the pages are saved as files of their own, else null:
+        /// a destination on another page than <see cref="CurrentPage"/> lives in that page's file.</summary>
+        public Func<int, string?>? PageFileOf;
+
+        /// <summary>The page whose links are being resolved.</summary>
+        public int CurrentPage;
+
+        /// <summary>The fragment href for a destination point, prefixed with its page's file when that is
+        /// another file than the current page's, or null when the point is not registered.</summary>
         public string? Href(int page, double x, double y)
         {
             if (!PageDests.TryGetValue(page, out var pts)) return null;
             var idx = pts.IndexOf((x, y));
-            return idx < 0 ? null : $"#{page}_{idx}";
+            if (idx < 0) return null;
+            var file = page != CurrentPage ? PageFileOf?.Invoke(page) : null;
+            return $"{file}#{page}_{idx}";
         }
 
         /// <summary>The fragment href for a link annotation's internal destination,
@@ -131,7 +140,7 @@ public sealed partial class PdfToHtmlConverter
         int targetPage = default;
         double x = default;
         double y = default;
-        targetPage = 0; x = 0; y = 0;
+
         var destObj = reader.Resolve(annot.Get("Dest"));
         if (destObj is null)
         {
@@ -140,14 +149,14 @@ public sealed partial class PdfToHtmlConverter
                 destObj = reader.Resolve(action.Get("D"));
         }
         if (destObj is PdfString ds)
-            destObj = ResolveNamedDest(doc, reader, ds.ToText());
+            destObj = ResolveNamedDest(reader, ds.ToText());
         else if (destObj is PdfName dn)
-            destObj = ResolveNamedDest(doc, reader, dn.Value);
+            destObj = ResolveNamedDest(reader, dn.Value);
         if (destObj is not PdfArray dest || dest.Count < 1) return null;
         var targetDict = reader.ResolveDict(dest[0]);
         if (targetDict is null || !pageNum.TryGetValue(targetDict, out targetPage)) return null;
 
-        var mb = doc.Pages[targetPage].MediaBox;
+        var mb = Devices.SoftwarePageRenderer.EffectiveCropRect(doc.Pages[targetPage]);
         x = mb.LLX; y = mb.URY;
         var fit = dest.Count >= 2 ? (reader.Resolve(dest[1]) as PdfName)?.Value : null;
         switch (fit)
@@ -180,7 +189,7 @@ public sealed partial class PdfToHtmlConverter
     /// <summary>Look a named destination up in the catalog's /Dests dictionary or
     /// the /Names → /Dests name tree. Returns the destination array (unwrapping a
     /// /D-carrying dictionary), or null.</summary>
-    private static PdfObject? ResolveNamedDest(Document doc, PdfReader reader, string name)
+    private static PdfObject? ResolveNamedDest(PdfReader reader, string name)
     {
         var catalog = reader.ResolveDict(reader.Trailer?.Get("Root"));
         if (catalog is null) return null;
@@ -295,7 +304,9 @@ public sealed partial class PdfToHtmlConverter
             }
         }
         catch { /* an undecodable mask contributes what was counted so far */ }
+#pragma warning disable S4143 // the cycle-guard 0 is replaced by the final count
         memo[form] = count;
+#pragma warning restore S4143
         return count;
     }
 
@@ -306,11 +317,11 @@ public sealed partial class PdfToHtmlConverter
         foreach (var o in operands)
         {
             if (o is PdfString ps)
-                foreach (var by in ps.Value) { if (by is not (0x20 or 0x09 or 0x0A or 0x0D)) count++; }
+                foreach (var by in ps.Value.Where(by => by is not (0x20 or 0x09 or 0x0A or 0x0D))) { count++; }
             else if (o is PdfArray arr)
                 for (var ai = 0; ai < arr.Count; ai++)
                     if (arr[ai] is PdfString aps)
-                        foreach (var by in aps.Value) { if (by is not (0x20 or 0x09 or 0x0A or 0x0D)) count++; }
+                        foreach (var by in aps.Value.Where(by => by is not (0x20 or 0x09 or 0x0A or 0x0D))) { count++; }
         }
         return count;
     }
@@ -369,21 +380,21 @@ public sealed partial class PdfToHtmlConverter
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
     /// <summary>Emit the invisible link overlay for each link annotation: a
-    /// positioned class-less div (root-em geometry, page top from the truncated
-    /// page height) holding the anchor around a stretched 1×1 transparent PNG with
-    /// the grlink class (z-index 1000000 via structural CSS).
+    /// positioned class-less div (root-em geometry from the page box's left edge and
+    /// its top at the truncated page height) holding the anchor around a stretched 1×1
+    /// transparent PNG with the grlink class (z-index 1000000 via structural CSS).
     /// A link whose rect covered text is skipped: that text already renders inside
     /// an inline anchor, and a second anchor over it would make the page carry two
     /// hyperlinks where the document has one.</summary>
     private static void EmitGrlinkOverlays(List<LinkTarget>? targets, StringBuilder sb,
-        double pageHeight, ClassNamer namer)
+        double pageLLX, double yTop, ClassNamer namer)
     {
         if (targets is null) return;
         foreach (var t in targets)
         {
             if (t.Wrapped) continue;
-            sb.Append($"\t\t\t<div style=\"position:absolute;left:{Em4(t.Llx / 12.0)}em;" +
-                $"top:{Em4((Math.Floor(pageHeight) - t.Ury) / 12.0)}em;" +
+            sb.Append($"\t\t\t<div style=\"position:absolute;left:{Em4((t.Llx - pageLLX) / 12.0)}em;" +
+                $"top:{Em4((yTop - t.Ury) / 12.0)}em;" +
                 $"width:{Em4((t.Urx - t.Llx) / 12.0)}em;height:{Em4((t.Ury - t.Lly) / 12.0)}em;\">\r\n");
             sb.Append($"\t\t\t\t<a href=\"{EscapeHtml(t.Uri)}\"" +
                 (t.Uri.StartsWith('#') ? ">\r\n" : " target=\"_blank\">\r\n"));
@@ -431,12 +442,23 @@ public sealed partial class PdfToHtmlConverter
         return result;
     }
 
+    /// <summary>How far a link rect may reach past a run's ends and still lie inside it.</summary>
+    private const double LinkRectSlackPt = 0.5;
+
+    /// <summary>The share of a run a rect inside it must cover to make the whole run its link.</summary>
+    private const double LinkRunCoverShare = 0.75;
+
     /// <summary>The link whose rect the run [x..xEnd] substantially overlaps on a
     /// matching baseline: the run covers most of the rect (its own hotspot) or lies
     /// mostly inside it (a word within a row-spanning link). A run with no usable
     /// extent falls back to the origin-in-rect test (small tolerance for hairline
-    /// rect/baseline mismatches). Null when nothing qualifies.</summary>
-    private static LinkTarget? FindLinkTarget(List<LinkTarget>? targets, double x, double xEnd, double y)
+    /// rect/baseline mismatches), its extent then judged by <paramref name="estimatedEnd"/>
+    /// when given. A rect lying inside a run it covers only a part of (a URL or address
+    /// opening a longer line) is not the run's link: the rect keeps its own click
+    /// surface - when the page writes one (<paramref name="ownSurface"/>; the z-ordered
+    /// layer writes none, and its links live on the runs alone). Null when nothing qualifies.</summary>
+    private static LinkTarget? FindLinkTarget(List<LinkTarget>? targets, double x, double xEnd, double y,
+        double estimatedEnd = double.NaN, bool ownSurface = true)
     {
         if (targets is null) return null;
         foreach (var t in targets)
@@ -445,14 +467,21 @@ public sealed partial class PdfToHtmlConverter
             if (xEnd > x + 0.01)
             {
                 var ov = Math.Min(t.Urx, xEnd) - Math.Max(t.Llx, x);
+                if (ownSurface && CoversPartOfRun(t, x, xEnd)) continue;
                 if (ov >= 0.5 * (t.Urx - t.Llx) || ov >= 0.5 * (xEnd - x))
                     return t;
             }
-            else if (x >= t.Llx - 0.5 && x <= t.Urx + 0.5)
+            else if (x >= t.Llx - 0.5 && x <= t.Urx + 0.5
+                && !(ownSurface && estimatedEnd > x && CoversPartOfRun(t, x, estimatedEnd)))
                 return t;
         }
         return null;
     }
+
+    /// <summary>True when the rect lies inside the run [x..xEnd] and covers less than most of it.</summary>
+    private static bool CoversPartOfRun(LinkTarget t, double x, double xEnd) =>
+        t.Llx >= x - LinkRectSlackPt && t.Urx <= xEnd + LinkRectSlackPt
+        && t.Urx - t.Llx < LinkRunCoverShare * (xEnd - x);
 
     private static void RenderLinkAnnotations(PdfDictionary pageDict,
         PdfReader reader, StringBuilder sb, double pageHeight)
@@ -555,15 +584,14 @@ public sealed partial class PdfToHtmlConverter
         var ph = (int)Math.Round((by1 - by0) * s);
         if (pw < 1 || ph < 1 || (long)pw * ph > 64_000_000) return null;
 
-        // Device grid over the region, y down; the gs-time CTM rides under it so
-        // the group renders exactly where the page would put it.
-        var dev = new CtmState { A = s, B = 0, C = 0, D = -s, E = -bx0 * s, F = by1 * s };
-        dev.Concat(ctm.A, ctm.B, ctm.C, ctm.D, ctm.E, ctm.F);
+        // The renderer maps page space onto the region's pixel grid itself (the region is
+        // its media box, y down at SoftMaskDpi), so the group takes the gs-time CTM in
+        // page space; a device matrix here would be applied twice.
         var smInfo = new Content.SoftMaskInfo
         {
             Dict = smDict,
             Subtype = smDict.GetName("S") ?? "Luminosity",
-            Ctm = new[] { dev.A, dev.B, dev.C, dev.D, dev.E, dev.F },
+            Ctm = new[] { ctm.A, ctm.B, ctm.C, ctm.D, ctm.E, ctm.F },
         };
         byte[]? alpha;
         try
@@ -587,7 +615,7 @@ public sealed partial class PdfToHtmlConverter
     /// what lets it be declared with <c>userSpaceOnUse</c> and no transform of its own.
     /// A shading whose colours cannot be evaluated is skipped rather than guessed at.</summary>
     private static void EmitSvgShading(StringBuilder svgPaths, Aspose.Pdf.Shading.ShadingBase? shading,
-        string? clipD, ContentRenderState ct, int seq, double pageHeight)
+        string? clipD, ContentRenderState ct, int seq, string stateAttrs = "")
     {
         if (shading is null) return;
 
@@ -652,7 +680,7 @@ public sealed partial class PdfToHtmlConverter
             var (bx1, by1) = Dp(ct, box[2], box[3]);
             region = $"M{F(bx0)} {F(by0)}L{F(bx1)} {F(by0)}L{F(bx1)} {F(by1)}L{F(bx0)} {F(by1)}Z";
         }
-        svgPaths.Append($"<path d=\"{region}\" fill=\"url(#{id})\" stroke=\"none\" />");
+        svgPaths.Append($"<path d=\"{region}\" fill=\"url(#{id})\" stroke=\"none\"{stateAttrs} />");
     }
 
     /// <summary>Emit one collected path as an SVG &lt;path&gt; element.
@@ -661,10 +689,11 @@ public sealed partial class PdfToHtmlConverter
     /// points, against the truncated page height) and the id of the operator that
     /// opened its construction, with colours as #hex — attribute order id, transform,
     /// d, stroke, stroke-width, stroke-linejoin, fill. A sidecar document keeps the
-    /// wrapper-flipped form with rgb() colours.</summary>
+    /// wrapper-flipped form with rgb() colours. <paramref name="stateAttrs"/> carries the clip
+    /// and blend mode of the graphics state the path is painted under.</summary>
     private static void EmitSvgPath(StringBuilder svgPaths, PathState ps,
         bool stroke, bool fill, bool evenOdd = false,
-        double pageHeight = 0, int pathId = -1, bool authoredShape = false)
+        double pageHeight = 0, int pathId = -1, bool authoredShape = false, string stateAttrs = "")
     {
         var d = ps.Data.ToString().Trim();
         if (string.IsNullOrEmpty(d)) return;
@@ -706,13 +735,15 @@ public sealed partial class PdfToHtmlConverter
             if (stroke)
             {
                 attrs.Append($" stroke=\"{FormatRgb(ps.StrokeR, ps.StrokeG, ps.StrokeB)}\"");
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
                 if (ps.LineWidth != 1.0)
+#pragma warning restore S1244
                     attrs.Append($" stroke-width=\"{F(ps.LineWidth)}\"");
             }
             else attrs.Append(" stroke=\"none\"");
         }
 
-        svgPaths.AppendLine($"<path {attrs} />");
+        svgPaths.AppendLine($"<path {attrs}{stateAttrs} />");
     }
 
     private static string FormatRgb(double r, double g, double b) =>
@@ -721,35 +752,17 @@ public sealed partial class PdfToHtmlConverter
     private static string FormatHexRgb(double r, double g, double b) =>
         $"#{(int)System.Math.Round(r * 255):X2}{(int)System.Math.Round(g * 255):X2}{(int)System.Math.Round(b * 255):X2}";
 
-    /// <summary>sc/scn operands → RGB by component count (1 gray / 3 RGB / 4 CMYK);
-    /// null for pattern names or unexpected shapes.</summary>
-    private static (double r, double g, double b)? NumericColor(List<PdfObject> operands)
-    {
-        var nums = new List<double>(4);
-        foreach (var o in operands)
-        {
-            if (o is PdfInteger pi) nums.Add(pi.Value);
-            else if (o is PdfReal pr) nums.Add(pr.Value);
-            else return null;
-        }
-        return nums.Count switch
-        {
-            1 => (nums[0], nums[0], nums[0]),
-            3 => (nums[0], nums[1], nums[2]),
-            4 => CmykToRgb(nums[0], nums[1], nums[2], nums[3]),
-            _ => null,
-        };
-    }
-
     /// <summary>The inline appearance declaration for an stl_ span. A run is described
     /// by its font class unless it is FAUX bold — thickened by a fill-then-stroke
     /// rendering mode — which is weight the font does not carry, so no class can
     /// describe it. Such a run then states its painted appearance in full, slant
     /// included, weight first.</summary>
-    private static string StlWeightStyleCss(bool fauxBold, string fontStyle) =>
-        !fauxBold ? ""
-        : fontStyle != "normal" ? $"font-weight:bold;font-style:{fontStyle};"
-        : "font-weight:bold;";
+    private static string StlWeightStyleCss(bool fauxBold, string fontStyle)
+    {
+        if (!fauxBold) return "";
+        if (fontStyle != "normal") return $"font-weight:bold;font-style:{fontStyle};";
+        return "font-weight:bold;";
+    }
 
     // ── Text rendering ──────────────────────────────────────────────────
 
@@ -907,8 +920,7 @@ public sealed partial class PdfToHtmlConverter
             if (repl is not null && subsetHas is not null && subsetHas(text[i]))
             {
                 var componentsCovered = true;
-                foreach (var c in repl)
-                    if (!subsetHas(c)) { componentsCovered = false; break; }
+                if (repl.Any(c => !subsetHas(c))) { componentsCovered = false; }
                 if (!componentsCovered) repl = null;
             }
             if (repl is null) { sb?.Append(text[i]); continue; }

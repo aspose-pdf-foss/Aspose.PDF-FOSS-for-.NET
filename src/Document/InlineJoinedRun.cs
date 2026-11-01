@@ -22,10 +22,7 @@ public sealed partial class Document
         for (; k < lc.pl.paraList.Count && ParagraphInlineFlag(lc.pl.paraList[k])
                && InlineJoinable(lc.pl.paraList[k]) is (_, _); k++)
             members.Add(lc.pl.paraList[k]);
-        if (members.Count > 1)
-        {
-            if (LayoutInlineJoinedMembers(lc, members, k)) return true;
-        }
+        if (members.Count > 1 && LayoutInlineJoinedMembers(lc, members, k)) return true;
         return false;
     }
 
@@ -67,8 +64,8 @@ public sealed partial class Document
                 if (member is Text.TextFragment lsf)
                 {
                     if (lsf.TextState.LineSpacing > introLs) introLs = lsf.TextState.LineSpacing;
-                    foreach (Text.TextSegment lss in lsf.Segments)
-                        if (lss.TextState.LineSpacing > introLs) introLs = lss.TextState.LineSpacing;
+                    foreach (var lineSpacing in lsf.Segments.Select(lss => lss.TextState).Select(textState => textState.LineSpacing).Where(lineSpacing => lineSpacing > introLs))
+                        introLs = lineSpacing;
                 }
             foreach (var seg in ij.joined.Segments)
             {
@@ -107,8 +104,8 @@ public sealed partial class Document
                     lw += w;
                 }
                 // the first line sets on the leading the opening
-                // fragment declares (its box closes at the baseline);
-                // the rest keep the HTML 1.12-em rhythm
+                // fragment declares (its box closes at the baseline); the
+                // rest keep the HTML 1.12-em rhythm
                 var htmlLead = maxFs2 * 0.12;
                 for (var lg = 0; lg < lineGroups.Count; lg++)
                     ij.flow.WriteStyledParagraph(lineGroups[lg],
@@ -121,7 +118,7 @@ public sealed partial class Document
     }
 
     /// <summary>Turns each member into a styled segment of the composite fragment: HTML members in the serif body face and their inline style, text members with their own state.</summary>
-    private void CollectInlineJoinedSegments(InlineJoinedRunState ij)
+    private static void CollectInlineJoinedSegments(InlineJoinedRunState ij)
     {
         foreach (var member in ij.members)
         {
@@ -130,7 +127,7 @@ public sealed partial class Document
             if (member is Text.TextFragment mf)
                 seg.TextState.ApplyChangesFrom(mf.TextState);
             else if (member is HtmlFragment mh
-                && System.Text.RegularExpressions.Regex.Match(mh.HtmlContent ?? "",
+                && SafeRegex.Match(mh.HtmlContent ?? "",
                     @"<span\b[^>]*style\s*=\s*(['""])(?<s>[^'""]*)\1",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase)
                     is { Success: true } mSty)
@@ -139,7 +136,7 @@ public sealed partial class Document
                 // outermost span's own CSS
                 ij.anyHtmlStyled = true;
                 var css = mSty.Groups["s"].Value;
-                var fsm2 = System.Text.RegularExpressions.Regex.Match(css,
+                var fsm2 = SafeRegex.Match(css,
                     @"font-size\s*:\s*([\d.]+)\s*(pt|px)",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (fsm2.Success)
@@ -149,21 +146,21 @@ public sealed partial class Document
                     seg.TextState.FontSize = (float)(fsm2.Groups[2].Value
                         .Equals("px", StringComparison.OrdinalIgnoreCase) ? v * 0.75 : v);
                 }
-                var fam = System.Text.RegularExpressions.Regex.Match(css,
+                var fam = SafeRegex.Match(css,
                     @"font-family\s*:\s*['""]?([^;'""]+)",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (fam.Success) seg.TextState.FontName = fam.Groups[1].Value.Trim();
-                var col = System.Text.RegularExpressions.Regex.Match(css,
+                var col = SafeRegex.Match(css,
                     @"(?<![-\w])color\s*:\s*([^;]+)",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (col.Success && Converters.HtmlToPdfConverter
                         .ParseCssColor(col.Groups[1].Value.Trim()) is { } cc)
                     seg.TextState.ForegroundColor = cc;
-                if (System.Text.RegularExpressions.Regex.IsMatch(css,
+                if (SafeRegex.IsMatch(css,
                         @"font-style\s*:\s*italic",
                         System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                     seg.TextState.IsItalic = true;
-                if (System.Text.RegularExpressions.Regex.IsMatch(css,
+                if (SafeRegex.IsMatch(css,
                         @"text-decoration\s*:\s*line-through",
                         System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                     seg.TextState.IsStrikeOut = true;

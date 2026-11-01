@@ -139,7 +139,7 @@ public partial class Table
         }
         w += text.Length * run.CharSpacing;
         if (run.WordSpacing != 0)
-            foreach (var c in text) if (c == ' ') w += run.WordSpacing;
+            foreach (var c in text.Where(c => c == ' ')) w += run.WordSpacing;
         return w;
     }
 
@@ -176,7 +176,7 @@ public partial class Table
     /// boxed, pitched and seated by its LARGEST run -- the smaller runs share that
     /// baseline -- and drawn run by run in each run's own face, size and colour.
     /// True when the paragraph was laid here.</summary>
-    private bool PlanSegmentRunsText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, RowPlanState rp)
+    private static bool PlanSegmentRunsText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, RowPlanState rp)
     {
         if (pp.fragEmbeddedTtf is not null || !SegmentsFlowAsRuns(paragraph)) return false;
         var tf = (TextFragment)paragraph;
@@ -350,11 +350,15 @@ public partial class Table
         var width = 0.0;
         foreach (var line in WrapCellRuns(runs, tf, double.MaxValue))
             foreach (var piece in line)
-                width += piece.TabAdvance is { } advance
-                    ? piece.Stop is { AlignmentType: not TabAlignmentType.Left } ? advance : 0
-                    : CellRunWidth(runs[piece.Run], piece.Text);
+            {
+                if (piece.TabAdvance is { } advance) width += piece.Stop is { AlignmentType: not TabAlignmentType.Left } ? advance : 0;
+                else width += CellRunWidth(runs[piece.Run], piece.Text);
+            }
         return width;
     }
+
+    /// <summary>How a cell's picture bytes are decoded, naming them among the pictures the document placed.</summary>
+    private const string EncodedPictureVariant = "encoded";
 
     /// <summary>Styled runs on one baseline, each in its own face, size, colour and
     /// spacing: a run naming a Standard-14 face draws in it, a bold or slanted one
@@ -371,7 +375,8 @@ public partial class Table
             // With no page to register it on yet (a spill page) the caller blits it.
             if (run.Picture is { } picture && picturePage is not null)
             {
-                var name = ImageStamp.FromEncodedBytes(picture).RegisterXObject(picturePage);
+                var name = picturePage.PlacedPicture(picture, EncodedPictureVariant, () => ImageStamp.FromEncodedBytes(picture))!
+                    .RegisterXObject(picturePage);
                 builder.SaveState();
                 builder.SetMatrix(run.Width, 0, 0, run.PictureHeight, lineX + run.X, lineBase);
                 builder.DrawXObject(name);
@@ -409,9 +414,12 @@ public partial class Table
                 if (run.BaseFont is { } baseFont && page is not null)
                     srFont = RegisterFont(page, baseFont);
                 else if ((run.Bold || run.Italic) && page is not null)
-                    srFont = RegisterFont(page, run.Bold && run.Italic
-                        ? "Helvetica-BoldOblique"
-                        : run.Bold ? "Helvetica-Bold" : "Helvetica-Oblique");
+                    srFont = RegisterFont(page, (run.Bold, run.Italic) switch
+                    {
+                        (true, true) => "Helvetica-BoldOblique",
+                        (true, _) => "Helvetica-Bold",
+                        _ => "Helvetica-Oblique",
+                    });
                 builder.BeginText();
                 builder.SetFont(srFont, run.Size);
                 ApplyColor(builder, run.Color);

@@ -32,11 +32,23 @@ public sealed partial class SvgDevice
     // pages of one conversion.
     private int _imgCounter;
 
+    // The clipPath definitions of the page being processed, and their numbering.
+    private readonly StringBuilder _clipDefs = new();
+    private int _clipCounter;
+
+    // The gradient definitions of the page's shadings, their numbering, and the page box they fill when
+    // nothing clips an sh paint.
+    private readonly StringBuilder _gradientDefs = new();
+    private int _gradientCounter;
+    private double _pageWidth;
+    private double _pageHeight;
+
     /// <summary>
     /// Convert a page to SVG string.
     /// </summary>
     public string Process(Page page)
     {
+        ImageDevice.LayOutPendingParagraphs(page);
         // The canvas is the VISIBLE page: a distinct /CropBox sizes the SVG and
         // anchors its coordinates (a cropped page round-trips at its
         // crop size; sizing from the MediaBox inflated the canvas by the cropped-away
@@ -51,13 +63,21 @@ public sealed partial class SvgDevice
         // Map PDF user space (origin bottom-left, y up) onto SVG page space
         // (origin top-left, y down): x' = x - LLX, y' = URY - y.
         var gs = new GState { Ctm = new[] { 1.0, 0, 0, -1, -mb.LLX, mb.URY } };
+        gs.PatternBase = gs.Ctm;
         var usedBlendModes = new SortedSet<string>(StringComparer.Ordinal);
         var links = ResolveLinkRects(page, mb);
+        _clipDefs.Clear();
+        _clipCounter = 0;
+        _gradientDefs.Clear();
+        _gradientCounter = 0;
+        _pageWidth = mb.Width;
+        _pageHeight = mb.Height;
+        _faces.BeginPage();
 
-        foreach (var stream in contentStreams)
-        {
-            RenderToSvg(stream, resources, reader, body, 0, gs.Clone(), usedBlendModes, links);
-        }
+        // The parts of a /Contents array are one stream: a text object or a graphics state opened in
+        // one part carries into the next, so they are drawn as one.
+        RenderToSvg(JoinContentStreams(contentStreams), resources, reader, body, 0, gs.Clone(), usedBlendModes, links);
+        RenderAnnotations(page, reader, body, gs, usedBlendModes, links);
 
         var sb = new StringBuilder();
         sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>");
@@ -80,6 +100,16 @@ public sealed partial class SvgDevice
                 sb.Append($".{cls}{{ mix-blend-mode:{css}; }}");
             }
             sb.AppendLine("</style>");
+        }
+        var fontFaces = _faces.Css();
+        if (_clipDefs.Length > 0 || _gradientDefs.Length > 0 || fontFaces.Length > 0)
+        {
+            sb.AppendLine("<defs>");
+            sb.Append(_clipDefs);
+            sb.Append(_gradientDefs);
+            if (fontFaces.Length > 0)
+                sb.Append("<style type=\"text/css\"><![CDATA[\n").Append(fontFaces).AppendLine("]]></style>");
+            sb.AppendLine("</defs>");
         }
         sb.Append(body);
         sb.AppendLine("</svg>");
@@ -122,6 +152,8 @@ public sealed partial class SvgDevice
         public PdfDictionary? FontDict;
         public Dictionary<int, string>? ToUnicode;
         public Text.FontMetrics? Metrics;
+        // The page's web font for the current font, when it embeds a program.
+        public SvgFontFace? Face;
         public double LineWidth = 1.0;
         public int LineCap; // 0=butt, 1=round, 2=square
         public int LineJoin; // 0=miter, 1=round, 2=bevel
@@ -133,9 +165,18 @@ public sealed partial class SvgDevice
         public double HorizScale = 1.0; // Tz / 100
         public double TextRise;      // Ts
         public int RenderMode;       // Tr
+        // The id of the clipPath in force (null: unclipped); each element drawn under it refers to it.
+        public string? ClipId;
 
         // CTM as 6-element matrix [a b c d e f]; includes the page's PDF→SVG flip.
         public double[] Ctm = { 1, 0, 0, 1, 0, 0 };
+
+        // The space a pattern matrix maps into: the page's default space, or the form's at its invocation.
+        public double[] PatternBase = { 1, 0, 0, 1, 0, 0 };
+        // Whether cs selected the Pattern space, and the gradient paint a shading pattern then set as the
+        // fill (null: the flat fill colour).
+        public bool FillIsPattern;
+        public string? FillPaint;
 
         // The colorspaces cs/CS selected, resolved to their tint machinery — a
         // /Separation spot colour must go through its tint transform, not the
@@ -153,7 +194,7 @@ public sealed partial class SvgDevice
                 FillAlpha = FillAlpha, StrokeAlpha = StrokeAlpha,
                 BlendMode = BlendMode,
                 FontSize = FontSize, FontName = FontName,
-                FontDict = FontDict, ToUnicode = ToUnicode, Metrics = Metrics,
+                FontDict = FontDict, ToUnicode = ToUnicode, Metrics = Metrics, Face = Face,
                 LineWidth = LineWidth,
                 LineCap = LineCap, LineJoin = LineJoin,
                 DashArray = (double[])DashArray.Clone(),
@@ -161,7 +202,9 @@ public sealed partial class SvgDevice
                 TextLeading = TextLeading,
                 CharSpacing = CharSpacing, WordSpacing = WordSpacing,
                 HorizScale = HorizScale, TextRise = TextRise, RenderMode = RenderMode,
+                ClipId = ClipId,
                 Ctm = (double[])Ctm.Clone(),
+                PatternBase = PatternBase, FillIsPattern = FillIsPattern, FillPaint = FillPaint,
             };
         }
 
@@ -237,9 +280,9 @@ public sealed partial class SvgDevice
     {
         var resolved = reader.Resolve(dest);
         // Named destination: look it up through the document.
-        if (resolved is PdfString or PdfName)
+        var name = resolved switch { PdfString ps => ps.ToText(), PdfName pn => pn.Value, _ => null };
+        if (name is not null)
         {
-            var name = resolved is PdfString ps ? ps.ToText() : ((PdfName)resolved).Value;
             var doc = reader.OwnerDocument;
             if (doc is null || string.IsNullOrEmpty(name)) return 0;
             foreach (var nd in doc.NamedDestinations)
@@ -264,10 +307,27 @@ public sealed partial class SvgDevice
     private static LinkRect? LinkAt(List<LinkRect>? links, double x, double y)
     {
         if (links is null) return null;
-        foreach (var l in links)
-            if (l.Contains(x, y)) return l;
-        return null;
+        return links.FirstOrDefault(l => l.Contains(x, y));
     }
+
+    /// <summary>
+    /// Define the clip a W or W* set on a painted path: the path itself, intersected with the
+    /// clip already in force by referring to it from the definition. Returns the new clip's id.
+    /// </summary>
+    private string AddClipPath(string d, bool evenOdd, string? outer)
+    {
+        var id = $"clip{++_clipCounter}";
+        _clipDefs.Append($"<clipPath id=\"{id}\"");
+        if (outer is not null) _clipDefs.Append($" clip-path=\"url(#{outer})\"");
+        _clipDefs.Append($"><path d=\"{d}\"");
+        if (evenOdd) _clipDefs.Append(" clip-rule=\"evenodd\"");
+        _clipDefs.AppendLine(" /></clipPath>");
+        return id;
+    }
+
+    /// <summary>The clip-path attribute of an element drawn under the state's clip, or nothing.</summary>
+    private static string ClipAttribute(GState gs) =>
+        gs.ClipId is null ? "" : $" clip-path=\"url(#{gs.ClipId})\"";
 
     /// <summary>Transform a point by an affine matrix.</summary>
     private static (double x, double y) Apply(double[] m, double x, double y) =>

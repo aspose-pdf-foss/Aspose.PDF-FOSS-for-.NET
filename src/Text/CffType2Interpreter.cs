@@ -47,8 +47,8 @@ internal sealed class CffType2Interpreter
     /// flattens on its own device grid.</summary>
     public bool KeepCurves { get; init; }
 
-    // Runaway subroutine recursion guard — real charstrings stay under ~20 deep;
-    // anything beyond that is almost certainly a malformed font.
+    // Runaway subroutine recursion guard — real charstrings stay under ~20 deep; anything
+    // beyond that is almost certainly a malformed font.
     private int _subrDepth;
 
     public CffType2Interpreter(byte[] cffData, CffParser.IndexInfo globalSubrs,
@@ -72,14 +72,16 @@ internal sealed class CffType2Interpreter
         var arr = new ContourPoint[_contours.Count][];
         for (var i = 0; i < _contours.Count; i++)
             arr[i] = _contours[i].ToArray();
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
         if (_xMin == double.MaxValue) { _xMin = _yMin = 0; _xMax = _yMax = 0; }
+#pragma warning restore S1244
         return new GlyphOutline(arr, _xMin, _yMin, _xMax, _yMax);
     }
 
     // Type 2 subroutine-call bias: negative indices are normal; the actual index
     // is operand + bias. Bias depends on the number of subroutines in the INDEX.
     private static int SubrBias(int count) =>
-        count < 1240 ? 107 : count < 33900 ? 1131 : 32768;
+        count switch { < 1240 => 107, < 33900 => 1131, _ => 32768 };
 
     private void Interpret(byte[] bytes)
     {
@@ -172,7 +174,9 @@ internal sealed class CffType2Interpreter
             case 36: // hflex1
                 if (_sp >= 9)
                 {
-                    var dy = _stack[1] + _stack[4];  // preserves y-alignment
+                    // dx1 dy1 dx2 dy2 dx3 dx4 dx5 dy5 dx6: the last point returns to the starting
+                    // height, so it undoes the three vertical moves made on the way.
+                    var dy = _stack[1] + _stack[3] + _stack[7];
                     var dyBack = -dy;
                     EmitFlex(
                         _stack[0], _stack[1], _stack[2], _stack[3], _stack[4], 0,
@@ -389,7 +393,14 @@ internal sealed class CffType2Interpreter
         }
     }
 
-    // endchar: 0 operands normally, 1 means width, 4 means seac (deprecated; ignore).
+    /// <summary>The operands of an endchar that composes an accented character (Adobe TN #5177
+    /// Appendix C): the accent's placement and the StandardEncoding codes of the base and accent
+    /// glyphs. Null when the glyph ended plainly.</summary>
+    public (double Adx, double Ady, int BaseCode, int AccentCode)? Seac { get; private set; }
+
+    private const int SeacOperandCount = 4;
+
+    // endchar: 0 operands normally, 1 means width, 4 (or 5 with the width) means seac.
     private void CheckWidthEndchar()
     {
         if (_widthSeen) return;
@@ -577,6 +588,11 @@ internal sealed class CffType2Interpreter
                 return true;
 
             case 14: // endchar — close last open contour, done with glyph
+                // Four operands (after an optional width) are the deprecated accented-
+                // character form: the glyph is a standard-encoded base glyph with an
+                // accent glyph placed at (adx, ady). The caller composes them.
+                if (_sp >= SeacOperandCount)
+                    Seac = (_stack[_sp - 4], _stack[_sp - 3], (int)_stack[_sp - 2], (int)_stack[_sp - 1]);
                 CheckWidthEndchar();
                 FlushCurrent();
                 return true;

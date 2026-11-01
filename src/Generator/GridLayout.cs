@@ -168,7 +168,11 @@ internal static class GridLayout
         var end = Line(placement.End);
         var span = Math.Max(1, placement.Span ?? 1);
         if (start is { } s && end is { } e)
-            return e > s ? (s, e - s) : e < s ? (e, s - e) : (s, 1);
+        {
+            if (e > s) return (s, e - s);
+            if (e < s) return (e, s - e);
+            return (s, 1);
+        }
         if (start is not null) return (start, span);
         if (end is { } onlyEnd) return (Math.Max(0, onlyEnd - span), Math.Min(span, Math.Max(1, onlyEnd)));
         return (null, span);
@@ -181,13 +185,14 @@ internal static class GridLayout
         foreach (var track in tracks)
         {
             track.Base = track.MinSizing == GridSizing.Fixed ? track.MinValue : 0;
-            track.Limit = track.MaxSizing == GridSizing.Fixed ? track.MaxValue
-                : track.IsFlexible ? track.Base : float.PositiveInfinity;
+            if (track.MaxSizing == GridSizing.Fixed) track.Limit = track.MaxValue;
+            else if (track.IsFlexible) track.Limit = track.Base;
+            else track.Limit = float.PositiveInfinity;
             if (track.Limit < track.Base) track.Limit = track.Base;
         }
         ResolveIntrinsicSizes(tracks, items, gap);
-        foreach (var track in tracks)
-            if (float.IsPositiveInfinity(track.Limit)) track.Limit = track.Base;
+        foreach (var track in tracks.Where(track => float.IsPositiveInfinity(track.Limit)))
+            track.Limit = track.Base;
         var gaps = gap * Math.Max(0, tracks.Count - 1);
         if (room is { } definite) MaximizeTracks(tracks, definite - gaps);
         else foreach (var track in tracks) if (!track.IsFlexible) track.Base = track.Limit;
@@ -252,12 +257,11 @@ internal static class GridLayout
     private static void DistributeToLimits(List<GridTrack> tracks, float extra)
     {
         if (tracks.Count == 0) return;
-        foreach (var track in tracks)
-            if (float.IsPositiveInfinity(track.Limit))
-            {
-                track.Limit = track.Base;
-                track.InfinitelyGrowable = true;
-            }
+        foreach (var track in tracks.Where(track => float.IsPositiveInfinity(track.Limit)))
+        {
+            track.Limit = track.Base;
+            track.InfinitelyGrowable = true;
+        }
         if (extra <= Epsilon) return;
         var growable = tracks.Where(t => t.InfinitelyGrowable).ToList();
         if (growable.Count > 0)

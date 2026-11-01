@@ -28,6 +28,34 @@ public partial class TextFragment : BaseParagraph
         TabStops = tabStops;
     }
 
+#pragma warning disable S3427 // public API: the published overloads
+    /// <summary>Creates a text fragment with the given text, an optional bounding rectangle (in points) and an optional text state whose settings are copied onto the fragment.</summary>
+    public TextFragment(string text, Rectangle? rectangle = null, TextState? textState = null)
+#pragma warning restore S3427
+    {
+        _text = text;
+        Rectangle = rectangle;
+        if (rectangle is not null)
+            AbsorbedRectangle = new Rectangle(rectangle.LLX, rectangle.LLY, rectangle.URX, rectangle.URY);
+        TextState = new TextFragmentState(this);
+        if (textState is not null) TextState.ApplyChangesFrom(textState);
+        _segments = new TextSegmentCollection { Owner = this };
+        var seg = new TextSegment(text);
+        // Quiet copy: inheriting the fragment's size must not read as an
+        // explicit caller size on the segment (FontSizeTouched stays false).
+        seg.TextState.SetFontSizeQuiet(TextState.FontSize);
+        seg.TextState.FontName = TextState.FontName;
+        seg.TextState.CharacterSpacing = TextState.CharacterSpacing;
+        seg.TextState.WordSpacing = TextState.WordSpacing;
+        seg.TextState.HorizontalScaling = TextState.HorizontalScaling;
+        seg.TextState.IsBold = TextState.IsBold;
+        seg.TextState.IsItalic = TextState.IsItalic;
+        seg.TextState.RenderingMode = TextState.RenderingMode;
+        seg.TextState.Font = TextState.Font;
+        seg.Owner = this;
+        _segments.Add(seg);
+    }
+
     // DataWorks form-grid input boxes for this fragment's InlineInputChar
     // markers, in document order (W/H in points, the value typeset inside).
     internal System.Collections.Generic.List<(double W, double H, string Value, bool Mono, double Lift)>? InlineInputBoxes;
@@ -65,32 +93,6 @@ public partial class TextFragment : BaseParagraph
     private string? _pendingCidRedressFamily;
 
     public new VerticalAlignment VerticalAlignment { get; set; } = VerticalAlignment.Top;
-
-    /// <summary>Creates a text fragment with the given text, an optional bounding rectangle (in points) and an optional text state whose settings are copied onto the fragment.</summary>
-    public TextFragment(string text, Rectangle? rectangle = null, TextState? textState = null)
-    {
-        _text = text;
-        Rectangle = rectangle;
-        if (rectangle is not null)
-            AbsorbedRectangle = new Rectangle(rectangle.LLX, rectangle.LLY, rectangle.URX, rectangle.URY);
-        TextState = new TextFragmentState(this);
-        if (textState is not null) TextState.ApplyChangesFrom(textState);
-        _segments = new TextSegmentCollection { Owner = this };
-        var seg = new TextSegment(text);
-        // Quiet copy: inheriting the fragment's size must not read as an
-        // explicit caller size on the segment (FontSizeTouched stays false).
-        seg.TextState.SetFontSizeQuiet(TextState.FontSize);
-        seg.TextState.FontName = TextState.FontName;
-        seg.TextState.CharacterSpacing = TextState.CharacterSpacing;
-        seg.TextState.WordSpacing = TextState.WordSpacing;
-        seg.TextState.HorizontalScaling = TextState.HorizontalScaling;
-        seg.TextState.IsBold = TextState.IsBold;
-        seg.TextState.IsItalic = TextState.IsItalic;
-        seg.TextState.RenderingMode = TextState.RenderingMode;
-        seg.TextState.Font = TextState.Font;
-        seg.Owner = this;
-        _segments.Add(seg);
-    }
 
     /// <summary>
     /// The text content. Setting this property replaces the text in the PDF content stream
@@ -140,7 +142,7 @@ public partial class TextFragment : BaseParagraph
             // find nothing to replace and no-op.
             if (SourcePage is not null && TextState.Font is not null && TextState.FontSize > 0
                 && _replaceOptions?.ReplaceAdjustmentAction == TextReplaceOptions.ReplaceAdjustment.WholeWordsHyphenation
-                && TryReflowParagraph(SourcePage, oldText, value))
+                && !ReadsRightToLeft && TryReflowParagraph(SourcePage, oldText, value))
             {
                 _text = value;
                 return;
@@ -154,7 +156,7 @@ public partial class TextFragment : BaseParagraph
             // that fit on one line stay on the ordinary in-place path.
             if (SourcePage is not null && TextState.Font is not null && TextState.FontSize > 0
                 && _replaceOptions?.ReplaceAdjustmentAction == TextReplaceOptions.ReplaceAdjustment.IsFormFillingMode
-                && TryFormFillWrap(SourcePage, oldText, value))
+                && TryFormFillWrap(SourcePage, value))
             {
                 _text = value;
                 return;
@@ -177,6 +179,8 @@ public partial class TextFragment : BaseParagraph
                     }
 
             string? switchedFontFamily = null;
+            Rectangle? rtlRect = null;
+            var rewroteAcrossRuns = false;
             // An attached (TextBuilder-appended) fragment is written again from its
             // state at save time; editing the page here would only leave the old
             // run's replacement behind for the rewrite to overwrite.
@@ -211,6 +215,7 @@ public partial class TextFragment : BaseParagraph
                 // the invisible render mode so emptying it (fragment.Text = "")
                 // doesn't strip the visible copy (see DeleteFromContent).
                 int? reqRenderMode = TextState is { RenderingMode: TextRenderingMode.Invisible } ? 3 : null;
+                var drawn = DrawnForm(value);
                 var replacer = new TextReplacer { ForcedCidFallbackFamily = _pendingCidRedressFamily, AllowSubsetGlyphFallback = allowFallback, ReflowLineOnReplace = reflowLine, AnchorTrailingOnReplace = !reflowLine, RequiredRenderMode = reqRenderMode,
                     // AdjustSpaceWidth re-seats the rest of the line by the change in
                     // ADVANCE. A page that states each glyph off a relative Td chain
@@ -266,7 +271,7 @@ public partial class TextFragment : BaseParagraph
                         replacer.TargetX = tx;
                         replacer.TargetY = ty;
                         replacer.MatchWholeOperator = true;
-                        replacer.Replace(SourcePage, oldText, value);
+                        replacer.Replace(SourcePage, oldText, drawn);
                         if (replacer.ReplacementCount > 0) break;
                     }
                     if (replacer.ReplacementCount > 0 || _position is null) break;
@@ -278,7 +283,7 @@ public partial class TextFragment : BaseParagraph
                     {
                         replacer.TargetY = ty;
                         replacer.MatchWholeOperator = false;
-                        replacer.Replace(SourcePage, oldText, value);
+                        replacer.Replace(SourcePage, oldText, drawn);
                         if (replacer.ReplacementCount > 0) break;
                     }
                 }
@@ -287,18 +292,19 @@ public partial class TextFragment : BaseParagraph
                 // (handles text split across TJ/Tj operators). Not gated on segment count:
                 // the absorber COALESCES a one-character-per-operator producer into a single
                 // segment, so a single-segment fragment can still span many operators.
-                if (replacer.ReplacementCount == 0 && (_segments.Count > 1 || oldText.Length > 1))
+                // (a right-to-left match drawn as several runs is rewritten run by run below)
+                if (replacer.ReplacementCount == 0 && (_segments.Count > 1 || oldText.Length > 1) && !(ReadsRightToLeft && _segments.Count > 1))
                 {
                     var crossReplacer = new TextReplacer { ForcedCidFallbackFamily = _pendingCidRedressFamily, AllowSubsetGlyphFallback = allowFallback, ReflowLineOnReplace = reflowLine, AnchorTrailingOnReplace = !reflowLine, RequiredRenderMode = reqRenderMode,
                         ShiftFollowersByAdvance = adjustAction == TextReplaceOptions.ReplaceAdjustment.AdjustSpaceWidth };
                     foreach (var ty in targetYs)
                     {
                         crossReplacer.TargetY = ty;
-                        crossReplacer.ReplaceWithCrossOperator(SourcePage, oldText, value);
+                        crossReplacer.ReplaceWithCrossOperator(SourcePage, oldText, drawn);
                         if (crossReplacer.ReplacementCount > 0) break;
                     }
                     if (crossReplacer.ReplacementCount > 0)
-                        replacer = crossReplacer; // use cross result
+                        (replacer, rewroteAcrossRuns) = (crossReplacer, true); // use cross result
                 }
 
                 // Fallback: if the combined text wasn't found AND the fragment uses a CID
@@ -310,7 +316,7 @@ public partial class TextFragment : BaseParagraph
                 // has no contiguous operator text to find, but each segment maps to a
                 // concrete run and wipes cleanly on its own.
                 if (replacer.ReplacementCount == 0 && _segments.Count > 1
-                    && (IsCidFontFragment() || value.Length == 0))
+                    && (IsCidFontFragment() || value.Length == 0 || ReadsRightToLeft))
                 {
                     var firstSeg = true;
                     foreach (var s in _segments)
@@ -330,8 +336,8 @@ public partial class TextFragment : BaseParagraph
                                  { (segX, true), (segX, false), (null, false) })
                         {
                             var segReplacer = new TextReplacer
-                            { TargetY = segY, TargetX = mx, MatchWholeOperator = mo, RequiredRenderMode = reqRenderMode };
-                            segReplacer.Replace(SourcePage, s.Text, firstSeg ? value : "");
+                            { TargetY = segY, TargetX = mx, MatchWholeOperator = mo, RequiredRenderMode = reqRenderMode, AllowSubsetGlyphFallback = allowFallback && ReadsRightToLeft };
+                            segReplacer.Replace(SourcePage, s.Text, firstSeg ? drawn : "");
                             if (segReplacer.ReplacementCount > 0) { found = true; break; }
                             if (segY is null) break; // no geometry at all: single unscoped try
                         }
@@ -368,7 +374,8 @@ public partial class TextFragment : BaseParagraph
                 // If the replacement's glyphs were absent from the source subset and the
                 // run was substituted in a fallback face, surface that font on the
                 // fragment (default no-character behaviour reports the substituted font).
-                switchedFontFamily = replacer.SwitchedFontFamily;
+                switchedFontFamily = TextReplacer.SwitchedFontFamily;
+                rtlRect = ReseatLineAfterEdit(reflowLine, value, preRect, preBaselineY);
 
                 // AdjustSpaceWidth keeps the LINE's length by letting the gaps take up the
                 // slack, but the words after the replacement still sit behind its new
@@ -393,7 +400,7 @@ public partial class TextFragment : BaseParagraph
                             if (content is { Length: > 0 })
                             {
                                 var shifted = TextReplacer.ShiftFollowingBlocks(
-                                    content, shiftBaseY, shiftPre.URX, shiftDelta);
+                                    content, shiftBaseY, shiftPre.URX, shiftDelta, absoluteSeats: true);
                                 if (!ReferenceEquals(shifted, content))
                                     SourcePage.SetContentStream(shifted);
                             }
@@ -461,71 +468,14 @@ public partial class TextFragment : BaseParagraph
             // the decoration block further down must not apply it a SECOND time, which
             // subtracts the old advance twice and collapses the rectangle to zero width
             // (a shortened replacement then draws a zero-width underline).
-            var rectTookAdvanceDelta = false;
-            if (_rectangle is not null
-                && _replaceOptions?.ReplaceAdjustmentAction is TextReplaceOptions.ReplaceAdjustment.None
-                    or TextReplaceOptions.ReplaceAdjustment.ShiftRestOfLine
-                && TextState.Font is { } font && TextState.FontSize > 0)
-            {
-                double newWidth;
-                try
-                {
-                    var oldWidth = font.MeasureString(oldText, TextState.FontSize);
-                    newWidth = font.MeasureString(value, TextState.FontSize);
-                    // Old text wider than its own rect can't happen for real layouts;
-                    // spread detection: rect wider than the old natural advance by
-                    // more than a point means positioning ops pad the run — keep them.
-                    if (_rectangle.Width > oldWidth + 1.0)
-                        newWidth = Math.Max(0, _rectangle.Width + newWidth - oldWidth);
-                }
-                catch { newWidth = -1; }
-                if (newWidth >= 0)
-                {
-                    _rectangle = new Rectangle(_rectangle.LLX, _rectangle.LLY,
-                        _rectangle.LLX + newWidth, _rectangle.URY);
-                    rectTookAdvanceDelta = true;
-                }
-            }
+            var rectTookAdvanceDelta = rtlRect is not null;
+            if (rtlRect is not null) _rectangle = rtlRect;
+            else rectTookAdvanceDelta = TrackReplacementAdvance(oldText, value, rewroteAcrossRuns);
 
             // ToAttemptGetUnderlineFromSource: source decorations follow the replacement.
-            // Splice the captured underline/highlight rectangles out of the content and
-            // register standard injection so new ones are drawn at the replacement's
-            // advance (the source rects are sized to the OLD text and would otherwise
-            // keep rendering under/behind the new, differently-sized text). Runs BEFORE
-            // the reported-font switch below so the advance is measured against the
-            // ORIGINAL face (with its style), not the switched family name.
-            if (SourcePage is not null &&
-                (CapturedUnderlineSources is { Count: > 0 } || CapturedBackgroundSources is { Count: > 0 }))
-            {
-                SourcePage.RegisterUnderlineRemoval(this);
-
-                // Re-size the fragment rectangle by the replacement's advance DELTA so
-                // the injected decoration spans the new text, not the old. Delta, not
-                // the absolute advance: a kern-spread run's rect is far wider than the
-                // text's natural advance, and swapping one word must keep that spread.
-                if (!rectTookAdvanceDelta && _rectangle is not null
-                    && TextState.Font is { } decFont && TextState.FontSize > 0)
-                {
-                    var advance = MeasureReplacementAdvance(decFont, value, TextState.FontSize);
-                    var oldAdvance = MeasureReplacementAdvance(decFont, oldText, TextState.FontSize);
-                    if (advance >= 0 && oldAdvance >= 0)
-                        _rectangle = new Rectangle(_rectangle.LLX, _rectangle.LLY,
-                            _rectangle.LLX + Math.Max(0, _rectangle.Width + advance - oldAdvance),
-                            _rectangle.URY);
-                    else if (advance >= 0)
-                        _rectangle = new Rectangle(_rectangle.LLX, _rectangle.LLY,
-                            _rectangle.LLX + advance, _rectangle.URY);
-                }
-
-                if (CapturedUnderlineSources is { Count: > 0 })
-                    SourcePage.RegisterUnderlineFragment(this);
-                if (CapturedBackgroundSources is { Count: > 0 })
-                {
-                    if (TextState.BackgroundColor is null && CapturedBackgroundColor is { } cbc)
-                        TextState.SetCapturedBackgroundColor(cbc);
-                    SourcePage.RegisterBgColorFragment(this);
-                }
-            }
+            // Runs BEFORE the reported-font switch below so the advance is measured against
+            // the ORIGINAL face (with its style), not the switched family name.
+            if (SourcePage is not null) ReseatSourceDecorations(SourcePage, oldText, value, rectTookAdvanceDelta);
 
             // Report the substituted fallback face on the fragment's TextState.Font
             // (the byte-level replacer already switched the glyphs in the stream; this
@@ -577,7 +527,9 @@ public partial class TextFragment : BaseParagraph
             ordered.Add((l.y, LineBaseline(l), lx0, l.rx,
                 l.f.TextState.FontSize > 0 ? l.f.TextState.FontSize : 10));
         }
+#pragma warning disable S1244 // sort key tie-break - exact equality keeps the comparison consistent
         ordered.Sort((a, b) => a.y != b.y ? b.y.CompareTo(a.y) : a.lx.CompareTo(b.lx));
+#pragma warning restore S1244
 
         var bands = new System.Collections.Generic.List<(double y, double lx, double rx)>();
         var widest = new System.Collections.Generic.List<double>();
@@ -633,24 +585,22 @@ public partial class TextFragment : BaseParagraph
         // it from the match's font size fails on a producer that carries the size in the text
         // matrix and reports 1 pt: the pitch then comes out around a point and every real line
         // gap looks like a paragraph break.
+        var col = new System.Collections.Generic.List<int>();
+        for (int i = 0; i < bands.Count; i++)
+            if (System.Math.Abs(bands[i].lx - refLx) <= xtol) col.Add(i);
+        int k = col.IndexOf(at);
+        if (k >= 0 && col.Count >= 2)
         {
-            var col = new System.Collections.Generic.List<int>();
-            for (int i = 0; i < bands.Count; i++)
-                if (System.Math.Abs(bands[i].lx - refLx) <= xtol) col.Add(i);
-            int k = col.IndexOf(at);
-            if (k >= 0 && col.Count >= 2)
+            var gaps = new System.Collections.Generic.List<double>();
+            for (int j = System.Math.Max(1, k - 6); j < System.Math.Min(col.Count, k + 7); j++)
             {
-                var gaps = new System.Collections.Generic.List<double>();
-                for (int j = System.Math.Max(1, k - 6); j < System.Math.Min(col.Count, k + 7); j++)
-                {
-                    double g = bands[col[j - 1]].y - bands[col[j]].y;
-                    if (g > 0.5) gaps.Add(g);
-                }
-                if (gaps.Count > 0)
-                {
-                    gaps.Sort();
-                    maxGap = gaps[gaps.Count / 2] * 1.35;
-                }
+                double g = bands[col[j - 1]].y - bands[col[j]].y;
+                if (g > 0.5) gaps.Add(g);
+            }
+            if (gaps.Count > 0)
+            {
+                gaps.Sort();
+                maxGap = gaps[gaps.Count / 2] * 1.35;
             }
         }
         var taken = new System.Collections.Generic.List<int> { at };
@@ -754,34 +704,32 @@ public partial class TextFragment : BaseParagraph
             // Used before the fragment is placed on a page. An empty fragment
             // still yields a (zero-width) rectangle —
             // Rectangle is never null for a constructed fragment.
+            double fontSize = TextState.FontSize;
+            double width = 0;
+            if (Text != null && Text.Length > 0)
             {
-                double fontSize = TextState.FontSize;
-                double width = 0;
-                if (Text != null && Text.Length > 0)
+                var font = TextState.Font;
+                if (font != null)
                 {
-                    var font = TextState.Font;
-                    if (font != null)
-                    {
-                        try { width = font.MeasureString(Text, fontSize); }
-                        catch { width = Text.Length * fontSize * 0.5; }
-                    }
-                    else
-                        width = Text.Length * fontSize * 0.5;
+                    try { width = font.MeasureString(Text, fontSize); }
+                    catch { width = Text.Length * fontSize * 0.5; }
                 }
-
-                double height = fontSize * 1.2; // approximate line height
-                // A quarter turn puts the run's advance on the VERTICAL axis: the box a
-                // caller measures is the box the text will occupy once turned, so the two
-                // extents swap. (Callers size a table column by the turned run's Height,
-                // which is the advance — the whole point of asking a rotated fragment for
-                // its box.) A half turn leaves the extents where they are.
-                var rot = ((TextState.Rotation % 360) + 360) % 360;
-                if (Math.Abs(rot - 90) < 0.01 || Math.Abs(rot - 270) < 0.01)
-                    (width, height) = (height, width);
-                double x = PositionOrNull?.XIndent ?? 0;
-                double y = PositionOrNull?.YIndent ?? 0;
-                return new Rectangle(x, y - height * 0.2, x + width, y + height * 0.8);
+                else
+                    width = Text.Length * fontSize * 0.5;
             }
+
+            double height = fontSize * 1.2; // approximate line height
+            // A quarter turn puts the run's advance on the VERTICAL axis: the box a
+            // caller measures is the box the text will occupy once turned, so the two
+            // extents swap. (Callers size a table column by the turned run's Height,
+            // which is the advance — the whole point of asking a rotated fragment for
+            // its box.) A half turn leaves the extents where they are.
+            var rot = ((TextState.Rotation % 360) + 360) % 360;
+            if (Math.Abs(rot - 90) < 0.01 || Math.Abs(rot - 270) < 0.01)
+                (width, height) = (height, width);
+            double x = PositionOrNull?.XIndent ?? 0;
+            double y = PositionOrNull?.YIndent ?? 0;
+            return new Rectangle(x, y - height * 0.2, x + width, y + height * 0.8);
         }
         internal set => _rectangle = value;
     }
@@ -823,7 +771,9 @@ public partial class TextFragment : BaseParagraph
                 {
                     var dx = value.XIndent - refPos.XIndent;
                     var dy = value.YIndent - refPos.YIndent;
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
                     foreach (var seg in _segments)
+#pragma warning restore S3267
                     {
                         if (seg.Position is not null)
                             seg.Position = new Position(seg.Position.XIndent + dx, seg.Position.YIndent + dy);
@@ -925,7 +875,9 @@ public partial class TextFragment : BaseParagraph
     public TextSegmentCollection Segments
     {
         get => _segments;
+#pragma warning disable S4275 // the setter delegates to the registering setter on purpose
         set
+#pragma warning restore S4275
         {
             // Mutate-in-place rather than rebinding so the existing Owner
             // back-reference stays intact.
@@ -950,10 +902,12 @@ public partial class TextFragment : BaseParagraph
         return copy;
     }
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>Hyperlink applied to this fragment. Set-only on the
     /// public surface; the underlying hyperlink action is wired into
     /// the page's annotation stream at save time (stored only in this build).</summary>
     public new Hyperlink Hyperlink
+#pragma warning restore S2376
     {
         set
         {

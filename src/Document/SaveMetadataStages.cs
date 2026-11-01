@@ -17,13 +17,20 @@ public sealed partial class Document
     /// <summary>The document's XMP packet is written as its own object, reusing the metadata stream the document was opened with when it still fits.</summary>
     private void WriteSaveXmpMetadata(SaveDocumentState sv)
     {
+        // After the first save the catalog names the packet that save wrote, so the file's own packet,
+        // still in the table, is left out by number on every save that follows.
+        if (_replacedMetadataObjNum > 0) sv.infraObjNums.Add(_replacedMetadataObjNum);
         if (sv.xmpBytes is not null)
         {
             // The XMP packet is being rewritten (or cleared). Whichever way, the catalog's
             // existing /Metadata stream is stale: skip it on write and drop it from the
             // object-number ceiling so we don't carry the old packet as a dead object.
             if (_reader.Catalog.Get("Metadata") is PdfIndirectRef oldMetaRef)
+            {
                 sv.infraObjNums.Add(oldMetaRef.ObjectNumber);
+                if (_replacedMetadataObjNum == 0 && sv.xref.Entries.ContainsKey(oldMetaRef.ObjectNumber))
+                    _replacedMetadataObjNum = oldMetaRef.ObjectNumber;
+            }
 
             if (sv.xmpBytes.Length > 0)
             {
@@ -78,11 +85,22 @@ public sealed partial class Document
                 _reader.Catalog.Remove("Metadata");
             }
         }
+        else if (_reader.ResolveStream(_reader.Catalog.Get("Metadata")) is { } kept
+                 && !kept.Dict.ContainsKey("Filter") && ClaimsConformance(kept.RawData))
+        {
+            // The file's own packet goes through as it is, and one that claims conformance stays unfiltered for
+            // the same reason a rewritten one does.
+            kept.DoNotCompress = true;
+        }
     }
+
+    /// <summary>The object number of the file's own XMP packet once a save has replaced it, else 0.</summary>
+    private int _replacedMetadataObjNum;
 
     /// <summary>Every object the cross-reference table still reaches is written through, in object-number order.</summary>
     private void WriteSaveExistingObjects(SaveDocumentState sv)
     {
+        var rebuilt = PageTreeRebuildNumbers();
         foreach (var entry in sv.xref.Entries.Values.OrderBy(e => e.ObjectNumber))
         {
             if (!entry.InUse || entry.ObjectNumber == 0) continue;
@@ -106,6 +124,14 @@ public sealed partial class Document
 
             // Skip the source file's cross-reference infrastructure (see infraObjNums above).
             if (sv.infraObjNums.Contains(entry.ObjectNumber)) continue;
+            // A cross-reference stream the table still lists (a linearized file's first-page
+            // section) carried over under an encryption would be enciphered, which no reader
+            // expects of an xref stream; the writer makes its own.
+            if (sv.encryptor is not null && obj is PdfStream { Dict: var streamDict }
+                && streamDict.GetName("Type") == "XRef") continue;
+
+            // Written here as well, each would leave a dead copy in the file body ahead of the live one.
+            if (rebuilt.Contains(entry.ObjectNumber)) continue;
 
             // Prefer the live in-memory page dictionary over a (possibly stale,
             // post-ClearCache re-parsed) reader resolution. See livePageDicts above.
@@ -114,5 +140,17 @@ public sealed partial class Document
 
             sv.writer.WriteIndirectObject(entry.ObjectNumber, obj);
         }
+    }
+
+    /// <summary>The objects the page tree rebuild writes when the page list changed: the tree's root and the
+    /// pages loaded from this document.</summary>
+    private HashSet<int> PageTreeRebuildNumbers()
+    {
+        var numbers = new HashSet<int>();
+        if (_pages is null || !_pages.IsModified) return numbers;
+        if (_reader.Catalog.Get("Pages") is PdfIndirectRef root) numbers.Add(root.ObjectNumber);
+        foreach (var page in _pages)
+            if (page.ImportSlotObjNum <= 0 && page.SourceObjectNumber > 0) numbers.Add(page.SourceObjectNumber);
+        return numbers;
     }
 }

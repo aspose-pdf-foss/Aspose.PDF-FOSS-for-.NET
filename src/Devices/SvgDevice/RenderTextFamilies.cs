@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Devices;
 public sealed partial class SvgDevice
 {
     /// <summary>The text-state operators: the font, spacing, scale, rise, render mode and leading.</summary>
-    private bool RenderSvgTextStateOperator(SvgRenderState sv, PdfReader reader, string op)
+    private static bool RenderSvgTextStateOperator(SvgRenderState sv, PdfReader reader, string op)
     {
         switch (op)
         {
@@ -25,6 +25,7 @@ public sealed partial class SvgDevice
                             sv.gs.ToUnicode = Text.TextAbsorber.ParseToUnicodeFromDict(fd, reader);
                             var baseFont = fd.GetName("BaseFont") ?? "sans-serif";
                             sv.gs.FontName = MapFontName(baseFont);
+                            sv.gs.Face = sv.faces.For(fd, reader);
                             try { sv.gs.Metrics = Text.FontMetrics.FromFontDict(fd, reader); }
                             catch { sv.gs.Metrics = null; }
                         }
@@ -33,6 +34,7 @@ public sealed partial class SvgDevice
                             sv.gs.FontDict = null;
                             sv.gs.ToUnicode = null;
                             sv.gs.Metrics = null;
+                            sv.gs.Face = null;
                             sv.gs.FontName = fn.Value;
                         }
                     }
@@ -66,7 +68,7 @@ public sealed partial class SvgDevice
     }
 
     /// <summary>The text object, its positioning and the strings it shows.</summary>
-    private bool RenderSvgTextShowOperator(SvgRenderState sv, StringBuilder sb, PdfReader reader, List<LinkRect>? links, string op)
+    private static bool RenderSvgTextShowOperator(SvgRenderState sv, StringBuilder sb, PdfReader reader, List<LinkRect>? links, string op)
     {
         switch (op)
         {

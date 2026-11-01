@@ -123,10 +123,9 @@ public class Signature
     /// 8192-byte default.</summary>
     public int DefaultSignatureLength { get; set; }
 
-    /// <summary>When true, the visible signature appearance includes the
-    /// signer's Reason/Location/ContactInfo as text. Honoured by
-    /// <see cref="Security.PdfSigner.SignWithAppearance"/>.</summary>
-    public bool ShowProperties { get; set; }
+    /// <summary>When true (the default), a visible signature with an appearance image draws the signer's
+    /// name, date, reason, location and contact over the image; false draws the image alone.</summary>
+    public bool ShowProperties { get; set; } = true;
 
     internal string? FieldName { get; set; }
     internal string? Filter { get; set; }
@@ -147,6 +146,54 @@ public class Signature
     {
         if (_sourceDocumentBytes is null || FieldName is null) return false;
         return Security.PdfSigner.Verify(_sourceDocumentBytes, FieldName);
+    }
+
+    /// <summary>Verify with explicit options + a result DTO. Real — runs
+    /// the cryptographic-bytes check on the loaded source PDF; revocation
+    /// (OCSP/CRL) not implemented so Strict + non-Auto method reports
+    /// Unknown instead of lying about a check that didn't run.</summary>
+    public bool Verify(Security.ValidationOptions options, out Security.ValidationResult validationResult)
+    {
+        var ok = Verify();
+        validationResult = BuildValidationResult(ok, options);
+        return ok;
+    }
+
+    /// <summary>Public-key-pinned verify. The signer certificate is
+    /// extracted from /Contents and compared to <paramref name="publicKeyCertificate"/>
+    /// via Thumbprint before reporting Valid.</summary>
+    public bool Verify(System.Security.Cryptography.X509Certificates.X509Certificate2 publicKeyCertificate,
+        Security.ValidationOptions options, out Security.ValidationResult validationResult)
+    {
+        var ok = Verify();
+        if (ok && publicKeyCertificate is not null && _sourceDocumentBytes is not null && ContentsRaw is not null)
+        {
+            try
+            {
+                var certDer = Aspose.Pdf.Security.CmsParser.GetSignerCertificateDer(ContentsRaw);
+                var signerCert = certDer is null
+                    ? null
+                    : Compat.LoadCertificate(certDer);
+                if (signerCert is null
+                    || !signerCert.Thumbprint.Equals(publicKeyCertificate.Thumbprint,
+                        System.StringComparison.OrdinalIgnoreCase))
+                {
+                    validationResult = new Security.ValidationResult(
+                        Security.ValidationStatus.Invalid,
+                        "Signature's signer certificate does not match the supplied public certificate.");
+                    return false;
+                }
+            }
+            catch
+            {
+                validationResult = new Security.ValidationResult(
+                    Security.ValidationStatus.Unknown,
+                    "PKCS#7 decode failed — cannot compare signer certificate.");
+                return false;
+            }
+        }
+        validationResult = BuildValidationResult(ok, options);
+        return ok;
     }
 
     /// <summary>Non-throwing verification: the verdict - valid, invalid, or undefined when
@@ -232,8 +279,8 @@ public class Signature
         // structurally valid, but the unsigned gap between the two signed ranges
         // (which must hold only the /Contents hex string <…>) is larger than that
         // hex string. The surplus unsigned bytes hide injected objects the
-        // signature does not cover. On-disk hex length = 2·bytes + 2 delimiters;
-        // a small slack absorbs optional whitespace around the delimiters.
+        // signature does not cover. On-disk hex length = 2·bytes + 2 delimiters; a
+        // small slack absorbs optional whitespace around the delimiters.
         var gap = br[2] - (br[0] + br[1]);
         var contentsHexLen = 2L * sig.ContentsRaw.Length + 2;
         if (gap - contentsHexLen > 128)
@@ -242,54 +289,6 @@ public class Signature
                    "the /ByteRange leaves unsigned content in the /Contents gap.";
         }
         return null;
-    }
-
-    /// <summary>Verify with explicit options + a result DTO. Real — runs
-    /// the cryptographic-bytes check on the loaded source PDF; revocation
-    /// (OCSP/CRL) not implemented so Strict + non-Auto method reports
-    /// Unknown instead of lying about a check that didn't run.</summary>
-    public bool Verify(Security.ValidationOptions options, out Security.ValidationResult validationResult)
-    {
-        var ok = Verify();
-        validationResult = BuildValidationResult(ok, options);
-        return ok;
-    }
-
-    /// <summary>Public-key-pinned verify. The signer certificate is
-    /// extracted from /Contents and compared to <paramref name="publicKeyCertificate"/>
-    /// via Thumbprint before reporting Valid.</summary>
-    public bool Verify(System.Security.Cryptography.X509Certificates.X509Certificate2 publicKeyCertificate,
-        Security.ValidationOptions options, out Security.ValidationResult validationResult)
-    {
-        var ok = Verify();
-        if (ok && publicKeyCertificate is not null && _sourceDocumentBytes is not null && ContentsRaw is not null)
-        {
-            try
-            {
-                var certDer = Aspose.Pdf.Security.CmsParser.GetFirstCertificateDer(ContentsRaw);
-                var signerCert = certDer is null
-                    ? null
-                    : Compat.LoadCertificate(certDer);
-                if (signerCert is null
-                    || !signerCert.Thumbprint.Equals(publicKeyCertificate.Thumbprint,
-                        System.StringComparison.OrdinalIgnoreCase))
-                {
-                    validationResult = new Security.ValidationResult(
-                        Security.ValidationStatus.Invalid,
-                        "Signature's signer certificate does not match the supplied public certificate.");
-                    return false;
-                }
-            }
-            catch
-            {
-                validationResult = new Security.ValidationResult(
-                    Security.ValidationStatus.Unknown,
-                    "PKCS#7 decode failed — cannot compare signer certificate.");
-                return false;
-            }
-        }
-        validationResult = BuildValidationResult(ok, options);
-        return ok;
     }
 
     private Security.ValidationResult BuildValidationResult(bool ok, Security.ValidationOptions? options)
@@ -448,9 +447,11 @@ public class Signature
     }
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>A PKCS#1 signature configuration. Signing with it requires an RSA key; a loaded
 /// <c>adbe.x509.rsa_sha1</c> signature reads back as this type.</summary>
 public class PKCS1 : Signature
+#pragma warning restore S101
 {
     /// <summary>The signature appearance image bytes, when constructed from
     /// a raw image stream rather than a PFX. Used by the visible-signature
@@ -477,9 +478,11 @@ public class PKCS1 : Signature
     }
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>A PKCS#7 signature configuration. <c>PdfFileSignature</c> signs it with the <c>adbe.pkcs7.sha1</c>
 /// handler, and a loaded signature using that handler reads back as this type.</summary>
 public class PKCS7 : Signature
+#pragma warning restore S101
 {
     /// <summary>Creates a PKCS#7 signature configuration with no signing certificate.</summary>
     public PKCS7() { }
@@ -489,11 +492,13 @@ public class PKCS7 : Signature
     public PKCS7(Stream pfx, string password) : base(pfx, password) { }
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>A detached PKCS#7 (CMS) signature configuration. The signer
 /// emits an <c>adbe.pkcs7.detached</c> /SubFilter signature for every
 /// <see cref="Signature"/> subtype, so this differs from <see cref="PKCS7"/>
 /// only in name — it documents caller intent to produce a detached envelope.</summary>
 public class PKCS7Detached : Signature
+#pragma warning restore S101
 {
     /// <summary>Creates a detached PKCS#7 signature configuration with no signing certificate.</summary>
     public PKCS7Detached() { }
@@ -561,10 +566,6 @@ public class ExternalSignature : Signature
         base.Certificate = Security.PdfCertificate.FromX509(certificate);
     }
 
-    /// <summary>Which PKCS#7 handler this configuration signs with; see the
-    /// (certificate, detached) constructor.</summary>
-    internal bool Detached { get; } = true;
-
     public ExternalSignature(
         System.Security.Cryptography.X509Certificates.X509Certificate2 certificate,
         DigestHashAlgorithm digestHashAlgorithm)
@@ -584,4 +585,8 @@ public class ExternalSignature : Signature
         Certificate = Compat.LoadCertificate(System.Convert.FromBase64String(base64Certificate));
         base.Certificate = Security.PdfCertificate.FromX509(Certificate);
     }
+
+    /// <summary>Which PKCS#7 handler this configuration signs with; see the
+    /// (certificate, detached) constructor.</summary>
+    internal bool Detached { get; }
 }

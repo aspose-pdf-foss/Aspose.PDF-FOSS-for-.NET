@@ -186,7 +186,7 @@ namespace Aspose.Pdf.Utils.Clustering.HierarchicalAgglomerativeClustering
         public override double Calculate(Cluster<T> cluster1, Cluster<T> cluster2)
         {
             var min = double.MaxValue;
-            foreach (var d in Pairs(cluster1, cluster2)) if (d < min) min = d;
+            foreach (var d in Pairs(cluster1, cluster2).Where(d => d < min)) min = d;
             return min;
         }
     }
@@ -199,7 +199,7 @@ namespace Aspose.Pdf.Utils.Clustering.HierarchicalAgglomerativeClustering
         public override double Calculate(Cluster<T> cluster1, Cluster<T> cluster2)
         {
             var max = double.MinValue;
-            foreach (var d in Pairs(cluster1, cluster2)) if (d > max) max = d;
+            foreach (var d in Pairs(cluster1, cluster2).Where(d => d > max)) max = d;
             return max;
         }
     }

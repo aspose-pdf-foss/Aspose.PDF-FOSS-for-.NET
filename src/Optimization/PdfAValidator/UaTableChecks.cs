@@ -99,17 +99,24 @@ internal static partial class PdfAValidator
                 continue;
             }
             if (type is null || !UaTableRowGroupTypes.Contains(type)) continue;
-            foreach (var row in StructureChildren(reader, child))
-                if (StandardStructureType(roleMap, row.GetName("S")) == "TR") yield return row;
+            foreach (var row in StructureChildren(reader, child).Where(row => StandardStructureType(roleMap, row.GetName("S")) == "TR"))
+                yield return row;
         }
     }
 
     /// <summary>The structure elements among an element's kids; a marked-content or object
     /// reference is content, not an element.</summary>
+    /// <summary>An entry that holds one object or an array of them, as the objects it holds.</summary>
+    private static IEnumerable<PdfObject> OneOrMany(PdfReader reader, PdfObject? value)
+    {
+        if (reader.Resolve(value) is PdfArray array) return array;
+        return value is null ? [] : [value];
+    }
+
     private static IEnumerable<PdfDictionary> StructureChildren(PdfReader reader, PdfDictionary element)
     {
         var kids = element.Get("K");
-        foreach (var kid in reader.Resolve(kids) is PdfArray array ? array : kids is null ? [] : [kids])
+        foreach (var kid in OneOrMany(reader, kids))
             if (reader.ResolveDict(kid) is { } dict && dict.Get("S") is not null)
                 yield return dict;
     }
@@ -121,7 +128,7 @@ internal static partial class PdfAValidator
         var colSpan = 1;
         var rowSpan = 1;
         var attributes = cell.Get("A");
-        foreach (var entry in reader.Resolve(attributes) is PdfArray array ? array : attributes is null ? [] : [attributes])
+        foreach (var entry in OneOrMany(reader, attributes))
         {
             if (reader.ResolveDict(entry) is not { } attribute) continue;
             if (SpanValue(reader.Resolve(attribute.Get("ColSpan"))) is { } stated) colSpan = stated;

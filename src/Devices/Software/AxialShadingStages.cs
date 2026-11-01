@@ -51,13 +51,42 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
                     t = 1;
                 }
 
-                ash.input[0] = ash.domLo + t * ash.domLen;
-                var col = ash.axial.Function!.Evaluate(ash.input);
-                if (col is null) continue;
-
-                var (r, g, b) = ComponentsToRgb(col, ash.csName, ash.axial.TintTransform, ash.axial.AltSpaceName);
-                SetPixel(ash.ctx, px, py, r, g, b, ash.alpha);
+                if (ColorAt(ash, t, px) is not { } rgb) continue;
+                SetPixel(ash.ctx, px, py, rgb.r, rgb.g, rgb.b, ash.alpha);
             }
         }
+    }
+
+    /// <summary>The shading's colour at <paramref name="t"/>, from the function and tint
+    /// transform once per distinct t: the last t, then the one this column had on the row
+    /// before (see the state's note). Null where the function gives no colour.</summary>
+    private static (byte r, byte g, byte b)? ColorAt(AxialShadingState ash, double t, int px)
+    {
+#pragma warning disable S1244 // the same t gives the same colour: an exact repeat is what is looked for
+        if (t == ash.lastT) return ash.lastRgb;
+        ash.colT ??= Enumerable.Repeat(double.NaN, ash.ctx.PixelW).ToArray();
+        if (ash.colRgb.Length == 0) ash.colRgb = new (byte r, byte g, byte b)?[ash.ctx.PixelW];
+        if (t != ash.colT[px])
+#pragma warning restore S1244
+        {
+            ash.input[0] = ash.domLo + t * ash.domLen;
+            var col = EvaluateInPlace(ash.axial.Function!, ash.input, ref ash.output);
+            ash.colRgb[px] = col is null ? null : ComponentsToRgb(col, ash.csName, ash.axial.TintTransform, ash.axial.AltSpaceName);
+            ash.colT[px] = t;
+        }
+        ash.lastT = t;
+        ash.lastRgb = ash.colRgb[px];
+        return ash.lastRgb;
+    }
+
+    /// <summary>The function's outputs at <paramref name="input"/>[0], in <paramref name="output"/> once
+    /// its size is known (the first evaluation sizes it) and the function fills it whole; a function
+    /// whose output count varies is evaluated the allocating way every time.</summary>
+    private static double[]? EvaluateInPlace(Functions.PdfFunction function, double[] input, ref double[] output)
+    {
+        if (output.Length > 0 && function.EvaluateInto(input[0], output) == output.Length) return output;
+        var col = function.Evaluate(input);
+        if (col is not null && output.Length == 0) output = new double[col.Length];
+        return col;
     }
 }

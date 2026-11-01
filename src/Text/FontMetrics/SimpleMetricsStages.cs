@@ -15,7 +15,7 @@ internal sealed partial class FontMetrics
             double fontMatrix0 = 0.001;
             if (sm.reader?.Resolve(sm.fontDict.Get("FontMatrix")) is PdfArray fmArr && fmArr.Count >= 1)
             {
-                fontMatrix0 = (sm.reader!.Resolve(fmArr[0]) ?? fmArr[0]) switch
+                fontMatrix0 = (sm.reader.Resolve(fmArr[0]) ?? fmArr[0]) switch
                 {
                     PdfInteger pi => pi.Value,
                     PdfReal pr => pr.Value,
@@ -35,7 +35,9 @@ internal sealed partial class FontMetrics
             for (var i = 0; i < widthsArr.Count; i++)
             {
                 var w = sm.reader?.Resolve(widthsArr[i]) ?? widthsArr[i];
+#pragma warning disable S1244 // integrality test - exact by definition
                 if (!sm.isType3 && w is PdfReal exact && exact.Value != System.Math.Floor(exact.Value))
+#pragma warning restore S1244
                     (sm.exactWidths ??= new Dictionary<int, double>())[sm.firstChar + i] = exact.Value;
                 if (sm.isType3)
                 {

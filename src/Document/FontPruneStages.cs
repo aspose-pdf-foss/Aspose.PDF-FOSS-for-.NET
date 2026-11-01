@@ -40,15 +40,14 @@ public sealed partial class Document
     }
 
     /// <summary>The stages of the font prune: the content scan, the font dictionary prune and the nested form prune.</summary>
-    private void PruneFontDictionary(FontPruneState fp)
+    private static void PruneFontDictionary(FontPruneState fp)
     {
         var pruned = new List<string>();
-        foreach (var key in fp.fontDict!.Keys!.ToList())
-            if (!fp.usedFonts.Contains(key))
-            {
-                fp.fontDict.Remove(key);
-                pruned.Add(key);
-            }
+        foreach (var key in fp.fontDict!.Keys.Where(key => !fp.usedFonts.Contains(key)).ToList())
+        {
+            fp.fontDict.Remove(key);
+            pruned.Add(key);
+        }
 
         // Rename the replacement fonts (registered under an "AsRp…" key) to F0, F1, …,
         // avoiding collision with any surviving original font, and patch the content's
@@ -86,7 +85,7 @@ public sealed partial class Document
     }
 
     /// <summary>The stages of the font prune: the content scan, the font dictionary prune and the nested form prune.</summary>
-    private bool ScanContentForFonts(FontPruneState fp)
+    private static bool ScanContentForFonts(FontPruneState fp)
     {
         var token = fp.lexer.NextToken();
         if (token.Kind == IO.TokenKind.Eof) return false;

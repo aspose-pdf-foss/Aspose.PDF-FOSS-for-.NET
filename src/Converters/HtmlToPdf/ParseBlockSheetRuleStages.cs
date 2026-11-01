@@ -31,8 +31,8 @@ internal static partial class HtmlToPdfConverter
             }
             // …then the two-part descendant rules the open ancestors satisfy, outer to
             // inner (the flat map keys them as "ancestor descendant"): `.inlineDisplay h2
-            // { font-size: 1.3125rem }` sizes the title a reset sheet's bare `h2 {
-            // font-size: 100% }` had just levelled…
+            // { font-size: 1.3125rem }` sizes the title a reset sheet's bare `h2 { font-size:
+            // 100% }` had just levelled…
             for (var i = 0; i < pb.divClassStack.Count; i++)
             {
                 var ancTag = i < pb.divTagStack.Count ? pb.divTagStack[i] : "div";
@@ -112,6 +112,26 @@ internal static partial class HtmlToPdfConverter
     private static bool IsDrawableFace(string? face) =>
         face is { Length: > 0 } && WinMetricsFor(face) is not null && PosFace(face).ttf is not null;
 
+    /// <summary>The sheet ships its own data: URI faces: it names them through its descendant rules
+    /// (`.report p.TableHead { font-family: … }`), so those rules reach the blocks outside the metric flow
+    /// too. Every other sheet keeps the flow's calibrated element and class rules.</summary>
+    private static bool ShipsOwnFaces(ParseBlocksState pb) => pb.cv?.profile.dataFaces is not null;
+
+    /// <summary>The open blocks above the element as CSS elements, their ids included: the ancestors
+    /// the flat map's two-part descendant rules are matched against.</summary>
+    private static List<CssElem> OpenAncestors(ParseBlocksState pb)
+    {
+        var chain = new List<CssElem>(pb.divClassStack.Count);
+        for (var i = 0; i < pb.divClassStack.Count; i++)
+            chain.Add(new CssElem
+            {
+                Tag = i < pb.divTagStack.Count ? pb.divTagStack[i] : "div",
+                Id = i < pb.divIdStack.Count && pb.divIdStack[i].Length > 0 ? pb.divIdStack[i] : null,
+                Classes = pb.divClassStack[i].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries),
+            });
+        return chain;
+    }
+
     /// <summary>The element as a chain of CSS elements: every open block above it (tag and
     /// classes, as the stacks recorded them) and then itself.</summary>
     private static List<CssElem> OpenElementChain(ParseBlocksState pb, Token tok, string lowerTag)
@@ -146,11 +166,11 @@ internal static partial class HtmlToPdfConverter
         // `H1 { line-height: 125% }` heading lines 17.875 at 14.3 and its .8em span's line 14.3 at
         // 11.44; the body's inline `line-height: 100%` paces its 11 pt breaks 11 and the 12.65 h2
         // 12.65). A length or em stays the box it names.
-        if (style.UaSerif && Regex.Match(lower, @"^([\d.]+)\s*%$") is { Success: true } pct
+        if (style.UaSerif && SafeRegex.Match(lower, @"^([\d.]+)\s*%$") is { Success: true } pct
             && double.TryParse(pct.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var pctFactor) && pctFactor > 0)
         { style.UaLineFactor = pctFactor / 100.0; style.LineBoxPt = 0; return; }
-        if (Regex.IsMatch(lower, @"^[\d.]+$") && double.TryParse(lower,
+        if (SafeRegex.IsMatch(lower, @"^[\d.]+$") && double.TryParse(lower,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var factor) && factor > 0)
         { style.SheetLineFactor = factor; style.LineBoxPt = 0; return; }
@@ -207,20 +227,20 @@ internal static partial class HtmlToPdfConverter
         // The rule's line-height paces the block (calibrated flow): a unitless value is
         // a factor of the block's own size, a length is the line box itself, an em
         // length that box at the block's size, and `normal` returns to the flow's pitch
-        // (probed: a 21 px body line-height paces every 10.5 pt heading line at 15.75;
-        // a `p { line-height: 1.6 }` paces 9.75 pt text at 15.6).
+        // (probed: a 21 px body line-height paces every 10.5 pt heading line at 15.75; a
+        // `p { line-height: 1.6 }` paces 9.75 pt text at 15.6).
         // (…and the UA flow reads the same box: its lines seat half-leading inside it)
         if ((pb.sheetElementTypography || pb.browserUa) && bmRule.TryGetValue("line-height", out var bmLhV))
             ApplySheetLineHeight(pb.style, bmLhV.Trim());
         if (bmRule.TryGetValue("font-weight", out var bmFwV)
             && (bmFwV.Trim() is "bold" or "bolder"
-                || (int.TryParse(bmFwV.Trim(), out var bmFwN) && bmFwN >= 600)))
+                || (int.TryParse(bmFwV.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var bmFwN) && bmFwN >= 600)))
             pb.style.FontRes = "F2";
         // …and a NORMAL weight undoes the tag's legacy bold (the sheet-typography flow:
         // probed, `h2 { font-weight: normal }` draws the title in the regular face).
         else if (pb.sheetElementTypography && bmFwV is not null
             && (bmFwV.Trim() is "normal" or "lighter"
-                || (int.TryParse(bmFwV.Trim(), out var bmFwLight) && bmFwLight < 600))
+                || (int.TryParse(bmFwV.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var bmFwLight) && bmFwLight < 600))
             && pb.style.FontRes == "F2")
         { pb.style.FontRes = "F1"; pb.style.EmBold = false; }
         if (bmRule.TryGetValue("text-align", out var bmTaV))
@@ -249,7 +269,7 @@ internal static partial class HtmlToPdfConverter
         }
         if (bmRule.TryGetValue("border-top", out var bt)
             && TryParseBorderShorthand("border-top:" + bt, "border-top") is (var btW, var btCol) && btW > 0
-            && !Regex.IsMatch(bt, @"\bnone\b", RegexOptions.IgnoreCase))
+            && !SafeRegex.IsMatch(bt, @"\bnone\b", RegexOptions.IgnoreCase))
         {
             pb.style.BorderTopOnly = true;
             pb.style.BorderWidth = btW;
@@ -260,7 +280,7 @@ internal static partial class HtmlToPdfConverter
         }
         if (bmRule.TryGetValue("border-bottom", out var bb)
             && TryParseBorderShorthand("border-bottom:" + bb, "border-bottom") is (var bbW, var bbCol) && bbW > 0
-            && !Regex.IsMatch(bb, @"\bnone\b", RegexOptions.IgnoreCase))
+            && !SafeRegex.IsMatch(bb, @"\bnone\b", RegexOptions.IgnoreCase))
         {
             pb.style.BorderBottomWidth = bbW;
             pb.style.BorderBottomColor = bbCol ?? Color.Black;

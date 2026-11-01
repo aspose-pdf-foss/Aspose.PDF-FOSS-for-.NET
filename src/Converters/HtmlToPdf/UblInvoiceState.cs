@@ -67,8 +67,8 @@ private sealed class UblInvoiceState
     public double headlineDrop;
     // ── the item table: top/bottom hairlines, headings at their widths ──
     public double tableTop;
-    // columns: each heading's width plus the following column's 10px padding;
-    // the description column takes its declared 40%
+    // columns: each heading's width plus the following column's 10px padding; the
+    // description column takes its declared 40%
     public double[] colW = null!;
     public double[] colX = null!;
     public double rowH;

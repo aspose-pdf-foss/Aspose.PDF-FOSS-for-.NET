@@ -22,6 +22,7 @@ public sealed partial class Page
     public void AddStamp(ImageStamp stamp)
     {
         if (stamp is null) throw new ArgumentNullException(nameof(stamp));
+        if (DefersStamp(stamp)) return;
         stamp.CompensatePageRotation = true;
         stamp.ApplyTo(this);
     }
@@ -46,6 +47,7 @@ public sealed partial class Page
     public void AddStamp(Stamp stamp)
     {
         if (stamp is null) throw new ArgumentNullException(nameof(stamp));
+        if (DefersStamp(stamp)) return;
         stamp.Put(this);
     }
 
@@ -64,7 +66,9 @@ public sealed partial class Page
         // content with a Do operator. Emitting the stamp as a form (rather than
         // inline content) keeps the page content stream a simple reference and
         // surfaces the stamp under the page's /Resources/XObject (page.Resources.Forms).
-        var formName = AddStampForm(stampBytes, stamp.FormBBox, stampId: stamp.StampId,
+        // A stamp lays out in the page as shown and folds the shown-to-media frame into its own
+        // placement (see ShownPlacementToMedia); its form box is that frame carried into media space.
+        var formName = AddStampForm(stampBytes, ShownToMedia(stamp.FormBBox ?? ShownFrame), stampId: stamp.StampId,
             startAtExistingCount: stamp.NameFormAfterExistingXObjects);
         // Embed a %StampId comment ahead of the Do reference when the stamp carries an
         // id, so PdfContentEditor.GetStamps / DeleteStampById can identify it on reload.
@@ -200,9 +204,7 @@ public sealed partial class Page
                 // Shape/markup annotations are often stored without an /AP (the viewer
                 // synthesises one). Generate it from the annotation's geometry so the
                 // figure is baked into the page instead of vanishing on flatten.
-                var typed = Aspose.Pdf.Annotations.Annotation.Create(annotDict, _reader);
-                if (Aspose.Pdf.Annotations.Annotation.CanSynthesiseAppearance(typed))
-                    typed.UpdateAppearances();
+                Aspose.Pdf.Annotations.Annotation.Create(annotDict, _reader).SynthesiseMissingAppearance();
                 appearanceStream = ResolveAppearanceStream(annotDict);
                 if (appearanceStream is null) continue;
             }

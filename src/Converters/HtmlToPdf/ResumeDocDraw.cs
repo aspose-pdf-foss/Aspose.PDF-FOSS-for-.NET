@@ -48,23 +48,23 @@ internal static partial class HtmlToPdfConverter
         var runs = new List<(string, bool, Color)>();
         var colStack = new Stack<Color>();
         var boldDepth = 0;
-        foreach (Match m in rd.runRx.Matches(inner))
+        foreach (var groups in SafeRegex.Matches(rd.runRx, inner).Select(m => m.Groups))
         {
-            if (m.Groups[5].Success)
+            if (groups[5].Success)
             {
-                var txt = DecodeEntities(m.Groups[5].Value);
+                var txt = DecodeEntities(groups[5].Value);
                 if (txt.Length > 0)
                     runs.Add((txt, boldDepth > 0,
                         colStack.Count > 0 ? colStack.Peek() : rd.black));
                 continue;
             }
-            var tag = m.Groups[2].Value.ToLowerInvariant();
-            var closeT = m.Groups[1].Value == "/";
+            var tag = groups[2].Value.ToLowerInvariant();
+            var closeT = groups[1].Value == "/";
             if (tag == "font")
             {
                 if (!closeT)
                 {
-                    var fcM = Regex.Match(m.Groups[3].Value, @"color\s*=\s*[""']?(#?\w+)");
+                    var fcM = SafeRegex.Match(groups[3].Value, @"color\s*=\s*[""']?(#?\w+)");
                     colStack.Push(fcM.Success && ParseCssColor(fcM.Groups[1].Value) is { } fc
                         ? fc : rd.black);
                 }
@@ -84,7 +84,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var (t, bold, col) in runs)
         {
             var norm = CollapseWs(t);
-            foreach (var piece in Regex.Split(norm, @"(?<= )"))
+            foreach (var piece in SafeRegex.Split(norm, @"(?<= )"))
                 if (piece.Length > 0) flat.Add((piece, bold, col));
         }
         var lines = 0;
@@ -123,7 +123,7 @@ internal static partial class HtmlToPdfConverter
 
     private static void EmitLis(ResumeDocState rd, string ulInner, double colX, double availW, int grp)
     {
-        foreach (Match liM in Regex.Matches(ulInner, @"<li[^>]*>(.*?)</li>",
+        foreach (Match liM in SafeRegex.Matches(ulInner, @"<li[^>]*>(.*?)</li>",
             RegexOptions.IgnoreCase | RegexOptions.Singleline))
         {
             BreakIf(rd, RdLinePt);

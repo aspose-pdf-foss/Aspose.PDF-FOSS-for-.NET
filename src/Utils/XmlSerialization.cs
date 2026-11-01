@@ -271,7 +271,9 @@ internal static class XmlSerialization
             if (state.LineSpacing > 0) w.WriteAttributeString("LineSpacing", Num(state.LineSpacing));
             if (state.CharacterSpacing != 0) w.WriteAttributeString("CharacterSpacing", Num(state.CharacterSpacing));
             if (state.WordSpacing != 0) w.WriteAttributeString("WordSpacing", Num(state.WordSpacing));
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
             if (state.HorizontalScaling != 100) w.WriteAttributeString("HorizontalScaling", Num(state.HorizontalScaling));
+#pragma warning restore S1244
             if (state.Rotation != 0) w.WriteAttributeString("Rotation", Num(state.Rotation));
             if (state.TextRise != 0) w.WriteAttributeString("TextRise", Num(state.TextRise));
             // A fragment's alignment can be declared on its TEXT STATE rather than on
@@ -496,8 +498,10 @@ internal static class XmlSerialization
             if (gi.RotationAngle != 0) w.WriteAttributeString("RotationAngle", Num(gi.RotationAngle));
             if (gi.SkewAngleX != 0) w.WriteAttributeString("SkewAngleX", Num(gi.SkewAngleX));
             if (gi.SkewAngleY != 0) w.WriteAttributeString("SkewAngleY", Num(gi.SkewAngleY));
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
             if (gi.ScalingRateX != 1) w.WriteAttributeString("ScalingRateX", Num(gi.ScalingRateX));
             if (gi.ScalingRateY != 1) w.WriteAttributeString("ScalingRateY", Num(gi.ScalingRateY));
+#pragma warning restore S1244
         }
         WriteMargin(w, "Margin", graph.Margin);
         WriteBorder(w, "Border", graph.Border);

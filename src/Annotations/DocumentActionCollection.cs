@@ -64,7 +64,7 @@ public sealed class DocumentActionCollection
             { "DP", AfterPrinting },
         };
         var nonNullCount = 0;
-        foreach (var v in actions.Values) if (v is not null) nonNullCount++;
+        foreach (var v in actions.Values.Where(v => v is not null)) nonNullCount++;
         if (nonNullCount == 0)
         {
             // Strip any pre-existing /AA when all slots are clear so the

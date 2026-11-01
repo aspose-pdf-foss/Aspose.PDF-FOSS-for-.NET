@@ -41,7 +41,9 @@ internal static partial class MarkdownRenderer
             var repY = row.Max(m => m.Rect.URY);
             foreach (var m in row) mp.order.Add((m, repY, m.Rect.LLX));
         }
+#pragma warning disable S3267 // Select would read the member once, before calls in the body that can change it
         foreach (var it in mp.order.OrderByDescending(x => x.repY).ThenBy(x => x.llx))
+#pragma warning restore S3267
             it.ip.Token = mp.images.Token(it.ip);
 
         foreach (var (img, host) in mp.inlineImgs)

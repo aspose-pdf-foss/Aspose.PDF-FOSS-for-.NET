@@ -22,7 +22,7 @@ public sealed partial class TextAbsorber
     /// tmOriginX + (penText - tmOriginX) * tmScaleX + localCmTx.
     /// </remarks>
     /// <returns>The text-space pen after the run's glyph advances.</returns>
-    private static (double result, double keptStartPen) AppendClippedRun(StringBuilder sb, byte[] bytes, Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader, bool useFontEngine, FontMetrics? metrics, double fontSize, double horizScale, Rectangle searchRect, double tmOriginX, double tmScaleX, double localCmTx, double cmScaleX, double penText, double charSpacing, double wordSpacing, bool blankClipped = false, bool dropLeadingSpaces = false)
+    private static (double result, double keptStartPen) AppendClippedRun(StringBuilder sb, byte[] bytes, Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader, FontMetrics? metrics, double fontSize, double horizScale, Rectangle searchRect, double tmOriginX, double tmScaleX, double localCmTx, double cmScaleX, double penText, double charSpacing, double wordSpacing, bool blankClipped = false, bool dropLeadingSpaces = false)
     {
         double keptStartPen = default;
         // Text-space pen of the first SURVIVING glyph: a left-clipped run's
@@ -31,18 +31,26 @@ public sealed partial class TextAbsorber
         keptStartPen = double.NaN;
         const double eps = 0.05;
         var isCid = metrics?.IsCid ?? (fontDict?.GetName("Subtype") == "Type0");
+        // A legacy national CMap mixes one-byte and two-byte codes: read as fixed pairs, the
+        // Latin letters of such a font (one byte each) would never reach the output. Its
+        // one-byte codes are half-width, and the width table is keyed by CID, not by code.
+        var legacy = isCid && toUnicode is null && fontDict?.GetName("Encoding") is not null
+            ? GetLegacyCidInfo(fontDict, reader) : null;
         var step = isCid ? 2 : 1;
-        for (var i = 0; i + step - 1 < bytes.Length; i += step)
+        for (var i = 0; i < bytes.Length; i += step)
         {
-            var code = isCid ? ((bytes[i] << 8) | bytes[i + 1]) : bytes[i];
-            var seg = isCid ? new[] { bytes[i], bytes[i + 1] } : new[] { bytes[i] };
-            var glyph = NormalizeDecoded(DecodeString(seg, toUnicode, fontDict, reader, useFontEngine), foldNbsp: false);
+            if (legacy is not null) step = legacy.LegacyByteLength(bytes[i]);
+            if (i + step > bytes.Length) break;
+            var wide = step == 2;
+            var code = wide ? ((bytes[i] << 8) | bytes[i + 1]) : bytes[i];
+            var seg = wide ? new[] { bytes[i], bytes[i + 1] } : new[] { bytes[i] };
+            var glyph = NormalizeDecoded(DecodeString(seg, toUnicode, fontDict, reader), foldNbsp: false);
             // Advance = glyph width + Tc (+ Tw on the space code), matching the
             // main extraction pen — clip positions drift without them.
-            var w = ((metrics is not null
+            var w = ((metrics is not null && (wide || legacy is null)
                 ? metrics.GetWidth(code) * fontSize / 1000.0
                 : fontSize * 0.5 * System.Math.Max(1, glyph.Length))
-                + charSpacing + (!isCid && code == 32 ? wordSpacing : 0)) * horizScale;
+                + charSpacing + (!wide && code == 32 ? wordSpacing : 0)) * horizScale;
             // Device X = CTM linear scale × (Tm-composed text X) + CTM translation.
             // Content nested in a scaled Form XObject (e.g. resized page content
             // invoked via "0.6 0 0 0.6 tx ty cm /Fm Do") must fold the cm scale in,
@@ -89,10 +97,9 @@ public sealed partial class TextAbsorber
     /// of the new line anchors column 0. Called before spacing so <see cref="ColumnSpaces"/>
     /// measures from the correct line origin.
     /// </summary>
-    private void TrackLineStart(double runPageX, bool whitespaceOnly = false)
+    private void TrackLineStart(double runPageX)
     {
-        int ls = _text.Length;
-        while (ls > 0 && _text[ls - 1] != '\n') ls--;
+        int ls = CurrentLineStart();
         if (ls != _lineStartTextOffset) { _lineStartTextOffset = ls; _lineStartPageX = double.NaN; }
         // Whitespace-only runs are grid citizens like any other: they anchor
         // the line and their glyphs fill their own columns (the leading-space
@@ -225,7 +232,9 @@ public sealed partial class TextAbsorber
         // Left of the origin there are no accumulated stops to walk; the pure
         // grid clamps everything at negative X to one column left regardless.
         if (x < origin) return (int)Math.Floor((x - origin) / cell);
+#pragma warning disable S1244 // cache key - recomputes when the inputs differ in any bit
         if (_gridStops is null || _gridStopsCell != cell || _gridStopsOrigin != origin)
+#pragma warning restore S1244
         {
             _gridStops = new double[256];
             _gridStopsOrigin = origin;
@@ -293,7 +302,9 @@ public sealed partial class TextAbsorber
         var minX = double.MaxValue;
         foreach (var (off, x) in _pageLineStarts)
             if (off >= pageTextStart && InBand(x) && x < minX) minX = x;
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
         if (minX == double.MaxValue) return;
+#pragma warning restore S1244
         // Keep the merge/target math on the same trim.
         _pageMinX = minX;
 
@@ -345,10 +356,17 @@ public sealed partial class TextAbsorber
     /// behind the device column (each glyph covers ~2 grid cells).</summary>
     /// <summary>True when the current output tail (last ~8 non-space chars)
     /// carries an RTL character — the same lookback the TJ backjump rule uses.</summary>
+    /// <summary>How far back the text just written is read when deciding whether it is right-to-left:
+    /// a few words. Spaces are stepped over without counting, so without this bound a sheet set as
+    /// a grid of space glyphs was walked back across every pad space on every one of its shows -
+    /// minutes on a page of a million glyphs - for a verdict that is never "right-to-left" there.</summary>
+    private const int RecentTextWindow = 64;
+
     private bool RecentTextIsRtl()
     {
         var seen = 0;
-        for (var i = _text.Length - 1; i >= 0 && seen < 8; i--)
+        var oldest = Math.Max(0, _text.Length - RecentTextWindow);
+        for (var i = _text.Length - 1; i >= oldest && seen < 8; i--)
         {
             var c = _text[i];
             if (c == '\n' || c == '\r') return false;
@@ -357,6 +375,71 @@ public sealed partial class TextAbsorber
             seen++;
         }
         return false;
+    }
+
+    /// <summary>A shown string that lands wholly left of the previous run's start, more than a grid cell
+    /// back, draws its row out of x order (a value before its label, cells right to left): it opens a new
+    /// logical line, as a show array's backward jump does, and the row merge orders the pieces by x. An
+    /// overlapping redraw (a shadow or duplicate stack) and right-to-left text keep appending.</summary>
+    private void BreakAtBackwardJump(ExtractState xs, double startPageX)
+    {
+        if (_pageCellWidth <= 0 || xs.tmRotated || xs.tmAr <= 0
+            || double.IsNaN(xs.lastRunEndPageX) || double.IsNaN(xs.lastRunStartPageX)
+            || _text.Length == 0 || _text[^1] == '\n'
+            || startPageX - xs.lastRunEndPageX >= -_pageCellWidth
+            || startPageX >= xs.lastRunStartPageX - _pageCellWidth
+            || NearRightToLeftText())
+            return;
+        RecordLineY();
+        AppendStreamBreak();
+        xs.lastRunEndX = double.NaN; xs.lastRunEndDevX = double.NaN; xs.lastRunEndPageX = double.NaN;
+    }
+
+    /// <summary>Records where the run just shown starts and ends, for the gap to the next run. A run drawn
+    /// wholly inside the one before it - an accent or a vowel sign moved back over its letter - leaves the
+    /// line's ink ending where that run ends, and the next run's gap is measured from there. A right-to-left line
+    /// keeps its pen-based gaps: its runs legitimately pen leftward.</summary>
+    private void TrackRunExtent(ExtractState xs, double startPageX, double endPageX, double endX)
+    {
+        if (xs.tmRotated)
+        {
+            xs.lastRunEndPageX = double.NaN;
+            xs.lastRunStartPageX = double.NaN;
+            xs.lastRunEndX = endX;
+            return;
+        }
+        if (xs.tmAr > 0 && !double.IsNaN(xs.lastRunEndPageX) && !double.IsNaN(xs.lastRunStartPageX)
+            && startPageX >= xs.lastRunStartPageX && endPageX < xs.lastRunEndPageX && !NearRightToLeftText())
+            return;
+        xs.lastRunEndPageX = endPageX;
+        xs.lastRunStartPageX = startPageX;
+        xs.lastRunEndX = endX;
+    }
+
+    /// <summary>Whether right-to-left text was written lately, across line breaks too: the stream lines of a
+    /// right-to-left row are joined by the row merge later, and their gaps stay as the pen sets them.</summary>
+    private bool NearRightToLeftText()
+    {
+        for (var i = _text.Length - 1; i >= Math.Max(0, _text.Length - RecentTextWindow); i--)
+            if (BidiReorderer.IsRtlChar(_text[i])) return true;
+        return false;
+    }
+
+    /// <summary>A gap narrower than this share of the font size, measured from ink already drawn, is no
+    /// word gap (the threshold the run gaps use).</summary>
+    private const double OverstrikeGapEms = 0.09;
+
+    /// <summary>Whether a kern of a show array brings the pen back to where the ink drawn on the line
+    /// before the array ends, every glyph of the array so far lying inside that ink: a mark overstruck on
+    /// its letter by a move back, the word then going on. Such a kern opens no word gap.</summary>
+    private bool KernLandsOnDrawnInk(ExtractState xs, ShowTextArrayState tj)
+    {
+        if (xs.tmRotated || xs.tmAr <= 0 || double.IsNaN(xs.lastRunEndPageX)) return false;
+        var inkEnd = xs.tmE + (xs.tx + tj.tjInkWidth - xs.tlmX) * xs.tmAr;
+        var pen = xs.tmE + (xs.tx + tj.tjWidth - xs.tlmX) * xs.tmAr;
+        return inkEnd <= xs.lastRunEndPageX
+            && pen - xs.lastRunEndPageX < OverstrikeGapEms * xs.fontSize * xs.tmAr
+            && !NearRightToLeftText();
     }
 
     private int ColumnSpaces(double gap, double threshold, double runPageX, int extraChars = 0,

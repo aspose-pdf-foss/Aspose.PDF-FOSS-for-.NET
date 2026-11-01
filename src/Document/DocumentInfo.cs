@@ -10,7 +10,6 @@ namespace Aspose.Pdf;
 public sealed class DocumentInfo
 {
     private PdfDictionary? _dict;
-    private readonly PdfReader? _reader;
     private readonly Document? _document;
     private bool _isDirty;
     private bool _modDateExplicitlySet;
@@ -18,7 +17,6 @@ public sealed class DocumentInfo
     internal DocumentInfo(PdfDictionary? dict, PdfReader? reader = null, Document? document = null)
     {
         _dict = dict;
-        _reader = reader;
         _document = document;
     }
 
@@ -39,7 +37,28 @@ public sealed class DocumentInfo
     public int Count { get { EnsureDictForRead(); return _dict?.Count ?? 0; } }
 
     /// <summary>All metadata entry keys.</summary>
-    public IEnumerable<string> Keys { get { EnsureDictForRead(); return _dict?.Keys ?? Enumerable.Empty<string>(); } }
+    public IEnumerable<string> Keys { get { EnsureDictForRead(); return _dict?.Keys.Select(ShownKey) ?? Enumerable.Empty<string>(); } }
+
+    /// <summary>The name of an entry as text. A name that is not ASCII is stored as its UTF-8
+    /// bytes, which the dictionary holds one character per byte.</summary>
+    private static string ShownKey(string stored)
+    {
+        if (stored.All(c => c <= 0x7F) || stored.Any(c => c > 0xFF)) return stored;
+        try { return StrictUtf8.GetString(Compat.Latin1.GetBytes(stored)); }
+        catch (DecoderFallbackException) { return stored; }
+    }
+
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
+    /// <summary>The dictionary key an entry name is stored under: the name itself, or the
+    /// byte-per-character view of its UTF-8 form when that is the entry the dictionary has
+    /// (or the name cannot be written byte for byte).</summary>
+    private string StoredKey(string key)
+    {
+        if (_dict is null || key.All(c => c <= 0x7F) || _dict.ContainsKey(key)) return key;
+        var utf8 = Compat.Latin1.GetString(Encoding.UTF8.GetBytes(key));
+        return _dict.ContainsKey(utf8) || key.Any(c => c > 0xFF) ? utf8 : key;
+    }
 
     /// <summary>
     /// Whether the given key is one of the well-known PDF document information
@@ -59,35 +78,35 @@ public sealed class DocumentInfo
     public string? Title
     {
         get => GetString("Title") ?? MissingString;
-        set => SetString("Title", value);
+        set => Assign("Title", value);
     }
 
     /// <summary>Gets or sets the name of the person who created the document (the /Author entry). Reads as an empty string on a new document and as null when a loaded file has none.</summary>
     public string? Author
     {
         get => GetString("Author") ?? MissingString;
-        set => SetString("Author", value);
+        set => Assign("Author", value);
     }
 
     /// <summary>Gets or sets the document subject (the /Subject entry). Reads as an empty string on a new document and as null when a loaded file has none.</summary>
     public string? Subject
     {
         get => GetString("Subject") ?? MissingString;
-        set => SetString("Subject", value);
+        set => Assign("Subject", value);
     }
 
     /// <summary>Gets or sets the keywords associated with the document (the /Keywords entry). Reads as an empty string on a new document and as null when a loaded file has none.</summary>
     public string? Keywords
     {
         get => GetString("Keywords") ?? MissingString;
-        set => SetString("Keywords", value);
+        set => Assign("Keywords", value);
     }
 
     /// <summary>Gets or sets the name of the application that created the original content (the /Creator entry). When it is empty at save time, the library writes its own name.</summary>
     public string? Creator
     {
         get => GetString("Creator") ?? MissingString;
-        set => SetString("Creator", value);
+        set => Assign("Creator", value);
     }
 
     /// <summary>Gets or sets the name of the application that produced the PDF (the /Producer entry). Unless you assign it, saving replaces it with this library's name.</summary>
@@ -97,7 +116,7 @@ public sealed class DocumentInfo
         set
         {
             ProducerAssigned = true;
-            SetString("Producer", value);
+            Assign("Producer", value);
         }
     }
 
@@ -114,7 +133,7 @@ public sealed class DocumentInfo
         get => GetName("Trapped");
         set
         {
-            if (value is not null && value is not "True" and not "False" and not "Unknown")
+            if (value is not (null or "True" or "False" or "Unknown"))
                 throw new ArgumentException(
                     "Trapped value must be 'True', 'False', 'Unknown', or null.",
                     nameof(value));
@@ -126,7 +145,11 @@ public sealed class DocumentInfo
     public DateTime CreationDate
     {
         get => ParseDate(GetString("CreationDate")) ?? DateTime.MinValue;
-        set => SetDate("CreationDate", value == DateTime.MinValue ? null : value);
+        set
+        {
+            _document?.AssignedInfoKeys.Add("CreationDate");
+            SetDate("CreationDate", value == DateTime.MinValue ? null : value);
+        }
     }
 
     /// <summary>Gets or sets the date the document was last modified (the /ModDate entry). Unless you assign it, every save stamps the current UTC time; reads as <c>DateTime.MinValue</c> when absent.</summary>
@@ -135,6 +158,7 @@ public sealed class DocumentInfo
         get => ParseDate(GetString("ModDate")) ?? DateTime.MinValue;
         set
         {
+            _document?.AssignedInfoKeys.Add("ModDate");
             SetDate("ModDate", value == DateTime.MinValue ? null : value);
             _modDateExplicitlySet = true;
         }
@@ -198,8 +222,12 @@ public sealed class DocumentInfo
     public void Clear()
     {
         if (_dict is null) return;
+        _document?.MarkInfoEdited(_dict);
         foreach (var key in _dict.Keys.ToList())
+        {
             _dict.Remove(key);
+            _document?.AssignedInfoKeys.Add(key);
+        }
         _isDirty = true;
     }
 
@@ -207,10 +235,10 @@ public sealed class DocumentInfo
     public void ClearCustomData()
     {
         if (_dict is null) return;
-        foreach (var key in _dict.Keys.ToList())
+        _document?.MarkInfoEdited(_dict);
+        foreach (var key in _dict.Keys.Where(key => !IsPredefinedKey(key)).ToList())
         {
-            if (!IsPredefinedKey(key))
-                _dict.Remove(key);
+            _dict.Remove(key);
         }
         _isDirty = true;
     }
@@ -219,24 +247,27 @@ public sealed class DocumentInfo
     public void Remove(string key)
     {
         if (key is null || _dict is null) return;
-        if (_dict.Remove(key)) _isDirty = true;
+        if (!_dict.Remove(StoredKey(key))) return;
+        _document?.MarkInfoEdited(_dict);
+        _isDirty = true;
+        _document?.AssignedInfoKeys.Add(key);
     }
 
     /// <summary>
     /// Set a custom metadata property.
     /// </summary>
-    public void SetCustom(string key, string value) => SetString(key, value);
+    public void SetCustom(string key, string value) => Assign(key, value);
 
     /// <summary>
     /// Adds a custom metadata property. Alias for <see cref="SetCustom"/>;
     /// matches the DocumentInfo.Add(string, string) public surface.
     /// </summary>
-    public void Add(string key, string value) => SetString(key, value);
+    public void Add(string key, string value) => Assign(key, value);
 
     /// <summary>
     /// Whether the underlying /Info dictionary has an entry for the given key.
     /// </summary>
-    public bool ContainsKey(string key) => _dict?.ContainsKey(key) ?? false;
+    public bool ContainsKey(string key) => _dict?.ContainsKey(StoredKey(key)) ?? false;
 
     /// <summary>
     /// Get a custom metadata property.
@@ -253,10 +284,18 @@ public sealed class DocumentInfo
         set
         {
             if (value is null)
-                _dict?.Remove(key);
+                Remove(key);
             else
-                SetString(key, value);
+                Assign(key, value);
         }
+    }
+
+    /// <summary>A value the CALLER gave (or emptied): the save carries it into the XMP packet too, where a
+    /// value the file merely came with, or one the library stamps, is left to the packet.</summary>
+    private void Assign(string key, string? value)
+    {
+        _document?.AssignedInfoKeys.Add(key);
+        SetString(key, value);
     }
 
     internal void ClearDirty() => _isDirty = false;
@@ -283,7 +322,7 @@ public sealed class DocumentInfo
     private string? GetString(string key)
     {
         EnsureDictForRead();
-        var obj = _dict?.Get(key);
+        var obj = _dict?.Get(StoredKey(key));
         return obj switch
         {
             PdfString s => s.ToText(),
@@ -311,11 +350,12 @@ public sealed class DocumentInfo
         EnsureDict();
         if (_dict is null) return;
 
+        key = StoredKey(key);
         if (value is null)
             _dict.Remove(key);
         else
-            // Text outside Latin1 (e.g. Œ, CJK) upgrades to UTF-16BE with a BOM;
-            // a bare Latin1 write flattened such characters to their fallback
+            // Text outside Latin1 (e.g. Œ, CJK) upgrades to UTF-16BE with a BOM; a
+            // bare Latin1 write flattened such characters to their fallback
             // (Œ → O) and the /Info string no longer round-tripped.
             _dict.Set(key, Forms.Field.EncodePdfTextString(value));
         FlushDirty();
@@ -353,6 +393,8 @@ public sealed class DocumentInfo
                 "ModDate" => _modTimeZoneOverride,
                 _ => null,
             };
+            // A local time is written with the offset it was taken at, not as if it were universal time.
+            if (tz is null && value.Value.Kind == DateTimeKind.Local) tz = TimeZoneInfo.Local.GetUtcOffset(value.Value);
             _dict.Set(key, new PdfString(Compat.Latin1.GetBytes(FormatPdfDate(value.Value, tz))));
         }
         FlushDirty();
@@ -378,6 +420,8 @@ public sealed class DocumentInfo
 
     private void EnsureDict()
     {
+        // Every caller is about to change the dictionary: an in-place save must write it.
+        if (_dict is not null) _document?.MarkInfoEdited(_dict);
         if (_dict is null && _document is not null)
         {
             var (dict, _) = _document.EnsureInfoDict();
@@ -423,14 +467,14 @@ public sealed class DocumentInfo
         if (tz[0] != '+' && tz[0] != '-') return TimeSpan.Zero;
         try
         {
-            var hh = tz.Length >= 3 ? int.Parse(tz[1..3]) : 0;
+            var hh = tz.Length >= 3 ? int.Parse(tz[1..3], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture) : 0;
             var mmIdx = tz.IndexOf('\'');
             int mm = 0;
             if (tz.Length >= 5)
             {
                 var mmStart = mmIdx > 0 && mmIdx + 1 < tz.Length ? mmIdx + 1 : 3;
                 if (mmStart + 2 <= tz.Length)
-                    mm = int.Parse(tz.Substring(mmStart, 2));
+                    mm = int.Parse(tz.Substring(mmStart, 2), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture);
             }
             return new TimeSpan(sign * hh, sign * mm, 0);
         }
@@ -463,11 +507,11 @@ public sealed class DocumentInfo
             try
             {
                 var year = int.Parse(s[..4]);
-                var month = s.Length >= 6 ? int.Parse(s[4..6]) : 1;
-                var day = s.Length >= 8 ? int.Parse(s[6..8]) : 1;
-                var hour = s.Length >= 10 ? int.Parse(s[8..10]) : 0;
-                var minute = s.Length >= 12 ? int.Parse(s[10..12]) : 0;
-                var second = s.Length >= 14 ? int.Parse(s[12..14]) : 0;
+                var month = s.Length >= 6 ? int.Parse(s[4..6], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture) : 1;
+                var day = s.Length >= 8 ? int.Parse(s[6..8], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture) : 1;
+                var hour = s.Length >= 10 ? int.Parse(s[8..10], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture) : 0;
+                var minute = s.Length >= 12 ? int.Parse(s[10..12], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture) : 0;
+                var second = s.Length >= 14 ? int.Parse(s[12..14], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture) : 0;
 
                 return new DateTime(year, month, day, hour, minute, second, DateTimeKind.Utc);
             }

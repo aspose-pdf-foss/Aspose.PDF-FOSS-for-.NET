@@ -53,17 +53,17 @@ internal static partial class HtmlToPdfConverter
     private const double LsFooterPadL = 11.25;
     private const double LsPxPt = 0.75;
 
-    private static readonly Regex LsTagOrTextRx = new("<(/?)([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*>|[^<]+", RegexOptions.Compiled);
-    private static readonly Regex LsBrRx = new("<br\\s*/?>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex LsTagOrTextRx = new("<(/?)([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*>|[^<]+", RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex LsBrRx = new("<br\\s*/?>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Render the login shell, or null when the page does not carry the idiom's markup.</summary>
     private static Document? TryRenderLoginShell(ConvertState cv, HtmlLoadOptions? options)
     {
         var html = cv.html;
-        if (!Regex.IsMatch(html, "<table\\b[^>]*id\\s*=\\s*['\"]ContentTitle['\"]", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "<tr\\b[^>]*id\\s*=\\s*['\"]Content['\"]", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "<td\\b[^>]*id\\s*=\\s*['\"]Copyright['\"]", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "<td\\b[^>]*colspan[^>]*class\\s*=\\s*['\"]Tahoma11DarkGray['\"]", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(html, "<table\\b[^>]*id\\s*=\\s*['\"]ContentTitle['\"]", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "<tr\\b[^>]*id\\s*=\\s*['\"]Content['\"]", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "<td\\b[^>]*id\\s*=\\s*['\"]Copyright['\"]", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "<td\\b[^>]*colspan[^>]*class\\s*=\\s*['\"]Tahoma11DarkGray['\"]", RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor(LpFace) is not { } tm) return null;
         var ls = new LoginShellState
@@ -92,33 +92,33 @@ internal static partial class HtmlToPdfConverter
     {
         var s = ls.html;
         // the nav row: the logo in the dark cell, the application logo in the user-menu cell
-        var logoTd = Regex.Match(s, "<td\\b[^>]*bgcolor\\s*=\\s*['\"]?#231f20['\"]?[^>]*>([\\s\\S]*?)</td>", RegexOptions.IgnoreCase);
-        var menuTd = Regex.Match(s, "<td\\b[^>]*id\\s*=\\s*['\"]UserMenu1['\"][^>]*>([\\s\\S]*?)</table>", RegexOptions.IgnoreCase);
+        var logoTd = SafeRegex.Match(s, "<td\\b[^>]*bgcolor\\s*=\\s*['\"]?#231f20['\"]?[^>]*>([\\s\\S]*?)</td>", RegexOptions.IgnoreCase);
+        var menuTd = SafeRegex.Match(s, "<td\\b[^>]*id\\s*=\\s*['\"]UserMenu1['\"][^>]*>([\\s\\S]*?)</table>", RegexOptions.IgnoreCase);
         if (!logoTd.Success || !menuTd.Success) return false;
         if (LsImage(ls, logoTd.Groups[1].Value) is not { } logo || LsImage(ls, menuTd.Groups[1].Value) is not { } app) return false;
         ls.logo = logo;
         ls.appLogo = app;
-        var navH = Regex.Match(menuTd.Groups[1].Value, "<table\\b[^>]*height\\s*=\\s*['\"]?(\\d+)", RegexOptions.IgnoreCase);
+        var navH = SafeRegex.Match(menuTd.Groups[1].Value, "<table\\b[^>]*height\\s*=\\s*['\"]?(\\d+)", RegexOptions.IgnoreCase);
         ls.navTableH = navH.Success ? double.Parse(navH.Groups[1].Value, ls.invc) * LsPxPt : 0;
         // the box: the 500px table whose bottom margin is a percent of the row
-        var box = Regex.Match(s, "<table\\b[^>]*width\\s*=\\s*['\"]?(\\d+)['\"]?[^>]*margin-bottom\\s*:\\s*(\\d+(?:\\.\\d+)?)%", RegexOptions.IgnoreCase);
+        var box = SafeRegex.Match(s, "<table\\b[^>]*width\\s*=\\s*['\"]?(\\d+)['\"]?[^>]*margin-bottom\\s*:\\s*(\\d+(?:\\.\\d+)?)%", RegexOptions.IgnoreCase);
         if (!box.Success) return false;
         ls.boxW = double.Parse(box.Groups[1].Value, ls.invc) * LsPxPt;
         ls.boxMarginPct = double.Parse(box.Groups[2].Value, ls.invc) / 100.0;
         var boxEnd = LsElementClose(s, box.Index + box.Length, "table");
         var boxHtml = s[(box.Index + box.Length)..boxEnd];
         var rows = new List<string>();
-        foreach (Match tr in Regex.Matches(boxHtml, "<tr\\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match tr in SafeRegex.Matches(boxHtml, "<tr\\b[^>]*>", RegexOptions.IgnoreCase))
             rows.Add(boxHtml[(tr.Index + tr.Length)..LsElementClose(boxHtml, tr.Index + tr.Length, "tr")]);
         if (rows.Count < 3) return false;
         ls.topCorners = LsImages(ls, rows[0]);
         ls.bottomCorners = LsImages(ls, rows[^1]);
         if (ls.topCorners.Count < 2 || ls.bottomCorners.Count < 2) return false;
-        var body = Regex.Match(rows[1], "<td\\b[^>]*colspan[^>]*class\\s*=\\s*['\"]Tahoma11DarkGray['\"][^>]*>", RegexOptions.IgnoreCase);
+        var body = SafeRegex.Match(rows[1], "<td\\b[^>]*colspan[^>]*class\\s*=\\s*['\"]Tahoma11DarkGray['\"][^>]*>", RegexOptions.IgnoreCase);
         if (!body.Success) return false;
         var bodyStart = body.Index + body.Length;
         if (!LsParseBody(ls, rows[1][bodyStart..LsElementClose(rows[1], bodyStart, "td")])) return false;
-        var foot = Regex.Match(s, "<td\\b[^>]*id\\s*=\\s*['\"]Copyright['\"][^>]*>([\\s\\S]*?)</td>", RegexOptions.IgnoreCase);
+        var foot = SafeRegex.Match(s, "<td\\b[^>]*id\\s*=\\s*['\"]Copyright['\"][^>]*>([\\s\\S]*?)</td>", RegexOptions.IgnoreCase);
         ls.footer = foot.Success ? LpFlat(foot.Groups[1].Value) : "";
         return true;
     }
@@ -126,19 +126,19 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The body cell: the welcome segments, the login grid and the notice segments.</summary>
     private static bool LsParseBody(LoginShellState ls, string body)
     {
-        body = Regex.Replace(body, "<!--[\\s\\S]*?-->", "");
-        var grid = Regex.Match(body, "<table\\b[^>]*width\\s*=\\s*['\"]?(\\d+)%", RegexOptions.IgnoreCase);
+        body = SafeRegex.Replace(body, "<!--[\\s\\S]*?-->", "");
+        var grid = SafeRegex.Match(body, "<table\\b[^>]*width\\s*=\\s*['\"]?(\\d+)%", RegexOptions.IgnoreCase);
         if (!grid.Success) return false;
         ls.gridPct = double.Parse(grid.Groups[1].Value, ls.invc) / 100.0;
         var gridEnd = LsElementClose(body, grid.Index + grid.Length, "table");
         ls.welcome = LsSegments(body[..grid.Index]);
         ls.notice = LsSegments(body[Math.Min(body.Length, gridEnd + "</table>".Length)..]);
         var cells = new List<string>();
-        foreach (Match td in Regex.Matches(body[(grid.Index + grid.Length)..gridEnd], "<td\\b[^>]*>([\\s\\S]*?)</td>", RegexOptions.IgnoreCase))
+        foreach (Match td in SafeRegex.Matches(body[(grid.Index + grid.Length)..gridEnd], "<td\\b[^>]*>([\\s\\S]*?)</td>", RegexOptions.IgnoreCase))
             cells.Add(td.Groups[1].Value);
         if (cells.Count < 3) return false;
-        ls.userLabel = LsInlineRuns(LsBrRx.Split(cells[0])[0]);
-        ls.passLabel = LsInlineRuns(LsBrRx.Split(cells[1])[0]);
+        ls.userLabel = LsInlineRuns(SafeRegex.Split(LsBrRx, cells[0])[0]);
+        ls.passLabel = LsInlineRuns(SafeRegex.Split(LsBrRx, cells[1])[0]);
         ls.links = LsSegments(cells[2]);
         return ls.userLabel.Count > 0 && ls.passLabel.Count > 0 && ls.links.Count > 0;
     }
@@ -147,17 +147,17 @@ internal static partial class HtmlToPdfConverter
     /// line without opening another; a hidden div contributes nothing.</summary>
     private static List<List<LpRun>> LsSegments(string frag)
     {
-        frag = Regex.Replace(frag, "<!--[\\s\\S]*?-->", "");
-        var hidden = Regex.Match(frag, "<div\\b[^>]*display\\s*:\\s*none[^>]*>", RegexOptions.IgnoreCase);
+        frag = SafeRegex.Replace(frag, "<!--[\\s\\S]*?-->", "");
+        var hidden = SafeRegex.Match(frag, "<div\\b[^>]*display\\s*:\\s*none[^>]*>", RegexOptions.IgnoreCase);
         while (hidden.Success)
         {
             var start = hidden.Index + hidden.Length;
             var end = Math.Min(frag.Length, DivClose(frag, start) + "</div>".Length);
             frag = frag[..hidden.Index] + frag[end..];
-            hidden = Regex.Match(frag, "<div\\b[^>]*display\\s*:\\s*none[^>]*>", RegexOptions.IgnoreCase);
+            hidden = SafeRegex.Match(frag, "<div\\b[^>]*display\\s*:\\s*none[^>]*>", RegexOptions.IgnoreCase);
         }
         var segs = new List<List<LpRun>>();
-        foreach (var part in LsBrRx.Split(frag)) segs.Add(LsInlineRuns(part));
+        foreach (var part in SafeRegex.Split(LsBrRx, frag)) segs.Add(LsInlineRuns(part));
         if (segs.Count > 1 && segs[^1].Count == 0) segs.RemoveAt(segs.Count - 1);
         return segs;
     }
@@ -168,7 +168,7 @@ internal static partial class HtmlToPdfConverter
     {
         var runs = new List<LpRun>();
         int bold = 0, under = 0;
-        foreach (Match m in LsTagOrTextRx.Matches(Regex.Replace(frag, "[ \\t\\r\\n]+", " ")))
+        foreach (Match m in SafeRegex.Matches(LsTagOrTextRx, SafeRegex.Replace(frag, "[ \\t\\r\\n]+", " ")))
         {
             if (m.Value[0] == '<')
             {
@@ -203,7 +203,7 @@ internal static partial class HtmlToPdfConverter
     private static List<LsPicture> LsImages(LoginShellState ls, string frag)
     {
         var list = new List<LsPicture>();
-        foreach (Match img in Regex.Matches(frag, "<img\\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match img in SafeRegex.Matches(frag, "<img\\b[^>]*>", RegexOptions.IgnoreCase))
             if (LsImage(ls, img.Value) is { } im) list.Add(im);
         return list;
     }
@@ -212,13 +212,13 @@ internal static partial class HtmlToPdfConverter
     /// width and height attributes in px, else its natural size; a 1px spacer is skipped.</summary>
     private static LsPicture? LsImage(LoginShellState ls, string frag)
     {
-        var img = Regex.Match(frag, "<img\\b[^>]*>", RegexOptions.IgnoreCase);
+        var img = SafeRegex.Match(frag, "<img\\b[^>]*>", RegexOptions.IgnoreCase);
         if (!img.Success) return null;
-        var src = Regex.Match(img.Value, "src\\s*=\\s*['\"]([^'\"]+)", RegexOptions.IgnoreCase);
+        var src = SafeRegex.Match(img.Value, "src\\s*=\\s*['\"]([^'\"]+)", RegexOptions.IgnoreCase);
         if (!src.Success || LoadConverterImage(src.Groups[1].Value, ls.options) is not { } bytes) return null;
         if (TryReadImagePixelSize(bytes) is not { } nat) return null;
-        var w = Regex.Match(img.Value, "\\bwidth\\s*=\\s*['\"]?(\\d+)", RegexOptions.IgnoreCase);
-        var h = Regex.Match(img.Value, "\\bheight\\s*=\\s*['\"]?(\\d+)", RegexOptions.IgnoreCase);
+        var w = SafeRegex.Match(img.Value, "\\bwidth\\s*=\\s*['\"]?(\\d+)", RegexOptions.IgnoreCase);
+        var h = SafeRegex.Match(img.Value, "\\bheight\\s*=\\s*['\"]?(\\d+)", RegexOptions.IgnoreCase);
         var im = new LsPicture
         {
             Bytes = bytes,
@@ -231,9 +231,9 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Index of the close tag matching the element whose open tag ends at <paramref name="start"/>.</summary>
     private static int LsElementClose(string s, int start, string tag)
     {
-        var rx = new Regex("<(/?)" + tag + "\\b[^>]*>", RegexOptions.IgnoreCase);
+        var rx = new Regex("<(/?)" + tag + "\\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var depth = 1;
-        for (var m = rx.Match(s, start); m.Success; m = m.NextMatch())
+        for (var m = SafeRegex.Match(rx, s, start); m.Success; m = SafeRegex.NextMatch(m))
         {
             depth += m.Groups[1].Value.Length > 0 ? -1 : 1;
             if (depth == 0) return m.Index;

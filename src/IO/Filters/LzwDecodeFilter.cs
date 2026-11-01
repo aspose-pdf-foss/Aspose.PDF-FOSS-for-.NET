@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO.Filters;
 
@@ -14,134 +14,115 @@ internal static class LzwDecodeFilter
 
     public static byte[] Decode(byte[] data, PdfDictionary? parms)
     {
-        var earlyChange = parms is not null ? (int)parms.GetInt("EarlyChange", 1) : 1;
-        var output = DecodeLzw(data, earlyChange);
-
-        if (parms is not null)
-        {
-            var predictor = (int)parms.GetInt("Predictor", 1);
-            if (predictor > 1)
-            {
-                var columns = (int)parms.GetInt("Columns", 1);
-                var colors = (int)parms.GetInt("Colors", 1);
-                var bpc = (int)parms.GetInt("BitsPerComponent", 8);
-                // LZWDecode and FlateDecode share the same /Predictor DecodeParms
-                // (PDF 32000 §7.4.4.4); apply the TIFF/PNG predictor to the decoded
-                // output exactly as FlateDecode does.
-                output = FlateDecodeFilter.RemovePredictor(output, predictor, columns, colors, bpc);
-            }
-        }
-
-        return output;
+        if (parms is null) return DecodeLzw(data, earlyChange: 1);
+        return Decode(data, (int)parms.GetInt("EarlyChange", 1), (int)parms.GetInt("Predictor", 1),
+            (int)parms.GetInt("Columns", 1), (int)parms.GetInt("Colors", 1), (int)parms.GetInt("BitsPerComponent", 8));
     }
 
+    /// <summary>The decode with its parameters given as values (the /DecodeParms keys of the same names).</summary>
+    public static byte[] Decode(byte[] data, int earlyChange, int predictor, int columns, int colors, int bpc)
+    {
+        var output = DecodeLzw(data, earlyChange);
+        // LZWDecode and FlateDecode share the /Predictor parameters of PDF 32000 §7.4.4.4, so the
+        // TIFF or PNG predictor is removed from the decoded output exactly as FlateDecode does.
+        return predictor > 1 ? FlateDecodeFilter.RemovePredictor(output, predictor, columns, colors, bpc) : output;
+    }
+
+    private const int FirstFreeCode = 258;
+    private const int MaxTableSize = 4096;
+    private const int FirstCodeSize = 9;
+    private const int LastCodeSize = 12;
+
+    // The table holds each string as its prefix code and last byte - a string is written by
+    // walking the prefixes back - instead of a byte array per entry that copied the whole
+    // string each time it grew.
     private static byte[] DecodeLzw(byte[] data, int earlyChange)
     {
-        var output = new List<byte>();
+        var output = new MemoryStream(data.Length * 3);
         var reader = new BitReader(data);
+        var prefix = new int[MaxTableSize];
+        var suffix = new byte[MaxTableSize];
+        var length = new int[MaxTableSize];
+        for (var i = 0; i < 256; i++) { suffix[i] = (byte)i; length[i] = 1; }
+        var entry = new byte[MaxTableSize];
 
-        var codeSize = 9;
-        var table = InitTable();
-        var nextCode = 258;
-        byte[]? prevEntry = null;
-
+        var codeSize = FirstCodeSize;
+        var nextCode = FirstFreeCode;
+        var prevCode = -1;
         while (true)
         {
             var code = reader.ReadBits(codeSize);
-            if (code < 0) break; // no more data
-
-            if (code == EodCode) break;
-
+            if (code < 0 || code == EodCode) break;
             if (code == ClearTableCode)
             {
-                table = InitTable();
-                codeSize = 9;
-                nextCode = 258;
-                prevEntry = null;
-                // Let the main loop process the next code: it may legally be
-                // ANOTHER Clear (consecutive 256s), EOD, or a literal — the
-                // prevEntry==null state already handles the first post-clear code.
+                // The next code may legally be another Clear, EOD or a literal: with no
+                // previous code the loop takes it as the first after the clear.
+                codeSize = FirstCodeSize;
+                nextCode = FirstFreeCode;
+                prevCode = -1;
                 continue;
             }
 
-            byte[] currentEntry;
-            if (code < nextCode && table.ContainsKey(code))
+            int len;
+            if (code < nextCode) len = WriteString(code, prefix, suffix, length, entry);
+            else if (code == nextCode && prevCode >= 0)
             {
-                currentEntry = table[code];
+                // The code being defined right now: the previous string plus its own first byte.
+                len = WriteString(prevCode, prefix, suffix, length, entry);
+                entry[len++] = entry[0];
             }
-            else if (code == nextCode && prevEntry is not null)
-            {
-                currentEntry = [.. prevEntry, prevEntry[0]];
-            }
-            else
-            {
-                break; // corrupt data
-            }
+            else break; // corrupt data
 
-            output.AddRange(currentEntry);
-
-            if (prevEntry is not null && nextCode < 4096)
+            output.Write(entry, 0, len);
+            if (prevCode >= 0 && nextCode < MaxTableSize)
             {
-                table[nextCode] = [.. prevEntry, currentEntry[0]];
+                prefix[nextCode] = prevCode;
+                suffix[nextCode] = entry[0];
+                length[nextCode] = length[prevCode] + 1;
                 nextCode++;
             }
-
-            // Increase code size
-            // EarlyChange=1: increase one code early (when nextCode+1 reaches the limit)
-            // EarlyChange=0: increase when table is full (nextCode reaches the limit)
+            // EarlyChange 1 widens the code one entry early; 0 when the table reaches the limit.
             var threshold = earlyChange == 1 ? nextCode + 1 : nextCode;
-            if (threshold >= (1 << codeSize) && codeSize < 12)
-            {
-                codeSize++;
-            }
-
-            prevEntry = currentEntry;
+            if (threshold >= (1 << codeSize) && codeSize < LastCodeSize) codeSize++;
+            prevCode = code;
         }
-
         return output.ToArray();
     }
 
-    private static Dictionary<int, byte[]> InitTable()
+    /// <summary>Write the table's string for <paramref name="code"/> to the start of
+    /// <paramref name="entry"/>, last byte first along the prefixes; returns its length.</summary>
+    private static int WriteString(int code, int[] prefix, byte[] suffix, int[] length, byte[] entry)
     {
-        var table = new Dictionary<int, byte[]>();
-        for (var i = 0; i < 256; i++)
+        var len = length[code];
+        for (var i = len - 1; i >= 0; i--)
         {
-            table[i] = [(byte)i];
+            entry[i] = suffix[code];
+            code = prefix[code];
         }
-        return table;
+        return len;
     }
 
     private sealed class BitReader
     {
         private readonly byte[] _data;
-        private int _bytePos;
-        private int _bitPos;
+        private int _pos;
+        private uint _acc;
+        private int _bits;
 
-        public BitReader(byte[] data)
-        {
-            _data = data;
-            _bytePos = 0;
-            _bitPos = 0;
-        }
+        public BitReader(byte[] data) => _data = data;
 
+        /// <summary>The next <paramref name="count"/> bits, most significant first; -1 once the
+        /// data holds fewer.</summary>
         public int ReadBits(int count)
         {
-            var result = 0;
-            for (var i = 0; i < count; i++)
+            while (_bits < count)
             {
-                if (_bytePos >= _data.Length) return -1;
-
-                var bit = (_data[_bytePos] >> (7 - _bitPos)) & 1;
-                result = (result << 1) | bit;
-
-                _bitPos++;
-                if (_bitPos == 8)
-                {
-                    _bitPos = 0;
-                    _bytePos++;
-                }
+                if (_pos >= _data.Length) return -1;
+                _acc = (_acc << 8) | _data[_pos++];
+                _bits += 8;
             }
-            return result;
+            _bits -= count;
+            return (int)((_acc >> _bits) & ((1u << count) - 1));
         }
     }
 }

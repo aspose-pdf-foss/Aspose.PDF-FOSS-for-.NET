@@ -32,7 +32,9 @@ internal static partial class HtmlToPdfConverter
             foreach (var cell in row)
             {
                 var cw = cell.Flex * MhTableW + MhRowPad;   // border box: basis + padding
-                var fs = cell.IsLabel ? MhLabelFs : cell.IsLink && cell.Flex > 0.09 ? MhLabelFs : MhLinkFs;
+                double fs = MhLinkFs;
+                if (cell.IsLabel) fs = MhLabelFs;
+                else if (cell.IsLink && cell.Flex > 0.09) fs = MhLabelFs;
                 var budget = cw - MhRowPad;
                 var lines = cell.Text.Length > 0
                     ? WrapCfWords(cell.Text, s => M(mh, mh.segoe, "SegoeUI", s, fs) * MhWrapFactor, budget)

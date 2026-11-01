@@ -44,7 +44,8 @@ rendering, accessibility, and comparison.
 - Read, fill, and build AcroForm fields — text, checkbox, radio, choice, button, signature, date,
   rich text, file-select (`FileSelectBoxField`) and paper-barcode (`BarcodeField`) — through `Form`,
   `Field`, `FormFieldBuilder`, `FormEditor`, and `FormDataConverter`, including field-level flatten
-  and JSON/XFDF form-data import and export.
+  and JSON/XFDF form-data import and export. Dynamic XFA forms render as their template lays them
+  out, with the load-time scripts run first, and convert to standard AcroForm pages.
 - Add and edit every standard annotation type — link, text, free-text, highlight,
   square/circle/line/polyline, ink, stamp, popup, file attachment, screen, redaction, watermark,
   pre-press marks, and rich media — with appearance generation and flatten. Applying a redaction
@@ -117,13 +118,13 @@ This library publishes prebuilt binaries to NuGet as
 [`Aspose.PDF.FOSS`](https://www.nuget.org/packages/Aspose.PDF.FOSS/):
 
 ```bash
-dotnet add package Aspose.PDF.FOSS --version 26.10.0
+dotnet add package Aspose.PDF.FOSS --version 26.11.0
 ```
 
 Or with a `<PackageReference>`:
 
 ```xml
-<PackageReference Include="Aspose.PDF.FOSS" Version="26.10.0" />
+<PackageReference Include="Aspose.PDF.FOSS" Version="26.11.0" />
 ```
 
 The package ships builds for **netstandard2.0, net48, net8.0, net9.0 and net10.0**, so it runs on
@@ -350,7 +351,7 @@ signer.Save("signed.pdf");
 The primary entry point is `Document`, which exposes its pages through `Document.Pages` (a
 `PageCollection` of `Page` objects), its interactive form through `Document.Form`, and its
 security surface through `PdfFileSecurity` and `PdfFileSignature`. The public API surface includes
-983 public types across 36 modules, summarized in the module-grouped tables below.
+984 public types across 36 modules, summarized in the module-grouped tables below.
 
 <details>
 <summary>View the Core API Surface</summary>
@@ -945,6 +946,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 | `EmptyValueException` | Thrown when an operation requires a value the caller left empty. |
 | `FontEmbeddingException` | Thrown when a font marked for embedding may not be written into the document (its licence flags forbid embedding). |
 | `FontNotFoundException` | Thrown when a requested font cannot be located (no system font with that name, no matching custom-font source, etc.). |
+| `ImageLoadException` | Thrown when an image's bytes are not an image the library can read: no decoder recognises them. |
 | `IncorrectFontUsageException` | Thrown during text extraction when the content stream issues a text-showing operator (Tj/TJ/'/") while no font is set in the current graphics state — i.e. |
 | `InvalidFormTypeOperationException` | Thrown when an operation is attempted on the wrong form type (e.g. |
 | `InvalidPasswordException` | Thrown when a password-protected operation is attempted without supplying a valid password (e.g. |
@@ -1775,7 +1777,7 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 - **[How-to guides & FAQ](https://kb.aspose.org/pdf/net/)** — task-focused answers for common
   PDF-processing questions.
 - **[Full API reference](https://reference.aspose.org/pdf/net/)** — the complete, browsable
-  reference for all 983 public types (the API Reference section above covers the essentials).
+  reference for all 984 public types (the API Reference section above covers the essentials).
 - Found a bug or have a feature request?
   [Open an issue](https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/issues) on GitHub.
 
@@ -1844,7 +1846,8 @@ security surface through `PdfFileSecurity` and `PdfFileSignature`. The public AP
 - `PdfFileEditor.MakeNUp` and `MakeBooklet` impose pages as a plain scaled grid or as folded
   two-up sheets, controlled only by the sheet size, the grid and the page order.
 - Dynamic XFA forms are read, laid out from their own content — field heights, per-edge border
-  chrome, captions, rich text — and can be flattened to real AcroForm pages; XFA datasets
+  chrome, captions, rich text, and the presence and values their load-time scripts set — and can
+  be flattened to real AcroForm pages; XFA datasets
   round-trip through the AcroForm `/XFA` entry, sync with AcroForm fields, and export / import via
   FDF, XFDF, and XML. Fine-grained authoring of individual XFA dataset fields is still limited.
 - `PDF3DAnnotation` content (artwork, views, cross-sections, lighting) is read and round-trips,

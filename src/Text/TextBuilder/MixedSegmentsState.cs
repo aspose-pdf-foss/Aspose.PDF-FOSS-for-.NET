@@ -26,8 +26,8 @@ private sealed class MixedSegmentsState
     public string normalised = null!;
     public bool hasNewlines;
     // An explicit LineSpacing is extra leading on top of the glyph height
-    // (line pitch = fontSize + LineSpacing, matching the generator paginator);
-    // otherwise fall back to the default 1.2x leading.
+    // (line pitch = fontSize + LineSpacing, matching the generator paginator); otherwise
+    // fall back to the default 1.2x leading.
     public double lineHeight;
     // A non-zero TextState.Rotation rotates the run about its position via a
     // text matrix; the descent shift (applied straight down in the unrotated

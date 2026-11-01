@@ -127,7 +127,7 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("<path", svg);
-        Assert.Contains("fill=\"#ff0000FF\"", svg);
+        Assert.Contains("fill=\"#FF0000\"", svg);
     }
 
     [Fact]
@@ -156,8 +156,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#ff0000FF\"", svg);
-        Assert.Contains("fill=\"#000000FF\"", svg);
+        Assert.Contains("fill=\"#FF0000\"", svg);
+        Assert.Contains("fill=\"#000000\"", svg);
     }
 
     [Fact]
@@ -169,7 +169,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"#0000ffFF\"", svg);
+        Assert.Contains("stroke=\"#0000FF\"", svg);
     }
 
     [Fact]
@@ -182,8 +182,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#ff0000FF\"", svg);
-        Assert.Contains("stroke=\"#0000ffFF\"", svg);
+        Assert.Contains("fill=\"#FF0000\"", svg);
+        Assert.Contains("stroke=\"#0000FF\"", svg);
     }
 
     [Fact]
@@ -306,8 +306,8 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("fill-rule=\"evenodd\"", svg);
-        Assert.Contains("fill=\"#ff0000FF\"", svg);
-        Assert.Contains("stroke=\"#00ff00FF\"", svg);
+        Assert.Contains("fill=\"#FF0000\"", svg);
+        Assert.Contains("stroke=\"#00FF00\"", svg);
     }
 
     [Fact]
@@ -320,7 +320,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#00ffffFF\"", svg);
+        Assert.Contains("fill=\"#00FFFF\"", svg);
     }
 
     [Fact]
@@ -333,7 +333,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"#ff00ffFF\"", svg);
+        Assert.Contains("stroke=\"#FF00FF\"", svg);
     }
 
     [Fact]
@@ -346,7 +346,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#000000FF\"", svg);
+        Assert.Contains("fill=\"#000000\"", svg);
     }
 
     [Fact]
@@ -358,7 +358,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("stroke=\"#808080FF\"", svg);
+        Assert.Contains("stroke=\"#808080\"", svg);
     }
 
     [Fact]
@@ -370,7 +370,7 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#808080FF\"", svg);
+        Assert.Contains("fill=\"#808080\"", svg);
     }
 
     [Fact]
@@ -462,8 +462,8 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         // First fill red, after Q restore fill is back to black (default)
-        Assert.Contains("fill=\"#ff0000FF\"", svg);
-        Assert.Contains("fill=\"#000000FF\"", svg);
+        Assert.Contains("fill=\"#FF0000\"", svg);
+        Assert.Contains("fill=\"#000000\"", svg);
     }
 
     [Fact]
@@ -493,8 +493,8 @@ public class SvgDeviceTests
 
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
-        Assert.Contains("fill=\"#00ff00FF\"", svg);
-        Assert.Contains("stroke=\"#ff0000FF\"", svg);
+        Assert.Contains("fill=\"#00FF00\"", svg);
+        Assert.Contains("stroke=\"#FF0000\"", svg);
     }
 
     [Fact]
@@ -509,8 +509,8 @@ public class SvgDeviceTests
         var svg = device.Process(doc.Pages[1]);
         Assert.Contains("<path", svg);
         Assert.Contains("Z", svg); // path should be closed
-        Assert.Contains("fill=\"#00ff00FF\"", svg);
-        Assert.Contains("stroke=\"#ff0000FF\"", svg);
+        Assert.Contains("fill=\"#00FF00\"", svg);
+        Assert.Contains("stroke=\"#FF0000\"", svg);
     }
 
     [Fact]
@@ -575,5 +575,204 @@ public class SvgDeviceTests
         var device = new SvgDevice();
         var svg = device.Process(doc.Pages[1]);
         Assert.DoesNotContain("stroke-linejoin", svg);
+    }
+
+    private const string RedToBlueAxial =
+        "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] /Extend [true true] " +
+        "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>";
+
+    private const string RedToBlueAxialUnextended =
+        "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 1 0] /Extend [false false] " +
+        "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>";
+
+    // The band of the unit-square axial shading placed by "200 0 0 100 100 500 cm": its axis runs from
+    // (100,292) to (300,292) on the flipped page, and the band reaches 1404 (the page's width plus
+    // height) either side of it, to be cut by the clip.
+    private const string AxisBand = "d=\"M100 1696 L100 -1112 L300 -1112 L300 1696 Z\" fill=\"url(#sh1)\" stroke=\"none\"";
+
+    [Fact]
+    public void Process_ShOperator_PaintsTheAxisBandWithAGradientInShadingSpace()
+    {
+        // The unit-square shading is placed by the CTM and clipped to a rectangle.
+        var data = BuildWithResources("q 100 500 200 100 re W n 200 0 0 100 100 500 cm /Sh1 sh Q",
+            $"/Shading << /Sh1 {RedToBlueAxialUnextended} >>");
+        using var doc = Document.Open(data);
+
+        var svg = new SvgDevice().Process(doc.Pages[1]);
+        Assert.Contains("<linearGradient id=\"sh1\" gradientUnits=\"userSpaceOnUse\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"0\" " +
+            "gradientTransform=\"matrix(200 0 0 -100 100 292)\">", svg);
+        Assert.Contains("<stop offset=\"0%\" stop-color=\"#ff0000\" />", svg);
+        Assert.Contains("<stop offset=\"100%\" stop-color=\"#0000ff\" />", svg);
+        Assert.Contains("clip-path=\"url(#clip1)\"  clip-rule=\"evenodd\" transform=\"matrix(1 0 0 1 0 0)\" " + AxisBand, svg);
+        // Nothing beyond the band: no solid end colours.
+        Assert.DoesNotContain("fill=\"#ff0000\"", svg);
+        Assert.DoesNotContain("fill=\"#0000ff\"", svg);
+    }
+
+    [Fact]
+    public void Process_ShOperator_ExtendedEndsAddTheirSolidColoursBeyondTheBand()
+    {
+        var data = BuildWithResources("q 100 500 200 100 re W n 200 0 0 100 100 500 cm /Sh1 sh Q",
+            $"/Shading << /Sh1 {RedToBlueAxial} >>");
+        using var doc = Document.Open(data);
+
+        var svg = new SvgDevice().Process(doc.Pages[1]);
+        Assert.Contains(AxisBand, svg);
+        // The start colour fills from the band's first edge away from the axis, the end colour from its last.
+        Assert.Contains("clip-path=\"url(#clip1)\"  clip-rule=\"evenodd\" transform=\"matrix(1 0 0 1 0 0)\" " +
+            "d=\"M100 1696 L100 -1112 L-1304 -1112 L-1304 1696 Z\" fill=\"#ff0000\" stroke=\"none\"", svg);
+        Assert.Contains("clip-path=\"url(#clip1)\"  clip-rule=\"evenodd\" transform=\"matrix(1 0 0 1 0 0)\" " +
+            "d=\"M300 1696 L300 -1112 L1704 -1112 L1704 1696 Z\" fill=\"#0000ff\" stroke=\"none\"", svg);
+    }
+
+    [Fact]
+    public void Process_ShadingPatternFill_PaintsTheGradientPlacedByThePatternMatrix()
+    {
+        // The pattern matrix maps the shading into page space; a later rg returns to a flat fill.
+        var data = BuildWithResources("/Pattern cs /P1 scn 100 500 200 100 re f 0 0 1 rg 100 100 50 50 re f",
+            $"/Pattern << /P1 << /PatternType 2 /Matrix [200 0 0 200 100 500] /Shading {RedToBlueAxial} >> >>");
+        using var doc = Document.Open(data);
+
+        var svg = new SvgDevice().Process(doc.Pages[1]);
+        Assert.Contains("gradientTransform=\"matrix(200 0 0 -200 100 292)\"", svg);
+        Assert.Contains("fill=\"url(#sh1)\"", svg);
+        Assert.Contains("fill=\"#0000FF\"", svg);
+    }
+
+    [Fact]
+    public void Process_TilingPatternFill_KeepsTheFlatColour()
+    {
+        var data = BuildWithResources("1 0 0 rg /Pattern cs /P1 scn 100 500 200 100 re f",
+            "/Pattern << /P1 << /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << >> /Length 0 >> >>");
+        using var doc = Document.Open(data);
+
+        var svg = new SvgDevice().Process(doc.Pages[1]);
+        Assert.DoesNotContain("url(#", svg);
+        Assert.Contains("fill=\"#FF0000\"", svg);
+    }
+
+    [Fact]
+    public void Process_NonEmbeddedHelvetica_ShipsATaggedArialSubset()
+    {
+        var data = PdfBuilder.BuildWithTextContent(Encoding.ASCII.GetBytes("BT /F1 12 Tf (Hello) Tj ET"));
+        using var doc = Document.Open(data);
+
+        var svg = new SvgDevice().Process(doc.Pages[1]);
+        var face = System.Text.RegularExpressions.Regex.Match(svg, "@font-face \\{font-family:'(?<f>[A-Z]{6}\\+Arial)';");
+        Assert.True(face.Success, "no tagged Arial face shipped");
+        Assert.Contains($"font-family:'{face.Groups["f"].Value}',Helvetica, Arial, sans-serif;font-size:", svg);
+        Assert.DoesNotContain("font-weight", svg);
+        Assert.DoesNotContain("font-style", svg);
+    }
+
+    [Fact]
+    public void Process_NonEmbeddedTimesBoldItalic_ShipsTheStyledSubstituteAndAsksForItsStyle()
+    {
+        var data = BuildWithResources("BT /F1 12 Tf (Hello) Tj ET",
+            "/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Times-BoldItalic /Encoding /WinAnsiEncoding >> >>");
+        using var doc = Document.Open(data);
+
+        var svg = new SvgDevice().Process(doc.Pages[1]);
+        var face = System.Text.RegularExpressions.Regex.Match(svg, "@font-face \\{font-family:'(?<f>[A-Z]{6}\\+Times New Roman Bold Italic)';");
+        Assert.True(face.Success, "no tagged Times New Roman Bold Italic face shipped");
+        Assert.Contains($"font-family:'{face.Groups["f"].Value}',Times New Roman, serif;font-style:italic;font-weight:bold;font-size:", svg);
+    }
+
+    [Fact]
+    public void Process_AxialShWithABoundingBox_PaintsTheBoxWhateverItsExtend()
+    {
+        // The axis (150..250) is shorter than the box (100..300 x 100..200) and neither end is extended:
+        // the box is painted, the gradient padding the bands beyond the axis ends with the end colours.
+        var data = BuildWithResources("q 50 50 300 300 re W n /Sh0 sh Q",
+            "/Shading << /Sh0 << /ShadingType 2 /ColorSpace /DeviceRGB /BBox [100 100 300 200] /Coords [150 150 250 150] " +
+            "/Extend [false false] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >>");
+        using var doc = Document.Open(data);
+
+        var svg = new SvgDevice().Process(doc.Pages[1]);
+        Assert.Contains("x1=\"150\" y1=\"150\" x2=\"250\" y2=\"150\"", svg);
+        Assert.DoesNotContain("spreadMethod", svg);
+        Assert.Contains("d=\"M100 692 L300 692 L300 592 L100 592 Z\" fill=\"url(#sh1)\"", svg);
+        Assert.DoesNotContain("fill=\"#ff0000\"", svg);
+        Assert.DoesNotContain("fill=\"#0000ff\"", svg);
+    }
+
+    /// <summary>Red at the inner circle (centre 200,200, radius r0) to blue at the outer one (radius 100).</summary>
+    private static string RedToBlueRadial(int r0, string extend) =>
+        $"<< /ShadingType 3 /ColorSpace /DeviceRGB /Coords [200 200 {r0} 200 200 100] /Extend [{extend}] " +
+        "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >>";
+
+    private static string RadialSvg(int r0, string extend)
+    {
+        var data = BuildWithResources("q 20 20 360 360 re W n /Sh0 sh Q", $"/Shading << /Sh0 {RedToBlueRadial(r0, extend)} >>");
+        using var doc = Document.Open(data);
+        return new SvgDevice().Process(doc.Pages[1]);
+    }
+
+    // The outer circle (radius 100 about 200,200 on the flipped page: centre 200,592) and the inner one of radius 30.
+    private const string OuterCircle = "d=\"M300 592 C";
+    private const string InnerCircle = " M230 592 C";
+    private const string WholePage = "d=\"M0 0 L612 0 L612 792 L0 792 Z\"";
+
+    [Fact]
+    public void Process_RadialSh_UnextendedPaintsOnlyTheDiscOfItsOuterCircle()
+    {
+        var svg = RadialSvg(0, "false false");
+        Assert.Contains("<radialGradient id=\"sh1\"", svg);
+        Assert.Contains("<stop offset=\"0%\" stop-color=\"#ff0000\" />", svg);
+        Assert.Contains(OuterCircle, svg);
+        Assert.DoesNotContain(WholePage, svg);
+    }
+
+    [Fact]
+    public void Process_RadialSh_ExtendedOuterEndPaintsBeyondItsCircle()
+    {
+        var svg = RadialSvg(0, "false true");
+        Assert.Contains(WholePage + " fill=\"url(#sh1)\" fill-rule=\"evenodd\"", svg);
+    }
+
+    [Fact]
+    public void Process_RadialSh_InnerRadiusStartsTheRampAndLeavesItsDiscUnpaintedUnlessExtended()
+    {
+        // The ramp runs from the inner circle: its first stop sits at 30% of the outer radius.
+        var hole = RadialSvg(30, "false false");
+        Assert.Contains("<stop offset=\"30%\" stop-color=\"#ff0000\" />", hole);
+        Assert.Contains("<stop offset=\"100%\" stop-color=\"#0000ff\" />", hole);
+        Assert.Contains(OuterCircle, hole);
+        Assert.Contains(InnerCircle, hole);
+        Assert.Contains("fill-rule=\"evenodd\"", hole);
+
+        // Extending the inner end fills its disc - the gradient's padding gives it the first stop's red.
+        var disc = RadialSvg(30, "true false");
+        Assert.Contains(OuterCircle, disc);
+        Assert.DoesNotContain(InnerCircle, disc);
+
+        var both = RadialSvg(30, "true true");
+        Assert.Contains(WholePage, both);
+        Assert.DoesNotContain(InnerCircle, both);
+    }
+
+    /// <summary>A one-page letter-size PDF with the given content and page resources.</summary>
+    private static byte[] BuildWithResources(string content, string resources)
+    {
+        var bytes = Encoding.ASCII.GetBytes(content);
+        using var ms = new MemoryStream();
+        void Write(string s) => ms.Write(Encoding.ASCII.GetBytes(s));
+        Write("%PDF-1.4\n");
+        var offsets = new long[4];
+        offsets[0] = ms.Position;
+        Write("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets[1] = ms.Position;
+        Write("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        offsets[2] = ms.Position;
+        Write($"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << {resources} >> >>\nendobj\n");
+        offsets[3] = ms.Position;
+        Write($"4 0 obj\n<< /Length {bytes.Length} >>\nstream\n");
+        ms.Write(bytes);
+        Write("\nendstream\nendobj\n");
+        var xref = ms.Position;
+        Write("xref\n0 5\n0000000000 65535 f \n");
+        foreach (var offset in offsets) Write($"{offset:D10} 00000 n \n");
+        Write($"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+        return ms.ToArray();
     }
 }

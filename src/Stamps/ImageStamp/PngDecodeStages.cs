@@ -7,34 +7,50 @@ public partial class ImageStamp
     /// <summary>Convert one unfiltered scanline into the RGB (and alpha) planes.</summary>
     private static void ConvertPngRowToRgb(PngDecodeState pn, int y)
     {
-        // Convert to RGB
+        // The colour type is fixed for the image: the plain layouts copy the row in one
+        // loop each, the palette layout keeps its per-pixel unpacking below.
+        var row = pn.curRow;
+        var rgb = pn.rgb;
+        var rowStart = y * pn.width;
+        switch (pn.colorType)
+        {
+            case 0: // Grayscale
+                for (var x = 0; x < pn.width; x++)
+                    rgb[(rowStart + x) * 3] = rgb[(rowStart + x) * 3 + 1] = rgb[(rowStart + x) * 3 + 2] = row[x];
+                return;
+            case 2: // RGB
+                Array.Copy(row, 0, rgb, rowStart * 3, pn.width * 3);
+                return;
+            case 4: // Grayscale + Alpha
+                for (var x = 0; x < pn.width; x++)
+                {
+                    rgb[(rowStart + x) * 3] = rgb[(rowStart + x) * 3 + 1] = rgb[(rowStart + x) * 3 + 2] = row[x * 2];
+                    var ga = row[x * 2 + 1];
+                    pn.alpha![rowStart + x] = ga;
+                    if (ga != 255) pn.anyTransparent = true;
+                }
+                return;
+            case 6: // RGBA
+                for (var x = 0; x < pn.width; x++)
+                {
+                    rgb[(rowStart + x) * 3] = row[x * 4];
+                    rgb[(rowStart + x) * 3 + 1] = row[x * 4 + 1];
+                    rgb[(rowStart + x) * 3 + 2] = row[x * 4 + 2];
+                    var ra = row[x * 4 + 3];
+                    pn.alpha![rowStart + x] = ra;
+                    if (ra != 255) pn.anyTransparent = true;
+                }
+                return;
+            case 3:
+                break;
+            default:
+                return;
+        }
         for (var x = 0; x < pn.width; x++)
         {
-            var rgbIdx = (y * pn.width + x) * 3;
+            var rgbIdx = (rowStart + x) * 3;
             switch (pn.colorType)
             {
-                case 0: // Grayscale
-                    pn.rgb[rgbIdx] = pn.rgb[rgbIdx + 1] = pn.rgb[rgbIdx + 2] = pn.curRow[x];
-                    break;
-                case 2: // RGB
-                    pn.rgb[rgbIdx] = pn.curRow[x * 3];
-                    pn.rgb[rgbIdx + 1] = pn.curRow[x * 3 + 1];
-                    pn.rgb[rgbIdx + 2] = pn.curRow[x * 3 + 2];
-                    break;
-                case 4: // Grayscale + Alpha
-                    pn.rgb[rgbIdx] = pn.rgb[rgbIdx + 1] = pn.rgb[rgbIdx + 2] = pn.curRow[x * 2];
-                    var ga = pn.curRow[x * 2 + 1];
-                    pn.alpha![y * pn.width + x] = ga;
-                    if (ga != 255) pn.anyTransparent = true;
-                    break;
-                case 6: // RGBA
-                    pn.rgb[rgbIdx] = pn.curRow[x * 4];
-                    pn.rgb[rgbIdx + 1] = pn.curRow[x * 4 + 1];
-                    pn.rgb[rgbIdx + 2] = pn.curRow[x * 4 + 2];
-                    var ra = pn.curRow[x * 4 + 3];
-                    pn.alpha![y * pn.width + x] = ra;
-                    if (ra != 255) pn.anyTransparent = true;
-                    break;
                 case 3: // Indexed: unpack the index at the image bit depth, look up /PLTE
                     int idx;
                     if (pn.bitDepth == 8)
@@ -75,21 +91,31 @@ public partial class ImageStamp
         Array.Copy(pn.rawScanlines, pn.scanPos, pn.curRow, 0, bytesToRead);
         pn.scanPos += pn.stride;
 
-        // Apply PNG filter
-        for (var x = 0; x < pn.stride; x++)
+        // Apply PNG filter: one loop per filter, since the filter is fixed for the row and
+        // a per-byte choice cost more than the arithmetic. The left neighbour of the first
+        // pixel's bytes is zero, so the first bpp bytes are a row of their own.
+        var row = pn.curRow;
+        var prev = pn.prevRow;
+        var bpp = pn.channels;
+        var n = pn.stride;
+        switch (filterByte)
         {
-            byte a = x >= pn.channels ? pn.curRow[x - pn.channels] : (byte)0;
-            byte b = pn.prevRow[x];
-            byte c = x >= pn.channels ? pn.prevRow[x - pn.channels] : (byte)0;
-
-            pn.curRow[x] = filterByte switch
-            {
-                1 => (byte)(pn.curRow[x] + a),             // Sub
-                2 => (byte)(pn.curRow[x] + b),             // Up
-                3 => (byte)(pn.curRow[x] + (a + b) / 2),   // Average
-                4 => (byte)(pn.curRow[x] + PaethPredictor(a, b, c)), // Paeth
-                _ => pn.curRow[x]                           // None
-            };
+            case 1: // Sub
+                for (var x = bpp; x < n; x++) row[x] = (byte)(row[x] + row[x - bpp]);
+                break;
+            case 2: // Up
+                for (var x = 0; x < n; x++) row[x] = (byte)(row[x] + prev[x]);
+                break;
+            case 3: // Average
+                for (var x = 0; x < bpp && x < n; x++) row[x] = (byte)(row[x] + prev[x] / 2);
+                for (var x = bpp; x < n; x++) row[x] = (byte)(row[x] + (row[x - bpp] + prev[x]) / 2);
+                break;
+            case 4: // Paeth: with a = c = 0 the predictor is b
+                for (var x = 0; x < bpp && x < n; x++) row[x] = (byte)(row[x] + prev[x]);
+                for (var x = bpp; x < n; x++) row[x] = (byte)(row[x] + PaethPredictor(row[x - bpp], prev[x], prev[x - bpp]));
+                break;
+            default: // None
+                break;
         }
     }
 

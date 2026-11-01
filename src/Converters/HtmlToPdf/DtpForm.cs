@@ -46,7 +46,9 @@ internal static partial class HtmlToPdfConverter
 
     private sealed class DtpIdRule
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double L, T, W, H;
+#pragma warning restore S3218
         public bool HasH;
         public string? Align;
     }
@@ -54,7 +56,7 @@ internal static partial class HtmlToPdfConverter
     private sealed class DtpClassRule
     {
         public double SizePt = 10;
-        public bool Bold, Italic;
+        public bool Bold;
         public string Family = "Arial";
         public (double R, double G, double B) Color = (0, 0, 0);
         public string? Align;
@@ -93,7 +95,7 @@ internal static partial class HtmlToPdfConverter
         rt.baseClass = baseClass;
         rt.classRules = classRules;
         rt.defaultAlign = defaultAlign;
-        rt.inner = Regex.Replace(rt.inner, @"<!--[\s\S]*?-->", " ");
+        rt.inner = SafeRegex.Replace(rt.inner, @"<!--[\s\S]*?-->", " ");
         rt.lines = new List<DtpLogicalLine>();
         rt.cur = null;
         rt.bold = 0; rt.ital = 0; rt.under = 0; rt.link = 0;
@@ -105,7 +107,7 @@ internal static partial class HtmlToPdfConverter
         rt.inMso = false;
 
         rt.idx = 0;
-        rt.tokRx = new Regex(@"<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:[^>'""]|'[^']*'|""[^""]*"")*)>");
+        rt.tokRx = new Regex(@"<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:[^>'""]|'[^']*'|""[^""]*"")*)>", RegexOptions.None, RegexLimits.Timeout);
         while (rt.idx < rt.inner.Length)
         {
             if (!DtpRichTextStep(rt)) break;
@@ -176,7 +178,6 @@ internal static partial class HtmlToPdfConverter
         void Append(DtpRun proto, string text)
         {
             if (text.Length == 0) return;
-            if (line.Count > 0 && ReferenceEquals(line[^1].Text, null)) { }
             if (line.Count > 0 && DtpSameStyle(line[^1], proto))
                 line[^1].Text += text;
             else
@@ -199,10 +200,8 @@ internal static partial class HtmlToPdfConverter
                 if (t[i] == ' ')
                 {
                     j = i + 1;
-                    var w2 = MeasureFaceText(DtpFaceName(run), " ", run.SizePt);
                     // a space that would overflow hangs on the line
                     Append(run, " ");
-                    if (lineW - w2 > budget + 1e-6) { }
                     i = j;
                     continue;
                 }
@@ -225,7 +224,9 @@ internal static partial class HtmlToPdfConverter
 
     private static bool DtpSameStyle(DtpRun a, DtpRun b)
         => a.Bold == b.Bold && a.Italic == b.Italic && a.Under == b.Under
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
            && a.SizePt.Equals(b.SizePt) && a.Face == b.Face && a.Color.Equals(b.Color);
+#pragma warning restore S1244
 
     private static DtpRun DtpCloneStyle(DtpRun p) => new()
     {
@@ -261,7 +262,7 @@ internal static partial class HtmlToPdfConverter
     private static double? TryDtpPt(string css, string prop)
     {
         double value = 0;
-        var m = Regex.Match(css, prop + @"\s*:\s*([\-\d.]+)\s*pt", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(css, prop + @"\s*:\s*([\-\d.]+)\s*pt", RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         value = DtpNum(m.Groups[1].Value);
         return value;
@@ -273,7 +274,7 @@ internal static partial class HtmlToPdfConverter
 
     private static double? DtpStyleLen(string style, string pattern)
     {
-        var m = Regex.Match(style, pattern, RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(style, pattern, RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         var tok = m.Groups[1].Value;
         var isIn = tok.EndsWith("in", StringComparison.OrdinalIgnoreCase);
@@ -288,10 +289,11 @@ internal static partial class HtmlToPdfConverter
 
     private static string? DtpAttr(string tag, string name)
     {
-        var m = Regex.Match(tag,
+        var m = SafeRegex.Match(tag,
             name + @"\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))", RegexOptions.IgnoreCase);
         if (!m.Success) return null;
-        return m.Groups[1].Success ? m.Groups[1].Value
-            : m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value;
+        if (m.Groups[1].Success) return m.Groups[1].Value;
+        if (m.Groups[2].Success) return m.Groups[2].Value;
+        return m.Groups[3].Value;
     }
 }

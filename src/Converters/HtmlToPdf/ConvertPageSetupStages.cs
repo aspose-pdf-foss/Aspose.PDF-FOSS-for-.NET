@@ -5,23 +5,31 @@ namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
+    /// <summary>The value of a match whose pattern spells one value three ways (double-quoted, single-quoted,
+    /// bare - groups 1 to 3): the group that took part.</summary>
+    private static string AlternativeValue(Match m)
+    {
+        if (m.Groups[1].Success) return m.Groups[1].Value;
+        if (m.Groups[2].Success) return m.Groups[2].Value;
+        return m.Groups[3].Value;
+    }
+
     /// <summary>The document chain rules and the body background from the body tag or the stylesheet, white dropped.</summary>
-    private static void ResolveBodyBackground(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResolveBodyBackground(ConvertState cv)
     {
         cv.profile.docChainRules = ParseChainRules(cv.html, out var chainCellOnly);
         cv.profile.docChainCellRulesOnly = chainCellOnly;
         cv.profile.docSiblingCellRules = ParseSiblingCellRules(cv.html);
 
         cv.bodyBackground = null;
-        cv.bodyOpen = Regex.Match(cv.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
+        cv.bodyOpen = SafeRegex.Match(cv.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
         if (cv.bodyOpen.Success)
         {
-            var bgAttr = Regex.Match(cv.bodyOpen.Value,
+            var bgAttr = SafeRegex.Match(cv.bodyOpen.Value,
                 @"\bbgcolor\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))", RegexOptions.IgnoreCase);
             if (bgAttr.Success)
-                cv.bodyBackground = ParseCssColor(bgAttr.Groups[1].Success ? bgAttr.Groups[1].Value
-                    : bgAttr.Groups[2].Success ? bgAttr.Groups[2].Value : bgAttr.Groups[3].Value);
-            var inlineBg = Regex.Match(DivStyleOf(cv.bodyOpen.Value),
+                cv.bodyBackground = ParseCssColor(AlternativeValue(bgAttr));
+            var inlineBg = SafeRegex.Match(DivStyleOf(cv.bodyOpen.Value),
                 @"background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
             if (inlineBg.Success && ParseCssColor(inlineBg.Groups[1].Value) is { } inlineColor)
                 cv.bodyBackground = inlineColor;
@@ -39,19 +47,21 @@ internal static partial class HtmlToPdfConverter
         cv.pageInfo = options?.PageInfo;
         cv.pageWidth = cv.pageInfo?.Width  is > 0 ? cv.pageInfo.Width  : 612.0;
         cv.pageHeight = cv.pageInfo?.Height is > 0 ? cv.pageInfo.Height : 792.0;
-        // PageInfo.IsLandscape is a no-op for HTML imports — the page lays
-        // out portrait regardless — so undo the SETTER's dimension swap (the
-        // caller authored portrait and only set the flag). Width/Height the
-        // caller authored landscape stand, flag or no flag.
-        if (cv.pageInfo?.LandscapeSwapApplied == true && cv.pageWidth > cv.pageHeight)
+        // A landscape request lays the pages out landscape, whether the flag was set before or
+        // after the size: a portrait size the setter did not turn is turned here.
+        if (cv.pageInfo?.LandscapeRequested == true && cv.pageHeight > cv.pageWidth)
             (cv.pageWidth, cv.pageHeight) = (cv.pageHeight, cv.pageWidth);
         cv.pageMargin = cv.pageInfo?.Margin;
         cv.marginsExplicit = (cv.pageMargin?.IsTouched ?? false) || (cv.pageInfo?.MarginAssigned ?? false);
-        cv.perSide = (cv.pageMargin?.IsTouched ?? false) && cv.pageMargin!.HtmlPerSideDefaults;
-        cv.marginLeft = cv.marginsExplicit ? (cv.perSide && !cv.pageMargin!.LeftTouched   ? 96.0 : cv.pageMargin!.Left)   : 96.0;
-        cv.marginRight = cv.marginsExplicit ? (cv.perSide && !cv.pageMargin!.RightTouched  ? 72.0 : cv.pageMargin!.Right)  : 72.0;
-        cv.marginTop = cv.marginsExplicit ? (cv.perSide && !cv.pageMargin!.TopTouched    ? 89.0 : cv.pageMargin!.Top)    : 89.0;
-        cv.marginBottom = cv.marginsExplicit ? (cv.perSide && !cv.pageMargin!.BottomTouched ? 72.0 : cv.pageMargin!.Bottom) : 72.0;
+        cv.perSide = (cv.pageMargin?.IsTouched ?? false) && cv.pageMargin.HtmlPerSideDefaults;
+        if (cv.marginsExplicit) cv.marginLeft = cv.perSide && !cv.pageMargin!.LeftTouched   ? 96.0 : cv.pageMargin!.Left;
+        else cv.marginLeft = 96.0;
+        if (cv.marginsExplicit) cv.marginRight = cv.perSide && !cv.pageMargin!.RightTouched  ? 72.0 : cv.pageMargin!.Right;
+        else cv.marginRight = 72.0;
+        if (cv.marginsExplicit) cv.marginTop = cv.perSide && !cv.pageMargin!.TopTouched    ? 89.0 : cv.pageMargin!.Top;
+        else cv.marginTop = 89.0;
+        if (cv.marginsExplicit) cv.marginBottom = cv.perSide && !cv.pageMargin!.BottomTouched ? 72.0 : cv.pageMargin!.Bottom;
+        else cv.marginBottom = 72.0;
 
         cv.cssPageFirstTopLift = 0.0;
         cv.cssPageRule = null;
@@ -93,7 +103,7 @@ internal static partial class HtmlToPdfConverter
     private static string EmptySpacedTablesToSpacers(string html)
     {
         if (html.IndexOf("<table", StringComparison.OrdinalIgnoreCase) < 0) return html;
-        return Regex.Replace(html,
+        return SafeRegex.Replace(html,
             @"<table\b[^>]*\bcellspacing\s*=\s*[""']?(?<cs>\d+(?:\.\d+)?)[^>]*>\s*</table\s*>",
             m => double.Parse(m.Groups["cs"].Value, System.Globalization.CultureInfo.InvariantCulture) is var csPx && csPx > 0
                 // (a zero spacing is no box at all: the rowless unwrap takes that table)
@@ -131,11 +141,11 @@ internal static partial class HtmlToPdfConverter
             // An empty div styled with only a border-bottom is a section divider —
             // exactly what <hr> renders as. The divider's CSS vertical margins ride
             // along: they are the section rhythm of this dialect.
-            cv.html = Regex.Replace(cv.html,
+            cv.html = SafeRegex.Replace(cv.html,
                 @"<div\b[^>]*style\s*=\s*""[^""]*border-bottom\s*:\s*(\d+(?:\.\d+)?)px\s+solid\s+(#[0-9a-fA-F]{3,6}|[a-zA-Z]+)[^""]*""[^>]*>\s*</div>",
                 m =>
                 {
-                    var mt = Regex.Match(m.Value, @"margin\s*:\s*(\d+(?:\.\d+)?)px(?:\s+\S+)?\s+(\d+(?:\.\d+)?)px", RegexOptions.IgnoreCase);
+                    var mt = SafeRegex.Match(m.Value, @"margin\s*:\s*(\d+(?:\.\d+)?)px(?:\s+\S+)?\s+(\d+(?:\.\d+)?)px", RegexOptions.IgnoreCase);
                     var margins = mt.Success
                         ? $"; margin-top: {mt.Groups[1].Value}px; margin-bottom: {mt.Groups[2].Value}px"
                         : "";
@@ -145,9 +155,9 @@ internal static partial class HtmlToPdfConverter
             // A styled <legend> is this dialect's section heading — the block engine
             // has no legend tag, so it would flow as body text at body size. Unlike a
             // real h2 it keeps the normal (inherited) weight.
-            cv.html = Regex.Replace(cv.html, @"<legend\b([^>]*?)style\s*=\s*""",
+            cv.html = SafeRegex.Replace(cv.html, @"<legend\b([^>]*?)style\s*=\s*""",
                 "<h2$1style=\"font-weight: normal;", RegexOptions.IgnoreCase);
-            cv.html = Regex.Replace(cv.html, @"<(/?)legend\b", "<$1h2", RegexOptions.IgnoreCase);
+            cv.html = SafeRegex.Replace(cv.html, @"<(/?)legend\b", "<$1h2", RegexOptions.IgnoreCase);
         }
         // The body's CSS line-height (the `font: 1em/1.4em …` shorthand expands to
         // it) sets the pitch of the synthesized form-row cells.
@@ -156,7 +166,7 @@ internal static partial class HtmlToPdfConverter
         // break the page. Such a document is laid out on the browser's own block
         // rhythm — real UA margins, collapsed between siblings, and a <br> holding its
         // line box — rather than the legacy line-on-line stack.
-        cv.profile.sectionedReport = Regex.IsMatch(cv.html,
+        cv.profile.sectionedReport = SafeRegex.IsMatch(cv.html,
             @"<hr\b[^>]*(page-)?break-after\s*:\s*(always|page)", RegexOptions.IgnoreCase);
         cv.profile.uaGridBoxes = cv.profile.sectionedReport;
 
@@ -164,15 +174,15 @@ internal static partial class HtmlToPdfConverter
         // first space — so nothing in the markup can size a control or the flow. Such a
         // document falls back to the UA base (16px = 12pt) and to the character-grid box
         // each control's size/cols/rows declares, which is what gets drawn.
-        cv.profile.escapedAttrDoc = cv.html.IndexOf("=\\\"", StringComparison.Ordinal) >= 0;
+        cv.profile.escapedAttrDoc = HasEscapedAttributeQuote(cv.html);
         cv.profile.embedFonts = options?.IsEmbedFonts ?? true;
 
         cv.profile.formBodyFontPt = 0.0;
         if (cv.profile.formHorizontalDoc || cv.profile.sectionedReport || cv.profile.escapedAttrDoc)
         {
-            var bodyTag = Regex.Match(cv.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
+            var bodyTag = SafeRegex.Match(cv.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
             var bodyStyle = bodyTag.Success ? DivStyleOf(bodyTag.Value) : "";
-            var lhm = Regex.Match(bodyStyle, @"line-height\s*:\s*([\d.]+)\s*(em|px|pt)?", RegexOptions.IgnoreCase);
+            var lhm = SafeRegex.Match(bodyStyle, @"line-height\s*:\s*([\d.]+)\s*(em|px|pt)?", RegexOptions.IgnoreCase);
             if (lhm.Success && double.TryParse(lhm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var lhv))
@@ -185,7 +195,7 @@ internal static partial class HtmlToPdfConverter
             // The body font size seeds the whole flow (an em-sized body resolves
             // against the browser's 16px = 12pt base, not this flow's legacy 11pt).
             cv.profile.formBodyFontPt = 12.0;
-            var bfm = Regex.Match(bodyStyle, @"font-size\s*:\s*([\d.]+)\s*(em|px|pt)?", RegexOptions.IgnoreCase);
+            var bfm = SafeRegex.Match(bodyStyle, @"font-size\s*:\s*([\d.]+)\s*(em|px|pt)?", RegexOptions.IgnoreCase);
             if (bfm.Success && double.TryParse(bfm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var bfv))
@@ -205,16 +215,17 @@ internal static partial class HtmlToPdfConverter
     private static void ReadBodyLineBox(ConvertState cv)
     {
         cv.profile.bodyLineBoxPt = 0.0;
-        var bodyTag = Regex.Match(cv.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
+        var bodyTag = SafeRegex.Match(cv.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
         var inline = bodyTag.Success
-            ? Regex.Match(DivStyleOf(bodyTag.Value), LineHeightDeclRx, RegexOptions.IgnoreCase)
+            ? SafeRegex.Match(DivStyleOf(bodyTag.Value), LineHeightDeclRx, RegexOptions.IgnoreCase)
             : Match.Empty;
-        var value = inline.Success ? inline.Groups[1].Value.Trim()
-            : cv.css is not null && cv.css.TryGetValue("body", out var bodyRule)
-                && bodyRule.TryGetValue("line-height", out var sheetLh) ? sheetLh.Trim()
-            : null;
+        string? value = null;
+        if (inline.Success) value = inline.Groups[1].Value.Trim();
+        else if (cv.css is not null && cv.css.TryGetValue("body", out var bodyRule)
+            && bodyRule.TryGetValue("line-height", out var sheetLh))
+            value = sheetLh.Trim();
         if (value is not null
-            && Regex.IsMatch(value, @"^[\d.]+\s*(px|pt|cm|mm|in)$", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(value, @"^[\d.]+\s*(px|pt|cm|mm|in)$", RegexOptions.IgnoreCase)
             && TryParseLength(value) is { } lhPt && lhPt > 0)
             cv.profile.bodyLineBoxPt = lhPt;
     }
@@ -249,7 +260,7 @@ internal static partial class HtmlToPdfConverter
 
         // A percent-width till-slip invoice fills its body box with tables
         // whose columns take their max-content share (SlipInvoice.cs).
-        if (TryRenderSlipInvoice(cv.html, options, cv.css, cv.pageWidth, cv.pageHeight) is { } siDoc)
+        if (TryRenderSlipInvoice(cv.html, cv.css, cv.pageWidth, cv.pageHeight) is { } siDoc)
             return siDoc;
 
         // The payment-receipt card export (ReceiptCard.cs): the rounded
@@ -335,12 +346,12 @@ internal static partial class HtmlToPdfConverter
         // outsized paddings that pace the document onto its four pages.
         // The dhtmlxGantt chart export: a grid of task rows beside a timeline of
         // absolutely placed bars and connectors (GanttChart.cs).
-        if (TryRenderGanttChart(cv.html, options, cv.pageWidth, cv.pageHeight, cv.marginLeft, cv.marginTop) is { } gtDoc)
+        if (TryRenderGanttChart(cv.html, cv.pageWidth, cv.pageHeight, cv.marginLeft) is { } gtDoc)
             return gtDoc;
 
         // The em-grid contact form: a centred max-width column of inline-block
         // field boxes sized by their own em classes (ContactForm.cs).
-        if (TryRenderContactForm(cv.html, options, cv.pageWidth, cv.pageHeight,
+        if (TryRenderContactForm(cv.html, cv.pageWidth, cv.pageHeight,
                 cv.marginLeft, cv.marginRight, cv.marginTop) is { } cfDoc)
             return cfDoc;
 
@@ -397,7 +408,7 @@ internal static partial class HtmlToPdfConverter
         // The step-row DETABLE worksheet (see PrintPage.cs): flex step rows with
         // centred fixed-layout widget tables splitting across pages.
         if (!cv.marginsExplicit
-            && TryRenderStepRows(cv.html, cv.css, cv.pageHeight) is { } srDoc)
+            && TryRenderStepRows(cv.html, cv.css, cv.pageHeight, options) is { } srDoc)
             return srDoc;
 
         // The hospital discharge-letter preview (see LetterPreview.cs): the
@@ -477,7 +488,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>The chart dialects - the fixed charts, the bar chart and the Ember chart - render through their own renderers; the document when one matched, otherwise null.</summary>
-    private static Document? RenderChartDialects(ConvertState cv, HtmlLoadOptions? options)
+    private static Document? RenderChartDialects(ConvertState cv)
     {
 
         // Listing-card exports (see ListingCard.cs): a rounded-bordered
@@ -511,7 +522,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>The float band, float image and both-sides float dialects and the margins they imply.</summary>
-    private static void ResolveFloatBands(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResolveFloatBands(ConvertState cv)
     {
 
         // The SEC-filing float-column card dialect (consecutive `float:left; width:N%`
@@ -526,40 +537,38 @@ internal static partial class HtmlToPdfConverter
         // float-COLUMN band above, whose divs declare a width and become their own
         // columns; a document that has those keeps the band dialect.
         cv.profile.floatImageDoc = !cv.profile.floatBandDoc
-            && Regex.IsMatch(cv.html, @"float\s*:\s*left", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(cv.html, @"float\s*:\s*left", RegexOptions.IgnoreCase);
         cv.bodyLineFactor = 0.0;
-        {
-            var bodyClass = Regex.Match(cv.html, @"<body\b[^>]*class\s*=\s*[""']([^""']+)",
-                RegexOptions.IgnoreCase);
-            if (bodyClass.Success)
-                foreach (var cls in bodyClass.Groups[1].Value.Split(
-                             ' ', StringSplitOptions.RemoveEmptyEntries))
-                {
-                    // (a unitless factor, or an em one - the reference inherits the em as a factor
-                    //  too: the change-control page's `line-height: 1.25em` body paces its 15 pt
-                    //  heading 18.75 and its 9.5 pt runs 11.875)
-                    var rule = Regex.Match(cv.html,
-                        @"\." + Regex.Escape(cls) + @"\s*{[^}]*line-height\s*:\s*([0-9.]+)\s*(?:em)?\s*[;}]",
-                        RegexOptions.IgnoreCase);
-                    if (rule.Success && double.TryParse(rule.Groups[1].Value,
-                            System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture, out var blf)
-                        && blf > 0.5 && blf < 4)
-                    { cv.bodyLineFactor = blf; break; }
-                }
-            // …and the body tag's own percent or unitless line-height (its attribute; the UA flow
-            // reads it where that attribute is the flow's typography)
-            if (cv.bodyLineFactor <= 0 && BodyTagStyleAttr(cv.html) is { } bodyLhStyle
-                && Regex.Match(bodyLhStyle, LineHeightDeclRx, RegexOptions.IgnoreCase) is { Success: true } bodyLhM
-                && Regex.Match(bodyLhM.Groups[1].Value.Trim(), @"^([\d.]+)\s*(%?)$") is { Success: true } bodyLhV
-                && double.TryParse(bodyLhV.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var bodyAttrLf) && bodyAttrLf > 0)
-                cv.bodyLineFactor = bodyLhV.Groups[2].Value.Length > 0 ? bodyAttrLf / 100.0 : bodyAttrLf;
-        }
+        var bodyClass = SafeRegex.Match(cv.html, @"<body\b[^>]*class\s*=\s*[""']([^""']+)",
+            RegexOptions.IgnoreCase);
+        if (bodyClass.Success)
+            foreach (var cls in bodyClass.Groups[1].Value.Split(
+                         ' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                // (a unitless factor, or an em one - the reference inherits the em as a factor
+                //  too: the change-control page's `line-height: 1.25em` body paces its 15 pt
+                //  heading 18.75 and its 9.5 pt runs 11.875)
+                var rule = SafeRegex.Match(cv.html,
+                    @"\." + Regex.Escape(cls) + @"\s*{[^}]*line-height\s*:\s*([0-9.]+)\s*(?:em)?\s*[;}]",
+                    RegexOptions.IgnoreCase);
+                if (rule.Success && double.TryParse(rule.Groups[1].Value,
+                        System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var blf)
+                    && blf > 0.5 && blf < 4)
+                { cv.bodyLineFactor = blf; break; }
+            }
+        // …and the body tag's own percent or unitless line-height (its attribute; the UA flow
+        // reads it where that attribute is the flow's typography)
+        if (cv.bodyLineFactor <= 0 && BodyTagStyleAttr(cv.html) is { } bodyLhStyle
+            && SafeRegex.Match(bodyLhStyle, LineHeightDeclRx, RegexOptions.IgnoreCase) is { Success: true } bodyLhM
+            && SafeRegex.Match(bodyLhM.Groups[1].Value.Trim(), @"^([\d.]+)\s*(%?)$") is { Success: true } bodyLhV
+            && double.TryParse(bodyLhV.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var bodyAttrLf) && bodyAttrLf > 0)
+            cv.bodyLineFactor = bodyLhV.Groups[2].Value.Length > 0 ? bodyAttrLf / 100.0 : bodyAttrLf;
         cv.profile.floatBothSidesDoc =
-            Regex.IsMatch(cv.html, @"<img\b[^>]*style\s*=\s*[""'][^""']*float\s*:\s*left",
+            SafeRegex.IsMatch(cv.html, @"<img\b[^>]*style\s*=\s*[""'][^""']*float\s*:\s*left",
                 RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"<img\b[^>]*style\s*=\s*[""'][^""']*float\s*:\s*right",
+            && SafeRegex.IsMatch(cv.html, @"<img\b[^>]*style\s*=\s*[""'][^""']*float\s*:\s*right",
                 RegexOptions.IgnoreCase);
         if (!cv.marginsExplicit && cv.profile.floatBandDoc)
             cv.marginRight = cv.marginLeft;
@@ -618,11 +627,11 @@ internal static partial class HtmlToPdfConverter
         // draws the tables at the measured column model (all constants from the
         // expected render of the invoice fixture).
         if (!cv.marginsExplicit
-            && Regex.IsMatch(cv.html, @"@media\s+print", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"@page", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html,
+            && SafeRegex.IsMatch(cv.html, @"@media\s+print", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"@page", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html,
                 @"body\s*\{[^}]*display\s*:\s*table[^}]*\}", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase)
             && TryRenderPrintInvoice(cv.html, options) is { } invoiceDoc)
             return invoiceDoc;
 
@@ -635,7 +644,7 @@ internal static partial class HtmlToPdfConverter
         // DNN portal reports (see DnnReport.cs): the skinmaster box model drawn
         // from the skin constants; the sheet widens to hold the 984px box.
         if (!cv.marginsExplicit && !(cv.pageInfo?.WidthAssigned ?? false)
-            && TryRenderDnnReport(cv.html, options, cv.pageHeight) is { } dnnDoc)
+            && TryRenderDnnReport(cv.html, cv.pageHeight) is { } dnnDoc)
             return dnnDoc;
 
         // A document whose ROOT element is <svg> renders through the SVG engine at
@@ -645,7 +654,7 @@ internal static partial class HtmlToPdfConverter
         // (the engine draws the vector content on page 1 only).
         // …a leading INVISIBLE empty div (a chart library's hidden tooltip
         // holder) does not unseat the svg root — it renders nothing.
-        if (Regex.IsMatch(cv.html,
+        if (SafeRegex.IsMatch(cv.html,
                 @"^﻿?\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--[\s\S]*?-->\s*)*(?:<!DOCTYPE[^>]*>\s*)?(?:<div\b[^>]*(?:visibility\s*:\s*hidden|display\s*:\s*none)[^>]*>\s*</div\s*>\s*)*<svg\b",
                 RegexOptions.IgnoreCase))
         {
@@ -671,5 +680,22 @@ internal static partial class HtmlToPdfConverter
             return svgDocOut;
         }
         return null;
+    }
+
+    private const string EscapedAttributeQuote = "=\\\"";
+
+    /// <summary>Whether the markup writes an attribute's quote escaped (<c>=\"</c>), as a JSON-escaped
+    /// export does. A script's text is not markup: an escaped quote inside a string literal of a
+    /// script element says nothing about how the page's attributes are written.</summary>
+    private static bool HasEscapedAttributeQuote(string html)
+    {
+        var at = html.IndexOf(EscapedAttributeQuote, StringComparison.Ordinal);
+        while (at >= 0)
+        {
+            var open = html.LastIndexOf("<script", at, StringComparison.OrdinalIgnoreCase);
+            if (open < 0 || html.IndexOf("</script", open, at - open, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            at = html.IndexOf(EscapedAttributeQuote, at + EscapedAttributeQuote.Length, StringComparison.Ordinal);
+        }
+        return false;
     }
 }

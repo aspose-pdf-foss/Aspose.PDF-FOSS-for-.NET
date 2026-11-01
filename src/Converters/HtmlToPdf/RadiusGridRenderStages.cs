@@ -8,7 +8,7 @@ internal static partial class HtmlToPdfConverter
 // The stages of the radius-grid render: the span read, the fill, the line split, one data row's layout and one row's draw.
     private static int SpanOf(string attrs, string name)
     {
-        var m = Regex.Match(attrs, name + @"\s*=\s*[""']?(\d+)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(attrs, name + @"\s*=\s*[""']?(\d+)", RegexOptions.IgnoreCase);
         return m.Success && int.TryParse(m.Groups[1].Value, out var n) && n > 1 ? n : 1;
     }
 
@@ -26,7 +26,8 @@ internal static partial class HtmlToPdfConverter
         for (var ri = 0; ri < rq.rows.Count; ri++)
         {
             var head = ri < rq.headRows;
-            var rowH = head ? (ri == 0 ? rq.firstHeadH : rq.lastHeadH) : 2 * RgLinePt + RgCellPadPt;
+            double rowH = 2 * RgLinePt + RgCellPadPt;
+            if (head) rowH = ri == 0 ? rq.firstHeadH : rq.lastHeadH;
             foreach (var (txt, col, span, rspan, isHead) in rq.placed[ri])
             {
                 double w = 0, cx = rq.tableX;
@@ -88,18 +89,18 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static void ReadRadiusGridRows(RadiusGridRenderState rq)
     {
-        foreach (Match rm in Regex.Matches(rq.tblM.Groups[1].Value,
+        foreach (Match rm in SafeRegex.Matches(rq.tblM.Groups[1].Value,
                      @"<tr\b[^>]*>([\s\S]*?)</tr\s*>", RegexOptions.IgnoreCase))
         {
             var cells = new List<(string, int, int, bool)>();
-            foreach (Match cm in Regex.Matches(rm.Groups[1].Value,
-                         @"<(t[dh])\b([^>]*)>([\s\S]*?)</t[dh]\s*>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(rm.Groups[1].Value,
+                         @"<(t[dh])\b([^>]*)>([\s\S]*?)</t[dh]\s*>", RegexOptions.IgnoreCase).Select(cm => cm.Groups))
             {
                 var txt = CollapseWs(DecodeEntities(
-                    Regex.Replace(cm.Groups[3].Value, @"<[^>]+>", " "))).Trim();
-                cells.Add((txt, SpanOf(cm.Groups[2].Value, "colspan"),
-                    SpanOf(cm.Groups[2].Value, "rowspan"),
-                    cm.Groups[1].Value.Equals("th", StringComparison.OrdinalIgnoreCase)));
+                    SafeRegex.Replace(groups[3].Value, @"<[^>]+>", " "))).Trim();
+                cells.Add((txt, SpanOf(groups[2].Value, "colspan"),
+                    SpanOf(groups[2].Value, "rowspan"),
+                    groups[1].Value.Equals("th", StringComparison.OrdinalIgnoreCase)));
             }
             if (cells.Count > 0) rq.rows.Add(cells);
         }

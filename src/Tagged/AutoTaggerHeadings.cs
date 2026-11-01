@@ -92,9 +92,9 @@ internal static partial class AutoTagger
                              || font.IndexOf("Black", StringComparison.OrdinalIgnoreCase) >= 0
                              || font.IndexOf("Heavy", StringComparison.OrdinalIgnoreCase) >= 0);
 
-    private static readonly Regex TitleSpace = new(@"\s+", RegexOptions.Compiled);
+    private static readonly Regex TitleSpace = new(@"\s+", RegexOptions.Compiled, RegexLimits.Timeout);
 
-    private static string NormTitle(string s) => TitleSpace.Replace(s, string.Empty).ToLowerInvariant();
+    private static string NormTitle(string s) => SafeRegex.Replace(TitleSpace, s, string.Empty).ToLowerInvariant();
 
     private static HeadingRule MakeHeadingRule(Document document, AutoTaggingSettings settings, double bodySize, List<double> sizes)
     {

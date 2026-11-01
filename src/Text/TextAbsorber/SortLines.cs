@@ -7,6 +7,29 @@ namespace Aspose.Pdf.Text;
 
 public sealed partial class TextAbsorber
 {
+    /// <summary>Each line's tracked runs - those lying wholly inside it - in recording order. The lines
+    /// partition the page's text, so a run is found among the line starts by its offset, instead of every
+    /// line walking every run of the page.</summary>
+    private List<RunSpan>[] SpansByLine(string[] lines, int textStartOffset)
+    {
+        var starts = new int[lines.Length];
+        var byLine = new List<RunSpan>[lines.Length];
+        var off = textStartOffset;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            starts[i] = off;
+            off += lines[i].Length + 1;
+            byLine[i] = new List<RunSpan>();
+        }
+        foreach (var s in _pageRunSpans)
+        {
+            var i = Array.BinarySearch(starts, s.Offset);
+            if (i < 0) i = ~i - 1;
+            if (i >= 0 && s.Offset + s.Len <= starts[i] + lines[i].Length) byLine[i].Add(s);
+        }
+        return byLine;
+    }
+
     private void SortLinesByY(int textStartOffset, int yStartIndex)
     {
         // Record the last line's Y position
@@ -21,31 +44,27 @@ public sealed partial class TextAbsorber
         sl.pageText = _text.ToString(sl.textStartOffset, _text.Length - sl.textStartOffset);
         sl.lines = sl.pageText.Split('\n');
 
-        sl.rtlMultiSpan = HasRtlMultiSpanLine(sl.lines, sl.textStartOffset);
+        sl.lineSpans = SpansByLine(sl.lines, sl.textStartOffset);
+        sl.rtlMultiSpan = HasRtlMultiSpanLine(sl.lines, sl.lineSpans);
         if (sl.yCount < 2 && !sl.rtlMultiSpan) return;
 
         sl.singleSpaceGlyphLine = new bool[sl.lines.Length];
         sl.lineEdgeX = new double[sl.lines.Length];
+        for (int i = 0; i < sl.lines.Length; i++)
         {
-            var off = sl.textStartOffset;
-            for (int i = 0; i < sl.lines.Length; i++)
+            int spans = 0, len = 0;
+            double endX = double.NaN, glyphX = double.NaN;
+            foreach (var s in sl.lineSpans[i])
             {
-                int lo = off, hi = off + sl.lines[i].Length, spans = 0, len = 0;
-                double endX = double.NaN, glyphX = double.NaN;
-                foreach (var s in _pageRunSpans)
-                {
-                    if (s.Offset < lo || s.Offset + s.Len > hi) continue;
-                    spans++; len += s.Len; glyphX = s.X;
-                    var w = !double.IsNaN(s.Width) && s.Width > 0 ? s.Width : s.Len * Math.Max(_pageCellWidth, 1.0);
-                    if (double.IsNaN(endX) || s.X + w > endX) endX = s.X + w;
-                }
-                var blank = string.IsNullOrWhiteSpace(sl.lines[i]);
-                sl.singleSpaceGlyphLine[i] = blank && spans == 1 && len == 1;
-                sl.lineEdgeX[i] = blank ? glyphX : endX;
-                if (GridDebug)
-                    Console.Error.WriteLine($"[edge] i={i} blank={blank} lineLen={sl.lines[i].TrimEnd('\r').Length} spans={spans} spanLen={len} edgeX={sl.lineEdgeX[i]:F1} single={sl.singleSpaceGlyphLine[i]}");
-                off += sl.lines[i].Length + 1;
+                spans++; len += s.Len; glyphX = s.X;
+                var w = !double.IsNaN(s.Width) && s.Width > 0 ? s.Width : s.Len * Math.Max(_pageCellWidth, 1.0);
+                if (double.IsNaN(endX) || s.X + w > endX) endX = s.X + w;
             }
+            var blank = string.IsNullOrWhiteSpace(sl.lines[i]);
+            sl.singleSpaceGlyphLine[i] = blank && spans == 1 && len == 1;
+            sl.lineEdgeX[i] = blank ? glyphX : endX;
+            if (GridDebug)
+                Console.Error.WriteLine($"[edge] i={i} blank={blank} lineLen={sl.lines[i].TrimEnd('\r').Length} spans={spans} spanLen={len} edgeX={sl.lineEdgeX[i]:F1} single={sl.singleSpaceGlyphLine[i]}");
         }
         sl.adjacencyTol = Math.Max(1.5 * _pageCellWidth, 2.0);
         sl.pageYs = new List<double>();
@@ -85,10 +104,10 @@ public sealed partial class TextAbsorber
                 Console.Error.WriteLine($"[sortpre] y={sl.pageYs[i]:F2} '{sl.lines[i][..Math.Min(28, sl.lines[i].Length)]}'");
         }
 
-        sl.blankFs = ExtractionOptions?.FormattingMode != TextExtractionOptions.TextFormattingMode.Raw
-                      && _pageCellWidth > 0
-            ? (_pageDominantFs > 0 ? _pageDominantFs : _pageCellWidth / 0.6 + 2)
-            : 0;
+        if (ExtractionOptions?.FormattingMode != TextExtractionOptions.TextFormattingMode.Raw
+            && _pageCellWidth > 0)
+            sl.blankFs = _pageDominantFs > 0 ? _pageDominantFs : _pageCellWidth / 0.6 + 2;
+        else sl.blankFs = 0;
         sl.rawMode = ExtractionOptions?.FormattingMode == TextExtractionOptions.TextFormattingMode.Raw;
         if (sl.rawMode) return;
 
@@ -166,9 +185,10 @@ public sealed partial class TextAbsorber
         // Character width for X->column mapping within this row: prefer the
         // page grid cell; else the cell rule from the anchor font.
         var anchorFs2 = sl.pageFs[group[0].idx];
-        var rowCw = _pageCellWidth > 0
-            ? _pageCellWidth
-            : (!double.IsNaN(anchorFs2) && anchorFs2 > 0 ? Math.Max(1.0, 0.6 * (Math.Round(anchorFs2, MidpointRounding.AwayFromZero) - 2.0)) : 0.0);
+        double rowCw;
+        if (_pageCellWidth > 0) rowCw = _pageCellWidth;
+        else
+            rowCw = !double.IsNaN(anchorFs2) && anchorFs2 > 0 ? Math.Max(1.0, 0.6 * (Math.Round(anchorFs2, MidpointRounding.AwayFromZero) - 2.0)) : 0.0;
         for (int gi = 0; gi < group.Count; gi++)
         {
             if (!EmitRowLine(sl, group, gi, rowCw, rowStartLen, firstPad)) break;
@@ -185,10 +205,8 @@ public sealed partial class TextAbsorber
             // Line start offsets in _text (the same cumulative walk that mapped
             // lineStartXs) so each line's run spans can be located.
             var lineOffs = new int[sl.lines.Length];
-            {
-                var off = sl.textStartOffset;
-                for (int i = 0; i < sl.lines.Length; i++) { lineOffs[i] = off; off += sl.lines[i].Length + 1; }
-            }
+            var off = sl.textStartOffset;
+            for (int i = 0; i < sl.lines.Length; i++) { lineOffs[i] = off; off += sl.lines[i].Length + 1; }
             for (int gs = 0; gs < sl.indexed.Count;)
             {
                 int ge = gs + 1;
@@ -198,13 +216,7 @@ public sealed partial class TextAbsorber
                 // Multi-piece rows always qualify; a single line qualifies when it
                 // carries 2+ tracked runs (stream order within one emitted line can
                 // interleave overlapping runs just as badly as split pieces).
-                var singleLineSpans = 0;
-                if (ge - gs == 1)
-                {
-                    int lo1 = lineOffs[sl.indexed[gs].idx], hi1 = lo1 + sl.lines[sl.indexed[gs].idx].Length;
-                    foreach (var s in _pageRunSpans)
-                        if (s.Offset >= lo1 && s.Offset + s.Len <= hi1) singleLineSpans++;
-                }
+                var singleLineSpans = ge - gs == 1 ? sl.lineSpans[sl.indexed[gs].idx].Count : 0;
                 if (ge - gs > 1 || singleLineSpans > 1)
                 {
                     int rtl = 0, ltr = 0;
@@ -245,12 +257,10 @@ public sealed partial class TextAbsorber
                     if (string.IsNullOrWhiteSpace(sl.lines[i]) && !sl.singleSpaceGlyphLine[i]) continue;
                     if (string.IsNullOrWhiteSpace(sl.lines[i - 1]) && !sl.singleSpaceGlyphLine[i - 1]) continue;
                     // ...and the glyph must seat right after the text (see the walk).
-                    {
-                        var bi = string.IsNullOrWhiteSpace(sl.lines[i]) ? i : i - 1;
-                        var ti = bi == i ? i - 1 : i;
-                        if (string.IsNullOrWhiteSpace(sl.lines[ti])) continue;   // two blank lines
-                        if (!EdgeAdjacent(sl, bi, ti)) continue;
-                    }
+                    var bi = string.IsNullOrWhiteSpace(sl.lines[i]) ? i : i - 1;
+                    var ti = bi == i ? i - 1 : i;
+                    if (string.IsNullOrWhiteSpace(sl.lines[ti])) continue;   // two blank lines
+                    if (!EdgeAdjacent(sl, bi, ti)) continue;
                     // A whitespace-only line is a same-row segment only on the
                     // neighbour's own baseline (see the row walk below).
                     var tolFs = sl.pageFs[i]; if (double.IsNaN(tolFs) || tolFs <= 0) tolFs = 10.0;
@@ -341,84 +351,82 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>Walks the sorted lines bottom-up and numbers the rows they form, blank rows breaking a group.</summary>
-    private void AssignRowGroups(SortLinesState sl)
+    private static void AssignRowGroups(SortLinesState sl)
     {
         sl.groupOf = new int[sl.indexed.Count];
+        var gid = 0;
+        var members = new List<(double bot, double top, double fs, double y, int idx, bool blank)>();
+        // Font size of the nearest text line strictly BELOW the one being
+        // placed (bottom-up walk): an UNDERLINE run (only '_' and spaces)
+        // has its box HEIGHT clamped to it — a fs-12 rule drawn over a
+        // fs-9 table reads as a 9pt-tall band, so it underlines the row
+        // below instead of capturing the header above (the
+        // clamp never grows a box).
+        var fsBelow = 0.0;
+        for (var ii = sl.indexed.Count - 1; ii >= 0; ii--)
         {
-            var gid = 0;
-            var members = new List<(double bot, double top, double fs, double y, int idx, bool blank)>();
-            // Font size of the nearest text line strictly BELOW the one being
-            // placed (bottom-up walk): an UNDERLINE run (only '_' and spaces)
-            // has its box HEIGHT clamped to it — a fs-12 rule drawn over a
-            // fs-9 table reads as a 9pt-tall band, so it underlines the row
-            // below instead of capturing the header above (the
-            // clamp never grows a box).
-            var fsBelow = 0.0;
-            for (var ii = sl.indexed.Count - 1; ii >= 0; ii--)
+            var (yy, idx0, ln) = sl.indexed[ii];
+            var blank0 = string.IsNullOrWhiteSpace(ln);
+            var ffs = sl.pageFs[idx0];
+            if (double.IsNaN(ffs) || ffs <= 0) ffs = 10.0;
+            var hEff = ffs;
+            if (!blank0 && fsBelow > 0 && fsBelow < ffs && !sl.pageRot[idx0])
             {
-                var (yy, idx0, ln) = sl.indexed[ii];
-                var blank0 = string.IsNullOrWhiteSpace(ln);
-                var ffs = sl.pageFs[idx0];
-                if (double.IsNaN(ffs) || ffs <= 0) ffs = 10.0;
-                var hEff = ffs;
-                if (!blank0 && fsBelow > 0 && fsBelow < ffs && !sl.pageRot[idx0])
-                {
-                    var underline = true;
-                    foreach (var ch0 in ln)
-                        if (ch0 != '_' && ch0 != ' ' && ch0 != (char)13) { underline = false; break; }
-                    if (underline) hEff = fsBelow;
-                }
-                // A minority-rotated line's box points UP from its anchor —
-                // [y, y+fs] — instead of sitting on the upright descent line
-                // (sideways title-block runs join rows through
-                // the em above their baseline, never through a descender).
-                var rot0 = sl.pageRot[idx0];
-                var bot0 = rot0 ? yy : yy - sl.pageDesc[idx0] * ffs;
-                var top0 = bot0 + (rot0 ? ffs : hEff);
-                // A whitespace-only line is vertical spacing — UNLESS it is a space
-                // glyph drawn in its own text object on the row being formed (a
-                // trailing space, or the gap between "French" and ":" emitted as
-                // three shows at one baseline): that is a same-row segment, and
-                // breaking the group there would split the row around it.
-                var joins = !sl.rawMode && !double.IsNaN(yy) && members.Count > 0;
-                if (joins)
-                    foreach (var m in members)
-                        if (Math.Min(top0, m.top) - Math.Max(bot0, m.bot)
-                            < 0.5 * Math.Min(hEff, m.fs) - 1e-9
-                            // A whitespace-only line joins only a row on ITS OWN
-                            // baseline (a space glyph shown as its own object beside
-                            // the text); on a merely overlapping baseline it is a
-                            // pad row — vertical spacing that closes the row.
-                            || (blank0 && Math.Abs(yy - m.y) > SameBaselineTol * ffs))
-                        { joins = false; break; }
-                if (blank0 && !sl.singleSpaceGlyphLine[idx0]) joins = false;
-                // ...and only when the glyph seats right after a member's text
-                // (its grid column is the member's end column ±1): a single space
-                // drawn columns away — a justified line's padding, a pad row — is
-                // spacing, which stays as its own row.
-                // (The walk is bottom-up and, on one baseline, later stream index
-                // first — so the glyph may be visited before or after its text.)
-                if (joins)
-                {
-                    var anyText = false;
-                    foreach (var m in members) if (!m.blank) { anyText = true; break; }
-                    if (blank0 || !anyText)
-                    {
-                        var adjacent = false;
-                        foreach (var m in members)
-                            if (m.blank != blank0 && (blank0 ? EdgeAdjacent(sl, idx0, m.idx) : EdgeAdjacent(sl, m.idx, idx0))) { adjacent = true; break; }
-                        if (!adjacent) joins = false;
-                    }
-                }
-                // A lone space glyph that joins nothing still STARTS a group (the
-                // text on its baseline may be visited after it); emitted alone it
-                // is the pad row it always was. Wider blanks close the row.
-                var blankSpacing = blank0 && !sl.singleSpaceGlyphLine[idx0];
-                if (!joins && !(members.Count == 0)) { gid++; members.Clear(); }
-                sl.groupOf[ii] = gid;
-                if (double.IsNaN(yy) || blankSpacing) { gid++; members.Clear(); }
-                else { members.Add((bot0, top0, hEff, yy, idx0, blank0)); if (!blank0) fsBelow = ffs; }
+                var underline = true;
+                foreach (var ch0 in ln)
+                    if (ch0 != '_' && ch0 != ' ' && ch0 != (char)13) { underline = false; break; }
+                if (underline) hEff = fsBelow;
             }
+            // A minority-rotated line's box points UP from its anchor —
+            // [y, y+fs] — instead of sitting on the upright descent line
+            // (sideways title-block runs join rows through
+            // the em above their baseline, never through a descender).
+            var rot0 = sl.pageRot[idx0];
+            var bot0 = rot0 ? yy : yy - sl.pageDesc[idx0] * ffs;
+            var top0 = bot0 + (rot0 ? ffs : hEff);
+            // A whitespace-only line is vertical spacing — UNLESS it is a space
+            // glyph drawn in its own text object on the row being formed (a
+            // trailing space, or the gap between "French" and ":" emitted as
+            // three shows at one baseline): that is a same-row segment, and
+            // breaking the group there would split the row around it.
+            var joins = !sl.rawMode && !double.IsNaN(yy) && members.Count > 0;
+            if (joins)
+                foreach (var m in members)
+                    if (Math.Min(top0, m.top) - Math.Max(bot0, m.bot)
+                        < 0.5 * Math.Min(hEff, m.fs) - 1e-9
+                        // A whitespace-only line joins only a row on ITS OWN
+                        // baseline (a space glyph shown as its own object beside
+                        // the text); on a merely overlapping baseline it is a
+                        // pad row — vertical spacing that closes the row.
+                        || (blank0 && Math.Abs(yy - m.y) > SameBaselineTol * ffs))
+                    { joins = false; break; }
+            if (blank0 && !sl.singleSpaceGlyphLine[idx0]) joins = false;
+            // ...and only when the glyph seats right after a member's text
+            // (its grid column is the member's end column ±1): a single space
+            // drawn columns away — a justified line's padding, a pad row — is
+            // spacing, which stays as its own row.
+            // (The walk is bottom-up and, on one baseline, later stream index
+            // first — so the glyph may be visited before or after its text.)
+            if (joins)
+            {
+                var anyText = false;
+                foreach (var m in members) if (!m.blank) { anyText = true; break; }
+                if (blank0 || !anyText)
+                {
+                    var adjacent = false;
+                    foreach (var m in members)
+                        if (m.blank != blank0 && (blank0 ? EdgeAdjacent(sl, idx0, m.idx) : EdgeAdjacent(sl, m.idx, idx0))) { adjacent = true; break; }
+                    if (!adjacent) joins = false;
+                }
+            }
+            // A lone space glyph that joins nothing still STARTS a group (the
+            // text on its baseline may be visited after it); emitted alone it
+            // is the pad row it always was. Wider blanks close the row.
+            var blankSpacing = blank0 && !sl.singleSpaceGlyphLine[idx0];
+            if (!joins && members.Count != 0) { gid++; members.Clear(); }
+            sl.groupOf[ii] = gid;
+            if (double.IsNaN(yy) || blankSpacing) { gid++; members.Clear(); }
+            else { members.Add((bot0, top0, hEff, yy, idx0, blank0)); if (!blank0) fsBelow = ffs; }
         }
     }
 
@@ -427,16 +435,14 @@ public sealed partial class TextAbsorber
     {
         sl.lineStartXs = new double[sl.lines.Length];
         for (int i = 0; i < sl.lines.Length; i++) sl.lineStartXs[i] = double.NaN;
+        var startByOffset = new Dictionary<int, double>();
+        foreach (var (o, x) in _pageLineStarts)
+            startByOffset[o] = x;
+        var off = sl.textStartOffset;
+        for (int i = 0; i < sl.lines.Length; i++)
         {
-            var startByOffset = new Dictionary<int, double>();
-            foreach (var (o, x) in _pageLineStarts)
-                startByOffset[o] = x;
-            var off = sl.textStartOffset;
-            for (int i = 0; i < sl.lines.Length; i++)
-            {
-                if (startByOffset.TryGetValue(off, out var sx)) sl.lineStartXs[i] = sx;
-                off += sl.lines[i].Length + 1; // + '\n' the split consumed
-            }
+            if (startByOffset.TryGetValue(off, out var sx)) sl.lineStartXs[i] = sx;
+            off += sl.lines[i].Length + 1; // + '\n' the split consumed
         }
 
         sl.indexed = new List<(double y, int idx, string line)>();
@@ -493,7 +499,7 @@ public sealed partial class TextAbsorber
         // Grid-place only those lines; a lone-run line stays tight.
         for (int k = gs; k < ge; k++)
         {
-            if (!InterleaveRowLine(sl, k, gs, ge, lineOffs)) break;
+            if (!InterleaveRowLine(sl, k, lineOffs)) break;
         }
     }
 
@@ -510,8 +516,8 @@ public sealed partial class TextAbsorber
             if (!ExplodeRtlLineRuns(sl, k, lineOffs, cells)) break;
         }
         // Merge ascending X = the true visual row. One output space per
-        // DISTINCT space glyph (co-located stacked duplicates collapse);
-        // voids synthesize a space between letters/digits or beside an
+        // DISTINCT space glyph (co-located stacked duplicates collapse); voids
+        // synthesize a space between letters/digits or beside an
         // explicit space cell (a real space glyph vouches for its gap).
         var ordered = cells.OrderBy(t => t.x).ToList();
         var vsb = new StringBuilder();
@@ -565,11 +571,12 @@ public sealed partial class TextAbsorber
             foreach (var t in ordered)
                 Console.Error.WriteLine($"[rtl]   x={t.x:F2} adv={t.adv:F2} '{t.c}'");
         }
-        // Visual → logical via the UBA pass; the grid pad trails logically.
+        // Visual → logical on a right-to-left paragraph (the row is mostly right-to-left);
+        // the grid pad trails logically.
         // A masked line-end glyph space (see EolShowSpaceSentinel) trims
         // with the plain spaces here — the RTL rebuild's pad handling
         // owns the row's edge whitespace, exactly as before masking.
-        var logical = BidiReorderer.ReorderIfNeeded(vsb.ToString().Trim(' ', EolShowSpaceSentinel));
+        var logical = BidiReorderer.VisualToLogicalOnRtlParagraph(vsb.ToString().Trim(' ', EolShowSpaceSentinel));
         if (sl.rtlTailPad > 0 && sl.rtlTailPad <= 200) logical += new string(' ', sl.rtlTailPad);
         sl.indexed[gs] = (sl.indexed[gs].y, sl.indexed[gs].idx, logical);
         sl.lineStartXs[sl.indexed[gs].idx] = double.NaN;
@@ -590,12 +597,9 @@ public sealed partial class TextAbsorber
             sl.rtlTailPadX = lx;   // leftmost non-blank member: its lead pad trails
             sl.rtlTailPad = lead;
         }
-        int lo = lineOffs[idx], hi = lo + sl.lines[idx].Length;
+        int lo = lineOffs[idx];
         var fallbackAdv = _pageCellWidth > 0 ? _pageCellWidth : 6.0;
-        var lineSpans = new List<RunSpan>();
-        foreach (var s in _pageRunSpans)
-            if (s.Offset >= lo && s.Offset + s.Len <= hi)
-                lineSpans.Add(s);
+        var lineSpans = new List<RunSpan>(sl.lineSpans[idx]);
         var sawSpan = lineSpans.Count > 0;
         // A span whose MEASURED width overshoots into the next span's
         // territory (bad font metrics can double an advance) would
@@ -645,13 +649,12 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>Folds one member line of an interleaved row into the row's cell grid.</summary>
-    private bool InterleaveRowLine(SortLinesState sl, int k, int gs, int ge, int[] lineOffs)
+    private bool InterleaveRowLine(SortLinesState sl, int k, int[] lineOffs)
     {
         int idx = sl.indexed[k].idx, off = lineOffs[idx];
         var lineSpans = new List<RunSpan>();
-        foreach (var s in _pageRunSpans)
-            if (s.Offset >= off && s.Offset + s.Len <= off + sl.lines[idx].Length
-                && s.Width > 0 && !double.IsNaN(s.Width) && !double.IsNaN(s.X))
+        foreach (var s in sl.lineSpans[idx])
+            if (s.Width > 0 && !double.IsNaN(s.Width) && !double.IsNaN(s.X))
                 lineSpans.Add(s);
         // Only a genuine few-run interleave (a note plus a
         // dropped-in glyph) qualifies — a line carrying many
@@ -781,7 +784,9 @@ public sealed partial class TextAbsorber
             if (segmentDone) return true;
             if (body.Length == 0) return true;
             var bodyIsSpaceGlyph = IsSpaceGlyphSegment(body);
-            var sepFloor = prevSegBlank || bodyIsSpaceGlyph ? 0 : gridTarget ? 1 : 6;
+            int sepFloor = 6;
+            if (prevSegBlank || bodyIsSpaceGlyph) sepFloor = 0;
+            else if (gridTarget) sepFloor = 1;
             // A segment that starts where the previous one ends is the same
             // text continued in a new text object (a styled run, a word split
             // by its decoration): it reads on without a space or a pad - the
@@ -857,6 +862,9 @@ public sealed partial class TextAbsorber
                 var pos = abs + bi;
                 if (pos >= 0 && pos < _text.Length && _text[pos] != ' ') ok = false;
             }
+            // Seated flush against the row's next word, the segment would read as part of it.
+            var end = abs + body.TrimEnd(' ').Length;
+            if (ok && end < _text.Length && _text[end] != ' ') ok = false;
             if (ok)
             {
                 while (_text.Length < abs + body.Length) _text.Append(' ');
@@ -864,6 +872,8 @@ public sealed partial class TextAbsorber
                     if (body[bi] != ' ') _text[abs + bi] = body[bi];
                 return (true, body, prevSegBlank);
             }
+            if (DrawnInsideRow(sl, group, gi) && SeatInRowGap(rowStartLen, abs, body.TrimEnd(' ')))
+                return (true, body, prevSegBlank);
         }
         // Column clamp mirrors the 5000-column grid bound
         // (oversize engineering sheets pad into the hundreds of columns).
@@ -876,29 +886,82 @@ public sealed partial class TextAbsorber
         return (false, body, prevSegBlank);
     }
 
-    /// <summary>Clamps each span's width to its neighbours and adds the line's glyphs to the row's cells at their measured x.</summary>
-    private void AppendSpanRuns(SortLinesState sl, List<RunSpan> lineSpans, List<(double x, double adv, char c)> cells, int idx, int lo, Dictionary<int, double> clampW, double fallbackAdv)
+    /// <summary>Whether row member <paramref name="gi"/> starts left of the right edge of the members
+    /// before it - drawn back INTO the row's text, not past its end. Only such a segment is seated in
+    /// a gap; one drawn past the row's text whose grid column merely drifted inside it is appended.</summary>
+    private static bool DrawnInsideRow(SortLinesState sl, List<(double y, int idx, string line)> group, int gi)
     {
+        var x = AnchorX(sl, group[gi].idx);
+        if (double.IsNaN(x)) return false;
+        var edge = double.NegativeInfinity;
+        for (var k = 0; k < gi; k++)
         {
-            var byX = new List<RunSpan>(lineSpans);
-            byX.Sort((a2, b2) => a2.X.CompareTo(b2.X));
-            for (int si = 0; si < byX.Count; si++)
+            var e = sl.lineEdgeX[group[k].idx];
+            if (!double.IsNaN(e) && e > edge) edge = e;
+        }
+        return x < edge;
+    }
+
+    /// <summary>A segment drawn back into a row whose glyphs collide with the row's text at its
+    /// grid column - the row's text runs one character per glyph, so a proportional line drifts
+    /// off the grid. A segment the row already reads at that column (the same words drawn twice
+    /// over each other) is dropped; otherwise it is seated in the row's own gap nearest the column,
+    /// over the gap's blanks when they hold it, else widening the gap - so it reads where it is
+    /// drawn, never at the row's end. False when no gap lies within the segment's length of the
+    /// column.</summary>
+    private bool SeatInRowGap(int rowStartLen, int abs, string body)
+    {
+        if (body.Length == 0) return false;
+        // The same words drawn twice over each other read once: the row already holds them within
+        // the segment's length of its column (the copy seated first may have moved to a gap).
+        var from = Math.Max(rowStartLen, abs - body.Length);
+        var to = Math.Min(_text.Length, abs + 2 * body.Length);
+        if (to - from >= body.Length && _text.ToString(from, to - from).Contains(body, StringComparison.Ordinal))
+            return true;
+        for (var d = 0; d <= body.Length; d++)
+            foreach (var pos in new[] { abs - d, abs + d })
             {
-                var s2 = byX[si];
-                if (!(s2.Width > 0) || double.IsNaN(s2.Width)) continue;
-                var w2 = s2.Width;
-                for (int sj = si + 1; sj < byX.Count; sj++)
+                if (pos <= rowStartLen || pos >= _text.Length - 1 || _text[pos] != ' ') continue;
+                int s = pos, e = pos + 1;
+                while (s > rowStartLen && _text[s - 1] == ' ') s--;
+                while (e < _text.Length && _text[e] == ' ') e++;
+                // Only a gap BETWEEN the row's words: text on both sides of it.
+                if (s == rowStartLen || e == _text.Length) continue;
+                if (e - s >= body.Length + 2)
                 {
-                    var nb = byX[sj];
-                    var nbText = nb.Offset - lo >= 0 && nb.Offset - lo + nb.Len <= sl.lines[idx].Length
-                        ? sl.lines[idx].Substring(nb.Offset - lo, nb.Len) : "";
-                    if (string.IsNullOrWhiteSpace(nbText)) continue;
-                    var room = nb.X - s2.X;
-                    if (room > 1 && room < w2) w2 = room;
-                    break;
+                    for (var bi = 0; bi < body.Length; bi++) _text[s + 1 + bi] = body[bi];
                 }
-                if (w2 < s2.Width) clampW[s2.Offset] = w2;
+                else
+                {
+                    _text.Remove(s, e - s);
+                    _text.Insert(s, " " + body + " ");
+                }
+                return true;
             }
+        return false;
+    }
+
+    /// <summary>Clamps each span's width to its neighbours and adds the line's glyphs to the row's cells at their measured x.</summary>
+    private static void AppendSpanRuns(SortLinesState sl, List<RunSpan> lineSpans, List<(double x, double adv, char c)> cells, int idx, int lo, Dictionary<int, double> clampW, double fallbackAdv)
+    {
+        var byX = new List<RunSpan>(lineSpans);
+        byX.Sort((a2, b2) => a2.X.CompareTo(b2.X));
+        for (int si = 0; si < byX.Count; si++)
+        {
+            var s2 = byX[si];
+            if (!(s2.Width > 0) || double.IsNaN(s2.Width)) continue;
+            var w2 = s2.Width;
+            for (int sj = si + 1; sj < byX.Count; sj++)
+            {
+                var nb = byX[sj];
+                var nbText = nb.Offset - lo >= 0 && nb.Offset - lo + nb.Len <= sl.lines[idx].Length
+                    ? sl.lines[idx].Substring(nb.Offset - lo, nb.Len) : "";
+                if (string.IsNullOrWhiteSpace(nbText)) continue;
+                var room = nb.X - s2.X;
+                if (room > 1 && room < w2) w2 = room;
+                break;
+            }
+            if (w2 < s2.Width) clampW[s2.Offset] = w2;
         }
         foreach (var s in lineSpans)
         {

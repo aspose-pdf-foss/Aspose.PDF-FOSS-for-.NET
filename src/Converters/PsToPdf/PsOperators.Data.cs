@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 
 namespace Aspose.Pdf.Converters.PsToPdf;
 
@@ -47,7 +48,7 @@ internal sealed partial class PsInterpreter
             PsType.String => v.AsString!.Length,
             PsType.Dictionary or PsType.Font => v.AsDictionary!.Count,
             PsType.Name => v.Text!.Length,
-            _ => throw new PsErrorSignal("typecheck"),
+            _ => throw new PsErrorException("typecheck"),
         });
     }
 
@@ -58,18 +59,18 @@ internal sealed partial class PsInterpreter
         switch (target.Type)
         {
             case PsType.Array:
-                i.Push(target.AsArray![CheckIndex(key, target.AsArray!.Length)]);
+                i.Push(target.AsArray![CheckIndex(key, target.AsArray.Length)]);
                 return;
             case PsType.String:
-                i.Push(target.AsString![CheckIndex(key, target.AsString!.Length)]);
+                i.Push(target.AsString![CheckIndex(key, target.AsString.Length)]);
                 return;
             case PsType.Dictionary:
             case PsType.Font:
-                if (!target.AsDictionary!.TryGet(key, out var value)) throw new PsErrorSignal("undefined");
+                if (!target.AsDictionary!.TryGet(key, out var value)) throw new PsErrorException("undefined");
                 i.Push(value);
                 return;
             default:
-                throw new PsErrorSignal("typecheck");
+                throw new PsErrorException("typecheck");
         }
     }
 
@@ -82,27 +83,27 @@ internal sealed partial class PsInterpreter
         switch (target.Type)
         {
             case PsType.Array:
-                target.AsArray![CheckIndex(key, target.AsArray!.Length)] = value;
+                target.AsArray![CheckIndex(key, target.AsArray.Length)] = value;
                 return;
             case PsType.String:
-                if (!value.IsNumber) throw new PsErrorSignal("typecheck");
-                target.AsString![CheckIndex(key, target.AsString!.Length)] = (byte)value.ToInt();
+                if (!value.IsNumber) throw new PsErrorException("typecheck");
+                target.AsString![CheckIndex(key, target.AsString.Length)] = (byte)value.ToInt();
                 return;
             case PsType.Dictionary:
             case PsType.Font:
-                if (target.AsDictionary!.ReadOnly) throw new PsErrorSignal("invalidaccess");
-                target.AsDictionary!.Put(key, value);
+                if (target.AsDictionary!.ReadOnly) throw new PsErrorException("invalidaccess");
+                target.AsDictionary.Put(key, value);
                 return;
             default:
-                throw new PsErrorSignal("typecheck");
+                throw new PsErrorException("typecheck");
         }
     }
 
     private static int CheckIndex(PsValue key, int length)
     {
-        if (!key.IsNumber) throw new PsErrorSignal("typecheck");
+        if (!key.IsNumber) throw new PsErrorException("typecheck");
         var index = key.ToInt();
-        if (index < 0 || index >= length) throw new PsErrorSignal("rangecheck");
+        if (index < 0 || index >= length) throw new PsErrorException("rangecheck");
         return index;
     }
 
@@ -114,13 +115,13 @@ internal sealed partial class PsInterpreter
         if (target.Type == PsType.Array)
         {
             CheckInterval(index, count, target.AsArray!.Length);
-            i.Push(PsValue.Arr(target.AsArray!.Interval(index, count)));
+            i.Push(PsValue.Arr(target.AsArray.Interval(index, count)));
             return;
         }
 
-        if (target.Type != PsType.String) throw new PsErrorSignal("typecheck");
+        if (target.Type != PsType.String) throw new PsErrorException("typecheck");
         CheckInterval(index, count, target.AsString!.Length);
-        i.Push(PsValue.Str(target.AsString!.Interval(index, count)));
+        i.Push(PsValue.Str(target.AsString.Interval(index, count)));
     }
 
     private static void PutIntervalOperator(PsInterpreter i)
@@ -132,26 +133,26 @@ internal sealed partial class PsInterpreter
         if (target.Type == PsType.Array && source.Type == PsType.Array)
         {
             CheckInterval(index, source.AsArray!.Length, target.AsArray!.Length);
-            for (var k = 0; k < source.AsArray!.Length; k++) target.AsArray![index + k] = source.AsArray![k];
+            for (var k = 0; k < source.AsArray.Length; k++) target.AsArray[index + k] = source.AsArray[k];
             return;
         }
 
         if (target.Type != PsType.String || source.Type != PsType.String)
-            throw new PsErrorSignal("typecheck");
+            throw new PsErrorException("typecheck");
         CheckInterval(index, source.AsString!.Length, target.AsString!.Length);
-        target.AsString!.Put(index, source.AsString);
+        target.AsString.Put(index, source.AsString);
     }
 
     private static void CheckInterval(int index, int count, int length)
     {
-        if (index + count > length) throw new PsErrorSignal("rangecheck");
+        if (index + count > length) throw new PsErrorException("rangecheck");
     }
 
     private static void AloadOperator(PsInterpreter i)
     {
         var value = i.Pop();
         var array = value.AsArray;
-        if (array is null) throw new PsErrorSignal("typecheck");
+        if (array is null) throw new PsErrorException("typecheck");
         for (var k = 0; k < array.Length; k++) i.Push(array[k]);
         i.Push(value);
     }
@@ -160,7 +161,7 @@ internal sealed partial class PsInterpreter
     {
         var value = i.Pop();
         var array = value.AsArray;
-        if (array is null) throw new PsErrorSignal("typecheck");
+        if (array is null) throw new PsErrorException("typecheck");
         i.Vm.Changing(array);
         for (var k = array.Length - 1; k >= 0; k--) array[k] = i.Pop();
         i.Push(value);
@@ -174,8 +175,9 @@ internal sealed partial class PsInterpreter
         {
             ForAllBody(i, proc, target);
         }
-        catch (PsExitSignal)
+        catch (PsExitException)
         {
+            // exit ends the loop - the operator finishes normally
         }
     }
 
@@ -186,7 +188,7 @@ internal sealed partial class PsInterpreter
             case PsType.Array:
                 for (var k = 0; k < target.AsArray!.Length; k++)
                 {
-                    i.Push(target.AsArray![k]);
+                    i.Push(target.AsArray[k]);
                     i.ExecuteProcedure(proc);
                 }
 
@@ -194,7 +196,7 @@ internal sealed partial class PsInterpreter
             case PsType.String:
                 for (var k = 0; k < target.AsString!.Length; k++)
                 {
-                    i.Push(target.AsString![k]);
+                    i.Push(target.AsString[k]);
                     i.ExecuteProcedure(proc);
                 }
 
@@ -210,7 +212,7 @@ internal sealed partial class PsInterpreter
 
                 return;
             default:
-                throw new PsErrorSignal("typecheck");
+                throw new PsErrorException("typecheck");
         }
     }
 
@@ -232,7 +234,7 @@ internal sealed partial class PsInterpreter
         Def("load", i =>
         {
             var key = i.Pop();
-            if (!i.TryResolve(key, out var value)) throw new PsErrorSignal("undefined");
+            if (!i.TryResolve(key, out var value)) throw new PsErrorException("undefined");
             i.Push(value);
         });
         Def("known", i =>
@@ -370,7 +372,7 @@ internal sealed partial class PsInterpreter
             return;
         }
 
-        if (subject.Type != PsType.String) throw new PsErrorSignal("typecheck");
+        if (subject.Type != PsType.String) throw new PsErrorException("typecheck");
         var text = subject.AsString!;
         var scanner = new PsScanner(text.ToArray());
         if (!scanner.TryRead(out var token))
@@ -428,13 +430,13 @@ internal sealed partial class PsInterpreter
         if (v.IsNumber) return v.Number;
         if (v.Type == PsType.String && PsScanner.TryParseNumber(v.AsString!.ToString(), out var parsed))
             return parsed.Number;
-        throw new PsErrorSignal("typecheck");
+        throw new PsErrorException("typecheck");
     }
 
     private static void ReadOnlyOperator(PsInterpreter i)
     {
         var v = i.Peek();
-        if (v.AsDictionary != null) v.AsDictionary!.ReadOnly = true;
+        if (v.AsDictionary != null) v.AsDictionary.ReadOnly = true;
     }
 
     private static void CvsOperator(PsInterpreter i)
@@ -442,7 +444,7 @@ internal sealed partial class PsInterpreter
         var target = i.PopString();
         var value = i.Pop();
         var text = TextOf(value);
-        if (text.Length > target.Length) throw new PsErrorSignal("rangecheck");
+        if (text.Length > target.Length) throw new PsErrorException("rangecheck");
         target.Put(0, PsString.FromText(text));
         i.Push(PsValue.Str(target.Interval(0, text.Length)));
     }
@@ -454,26 +456,26 @@ internal sealed partial class PsInterpreter
         var radix = i.PopInt();
         var value = (long)NumericOf(i.Pop());
         var text = ToRadixText(value, radix);
-        if (text.Length > target.Length) throw new PsErrorSignal("rangecheck");
+        if (text.Length > target.Length) throw new PsErrorException("rangecheck");
         target.Put(0, PsString.FromText(text));
         i.Push(PsValue.Str(target.Interval(0, text.Length)));
     }
 
     private static string ToRadixText(long value, int radix)
     {
-        if (radix < 2 || radix > 36) throw new PsErrorSignal("rangecheck");
+        if (radix < 2 || radix > 36) throw new PsErrorException("rangecheck");
         if (value == 0) return "0";
         const string Digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
         var negative = value < 0;
         var magnitude = Math.Abs(value);
-        var text = string.Empty;
+        var text = new StringBuilder();
         while (magnitude > 0)
         {
-            text = Digits[(int)(magnitude % radix)] + text;
+            text.Insert(0, Digits[(int)(magnitude % radix)]);
             magnitude /= radix;
         }
 
-        return negative ? "-" + text : text;
+        return negative ? "-" + text : text.ToString();
     }
 
     /// <summary>The text <c>cvs</c> produces: a number's digits, a name's or string's
@@ -557,9 +559,9 @@ internal sealed partial class PsInterpreter
     private static void RestoreOperator(PsInterpreter i)
     {
         var token = i.Pop();
-        if (token.Type != PsType.Save) throw new PsErrorSignal("typecheck");
+        if (token.Type != PsType.Save) throw new PsErrorException("typecheck");
         var level = token.ToInt();
-        if (level <= 0 || level > i.SaveDepths.Count) throw new PsErrorSignal("invalidrestore");
+        if (level <= 0 || level > i.SaveDepths.Count) throw new PsErrorException("invalidrestore");
         i.Graphics.UnwindTo(i.SaveDepths[level - 1]);
         i.Vm.RestoreTo(level);
         i.SaveDepths.RemoveRange(level - 1, i.SaveDepths.Count - level + 1);

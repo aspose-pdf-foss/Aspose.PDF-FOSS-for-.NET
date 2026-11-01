@@ -23,14 +23,25 @@ public partial class FileAttachmentAnnotation : MarkupAnnotation
         Dict.Set("Type", new PdfName("Annot"));
         Dict.Set("Subtype", new PdfName("FileAttachment"));
         Dict.Set("Name", new PdfName("Paperclip"));
-        if (fileSpec is not null)
+        if (fileSpec?.Filed is { } filed && ReferenceEquals(filed.Reader, page?.Reader))
+        {
+            // A file this document already embeds is pointed at, not specified a second time.
+            Dict.Set("FS", filed.Reference);
+            _filed = fileSpec;
+        }
+        else if (fileSpec is not null)
         {
             // Same as the File setter: write the pending bytes into /EF so the
             // attachment's content (not just its name) survives save → reload.
             fileSpec.MaterializeEmbeddedStream();
             Dict.Set("FS", fileSpec.Dict);
+            // Embedded in the document later, the file is opened from there.
+            fileSpec.HeldBy(Dict);
         }
     }
+
+    // The document's own specification this annotation was made for, while /FS still points at it.
+    private readonly FileSpecification? _filed;
 
     /// <summary>The icon name (/Name entry), e.g. "Paperclip", "Tag".</summary>
     public string? IconName => Dict.GetName("Name");
@@ -52,6 +63,7 @@ public partial class FileAttachmentAnnotation : MarkupAnnotation
     {
         get
         {
+            if (_filed is not null && ReferenceEquals(Dict.Get("FS"), _filed.Filed?.Reference)) return _filed;
             var fs = InternalReader.ResolveDict(Dict.Get("FS"));
             return fs is not null ? new FileSpecification(fs, InternalReader) : null;
         }
@@ -62,6 +74,7 @@ public partial class FileAttachmentAnnotation : MarkupAnnotation
             {
                 value.MaterializeEmbeddedStream();
                 Dict.Set("FS", value.Dict);
+                value.HeldBy(Dict);
             }
         }
     }
@@ -85,9 +98,12 @@ public partial class FileAttachmentAnnotation : MarkupAnnotation
     /// <summary>Annotation opacity (/CA entry; 0..1).</summary>
     public new double Opacity
     {
-        get => (InternalReader.Resolve(Dict.Get("CA")) is PdfReal r) ? r.Value
-              : (InternalReader.Resolve(Dict.Get("CA")) is PdfInteger i) ? i.Value
-              : 1.0;
+        get
+        {
+            if (InternalReader.Resolve(Dict.Get("CA")) is PdfReal r) return r.Value;
+            if (InternalReader.Resolve(Dict.Get("CA")) is PdfInteger i) return i.Value;
+            return 1.0;
+        }
         set => Dict.Set("CA", new PdfReal(value));
     }
 }

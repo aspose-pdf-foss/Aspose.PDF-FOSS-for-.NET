@@ -7,7 +7,7 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextFragmentAbsorber
 {
     /// <summary>Two runs the baselines put on the same line: the gap between them earns a separator space unless it is letter-tracking, a squeezed set, a drop-shadow repeat or a boundary the line never drew.</summary>
-    private bool InsertSameLineGapSpace(List<RawTextRun> rawFragments, int i, int prevIdx, RawTextRun prev, double deltaY, StringBuilder fullText, List<int> charToRun, int[] runStartChar, bool ignoreShadow, ref string? lastKeptText, ref double lastKeptX, ref double lastKeptY, bool[] letterTracked, bool[] squeezedGap)
+    private static bool InsertSameLineGapSpace(List<RawTextRun> rawFragments, int i, int prevIdx, RawTextRun prev, double deltaY, StringBuilder fullText, List<int> charToRun, int[] runStartChar, bool ignoreShadow, ref string? lastKeptText, ref double lastKeptX, ref double lastKeptY, bool[] letterTracked, bool[] squeezedGap)
     {
         // Remove \r\n sentinels between prevIdx and i on the same line —
         // they were BT/ET boundary artifacts, not real line breaks.
@@ -47,14 +47,13 @@ public sealed partial class TextFragmentAbsorber
     /// reads "Kundenummer: 981641205"). Junction separator: exactly one space iff the x-gap
     /// between the run's end and the line start is ≥ 0.15 em. RTL runs keep the append path —
     /// their visual pen legitimately walks right-to-left and reorders via the bidi pass.</summary>
-    private bool TryPrependBackJumpRun(List<RawTextRun> rawFragments, int i, RawTextRun prev,
+    private static bool TryPrependBackJumpRun(List<RawTextRun> rawFragments, int i, RawTextRun prev,
         StringBuilder fullText, List<int> charToRun, int[] runStartChar)
     {
         var cur = rawFragments[i];
         var bjText = cur.Text;
         var bjHasRtl = false;
-        foreach (var bjc in bjText)
-            if (BidiReorderer.IsRtlChar(bjc)) { bjHasRtl = true; break; }
+        if (bjText.Any(bjc => BidiReorderer.IsRtlChar(bjc))) { bjHasRtl = true; }
         // UPRIGHT text only: rotated/vertical runs advance along Y, so
         // an X-based "wholly left" test would reorder reading order.
         var bjUpright = Math.Abs(cur.TmB) <= Math.Abs(cur.TmA) * 1e-3
@@ -65,10 +64,16 @@ public sealed partial class TextFragmentAbsorber
         var lsIdx = fullText.Length;
         while (lsIdx > 0 && fullText[lsIdx - 1] != '\n') lsIdx--;
         var lineMinX = double.NaN;
+        var lastRun = -1;
         for (var cc = lsIdx; cc < charToRun.Count; cc++)
         {
             var rIdx = charToRun[cc];
-            if (rIdx < 0 || rIdx >= rawFragments.Count) continue;
+            if (rIdx < 0 || rIdx >= rawFragments.Count || rIdx == lastRun) continue;
+            lastRun = rIdx;
+            // A line that already reads right to left continues LEFTWARD: a Latin run drawn left
+            // of it is the next run in reading order, not a value drawn before its label, so it
+            // appends and the bidi pass places it (a placeholder drawn as several runs stays whole).
+            if (BidiReorderer.ContainsRtl(rawFragments[rIdx].Text)) return false;
             var rx = rawFragments[rIdx].X;
             if (double.IsNaN(lineMinX) || rx < lineMinX) lineMinX = rx;
         }
@@ -91,7 +96,7 @@ public sealed partial class TextFragmentAbsorber
     }
 
     /// <summary>Insert a space if there's a word-sized or column-sized gap.</summary>
-    private bool NeedsSameLineGapSpace(List<RawTextRun> rawFragments, int i, RawTextRun prev,
+    private static bool NeedsSameLineGapSpace(List<RawTextRun> rawFragments, int i, RawTextRun prev,
         double deltaY, StringBuilder fullText, bool[] letterTracked, bool[] squeezedGap)
     {
         var cur = rawFragments[i];
@@ -99,9 +104,12 @@ public sealed partial class TextFragmentAbsorber
         // translation — scale the width by the run's Tm X-scale so the
         // gap is measured in one space (a `/F 1 Tf` + `7 0 0 7 … Tm`
         // producer otherwise reads every glyph pair as a word gap).
+        // The previous run ends where its ink does: a trailing kern that pulls the pen back over its
+        // last glyph opens no gap after it.
         var prevTmScale = Math.Abs(prev.TmA) > 0 ? Math.Abs(prev.TmA) : 1.0;
+        var prevInkW = prev.CharEndPositions is { Length: > 0 } ends ? Math.Max(prev.Width, ends.Max()) : prev.Width;
         var prevEndX = prev.X + (prev.Width > 0
-            ? prev.Width * prev.HScaling
+            ? prevInkW * prev.HScaling
             : EstimateWidth(prev.Text, prev.FontSize)) * prevTmScale;
         var gap = cur.X - prevEndX;
         var fontSize = cur.FontSize > 0 ? cur.FontSize : 12.0;
@@ -116,6 +124,14 @@ public sealed partial class TextFragmentAbsorber
         // of one show op — always exactly one boundary space, independent
         // of the run-gap heuristics (the ceiling would glue wide columns).
         if (cur.GapSplit) return true;
+        // A right-to-left line advances LEFTWARD: a run ending where the previous run starts
+        // continues it, and only the gap between those two edges can separate words.
+        if (cur.X < prev.X)
+        {
+            var curEndX = cur.X + (cur.Width > 0 ? cur.Width * cur.HScaling : EstimateWidth(cur.Text, cur.FontSize)) * tmScaleX;
+            if (curEndX <= prev.X + effFontSize * RtlAbutEms && LineHoldsRightToLeft(fullText))
+                return IsWordGap(cur, prev, prev.X - curEndX, effFontSize, deltaY, letterTracked[i]);
+        }
         if (IsWordGap(cur, prev, gap, effFontSize, deltaY, letterTracked[i])) return true;
         // A run that starts PART-WAY THROUGH the previous run's advance —
         // past its origin, but short of where it ends — was set squeezed,
@@ -138,6 +154,18 @@ public sealed partial class TextFragmentAbsorber
         // redraw (drop shadows, doubled draw) keeps gluing.
         if (gap > effFontSize * 16.0 || gap < -effFontSize * 1.5) return true;
         return IsRotatedColumnHop(cur, prev, fontSize);
+    }
+
+    /// <summary>How far, in ems, a run may overlap the previous run's start and still continue
+    /// a right-to-left line leftward (rounding of the producer's seats).</summary>
+    private const double RtlAbutEms = 0.1;
+
+    /// <summary>Whether the text since the last line break holds right-to-left characters.</summary>
+    private static bool LineHoldsRightToLeft(StringBuilder fullText)
+    {
+        for (var k = fullText.Length - 1; k >= 0 && fullText[k] != '\n'; k--)
+            if (BidiReorderer.IsRtlChar(fullText[k])) return true;
+        return false;
     }
 
     /// <summary>A positive, word-sized gap between two runs that isn't letter-tracking.

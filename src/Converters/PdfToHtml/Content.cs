@@ -10,7 +10,9 @@ public sealed partial class PdfToHtmlConverter
 
     private sealed class CtmState
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double A = 1, B, C, D = 1, E, F;
+#pragma warning restore S3218
 
         public CtmState Clone() => new()
         {
@@ -65,8 +67,25 @@ public sealed partial class PdfToHtmlConverter
         public double StrokeR, StrokeG, StrokeB;
         public double FillR, FillG, FillB;
         public double LineWidth = 1.0;
+        // The box of the points the path is built from, in page space: a curve's control points
+        // count, so the box of a turned curve may run a little past its ink.
+        public double MinX = double.PositiveInfinity, MinY = double.PositiveInfinity;
+        public double MaxX = double.NegativeInfinity, MaxY = double.NegativeInfinity;
 
-        public void Clear() => Data.Clear();
+        public void Extend(double x, double y)
+        {
+            if (x < MinX) MinX = x;
+            if (x > MaxX) MaxX = x;
+            if (y < MinY) MinY = y;
+            if (y > MaxY) MaxY = y;
+        }
+
+        public void Clear()
+        {
+            Data.Clear();
+            MinX = MinY = double.PositiveInfinity;
+            MaxX = MaxY = double.NegativeInfinity;
+        }
     }
 
     // Baselines within this much of each other are the same line, matching the
@@ -98,10 +117,18 @@ public sealed partial class PdfToHtmlConverter
         double pageLLX = 0, double yTopRef = double.NaN, ZCounter? zCounter = null,
         string? defaultFontName = null, bool authoredPathShape = false,
         Dictionary<string, (string Name, string? GroupTitle)>? ocLayers = null,
-        bool pageTurnedOver = false)
+        bool pageTurnedOver = false, bool perGlyphDivs = false, TextLayerModel? model = null,
+        string? initialClipD = null, string? initialClipId = null, double initialFillAlpha = 1.0,
+        double frameWidth = double.NaN)
     {
         var ct = new ContentRenderState();
+        ct.model = model;
+        ct.initialClipD = initialClipD;
+        ct.initialClipId = initialClipId;
+        ct.fillAlpha = initialFillAlpha;
+        ct.frameWidth = double.IsNaN(frameWidth) ? pageWidth : frameWidth;
         ct.streamBytes = streamBytes;
+        ct.perGlyphDivs = perGlyphDivs;
         ct.fonts = fonts;
         ct.imageXObjects = imageXObjects;
         ct.reader = reader;
@@ -205,7 +232,7 @@ public sealed partial class PdfToHtmlConverter
         }
         else if (img.IsJpeg)
         {
-            src = $"data:image/jpeg;base64,{Convert.ToBase64String(img.GetRawData())}";
+            src = $"data:image/jpeg;base64,{Convert.ToBase64String(img.GetJpegBytes()!)}";
         }
         else
         {
@@ -221,8 +248,8 @@ public sealed partial class PdfToHtmlConverter
     // ── stl_ line solver ────────────────────────────────────────────────
     // The model for the fixed-layout span segmentation and letter/word
     // spacing solving:
-    //  * pen model = /Widths advances + kerns/Tc as inter-char gaps;
-    //    browser model = exact face advances (fallback face for chars the
+    //  * pen model = /Widths advances + kerns/Tc as inter-char gaps; browser
+    //    model = exact face advances (fallback face for chars the
     //    embedded subset lacks).
     //  * space slots collapse/drop/synthesize around 0.6×m (m = browser space
     //    advance); slots fold into a span while |e − running mean| ≤ 0.6×m,
@@ -240,9 +267,11 @@ public sealed partial class PdfToHtmlConverter
         public string CssFamily = "sans-serif";
         public string? FaceName;
         public double FontSize = 12;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         /// <summary>True when the run is drawn in the faux-bold rendering mode (a
         /// fill-then-stroke thickening the same face).</summary>
         public bool FauxBold;
+#pragma warning restore S3218
         /// <summary>The slant the face declares, carried so a faux-bold run can state
         /// its painted appearance in full.</summary>
         public string FontStyle = "normal";
@@ -263,6 +292,9 @@ public sealed partial class PdfToHtmlConverter
         /// <summary>The style's font serves a SUBSTITUTE face's subset (SimSun
         /// standing in for a non-embedded, non-installed CJK font).</summary>
         public bool SubstituteFace;
+        /// <summary>True when the style names an overflow face of its font (a glyph the primary
+        /// face holds no slot for): its class lists the fallback family behind it.</summary>
+        public bool OverflowFace;
 
         /// <summary>Embedded program advance by CHARACTER (via the font's own
         /// single-char ToUnicode), for measuring a ligature's components — the
@@ -274,15 +306,25 @@ public sealed partial class PdfToHtmlConverter
         /// class states the transparency instead of a fill colour.</summary>
         public bool Transparent;
 
+        /// <summary>The constant fill alpha the run is painted with.</summary>
+        public double Alpha = 1.0;
+
         public string CssColor => Transparent
             ? TransparentTextColor
-            : $"#{(int)Math.Round(Compat.Clamp(R, 0, 1) * 255):X2}" +
+            : TranslucentColor() ?? $"#{(int)Math.Round(Compat.Clamp(R, 0, 1) * 255):X2}" +
               $"{(int)Math.Round(Compat.Clamp(G, 0, 1) * 255):X2}" +
               $"{(int)Math.Round(Compat.Clamp(B, 0, 1) * 255):X2}";
 
+        private string? TranslucentColor() => Alpha < 1.0
+            ? CssRgba((int)Math.Round(Compat.Clamp(R, 0, 1) * 255), (int)Math.Round(Compat.Clamp(G, 0, 1) * 255),
+                (int)Math.Round(Compat.Clamp(B, 0, 1) * 255), Alpha)
+            : null;
+
         public bool SameSpan(StlRunStyle o) =>
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             CssFamily == o.CssFamily && FontSize == o.FontSize
-            && R == o.R && G == o.G && B == o.B
+            && R == o.R && G == o.G && B == o.B && Alpha == o.Alpha
+#pragma warning restore S1244
             && Transparent == o.Transparent
             && UseFallbackMetrics == o.UseFallbackMetrics;
 
@@ -304,6 +346,11 @@ public sealed partial class PdfToHtmlConverter
         public int Style;
         public double StartX;
         public double WidthsAdv;
+        /// <summary>The show that drew the glyph, counted along the page.</summary>
+        public int Show;
+        /// <summary>The part of <see cref="WidthsAdv"/> that is not the code's own width: the TJ number after the
+        /// glyph (zero when the font gives no widths).</summary>
+        public double KernPt;
         public double TtfMilli;
         /// <summary>A continuation char of a multi-char code expansion (ligature):
         /// it rides its head's glyph and advance, and the solver fuses the group
@@ -347,6 +394,9 @@ public sealed partial class PdfToHtmlConverter
         /// slot: the space metric m). The em-compensation solve re-scales the
         /// face side by the drawn/solve-size ratio.</summary>
         public double FaceMilli;
+        /// <summary>Char only: the part of <see cref="E"/> that is a position adjustment after it - a TJ array's
+        /// number, or a gap its pen leaves before the next glyph - rather than its own advance (milli-em).</summary>
+        public double KernMilli;
     }
 
     /// <summary>Reorder a page text layer's positioned line divs into the
@@ -356,23 +406,31 @@ public sealed partial class PdfToHtmlConverter
     /// a tab-split table therefore stacks its label column before its text
     /// column. Content other than line divs (overlays, anchors, layer wrappers)
     /// splits the layer into independently reordered runs, so nothing crosses it.</summary>
-    private static string ReorderStlLineDivs(string layer, string lineDivCls)
+    private static string ReorderStlLineDivs(string layer, string lineDivCls, TextLayerModel? model = null,
+        double shiftTopEm = 0)
     {
         var divRx = new System.Text.RegularExpressions.Regex(
             "<div class=\"" + System.Text.RegularExpressions.Regex.Escape(lineDivCls)
             + "\" style=\"left:(?<l>-?[0-9.]+)em;top:(?<t>-?[0-9.]+)em;",
-            System.Text.RegularExpressions.RegexOptions.Singleline);
+            System.Text.RegularExpressions.RegexOptions.Singleline, RegexLimits.Timeout);
+        // The model's boxes are the line divs in emission order; a count that differs
+        // means a div the model did not see, and the layer keeps the row/lane order.
+        var boxes = model is not null && model.Boxes.Count == SafeRegex.Matches(divRx, layer).Count
+            ? model.Boxes : null;
         var result = new StringBuilder(layer.Length);
         var run = new List<(double L, double T, string Html)>();
+        var runBoxes = boxes is null ? null : new List<LineBox>();
         void FlushRun()
         {
-            foreach (var frag in OrderStlRun(run)) result.Append(frag);
+            foreach (var frag in OrderStlRun(run, runBoxes)) result.Append(frag);
             run.Clear();
+            runBoxes?.Clear();
         }
         var pos = 0;
+        var divIndex = 0;
         while (pos < layer.Length)
         {
-            var m = divRx.Match(layer, pos);
+            var m = SafeRegex.Match(divRx, layer, pos);
             if (!m.Success)
             {
                 FlushRun();
@@ -387,17 +445,45 @@ public sealed partial class PdfToHtmlConverter
             }
             var end = BalancedDivEnd(layer, m.Index);
             if (end < layer.Length && layer[end] == '\n') end++;
+            pos = end;
+            var box = boxes?[divIndex++];
+            var div = layer[m.Index..end];
+            if (box is { } b)
+            {
+                // A line drawn beyond the page box is not on the page; one a later opaque fill
+                // painted over keeps its place in the layer with nothing of it showing.
+                if (model!.OffPage(b)) continue;
+                if (model.Covered(b)) div = HideLineSpans(div);
+            }
+            var top = double.Parse(m.Groups["t"].Value, System.Globalization.NumberStyles.Float,
+                CultureInfo.InvariantCulture);
+            if (shiftTopEm != 0)
+            {
+                // The band's top is the page's top now: every line sits that much higher, measured
+                // from the line's unrounded top where the model has it, so the topmost line lands on 0.
+                var at = m.Groups["t"].Index - m.Index;
+                top = (box?.T ?? top) - shiftTopEm;
+                div = div[..at] + Em4T(top) + div[(at + m.Groups["t"].Length)..];
+            }
             run.Add((
                 double.Parse(m.Groups["l"].Value, System.Globalization.NumberStyles.Float,
                     CultureInfo.InvariantCulture),
-                double.Parse(m.Groups["t"].Value, System.Globalization.NumberStyles.Float,
-                    CultureInfo.InvariantCulture),
-                layer[m.Index..end]));
-            pos = end;
+                top,
+                div));
+            if (box is { } kept) runBoxes!.Add(kept);
         }
         FlushRun();
         return result.ToString();
     }
+
+    /// <summary>The spans of a line div marked hidden: the line keeps its place and its text,
+    /// as a reader keeps text a later fill painted over, while nothing of it shows.</summary>
+    private static string HideLineSpans(string div) =>
+        SafeRegex.Replace(div, "<span\\b[^>]*>", m => m.Value.Contains(" style=\"", StringComparison.Ordinal)
+            ? m.Value.Replace(" style=\"", " style=\"" + HiddenSpanStyle)
+            : m.Value.Insert(m.Value.Length - 1, " style=\"" + HiddenSpanStyle + "\""));
+
+    private const string HiddenSpanStyle = "visibility:hidden;";
 
     private static int BalancedDivEnd(string s, int start)
     {

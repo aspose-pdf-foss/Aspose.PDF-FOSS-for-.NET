@@ -63,7 +63,7 @@ internal static partial class HtmlToPdfConverter
         ap.basePath = basePath;
         if (!ap.css.ContainsKey(".article-pdf__col-wrapper")
             || !ap.css.ContainsKey(".article-pdf__title")
-            || !Regex.IsMatch(ap.html, @"class\s*=\s*[""']article-pdf[""']", RegexOptions.IgnoreCase))
+            || !SafeRegex.IsMatch(ap.html, @"class\s*=\s*[""']article-pdf[""']", RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor("Arial") is not { } fm) return null;
         ap.fm = fm;
@@ -94,8 +94,8 @@ internal static partial class HtmlToPdfConverter
         ap.content = new List<ApBlock>();
         ap.footer = new List<ApBlock>();
 
-        ap.titleText = Flat(ap, Inner(ap, "article-pdf__title"));
-        ap.dateText = Flat(ap, Inner(ap, "article-pdf__date"));
+        ap.titleText = Flat(Inner(ap, "article-pdf__title"));
+        ap.dateText = Flat(Inner(ap, "article-pdf__date"));
         if (!ParseArticle(ap)) return null;
 
         RenderTitleBand(ap);

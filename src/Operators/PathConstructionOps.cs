@@ -36,12 +36,14 @@ public sealed class LineTo : Operator
 /// <summary>c — Append cubic Bézier curve with three control points.</summary>
 public sealed class CurveTo : Operator
 {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
     public double X1;
     public double Y1;
     public double X2;
     public double Y2;
     public double X3;
     public double Y3;
+#pragma warning restore S1104
     /// <summary>Creates a <c>c</c> operator that appends a cubic Bézier curve from the current point to (<c>x3</c>, <c>y3</c>), with (<c>x1</c>, <c>y1</c>) and (<c>x2</c>, <c>y2</c>) as its control points.</summary>
     public CurveTo(double x1, double y1, double x2, double y2, double x3, double y3)
     { X1 = x1; Y1 = y1; X2 = x2; Y2 = y2; X3 = x3; Y3 = y3; }

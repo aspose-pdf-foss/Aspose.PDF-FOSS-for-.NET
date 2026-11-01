@@ -93,10 +93,10 @@ public sealed partial class Document
                 if (p is not Text.TextFragment tf) continue;
                 var st = tf.TextState;
                 double fs = st.FontSizeTouched ? st.FontSize : 0, ls = st.LineSpacing;
-                foreach (var seg in tf.Segments)
+                foreach (var textState in tf.Segments.Select(seg => seg.TextState))
                 {
-                    if (fs <= 0 && seg.TextState.FontSizeTouched) fs = seg.TextState.FontSize;
-                    if (ls <= 0 && seg.TextState.LineSpacing > 0) ls = seg.TextState.LineSpacing;
+                    if (fs <= 0 && textState.FontSizeTouched) fs = textState.FontSize;
+                    if (ls <= 0 && textState.LineSpacing > 0) ls = textState.LineSpacing;
                 }
                 if (fs <= 0) fs = 10;
                 var hasText = !string.IsNullOrEmpty(tf.Text);
@@ -149,8 +149,7 @@ public sealed partial class Document
                 }
                 return xs;
             }
-            var shift = align == HorizontalAlignment.Center ? slack / 2
-                : align == HorizontalAlignment.Right ? slack : 0;
+            var shift = align switch { HorizontalAlignment.Center => slack / 2, HorizontalAlignment.Right => slack, _ => 0 };
             if (shift > 0) for (var i = 0; i < xs.Length; i++) xs[i] += shift;
             return xs;
         }
@@ -165,10 +164,10 @@ public sealed partial class Document
             if (margin <= 0) return;
             double fs = tf.TextState.FontSize > 0 ? tf.TextState.FontSize : 0;
             double ls = tf.TextState.LineSpacing;
-            foreach (var seg in tf.Segments)
+            foreach (var textState in tf.Segments.Select(seg => seg.TextState))
             {
-                fs = Math.Max(fs, seg.TextState.FontSize);
-                ls = Math.Max(ls, seg.TextState.LineSpacing);
+                fs = Math.Max(fs, textState.FontSize);
+                ls = Math.Max(ls, textState.LineSpacing);
             }
             if (fs <= 0) fs = XmlDefaultFontSize;
             EnsureRoom(margin + fs + ls);
@@ -204,7 +203,7 @@ public sealed partial class Document
         public void QueueBandFill(int startSlot, double top, double bottom, Color color)
         {
             var left = AnchorLeft ?? _marginLeft;
-            var right = _startPage.Width - _marginRight;
+            var right = _startPage.LayoutFrameWidth - _marginRight;
             if (right - left <= 0) return;
             var pageTop = _startPageHeight - _marginTop;
             for (var slot = startSlot; slot <= _currentSlot; slot++)
@@ -223,7 +222,7 @@ public sealed partial class Document
         public void QueueBodyBackground(int startSlot, Color color)
         {
             var left = AnchorLeft ?? _marginLeft;
-            var right = _startPage.Width - _marginRight;
+            var right = _startPage.LayoutFrameWidth - _marginRight;
             if (right - left <= 0) return;
             var pageTop = _startPageHeight - _marginTop;
             // Under everything else queued: the body box is the bottom of the paint
@@ -265,7 +264,7 @@ public sealed partial class Document
         /// reduced by any block indent.</summary>
         internal double CurWidth => (_colWidths is not null
             ? _colWidths[_curCol]
-            : _startPage.Width - (AnchorLeft ?? _marginLeft) - _marginRight) - LeftIndent - RightIndent;
+            : _startPage.LayoutFrameWidth - (AnchorLeft ?? _marginLeft) - _marginRight) - LeftIndent - RightIndent;
 
         /// <summary>Absolute left edge the full-width flow writes from once a
         /// positioned paragraph (a Graph with an assigned Left) re-anchored it:
@@ -307,7 +306,7 @@ public sealed partial class Document
         {
             // Flush any buffer in flight so it keeps its own slot before we seed a new one.
             if (_overflowBuffer is { Count: > 0 })
-                _overflowPages.Add((ConcatBlocks(_overflowBuffer), _startPage.Width, _startPage.Height));
+                _overflowPages.Add((ConcatBlocks(_overflowBuffer), _startPage.LayoutFrameWidth, _startPage.LayoutFrameHeight));
             _overflowBuffer = new List<byte[]> { content };
             _currentSlot = _overflowPages.Count; // slot this buffer will flush into
             (_marginTop, _marginBottom) = MarginsForSlot(_currentSlot);
@@ -446,7 +445,7 @@ public sealed partial class Document
             // buffer means we're still on the start page, so there's nothing to flush.
             if (_overflowBuffer is not null && (flushEmpty || _overflowBuffer.Count > 0))
             {
-                _overflowPages.Add((ConcatBlocks(_overflowBuffer), _startPage.Width, _startPage.Height));
+                _overflowPages.Add((ConcatBlocks(_overflowBuffer), _startPage.LayoutFrameWidth, _startPage.LayoutFrameHeight));
             }
             _overflowBuffer = new List<byte[]>();
             // The new buffer will flush into the next available slot index in

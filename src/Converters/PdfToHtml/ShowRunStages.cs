@@ -7,10 +7,59 @@ namespace Aspose.Pdf.Converters;
 
 public sealed partial class PdfToHtmlConverter
 {
+    /// <summary>The baseline coordinate of a run across its direction: the device y when the run is
+    /// unrotated (kept exact), else the device point projected onto the baseline's normal.</summary>
+    private static double AcrossCoordinate(CtmState dev, double x, double y)
+    {
+        if (Math.Abs(dev.B) < 1e-9) return y;
+        var length = Math.Sqrt(dev.A * dev.A + dev.B * dev.B);
+        return length > 0 ? (dev.A * y - dev.B * x) / length : y;
+    }
+
+    /// <summary>True when the stl_ line solver can measure every style of a line (<paramref name="lineStyles"/>)
+    /// and the run's font: an installed face or the served program's own advances, not a substitute face. The
+    /// em-compensation dialect and glyph-per-div output measure any line.</summary>
+    private static bool SolverMeasuresLine(ContentRenderState ct, List<StlRunStyle>? lineStyles,
+        Dictionary<string, HtmlFontRecord> fonts, bool emCompensation)
+    {
+        if (emCompensation || ct.perGlyphDivs) return true;
+        if (lineStyles is not null)
+            foreach (var st in lineStyles)
+                if ((st.FaceName is null && !st.HasEmbeddedMetrics) || st.SubstituteFace) return false;
+        var font = ct.currentFontKey is not null && fonts.TryGetValue(ct.currentFontKey, out var f) ? f : null;
+        return (HtmlToPdfConverter.ResolveStlFace(ct.fontFamily) is not null || font?.EmbeddedAdvMilli is not null)
+            && font?.SubstituteFace != true;
+    }
+
+    /// <summary>True when the run is drawn in a parked line's style: its font, weight, slant, colour and
+    /// visibility.</summary>
+    private static bool SameStyleAsParked(ContentRenderState ct, StlLinePark park) =>
+        ct.fontFamily == park.Family && ct.fontCssFamily == park.CssFamily
+        && ct.fontWeight == park.Weight && ct.fontStyle == park.Style
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
+        && ct.r == park.R && ct.g == park.G && ct.b == park.B && ct.fillAlpha == park.Alpha
+#pragma warning restore S1244
+        && Invisible(ct) == park.Transparent;
+
+    /// <summary>The open line's across coordinate; a line resumed from its park slot is unrotated and
+    /// carries it as its y.</summary>
+    private static double GroupAcross(ContentRenderState ct) =>
+        Math.Abs(ct.groupAngle) < 0.05 ? ct.groupY : ct.groupAcross;
+
+    /// <summary>The device x the open line starts at: the leftmost of its segments.</summary>
+    private static double LineStartX(ContentRenderState ct)
+    {
+        var start = double.MaxValue;
+        foreach (var seg in ct.groupSegs) start = Math.Min(start, seg.X);
+        return start;
+    }
+
     /// <summary>Append the run to the group's current segment (or open one at its pen), advance the pen and glyph ends per character and settle the group's end and counters.</summary>
     private static void AppendRunToGroupSegment(ShowRunState sr, ContentRenderState ct, bool textOnly, ZCounter? zCounter, string text, double advTextSpace, double extTextSpace, List<(double pen, double glyph)>? perChar)
     {
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
         if (ct.groupSegs.Count == 0 || ct.groupSegs[ct.groupSegs.Count - 1].X != sr.posX)
+#pragma warning restore S1244
             ct.groupSegs.Add((sr.posX, new StringBuilder(), sr.posX, sr.posX));
         sr.segIdx = ct.groupSegs.Count - 1;
         sr.s0 = ct.groupSegs[sr.segIdx];
@@ -47,6 +96,8 @@ public sealed partial class PdfToHtmlConverter
         ct.groupPenX = Math.Max(ct.groupPenX, sr.penX);
         if (!string.IsNullOrWhiteSpace(text))
             ct.groupTextPenX = Math.Max(ct.groupTextPenX, sr.penX);
+        ct.groupTailSpacePt = sr.aligned && text[text.Length - 1] == ' '
+            ? perChar![text.Length - 1].pen * sr.scale : 0;
 
         // Extent tracking: the run's device right edge from its width-only PDF
         // advances (the line-box budget ignores Tc/Tw).
@@ -60,7 +111,7 @@ public sealed partial class PdfToHtmlConverter
         if (zCounter is not null)
         {
             var nws = 0;
-            foreach (var ch in text) if (!char.IsWhiteSpace(ch)) nws++;
+            foreach (var ch in text.Where(ch => !char.IsWhiteSpace(ch))) nws++;
             if (nws > 0) { zCounter.V += nws; ct.groupZ = zCounter.V; }
         }
     }
@@ -74,6 +125,7 @@ public sealed partial class PdfToHtmlConverter
             return;
         }
         EnsureLineStyle(sr, ct, fonts);
+        ct.lineShowSeq++;
         sr.fRec = null;
         if (ct.currentFontKey is not null) fonts.TryGetValue(ct.currentFontKey, out sr.fRec);
         sr.glyphMapped = sr.fRec?.GlyphMapped;
@@ -87,7 +139,7 @@ public sealed partial class PdfToHtmlConverter
     }
 
     /// <summary>The run starts a new line: close the open group, then seat a fresh one at the run's baseline with its font and style.</summary>
-    private static void OpenNewLineGroup(ShowRunState sr, ContentRenderState ct, StringBuilder sb, double pageHeight, double pageWidth, bool emCompensation, bool textOnly, StyleRegistry? styleReg, ClassNamer classNamer, List<LinkTarget>? linkTargets, RotationRegistry? rotReg, double pageLLX, double yTopRef, ZCounter? zCounter, bool pageTurnedOver, double advTextSpace)
+    private static void OpenNewLineGroup(ShowRunState sr, ContentRenderState ct, Dictionary<string, HtmlFontRecord> fonts, StringBuilder sb, double pageHeight, double pageWidth, bool emCompensation, bool textOnly, StyleRegistry? styleReg, ClassNamer classNamer, List<LinkTarget>? linkTargets, RotationRegistry? rotReg, double pageLLX, double yTopRef, ZCounter? zCounter, bool pageTurnedOver, double advTextSpace)
     {
         // A line the producer merely moved AWAY from is parked, not closed:
         // a show landing back on a parked baseline CONTINUES that line iff
@@ -96,6 +148,7 @@ public sealed partial class PdfToHtmlConverter
         // or behind it under the dialect's own backtrack semantics.
         var canPark = styleReg is not null && Math.Abs(sr.cssAngle) < 0.05;
         StlLinePark? resumed = null;
+        ct.groupTailSpacePt = 0;   // a resumed line's last show is not on hand: no slack
         if (canPark)
         {
             ParkCurrentLine(ct, styleReg);
@@ -128,7 +181,12 @@ public sealed partial class PdfToHtmlConverter
                     && sr.posX < cand.X - PenSlackPt
                     && sr.posX + advTextSpace * sr.scale >= cand.X - PenSlackPt
                     && sr.posX + advTextSpace * sr.scale <= cand.X + PrefixJoinTolPt;
-                if (continues || prefixJoins) resumed = cand;
+                // A run of another style resumes the line only when the solver will part the styles into spans;
+                // a line it declines is written as one span in the line's first style. A line whose extent is
+                // unknown places no run of its own reliably and keeps joining.
+                var styleJoins = sr.wsOnlyShow || SameStyleAsParked(ct, cand) || !cand.Pinned
+                    || (cand.Ok && SolverMeasuresLine(ct, cand.Styles, fonts, emCompensation));
+                if ((continues || prefixJoins) && styleJoins) resumed = cand;
             }
         }
         else FlushGroup(ct, sb, pageHeight, pageWidth, textOnly, styleReg, classNamer, linkTargets, rotReg, pageLLX, yTopRef, zCounter, pageTurnedOver, emCompensation);
@@ -140,14 +198,14 @@ public sealed partial class PdfToHtmlConverter
         else
         {
         ct.groupActive = true;
-        ct.groupX = sr.posX; ct.groupY = sr.posY; ct.groupFontSize = sr.effSize; ct.groupRise = sr.effRise;
+        ct.groupX = sr.posX; ct.groupY = sr.posY; ct.groupAcross = sr.across; ct.groupFontSize = sr.effSize; ct.groupRise = sr.effRise;
         ct.groupRawRise = ct.rise;
         ct.groupAngle = sr.cssAngle;
         ct.groupFamily = ct.fontFamily; ct.groupCssFamily = ct.fontCssFamily;
         ct.groupWeight = ct.fontWeight; ct.groupStyle = ct.fontStyle;
         ct.groupFauxBold = FauxBold(ct);
         ct.groupDeclStyle = DeclStyle(ct);
-        ct.groupR = ct.r; ct.groupG = ct.g; ct.groupB = ct.b;
+        ct.groupR = ct.r; ct.groupG = ct.g; ct.groupB = ct.b; ct.groupAlpha = ct.fillAlpha;
         ct.groupTransparent = Invisible(ct);
         ct.groupAscent = ct.fontAscent;
         ct.groupLineHeight = ct.fontLineHeight;
@@ -161,9 +219,9 @@ public sealed partial class PdfToHtmlConverter
     /// <summary>Decide whether the run joins the open group: the page-edge, angle and same-line tolerances that bail out of the run entirely.</summary>
     private static bool TryJoinRunToGroup(ShowRunState sr, ContentRenderState ct, StringBuilder sb, double pageHeight, double pageWidth, bool emCompensation, bool textOnly, StyleRegistry? styleReg, ClassNamer classNamer, List<LinkTarget>? linkTargets, RotationRegistry? rotReg, double pageLLX, double yTopRef, ZCounter? zCounter, bool pageTurnedOver, string text, double advTextSpace)
     {
-        if (ct.groupActive && !textOnly && ct.groupSegs.Count > 0
+        if (ct.groupActive && ct.groupSegs.Count > 0
             && !string.IsNullOrWhiteSpace(text)
-            && Math.Abs(sr.posY - ct.groupY) <= sr.lineYTol
+            && Math.Abs(sr.across - GroupAcross(ct)) <= sr.lineYTol
             && sr.posX - Math.Max(ct.groupTextPenX, ct.groupX) > sr.divGapPt)
         {
             // The severed line must not EMIT here: it keeps its place in the
@@ -182,7 +240,7 @@ public sealed partial class PdfToHtmlConverter
         // A show that STARTS past the page's right edge is invisible (an
         // off-page TouchUp leftover, clipped by the page rect) — it must not
         // join a line and stretch the flow toward its phantom position.
-        if (styleReg is not null && sr.cssAngle == 0 && sr.posX > pageWidth - 0.5)
+        if (styleReg is not null && sr.cssAngle == 0 && sr.posX > ct.frameWidth - 0.5)
         {
             ct.pendingTjNum = 0;
             return false;
@@ -218,8 +276,8 @@ public sealed partial class PdfToHtmlConverter
         // the line's characters ("fun" "d" then "d" again reading as "fundd").
         // The suffix match plus the end-on-pen test keeps everything
         // legitimate: an RTL line's next word ends at the previous word's
-        // START, not at the pen; a repeated word starts AT the pen or later;
-        // a justified continuation carries fresh text. The line consulted is
+        // START, not at the pen; a repeated word starts AT the pen or later; a
+        // justified continuation carries fresh text. The line consulted is
         // whichever this show belongs to — the current group, or the parked
         // line on this baseline.
         if (styleReg is not null && sr.cssAngle == 0
@@ -228,11 +286,8 @@ public sealed partial class PdfToHtmlConverter
             string? lastTxt = null; double lastPen = 0, lastX0 = 0;
             if (ct.groupActive && Math.Abs(sr.posY - ct.groupY) <= ParkBaselineTolPt)
             { lastTxt = ct.groupLastShowText; lastPen = ct.groupTextPenX; lastX0 = ct.groupX; }
-            else if (!ct.groupActive || Math.Abs(sr.posY - ct.groupY) > ParkBaselineTolPt)
-            {
-                if (FindParkedLine(ct, sr.posY) is { } c)
-                { lastTxt = c.LastShowText; lastPen = c.TextPenX; lastX0 = c.X; }
-            }
+            else if ((!ct.groupActive || Math.Abs(sr.posY - ct.groupY) > ParkBaselineTolPt) && FindParkedLine(ct, sr.posY) is { } c)
+            { lastTxt = c.LastShowText; lastPen = c.TextPenX; lastX0 = c.X; }
             // Observed second strokes end within 0.06-0.24 pt of the pen; 1 pt
             // holds margin for coarser producers while staying well under half
             // a word space, so a genuinely new word can never qualify.
@@ -260,25 +315,27 @@ public sealed partial class PdfToHtmlConverter
         {
             if (sr.fbIdx < 0)
             {
-                var b0 = ct.lineStyles![sr.baseIdx];
-                ct.lineStyles.Add(new StlRunStyle
-                {
-                    Family = b0.Family, CssFamily = b0.CssFamily,
-                    FaceName = b0.FaceName, FontSize = b0.FontSize,
-                    FauxBold = b0.FauxBold, FontStyle = b0.FontStyle,
-                    R = b0.R, G = b0.G, B = b0.B, Transparent = b0.Transparent,
-                    Ascent = b0.Ascent, LineHeightEm = b0.LineHeightEm,
-                    SubsetHasSpace = b0.SubsetHasSpace,
-                    SubsetHas = b0.SubsetHas,
-                    SpaceAdvMilli = b0.SpaceAdvMilli,
-                    HasEmbeddedMetrics = b0.HasEmbeddedMetrics,
-                    SubstituteFace = b0.SubstituteFace,
-                    ProgramCharMilli = b0.ProgramCharMilli,
-                    UseFallbackMetrics = true,
-                });
+                var fallback = SiblingStyle(ct.lineStyles![sr.baseIdx]);
+                fallback.UseFallbackMetrics = true;
+                ct.lineStyles.Add(fallback);
                 sr.fbIdx = ct.lineStyles.Count - 1;
             }
             idxRec = sr.fbIdx;
+        }
+        // A code the font's primary face holds no slot for is drawn from the overflow face
+        // that carries its glyph: a sibling style naming that face, one per face and line.
+        else if (chRec != ' ' && codeRec >= 0 && sr.fRec?.OverflowFamily?.Invoke(codeRec) is { } overflowFamily)
+        {
+            sr.overflowIdx ??= new Dictionary<string, int>(StringComparer.Ordinal);
+            if (!sr.overflowIdx.TryGetValue(overflowFamily, out idxRec))
+            {
+                var overflow = SiblingStyle(ct.lineStyles![sr.baseIdx]);
+                overflow.Family = overflowFamily;
+                overflow.CssFamily = overflowFamily;
+                overflow.OverflowFace = true;
+                ct.lineStyles.Add(overflow);
+                idxRec = sr.overflowIdx[overflowFamily] = ct.lineStyles.Count - 1;
+            }
         }
         double? embAdv = null;
         if (codeRec >= 0)
@@ -324,6 +381,9 @@ public sealed partial class PdfToHtmlConverter
             Style = idxRec,
             StartX = sr.sxRec,
             WidthsAdv = perChar![ci].glyph * sr.scale,
+            Show = ct.lineShowSeq,
+            KernPt = codeRec >= 0 && !expansionTail && sr.fRec?.AdvanceOf is { } width
+                ? (perChar[ci].glyph - width(codeRec) * ct.fontSize) * sr.scale : 0,
             TtfMilli = embAdv ?? ct.lineStyles![idxRec].TtfMilli(chRec),
             ExpansionTail = expansionTail,
             FuseByFace = expansionTail && sr.glyphMapped is not null,
@@ -333,16 +393,43 @@ public sealed partial class PdfToHtmlConverter
         sr.sxRec += perChar[ci].pen * sr.scale;
     }
 
+    /// <summary>A copy of a line style for the glyphs another face of the same font must draw: its
+    /// size, colour, metrics and line height, with the face left to the caller.</summary>
+    private static StlRunStyle SiblingStyle(StlRunStyle b0) => new()
+    {
+        Family = b0.Family, CssFamily = b0.CssFamily,
+        FaceName = b0.FaceName, FontSize = b0.FontSize,
+        FauxBold = b0.FauxBold, FontStyle = b0.FontStyle,
+        R = b0.R, G = b0.G, B = b0.B, Alpha = b0.Alpha, Transparent = b0.Transparent,
+        Ascent = b0.Ascent, LineHeightEm = b0.LineHeightEm,
+        SubsetHasSpace = b0.SubsetHasSpace,
+        SubsetHas = b0.SubsetHas,
+        SpaceAdvMilli = b0.SpaceAdvMilli,
+        HasEmbeddedMetrics = b0.HasEmbeddedMetrics,
+        SubstituteFace = b0.SubstituteFace,
+        ProgramCharMilli = b0.ProgramCharMilli,
+    };
+
+    /// <summary>The word space of a font whose program serves the line's advances: the browser draws
+    /// the space with the served glyph, so a face installed under the same name (whose space is
+    /// often wider) does not measure it. Null when the program does not map a space.</summary>
+    private static double? ServedSpaceMilli(HtmlFontRecord? font) =>
+        font is { EmbeddedAdvMilli: not null, SubstituteFace: false }
+            && font.ProgramCharAdvMilli?.Invoke(' ') is { } milli && milli > 0 ? milli : null;
+
     /// <summary>Open a new line style when the run's face, size or colour differs from the line's current one.</summary>
     private static void EnsureLineStyle(ShowRunState sr, ContentRenderState ct, Dictionary<string, HtmlFontRecord> fonts)
     {
         if (ct.lineStyleIdx < 0
             || ct.lineStyles![ct.lineStyleIdx].Family != ct.fontFamily
             || ct.lineStyles[ct.lineStyleIdx].CssFamily != ct.fontCssFamily
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             || ct.lineStyles[ct.lineStyleIdx].FontSize != sr.effSize
+            || ct.lineStyles[ct.lineStyleIdx].Alpha != ct.fillAlpha
             || ct.lineStyles[ct.lineStyleIdx].R != ct.r
             || ct.lineStyles[ct.lineStyleIdx].G != ct.g
             || ct.lineStyles[ct.lineStyleIdx].B != ct.b
+#pragma warning restore S1244
             || ct.lineStyles[ct.lineStyleIdx].Transparent != Invisible(ct)
             || ct.lineStyles[ct.lineStyleIdx].UseFallbackMetrics)
         {
@@ -357,7 +444,7 @@ public sealed partial class PdfToHtmlConverter
                 FaceName = faceName,
                 FontSize = sr.effSize,
                 FauxBold = FauxBold(ct), FontStyle = DeclStyle(ct),
-                R = ct.r, G = ct.g, B = ct.b, Transparent = Invisible(ct),
+                R = ct.r, G = ct.g, B = ct.b, Alpha = ct.fillAlpha, Transparent = Invisible(ct),
                 Ascent = ct.fontAscent,
                 LineHeightEm = ct.fontLineHeight,
                 SubsetHasSpace = subsetSpace,
@@ -365,11 +452,13 @@ public sealed partial class PdfToHtmlConverter
                 HasEmbeddedMetrics = fiNow?.EmbeddedAdvMilli is not null,
                 SubstituteFace = fiNow?.SubstituteFace ?? false,
                 ProgramCharMilli = fiNow?.ProgramCharAdvMilli,
-                SpaceAdvMilli = subsetSpace && faceName is not null
+                SpaceAdvMilli = ServedSpaceMilli(fiNow) is { } served ? served
+                    : subsetSpace && faceName is not null
                     ? HtmlToPdfConverter.StlCharAdvanceMilli(faceName, ' ')
                     // No installed face to measure: the served program's
-                    // own space advance beats the generic 250.
-                    : fiNow?.EmbeddedAdvMilli?.Invoke(32)
+                    // own space advance beats the generic 250. A CID font's
+                    // code 32 is whatever glyph its CID 32 is, not a space.
+                    : (fiNow is { IsCidFont: false } ? fiNow.EmbeddedAdvMilli?.Invoke(32) : null)
                         ?? HtmlToPdfConverter.StlFallbackAdvanceMilli(' '),
             });
             ct.lineStyleIdx = ct.lineStyles.Count - 1;

@@ -14,9 +14,9 @@ public sealed partial class TextAbsorber
         var mo = new TextMatrixOpState();
         mo.xs = xs;
         // Track scale components to interpret Td/TD displacements correctly.
-        // Many PDFs use a tiny-scale Tm (e.g. d=0.015) and large Td values;
-        // the actual page displacement is d * ty (or a * tx), not ty (tx) alone.
-        if (!(mo.xs.operands.Count >= 6)) return;
+        // Many PDFs use a tiny-scale Tm (e.g. d=0.015) and large Td values; the
+        // actual page displacement is d * ty (or a * tx), not ty (tx) alone.
+        if (mo.xs.operands.Count < 6) return;
         mo.newTmY = GetNumber(mo.xs.operands[5]);
         mo.xs.tmD = Math.Abs(GetNumber(mo.xs.operands[3]));
         mo.xs.tmA = Math.Abs(GetNumber(mo.xs.operands[0]));
@@ -57,8 +57,8 @@ public sealed partial class TextAbsorber
         mo.xs.tmOriginX = mo.xs.tlmX;
         mo.xs.tx = mo.xs.tlmX;
         // Line-level bounds + rectangle filter (rotation-aware).
-        // Upright pages carry the per-line verdict computed above;
-        // sideways pages evaluate fresh, as before.
+        // Upright pages carry the per-line verdict computed above; sideways
+        // pages evaluate fresh, as before.
         mo.xs.skipText = mo.xs.tmRotated ? LineFiltered(mo.xs, mo.newTmY) : mo.tmFiltered;
         // Reset gap-detection only when the Tm actually moved to a new
         // logical row. For same-row Tm (column reposition) keep
@@ -74,7 +74,7 @@ public sealed partial class TextAbsorber
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private void BeginTextOp(ExtractState xs)
+    private static void BeginTextOp(ExtractState xs)
     {
         // PDF spec ISO 32000-1 §9.4.1: BT initializes only the text matrix
         // and text line matrix to identity. All other text state (leading,
@@ -107,7 +107,6 @@ public sealed partial class TextAbsorber
             xs.tmOriginX = xs.tlmX;
             xs.tx = xs.tlmX;
         }
-        xs.lastRunEstWidth = 0;
         xs.horizScale = 1.0; // Tz resets to 100% at start of text object
     }
 
@@ -131,7 +130,7 @@ public sealed partial class TextAbsorber
         xs.tx = xs.tlmX;
         // Compute actual page-space y-displacement: ty * tmD
         // (tmD is the y-scale component from the most recent Tm)
-        var pageDisp = Math.Abs(rawTy * (xs.tmRotated ? xs.tmN : xs.tmD > 0 ? xs.tmD : xs.tmN));
+        var pageDisp = Math.Abs(rawTy * ((xs.tmRotated, xs.tmD) switch { (true, _) => xs.tmN, (_, > 0) => xs.tmD, _ => xs.tmN }));
         // Sideways: re-derive the row coordinate from the moved origin
         // rather than stepping it by the axis norm - the two agree only
         // on an exactly axis-aligned rotation (see RotatedRowY).
@@ -142,11 +141,15 @@ public sealed partial class TextAbsorber
         // denominator / summation lower bound ~0.6 em+); UPWARD moves
         // break only past ~1.5 em (superscripts, returns from a
         // subscript, and raised summation bounds all continue the line).
-        var fsScaleTd = xs.tmRotated ? xs.tmN : xs.tmD > 0 ? xs.tmD : xs.tmN;
+        double fsScaleTd;
+        if (xs.tmRotated) fsScaleTd = xs.tmN;
+        else if (xs.tmD > 0) fsScaleTd = xs.tmD;
+        else fsScaleTd = xs.tmN;
         var sDispTd = rawTy * fsScaleTd;
-        var tdBreakTol = !xs.rawInlineScripts ? 0.5
-            : sDispTd < 0 ? Math.Max(0.5, 0.42 * xs.fontSize * Math.Abs(fsScaleTd))
-            : Math.Max(0.5, 1.5 * xs.fontSize * Math.Abs(fsScaleTd));
+        double tdBreakTol;
+        if (!xs.rawInlineScripts) tdBreakTol = 0.5;
+        else if (sDispTd < 0) tdBreakTol = Math.Max(0.5, 0.42 * xs.fontSize * Math.Abs(fsScaleTd));
+        else tdBreakTol = Math.Max(0.5, 1.5 * xs.fontSize * Math.Abs(fsScaleTd));
         // Line-level bounds + rectangle filter (rotation-aware).
         // Evaluated FIRST on upright pages: a filtered line contributes
         // no break and no tracking-state change (see the Tm note); a
@@ -185,7 +188,7 @@ public sealed partial class TextAbsorber
     // run of T* operators was positioned and filtered against the Y of
     // a line several rows above, dropping in-rectangle text.)
     xs.tx = xs.tlmX;
-    var disp = xs.leading * (xs.tmRotated ? xs.tmN : xs.tmD > 0 ? xs.tmD : xs.tmN);
+    var disp = xs.leading * ((xs.tmRotated, xs.tmD) switch { (true, _) => xs.tmN, (_, > 0) => xs.tmD, _ => xs.tmN });
     var pageDisp = Math.Abs(disp);
     xs.tmE += -xs.leading * xs.tmCr;
     xs.tmF += -xs.leading * xs.tmDr;
@@ -193,9 +196,8 @@ public sealed partial class TextAbsorber
     else xs.tmY -= disp;
     // See the Td note: Raw mode keeps sub/superscript-scale hops
     // inline (T* moves DOWN by the leading, so the downward tol applies).
-    var tstarBreakTol = xs.rawInlineScripts
-        ? Math.Max(0.5, 0.42 * xs.fontSize * Math.Abs(xs.tmRotated ? xs.tmN : xs.tmD > 0 ? xs.tmD : xs.tmN))
-        : 0.5;
+    double tstarBreakTol = 0.5;
+    if (xs.rawInlineScripts) tstarBreakTol = Math.Max(0.5, 0.42 * xs.fontSize * Math.Abs((xs.tmRotated, xs.tmD) switch { (true, _) => xs.tmN, (_, > 0) => xs.tmD, _ => xs.tmN }));
     // Re-evaluate the line-level filters at the new baseline FIRST —
     // on upright pages a filtered line contributes no break and no
     // tracking change (see the Tm note); a sub-tolerance T* inherits.

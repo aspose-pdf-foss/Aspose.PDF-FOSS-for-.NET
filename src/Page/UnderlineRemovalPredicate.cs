@@ -12,7 +12,7 @@ public sealed partial class Page
 {
     /// <summary>The underline-removal predicate: true for a content operator that belongs to a
     /// removed underline (its paint, or a rule matched to a doomed fragment).</summary>
-    private bool IsRemovedUnderlineOp(Operator op, System.Collections.Generic.HashSet<Operator> doomedPaint, List<(double X, double Y, double W, double H)> targets, System.Collections.Generic.Dictionary<Operator, Operator> paintOfRe)
+    private static bool IsRemovedUnderlineOp(Operator op, System.Collections.Generic.HashSet<Operator> doomedPaint, List<(double X, double Y, double W, double H)> targets, System.Collections.Generic.Dictionary<Operator, Operator> paintOfRe)
     {
         if (doomedPaint.Remove(op)) return true;
         // Content operators materialize lazily as generic operators, so match by
@@ -54,14 +54,11 @@ public sealed partial class Page
         }
         else return false;
 
-        foreach (var t in targets)
+        if (targets.Any(t => Math.Abs(x - t.X) < 0.5 && Math.Abs(y - t.Y) < 0.5 &&
+                Math.Abs(w - t.W) < 0.5 && Math.Abs(h - t.H) < 0.5))
         {
-            if (Math.Abs(x - t.X) < 0.5 && Math.Abs(y - t.Y) < 0.5 &&
-                Math.Abs(w - t.W) < 0.5 && Math.Abs(h - t.H) < 0.5)
-            {
-                if (paintOfRe.TryGetValue(op, out var paint)) doomedPaint.Add(paint);
-                return true;
-            }
+            if (paintOfRe.TryGetValue(op, out var paint)) doomedPaint.Add(paint);
+            return true;
         }
         return false;
     }

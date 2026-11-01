@@ -246,6 +246,13 @@ internal sealed class PsFile
         IsReadable = true;
     }
 
+    /// <summary>A writable file that discards what it is given.</summary>
+    public PsFile(Stream? sink)
+    {
+        _data = new byte[0];
+        Sink = sink;
+    }
+
     /// <summary>Decode what the source holds, and leave the source just past the run
     /// the filter consumed so the program carries on after its own data.</summary>
     private void Materialise()
@@ -261,13 +268,6 @@ internal sealed class PsFile
         var run = new byte[used];
         Array.Copy(available, run, used);
         _data = PsFilters.Decode(filter, run);
-    }
-
-    /// <summary>A writable file that discards what it is given.</summary>
-    public PsFile(Stream? sink)
-    {
-        _data = new byte[0];
-        Sink = sink;
     }
 
     /// <summary>Where the next read starts.</summary>

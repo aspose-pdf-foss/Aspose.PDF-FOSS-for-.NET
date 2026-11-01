@@ -31,9 +31,8 @@ public class RedactRemovesAnnotationsTests
         Assert.True(SavedFile.Holds(saved, "FAR-KEPT"));
         using var doc = Document.Open(saved);
         var types = doc.Pages[1].Annotations.Select(a => a.AnnotationType).ToList();
-        Assert.Equal(2, types.Count);
-        Assert.Contains(AnnotationType.Redact, types);
-        Assert.Contains(AnnotationType.Text, types);
+        // the applied redaction's own mark is gone too: only the annotation away from the area is left
+        Assert.Equal([AnnotationType.Text], types);
     }
 
     [Fact]

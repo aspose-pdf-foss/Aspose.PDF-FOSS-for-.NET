@@ -129,6 +129,7 @@ public class HtmlSaveOptions : UnifiedSaveOptions
 
     // ── Public fields (matches public reflection shape) ─────────
 
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
     public AntialiasingProcessingType AntialiasingProcessing;
     public string CssClassNamesPrefix;
     public CssSavingStrategy CustomCssSavingStrategy;
@@ -140,21 +141,25 @@ public class HtmlSaveOptions : UnifiedSaveOptions
     public FontEncodingRules FontEncodingStrategy;
     public FontSavingModes FontSavingMode;
     public HtmlMarkupGenerationModes HtmlMarkupGenerationMode;
+#pragma warning restore S1104
     // The enum's FIRST member is the em-compensation mode, but the DEFAULT
     // behaviour is the pixel mode: a save that never touches this field
     // solves its letter/word-spacing at four decimals, while an EXPLICIT
     // em-compensation save quantizes to the 0.01 em grid. Same pattern as
     // DocumentType: the enum order is public reflection shape and stays; the
     // default is the initializer.
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
     public LettersPositioningMethods LettersPositioningMethod =
         LettersPositioningMethods.UsePixelUnitsInCssLetterSpacingForIE;
     public SaveOptions.BorderInfo PageBorderIfAny;
     public SaveOptions.MarginInfo PageMarginIfAny;
     public bool PagesFlowTypeDependsOnViewersScreenSize;
+#pragma warning restore S1104
     // By default, resources go to the sidecar folder unless the caller
     // explicitly asks for a single self-contained file (a default
     // PNG-background save produces a "<stem>_files" sidecar folder, while an
     // explicit EmbedAllIntoHtml inlines the page rasters).
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
     public PartsEmbeddingModes PartsEmbeddingMode = PartsEmbeddingModes.NoEmbedding;
     // The default is External (img_NN.png sidecars referenced from the page
     // SVG), NOT the enum's first member: an explicit AsPngImagesEmbeddedIntoSvg
@@ -166,6 +171,7 @@ public class HtmlSaveOptions : UnifiedSaveOptions
     public string SpecialFolderForAllImages;
     public string SpecialFolderForSvgImages;
     public bool TrySaveTextUnderliningAndStrikeoutingInCss;
+#pragma warning restore S1104
 
     // ── Consistency validation ──────────────────────────────────────────────
 
@@ -315,25 +321,31 @@ public class HtmlSaveOptions : UnifiedSaveOptions
     /// <summary>Context passed to a <see cref="CssSavingStrategy"/> callback.</summary>
     public class CssSavingInfo
     {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
         public Stream ContentStream;
         public int CssNumber;
         public string SupposedURL;
+#pragma warning restore S1104
     }
 
     /// <summary>Context passed to a <see cref="CssUrlMakingStrategy"/> callback.</summary>
     public class CssUrlRequestInfo
     {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
         public bool CustomProcessingCancelled;
+#pragma warning restore S1104
     }
 
     /// <summary>Context passed to a <see cref="HtmlPageMarkupSavingStrategy"/> callback.</summary>
     public class HtmlPageMarkupSavingInfo
     {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
         public Stream ContentStream;
         public bool CustomProcessingCancelled;
         public int HtmlHostPageNumber;
         public int PdfHostPageNumber;
         public string SupposedFileName;
+#pragma warning restore S1104
     }
 
     /// <summary>Context passed to a per-image saving callback. Derives from
@@ -341,10 +353,12 @@ public class HtmlSaveOptions : UnifiedSaveOptions
     /// <see cref="ResourceSavingStrategy"/> can downcast to reach the page numbers.</summary>
     public class HtmlImageSavingInfo : SaveOptions.ResourceSavingInfo
     {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
         public int HtmlHostPageNumber;
         public HtmlImageType ImageType;
         public ImageParentTypes ParentType;
         public int PdfHostPageNumber;
+#pragma warning restore S1104
     }
 
     // ── Nested delegates (callback strategies) ──────────────────────────────

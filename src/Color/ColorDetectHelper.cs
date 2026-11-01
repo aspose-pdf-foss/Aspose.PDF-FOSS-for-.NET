@@ -21,9 +21,6 @@ internal static class ColorDetectHelper
         public bool hasRgb;
         public bool hasGray;
         public bool hasCmyk;
-        /// <summary>A colour operator, image or annotation colour was present at all - even one
-        /// whose values were plain black or white.</summary>
-        public bool hasAnyColor;
     }
 
     /// <summary>
@@ -181,7 +178,6 @@ internal static class ColorDetectHelper
             var subtype = obj.Dict.GetName("Subtype");
             if (subtype == "Image")
             {
-                usage.hasAnyColor = true;
                 ClassifyImageColorSpace(obj, reader, usage);
             }
             else if (subtype == "Form")
@@ -306,18 +302,12 @@ internal static class ColorDetectHelper
                         }
                     }
                 }
-                else if (baseName is not null)
-                {
-                    // Skip DeviceGray - it's detected via g/G operators and images
-                    if (baseName is not "DeviceGray" and not "CalGray")
-                        ClassifyColorSpaceName(baseName, usage);
-                }
+                // Skip DeviceGray - it's detected via g/G operators and images
+                else if (baseName is not (null or "DeviceGray" or "CalGray"))
+                    ClassifyColorSpaceName(baseName, usage);
             }
-            else if (csObj is PdfName csName)
-            {
-                if (csName.Value is not "DeviceGray" and not "CalGray")
-                    ClassifyColorSpaceName(csName.Value, usage);
-            }
+            else if (csObj is PdfName csName && csName.Value is not "DeviceGray" and not "CalGray")
+                ClassifyColorSpaceName(csName.Value, usage);
         }
     }
 
@@ -360,7 +350,6 @@ internal static class ColorDetectHelper
 
         if (colorSpaceName is not null)
         {
-            usage.hasAnyColor = true;
             ClassifyColorSpaceName(colorSpaceName, usage);
         }
     }
@@ -398,7 +387,7 @@ internal static class ColorDetectHelper
     /// Check if CMYK values represent a non-grayscale color.
     /// Gray in CMYK has C=M=Y=0 with only K varying.
     /// </summary>
-    private static bool IsNonTrivialCmyk(double c, double m, double y, double k)
+    private static bool IsNonTrivialCmyk(double c, double m, double y)
     {
         const double eps = 0.001;
         return c > eps || m > eps || y > eps;
@@ -422,12 +411,7 @@ internal static class ColorDetectHelper
         try
         {
             var data = reader.DecodeStream(imageStream);
-            foreach (var b in data)
-            {
-                if (b != 0 && b != 255)
-                    return false;
-            }
-            return true;
+            return !data.Any(b => b != 0 && b != 255);
         }
         catch
         {
@@ -545,7 +529,6 @@ internal static class ColorDetectHelper
         var colorObj = reader.Resolve(annotDict.Get(key)) as PdfArray;
         if (colorObj is null || colorObj.Count == 0) return;
 
-        usage.hasAnyColor = true;
         if (colorObj.Count == 1)
         {
             var v = Num(colorObj[0]);
@@ -567,8 +550,7 @@ internal static class ColorDetectHelper
             var c = Num(colorObj[0]);
             var m = Num(colorObj[1]);
             var y = Num(colorObj[2]);
-            var kv = Num(colorObj[3]);
-            if (IsNonTrivialCmyk(c, m, y, kv))
+            if (IsNonTrivialCmyk(c, m, y))
                 usage.hasCmyk = true;
             else if (IsCmykGray(c, m, y))
                 usage.hasGray = true;
@@ -606,21 +588,8 @@ internal static class ColorDetectHelper
         switch (op)
         {
             // RGB fill/stroke
-            case "rg" when operands.Count >= 3:
+            case "rg" or "RG" when operands.Count >= 3:
             {
-                usage.hasAnyColor = true;
-                var r = Num(operands[0]);
-                var g = Num(operands[1]);
-                var b = Num(operands[2]);
-                if (IsNonTrivialRgb(r, g, b))
-                    usage.hasRgb = true;
-                else if (IsGrayRgb(r, g, b))
-                    usage.hasGray = true;
-                break;
-            }
-            case "RG" when operands.Count >= 3:
-            {
-                usage.hasAnyColor = true;
                 var r = Num(operands[0]);
                 var g = Num(operands[1]);
                 var b = Num(operands[2]);
@@ -632,17 +601,8 @@ internal static class ColorDetectHelper
             }
 
             // Gray fill/stroke
-            case "g" when operands.Count >= 1:
+            case "g" or "G" when operands.Count >= 1:
             {
-                usage.hasAnyColor = true;
-                var v = Num(operands[0]);
-                if (!IsBlackOrWhite(v))
-                    usage.hasGray = true;
-                break;
-            }
-            case "G" when operands.Count >= 1:
-            {
-                usage.hasAnyColor = true;
                 var v = Num(operands[0]);
                 if (!IsBlackOrWhite(v))
                     usage.hasGray = true;
@@ -650,27 +610,12 @@ internal static class ColorDetectHelper
             }
 
             // CMYK fill/stroke
-            case "k" when operands.Count >= 4:
+            case "k" or "K" when operands.Count >= 4:
             {
-                usage.hasAnyColor = true;
                 var c = Num(operands[0]);
                 var m = Num(operands[1]);
                 var y = Num(operands[2]);
-                var kv = Num(operands[3]);
-                if (IsNonTrivialCmyk(c, m, y, kv))
-                    usage.hasCmyk = true;
-                else if (IsCmykGray(c, m, y))
-                    usage.hasGray = true;
-                break;
-            }
-            case "K" when operands.Count >= 4:
-            {
-                usage.hasAnyColor = true;
-                var c = Num(operands[0]);
-                var m = Num(operands[1]);
-                var y = Num(operands[2]);
-                var kv = Num(operands[3]);
-                if (IsNonTrivialCmyk(c, m, y, kv))
+                if (IsNonTrivialCmyk(c, m, y))
                     usage.hasCmyk = true;
                 else if (IsCmykGray(c, m, y))
                     usage.hasGray = true;
@@ -691,7 +636,6 @@ internal static class ColorDetectHelper
             {
                 // These use the current color space; with 3+ numeric operands = RGB-like,
                 // 4+ = CMYK-like, 1 = gray-like
-                usage.hasAnyColor = true;
                 if (operands.Count >= 4 && operands.All(o => o is PdfInteger or PdfReal))
                     usage.hasCmyk = true;
                 else if (operands.Count >= 3 && operands.Take(3).All(o => o is PdfInteger or PdfReal))
@@ -717,7 +661,6 @@ internal static class ColorDetectHelper
             // and its actual gray level is determined by g/G operators, not the cs/CS selection.
             case "cs" or "CS" when operands.Count >= 1 && operands[0] is PdfName csName:
             {
-                usage.hasAnyColor = true;
                 if (csName.Value is not "DeviceGray" and not "CalGray")
                     ClassifyColorSpaceName(csName.Value, usage);
                 break;

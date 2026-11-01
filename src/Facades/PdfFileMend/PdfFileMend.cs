@@ -14,19 +14,19 @@ public sealed partial class PdfFileMend : ISaveableFacade
 
     private Document? _document;
     private string? _inputFile;
-    private string? _outputFile;
     private Stream? _inputStream;
-    private Stream? _outputStream;
     private bool _ownsDocument;
 
     private bool _isWordWrap;
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>
     /// Whether to enable word wrapping for AddText operations. Set-only on
     /// the public surface only; internal code reads
     /// <see cref="WrapMode"/> for the resolved behaviour.
     /// </summary>
     public bool IsWordWrap { set => _isWordWrap = value; }
+#pragma warning restore S2376
 
     /// <summary>
     /// Word wrap mode (Default or ByWords).
@@ -55,11 +55,7 @@ public sealed partial class PdfFileMend : ISaveableFacade
     /// <summary>
     /// Output file path.
     /// </summary>
-    public string? OutputFile
-    {
-        get => _outputFile;
-        set => _outputFile = value;
-    }
+    public string? OutputFile { get; set; }
 
     /// <summary>
     /// Input stream.
@@ -78,11 +74,7 @@ public sealed partial class PdfFileMend : ISaveableFacade
     /// <summary>
     /// Output stream.
     /// </summary>
-    public Stream? OutputStream
-    {
-        get => _outputStream;
-        set => _outputStream = value;
-    }
+    public Stream? OutputStream { get; set; }
 
     /// <summary>
     /// The document bound to this PdfFileMend, exposing the in-progress
@@ -103,7 +95,7 @@ public sealed partial class PdfFileMend : ISaveableFacade
     public PdfFileMend(string inputFileName, string outputFileName)
     {
         _inputFile = inputFileName;
-        _outputFile = outputFileName;
+        OutputFile = outputFileName;
         LoadFromFile(inputFileName);
     }
 
@@ -113,7 +105,7 @@ public sealed partial class PdfFileMend : ISaveableFacade
     public PdfFileMend(Stream inputStream, Stream outputStream)
     {
         _inputStream = inputStream;
-        _outputStream = outputStream;
+        OutputStream = outputStream;
         LoadFromStream(inputStream);
     }
 
@@ -128,7 +120,7 @@ public sealed partial class PdfFileMend : ISaveableFacade
     public PdfFileMend(Document document, string outputFileName)
     {
         _document = document ?? throw new ArgumentNullException(nameof(document));
-        _outputFile = outputFileName;
+        OutputFile = outputFileName;
         _ownsDocument = false;
     }
 
@@ -136,32 +128,38 @@ public sealed partial class PdfFileMend : ISaveableFacade
     public PdfFileMend(Document document, Stream destStream)
     {
         _document = document ?? throw new ArgumentNullException(nameof(document));
-        _outputStream = destStream;
+        OutputStream = destStream;
         _ownsDocument = false;
     }
 
+#pragma warning disable S927 // public API: the published parameter name
     /// <summary>
     /// Bind an existing Document to this PdfFileMend.
     /// </summary>
     public void BindPdf(Document document)
+#pragma warning restore S927
     {
         _document = document;
         _ownsDocument = false;
     }
 
+#pragma warning disable S927 // public API: the published parameter name
     /// <summary>
     /// Bind a PDF document from a file path.
     /// </summary>
     public void BindPdf(string inputFile)
+#pragma warning restore S927
     {
         _inputFile = inputFile;
         LoadFromFile(inputFile);
     }
 
+#pragma warning disable S927 // public API: the published parameter name
     /// <summary>
     /// Bind a PDF document from a stream.
     /// </summary>
     public void BindPdf(Stream inputStream)
+#pragma warning restore S927
     {
         LoadFromStream(inputStream);
     }
@@ -186,7 +184,7 @@ public sealed partial class PdfFileMend : ISaveableFacade
             return false;
 
         var page = _document.Pages.At(pageNum);
-        AddTextToPage(page, text, lowerLeftX, lowerLeftY, upperRightX, upperRightY);
+        AddTextToPage(page, text, lowerLeftX, lowerLeftY, upperRightX);
         return true;
     }
 
@@ -202,7 +200,7 @@ public sealed partial class PdfFileMend : ISaveableFacade
         {
             if (pn < 1 || pn > _document.PageCount) continue;
             var page = _document.Pages.At(pn);
-            AddTextToPage(page, text, lowerLeftX, lowerLeftY, upperRightX, upperRightY);
+            AddTextToPage(page, text, lowerLeftX, lowerLeftY, upperRightX);
         }
         return true;
     }
@@ -351,13 +349,13 @@ public sealed partial class PdfFileMend : ISaveableFacade
     {
         if (_document is null) return;
 
-        if (_outputFile is not null)
+        if (OutputFile is not null)
         {
-            _document.Save(_outputFile);
+            _document.Save(OutputFile);
         }
-        else if (_outputStream is not null)
+        else if (OutputStream is not null)
         {
-            _document.Save(_outputStream);
+            _document.Save(OutputStream);
         }
 
         if (_ownsDocument)
@@ -420,23 +418,26 @@ public sealed partial class PdfFileMend : ISaveableFacade
         pd.decompressed = IO.Filters.ManagedInflater.InflateToEnd(pd.compressedData, 0, pd.compressedData.Length, zlibWrapper: true);
 
         pd.hasAlpha = pd.colorType == 4 || pd.colorType == 6;
-        pd.channels = pd.colorType switch
+        pd.channels = IO.PngSamples.Channels(pd.colorType);
+        if (IO.PngSamples.ReadersTakeAsIs(pd.bitDepth, pd.colorType, pd.interlaced))
         {
-            0 => 1, // Grayscale
-            2 => 3, // RGB
-            3 => 1, // Palette index
-            4 => 2, // Grayscale + Alpha
-            6 => 4, // RGBA
-            _ => 3,
-        };
-        pd.bpp = Math.Max(1, pd.channels * pd.bitDepth / 8);
-        pd.stride = (pd.width * pd.channels * pd.bitDepth + 7) / 8;
+            pd.bpp = Math.Max(1, pd.channels * pd.bitDepth / 8);
+            pd.stride = (pd.width * pd.channels * pd.bitDepth + 7) / 8;
 
-        pd.raw = new byte[pd.height * pd.stride];
-        pd.prevRow = new byte[pd.stride];
-        pd.srcPos = 0;
+            pd.raw = new byte[pd.height * pd.stride];
+            pd.prevRow = new byte[pd.stride];
+            pd.srcPos = 0;
 
-        UnfilterPngRows(pd);
+            UnfilterPngRows(pd);
+        }
+        else
+        {
+            // 16-bit, sub-byte grey and Adam7-interlaced data: plain rows of one byte per sample,
+            // read below as an 8-bit image.
+            pd.raw = IO.PngSamples.ToBytePerSample(pd.decompressed, pd.width, pd.height, pd.bitDepth, pd.colorType, pd.interlaced);
+            pd.bitDepth = 8;
+            pd.stride = pd.width * pd.channels;
+        }
 
         // Convert to RGB or RGBA
         if (pd.colorType == 3 && pd.palette is not null) // Palette index -> RGB (RGBA when tRNS present)

@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO.Filters;
 
@@ -18,19 +18,20 @@ internal static partial class Jbig2Decoder
         public IntegerDecoder(ArithmeticDecoder ad)
         {
             _ad = ad;
-            for (var i = 0; i < _ctx.Length; i++) _ctx[i] = new ArithmeticContext();
         }
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         /// <summary>
         /// Decode the next integer. Returns null when OOB; the value otherwise.
         /// </summary>
         public int? Decode()
+#pragma warning restore S3218
         {
             var prev = 1;
 
             int Read()
             {
-                var b = _ad.DecodeBit(_ctx[prev]) ? 1 : 0;
+                var b = _ad.DecodeBit(ref _ctx[prev]) ? 1 : 0;
                 prev = prev < 256 ? ((prev << 1) | b) : (((prev << 1) | b) & 511) | 256;
                 return b;
             }
@@ -38,10 +39,12 @@ internal static partial class Jbig2Decoder
             var s = Read();
             int bits, offset;
             if (Read() == 0)        { bits = 2;  offset = 0; }
+#pragma warning disable S1862 // each Read() decodes the next bit - the conditions are not the same
             else if (Read() == 0)   { bits = 4;  offset = 4; }
             else if (Read() == 0)   { bits = 6;  offset = 20; }
             else if (Read() == 0)   { bits = 8;  offset = 84; }
             else if (Read() == 0)   { bits = 12; offset = 340; }
+#pragma warning restore S1862
             else                    { bits = 32; offset = 4436; }
 
             var v = 0;
@@ -56,7 +59,7 @@ internal static partial class Jbig2Decoder
 
     /// <summary>
     /// QM arithmetic decoder for JBIG2 — T.88 Annex E in the "C-high / C-low split" software form
-    /// (the formulation used by pdf.js and the JPEG/JBIG2 reference decoders). The code register is
+    /// (the formulation the JPEG/JBIG2 reference decoders use). The code register is
     /// kept un-complemented; the DECODE comparison is against Qe (LPS sub-interval low). A past-end
     /// read of 0xFF lands the BYTEIN in the terminator branch, producing the required trailing 1-bits.
     /// </summary>
@@ -86,7 +89,7 @@ internal static partial class Jbig2Decoder
 
         private uint ByteAt(int p) => (uint)(p < _end ? _data[p] : 0xFF);
 
-        public bool DecodeBit(ArithmeticContext cx)
+        public bool DecodeBit(ref ArithmeticContext cx)
         {
             var idx = cx.Index;
             var qe = Jbig2QmStates.QeTable[idx];

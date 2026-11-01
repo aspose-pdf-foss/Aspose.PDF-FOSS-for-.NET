@@ -36,16 +36,17 @@ internal static partial class HtmlToPdfConverter
         // cellspacing grid pages 96 + 70.87 + 0.75 + its content + 90)
         // (a grid at its min floors inks the chrome between its columns and its frame too, and
         // ends at a last-column control's box rather than its advance)
-        var uaGridChrome = inkWiden && cv.profile.uaStdSerif && !cv.profile.deadExternalCss
-            ? (cv.widestIsPctMin ? MinFloorInkChromePt(cv) : cv.widestTableChromePt)
-            : 0;
-        var neededContent = cv.profile.floatBandDoc ? cv.widestTable - 6
-            : cv.profile.bodyZeroMargin || cv.profile.printGrid || inkWiden ? cv.widestTable + uaGridChrome
-            // (the field-list sheet ends one page margin past its grid's min-content exactly: 99.8 + 580.252 + 90)
-            : cv.profile.fieldListDoc ? cv.widestTable
-            // (the pt form sheet ends one page margin past its grid's min-content box: 96 + 550.609 + 90)
-            : cv.profile.ptFormDoc ? cv.widestTable
-            : cv.widestTable + 8;
+        double uaGridChrome = 0;
+        if (inkWiden && cv.profile.uaStdSerif && !cv.profile.deadExternalCss)
+            uaGridChrome = cv.widestIsPctMin ? MinFloorInkChromePt(cv) : cv.widestTableChromePt;
+        double neededContent;
+        if (cv.profile.floatBandDoc) neededContent = cv.widestTable - 6;
+        else if (cv.profile.bodyZeroMargin || cv.profile.printGrid || inkWiden) neededContent = cv.widestTable + uaGridChrome;
+        // (the field-list sheet ends one page margin past its grid's min-content exactly: 99.8 + 580.252 + 90)
+        else if (cv.profile.fieldListDoc) neededContent = cv.widestTable;
+        // (the pt form sheet ends one page margin past its grid's min-content box: 96 + 550.609 + 90)
+        else if (cv.profile.ptFormDoc) neededContent = cv.widestTable;
+        else neededContent = cv.widestTable + 8;
         // The same measured quantity as the ink pass's own right band, reached by a different
         // route: this one was derived from table geometry on documents that grow for a table,
         // the other from page-minus-ink on documents that grow for a declared width. Named
@@ -65,7 +66,8 @@ internal static partial class HtmlToPdfConverter
         // pages 96 + 612px + 2 x 1px border + 90 = 646.50).
         if (inkWiden && FramedWrapperDivOuterWidthPt(cv.html, cv.css) is var wrapW && wrapW > neededContent)
             neededContent = wrapW;
-        var neededPage = neededContent + (chainWiden ? 90.0 + (cv.bodyMarginAuthored ? 0.0 : cv.bodyMarginLeftPt) : cv.marginLeft) + widenRight
+        var chainLeft = cv.bodyMarginAuthored ? 90.0 : 90.0 + cv.bodyMarginLeftPt;
+        var neededPage = neededContent + (chainWiden ? chainLeft : cv.marginLeft) + widenRight
             // A UA-serif document's grown sheet keeps the symmetric body
             // margin on the RIGHT of the widest grid too (measured: the
             // register report's grid ends one body margin inside the frame).
@@ -116,9 +118,8 @@ internal static partial class HtmlToPdfConverter
         {
             if (!b.IsTable || b.TableHtml is not { } html) continue;
             var nestedDeclared = false;
-            foreach (var sub in ExtractNestedTables(html).subTables)
-                if (DeclaredTableWidthPt(Regex.Match(sub, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value) > 0)
-                { nestedDeclared = true; break; }
+            if (ExtractNestedTables(html).subTables.Any(sub => DeclaredTableWidthPt(SafeRegex.Match(sub, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value) > 0))
+            { nestedDeclared = true; }
             if (!nestedDeclared) continue;
             var gridInk = MetricTableInkRightPt(cv, options, html, cv.availContentW);
             ink = Math.Max(ink, gridInk);
@@ -127,9 +128,14 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>The before-markers, the form-control and form-dialect flags, the sheet chrome check, and the block parse itself - structured or plain.</summary>
-    private static void ParseDocumentBlocks(ConvertState cv, HtmlLoadOptions? options, List<Block> rowBlocks)
+    private static void ParseDocumentBlocks(ConvertState cv, List<Block> rowBlocks)
     {
+        // The flow is built from the document's elements alone: a tag inside a script's string literal or a
+        // commented-out block opens no structure and counts as no control. The tokeniser strips them per
+        // fragment, but a structure cut through a script leaves each half's source as text.
+        cv.html = StripInertMarkup(cv.html);
         cv.beforeMarkers = ParseBeforeMarkers(cv.html);
+        ScanSheetMarkerRules(cv);
 
         cv.blocks = new List<Block>();
         cv.htmlHasFormInput = HasVisibleFormControl(cv.html);
@@ -147,17 +153,27 @@ internal static partial class HtmlToPdfConverter
         // all, or one whose only controls are the options a control grid seats in its cells
         // (the letter whose single table carries the reasons' checkboxes in a nested grid
         // draws as that grid, measured; the flat path put every cell on its own line).
+        // …or a section wrapper holding a control: the wrapper flows row by row and each table
+        // nested in its rows is judged on its own (see UnwrapSectionWrapperTable).
+        var tableSegs = cv.htmlHasFormInput ? SegmentHtmlTables(cv.html) : null;
         cv.perTableFormGate = cv.htmlHasFormInput && !cv.profile.formDialectTables
-            && SegmentHtmlTables(cv.html).Any(s => s.isTable
+            && tableSegs!.Any(s => s.isTable
                 && (!HasVisibleFormControl(s.html) || RadioGridableControls(s.html, cv.profile.uaStdSerif)
-                    || ButtonFamilyControlsOnly(s.html)));
+                    || ButtonFamilyControlsOnly(s.html) || IsSectionWrapperTable(s.html)));
 
+        // A stylesheet form grids its text-box tables too, its controls fields in their cells (the
+        // flat path put every cell of an 8-column label/input table on its own full-width line).
+        // The UA serif flow and the calibrated control dialects keep their own control models, and the
+        // metric flows their face-measured grids, which hold no fields.
+        var p = cv.profile;
+        p.fieldCellGrids = cv.htmlHasFormInput && !p.uaStdSerif && !p.uaFormCells && !p.formDialectTables
+            && !p.escapedAttrDoc && !p.dwFormDoc && !p.metricFlow && !p.quirksCssRun && tableSegs!.Any(s => s.isTable && FieldGridTable(s.html));
         cv.sheetChromesCells = false;
         foreach (var chromeKey in new[] { "td", "table td", "th", "table th" })
         {
             if (!cv.css.TryGetValue(chromeKey, out var chromeRule)) continue;
             if (chromeRule.TryGetValue("border", out var chromeB)
-                && !Regex.IsMatch(chromeB, @"^\s*(0\w*|none)\b", RegexOptions.IgnoreCase))
+                && !SafeRegex.IsMatch(chromeB, @"^\s*(0\w*|none)\b", RegexOptions.IgnoreCase))
                 cv.sheetChromesCells = true;
             if (chromeRule.ContainsKey("background-color") || chromeRule.ContainsKey("background"))
                 cv.sheetChromesCells = true;
@@ -170,7 +186,7 @@ internal static partial class HtmlToPdfConverter
         // sizes the sheet): each row is a bold right-aligned label column beside a
         // wrapped span column at the sheet's own small size; an hr divides sections.
         if (!cv.marginsExplicit && !ContainsTable(cv.html)
-            && Regex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])[^'""]*?(?<![-\w])width\s*:\s*([\d.]+\s*(?:cm|mm|in|pt))[^'""]*\1",
+            && SafeRegex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])[^'""]*?(?<![-\w])width\s*:\s*([\d.]+\s*(?:cm|mm|in|pt))[^'""]*\1",
                 RegexOptions.IgnoreCase) is { Success: true } repBodyM
             && TryParseLength(repBodyM.Groups[2].Value.Replace(" ", "")) is { } repBodyW
             && repBodyW > 0
@@ -189,10 +205,10 @@ internal static partial class HtmlToPdfConverter
     private static double InCellDeclaredTableIntrinsicPt(string html, IReadOnlyDictionary<string, Dictionary<string, string>>? css, bool selfInCell = false)
     {
         double widest = 0;
-        foreach (Match tm in Regex.Matches(html, @"<table\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match tm in SafeRegex.Matches(html, @"<table\b[^>]*>", RegexOptions.IgnoreCase))
         {
             var style = DivStyleOf(tm.Value);
-            if (Regex.Match(style, @"(?<![-\w])width\s*:\s*([\d.]+\s*(?:px|pt|in|cm|mm))", RegexOptions.IgnoreCase) is not { Success: true } wM
+            if (SafeRegex.Match(style, @"(?<![-\w])width\s*:\s*([\d.]+\s*(?:px|pt|in|cm|mm))", RegexOptions.IgnoreCase) is not { Success: true } wM
                 || TryParseLength(wM.Groups[1].Value.Replace(" ", "")) is not { } wPt || wPt <= 0)
                 continue;
             if (!(selfInCell && tm.Index == 0) && !TableStandsInCell(html, tm.Index)) continue;
@@ -201,14 +217,14 @@ internal static partial class HtmlToPdfConverter
             var sides = CssBorderSides(style);
             var borderW = (sides[3].Style is "none" ? 0 : sides[3].W) + (sides[1].Style is "none" ? 0 : sides[1].W);
             double marginW = 0;
-            if (Regex.Match(style, @"(?<![-\w])margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mlM) marginW += StatedMarginPt(mlM.Groups[1].Value, em) ?? 0;
-            if (Regex.Match(style, @"(?<![-\w])margin-right\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mrM) marginW += StatedMarginPt(mrM.Groups[1].Value, em) ?? 0;
+            if (SafeRegex.Match(style, @"(?<![-\w])margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mlM) marginW += StatedMarginPt(mlM.Groups[1].Value, em) ?? 0;
+            if (SafeRegex.Match(style, @"(?<![-\w])margin-right\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mrM) marginW += StatedMarginPt(mrM.Groups[1].Value, em) ?? 0;
             var box = wPt + padL + padR + borderW + marginW;
             // (the card's real minimum: a declared div in its cell stands inside the UA cell spacing
             //  and padding on both sides, and the card's border round that)
             var end = html.IndexOf("</table", tm.Index, StringComparison.OrdinalIgnoreCase);
             var inner = end > tm.Index ? html.Substring(tm.Index, end - tm.Index) : "";
-            var innerDiv = Regex.Match(inner, @"<div\b[^>]*\bclass\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
+            var innerDiv = SafeRegex.Match(inner, @"<div\b[^>]*\bclass\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
             if (innerDiv.Success && css is not null
                 && (css.TryGetValue("." + innerDiv.Groups[1].Value, out var dRule) || css.TryGetValue("div." + innerDiv.Groups[1].Value, out dRule))
                 && dRule.TryGetValue("width", out var dW) && TryParseLength(dW.Trim()) is { } dWPt && dWPt > 0)
@@ -226,7 +242,7 @@ internal static partial class HtmlToPdfConverter
     private static bool TableStandsInCell(string html, int tableIndex)
     {
         var depth = 0;
-        foreach (Match m in Regex.Matches(html[..tableIndex], @"<(/?)t[dh]\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.RightToLeft))
+        foreach (Match m in SafeRegex.Matches(html[..tableIndex], @"<(/?)t[dh]\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.RightToLeft))
         {
             if (m.Groups[1].Value.Length > 0) { depth++; continue; }
             if (depth > 0) { depth--; continue; }
@@ -301,18 +317,18 @@ internal static partial class HtmlToPdfConverter
         if (!cv.marginsExplicit)
         {
             double bodyMinPt = 0;
-            foreach (Match styleBlock in Regex.Matches(cv.html, @"<style\b([^>]*)>([\s\S]*?)</style\s*>",
-                         RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(cv.html, @"<style\b([^>]*)>([\s\S]*?)</style\s*>",
+                         RegexOptions.IgnoreCase).Select(styleBlock => styleBlock.Groups))
             {
-                var mediaM = Regex.Match(styleBlock.Groups[1].Value, @"\bmedia\s*=\s*[""']?([^""'>]*)",
+                var mediaM = SafeRegex.Match(groups[1].Value, @"\bmedia\s*=\s*[""']?([^""'>]*)",
                     RegexOptions.IgnoreCase);
-                if (mediaM.Success && !Regex.IsMatch(mediaM.Groups[1].Value, @"\b(all|print)\b",
+                if (mediaM.Success && !SafeRegex.IsMatch(mediaM.Groups[1].Value, @"\b(all|print)\b",
                         RegexOptions.IgnoreCase))
                     continue;
-                foreach (Match br in Regex.Matches(styleBlock.Groups[2].Value,
+                foreach (Match br in SafeRegex.Matches(groups[2].Value,
                              @"(?<![\w.#-])body\s*\{([^{}]*)\}", RegexOptions.IgnoreCase))
                 {
-                    var mw = Regex.Match(br.Groups[1].Value,
+                    var mw = SafeRegex.Match(br.Groups[1].Value,
                         @"\bmin-width\s*:\s*([\d.]+\s*(?:px|pt|in|cm|mm))", RegexOptions.IgnoreCase);
                     if (mw.Success && TryParseLength(mw.Groups[1].Value.Replace(" ", "")) is { } mwPt
                         && mwPt > bodyMinPt)
@@ -351,9 +367,9 @@ internal static partial class HtmlToPdfConverter
     private static double DeclaredTableWidthPt(string tableTag)
     {
         // (`border-width: 1px` is not a width: the property must stand on its own)
-        var styleW = Regex.Match(DivStyleOf(tableTag), @"(?<![-\w])width\s*:\s*([\d.]+\s*(?:px|pt|in|cm|mm))", RegexOptions.IgnoreCase);
+        var styleW = SafeRegex.Match(DivStyleOf(tableTag), @"(?<![-\w])width\s*:\s*([\d.]+\s*(?:px|pt|in|cm|mm))", RegexOptions.IgnoreCase);
         if (styleW.Success && TryParseLength(styleW.Groups[1].Value.Replace(" ", "")) is { } stylePt) return stylePt;
-        var attr = Regex.Match(tableTag, @"\bwidth\s*=\s*[""']?\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*[""'\s/>]", RegexOptions.IgnoreCase);
+        var attr = SafeRegex.Match(tableTag, @"\bwidth\s*=\s*[""']?\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*[""'\s/>]", RegexOptions.IgnoreCase);
         return attr.Success && double.TryParse(attr.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var px) ? px * PxPt : 0;
     }
@@ -372,7 +388,7 @@ internal static partial class HtmlToPdfConverter
     {
         var depth = 0;
         var end = -1;
-        for (var t = Regex.Match(html, @"<(?<c>/?)table\b[^>]*>", RegexOptions.IgnoreCase); t.Success; t = t.NextMatch())
+        for (var t = SafeRegex.Match(html, @"<(?<c>/?)table\b[^>]*>", RegexOptions.IgnoreCase); t.Success; t = SafeRegex.NextMatch(t))
         {
             if (t.Index < tagIndex) continue;
             depth += t.Groups["c"].Length > 0 ? -1 : 1;
@@ -383,16 +399,16 @@ internal static partial class HtmlToPdfConverter
         var (own, _) = ExtractNestedTables(html.Substring(tagIndex, end - tagIndex));
         var declared = new List<double>();
         var painted = new List<bool>();
-        foreach (Match row in Regex.Matches(own, @"<tr\b.*?</tr\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
+        foreach (Match row in SafeRegex.Matches(own, @"<tr\b.*?</tr\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
         {
             var cursor = 0;
-            foreach (Match cell in Regex.Matches(row.Value, @"<t[dh]\b[^>]*>", RegexOptions.IgnoreCase))
+            foreach (var value in SafeRegex.Matches(row.Value, @"<t[dh]\b[^>]*>", RegexOptions.IgnoreCase).Select(cell => cell.Value))
             {
-                var tag = cell.Value;
-                var span = Regex.Match(tag, @"\bcolspan\s*=\s*[""']?(\d+)", RegexOptions.IgnoreCase) is { Success: true } sm
+                var tag = value;
+                var span = SafeRegex.Match(tag, @"\bcolspan\s*=\s*[""']?(\d+)", RegexOptions.IgnoreCase) is { Success: true } sm
                     && int.TryParse(sm.Groups[1].Value, out var sv) && sv > 0 ? sv : 1;
                 while (declared.Count < cursor + span) { declared.Add(0); painted.Add(false); }
-                var paints = Regex.IsMatch(tag, @"\bbgcolor\s*=|background(?:-color)?\s*:|\bborder\s*=\s*[""']?[1-9]|(?<![-\w])border(?:-(?:top|left|right|bottom))?\s*:\s*(?!none|0)", RegexOptions.IgnoreCase);
+                var paints = SafeRegex.IsMatch(tag, @"\bbgcolor\s*=|background(?:-color)?\s*:|\bborder\s*=\s*[""']?[1-9]|(?<![-\w])border(?:-(?:top|left|right|bottom))?\s*:\s*(?!none|0)", RegexOptions.IgnoreCase);
                 for (var k = 0; k < span; k++) painted[cursor + k] |= paints;
                 // (a single column's width is read from its own cells; a spanning cell's box is theirs to share)
                 if (span == 1 && declared[cursor] <= 0)
@@ -421,7 +437,7 @@ internal static partial class HtmlToPdfConverter
     {
         var depth = 0;
         var end = -1;
-        for (var t = Regex.Match(html, @"<(?<c>/?)table\b[^>]*>", RegexOptions.IgnoreCase); t.Success; t = t.NextMatch())
+        for (var t = SafeRegex.Match(html, @"<(?<c>/?)table\b[^>]*>", RegexOptions.IgnoreCase); t.Success; t = SafeRegex.NextMatch(t))
         {
             if (t.Index < tagIndex) continue;
             depth += t.Groups["c"].Length > 0 ? -1 : 1;
@@ -437,9 +453,9 @@ internal static partial class HtmlToPdfConverter
         var subTag = subs[0].Substring(0, subs[0].IndexOf('>') + 1);
         var subW = DeclaredTableWidthPt(subTag);
         if (subW <= 0 || wrapW <= 0 || subW >= wrapW - 1e-6) return false;
-        if (Regex.IsMatch(inner, @"\bbgcolor\s*=|background(?:-color)?\s*:|\bborder\s*=\s*[""']?[1-9]|border(?:-(?:top|left|right|bottom))?\s*:\s*(?!none|0)", RegexOptions.IgnoreCase)) return false;
+        if (SafeRegex.IsMatch(inner, @"\bbgcolor\s*=|background(?:-color)?\s*:|\bborder\s*=\s*[""']?[1-9]|border(?:-(?:top|left|right|bottom))?\s*:\s*(?!none|0)", RegexOptions.IgnoreCase)) return false;
         // (the extraction leaves a numbered marker where each nested table stood)
-        var innerText = Regex.Replace(Regex.Replace(inner, "<[^>]+>", " "), @"\u0002\d+\u0003", " ");
+        var innerText = SafeRegex.Replace(SafeRegex.Replace(inner, "<[^>]+>", " "), @"\u0002\d+\u0003", " ");
         return CollapseWs(DecodeEntities(innerText)).Trim().Length == 0;
     }
 
@@ -448,13 +464,13 @@ internal static partial class HtmlToPdfConverter
     private static double? HostDivRuleWidthPt(ConvertState cv, int tableIndex)
     {
         var before = cv.html.Substring(0, tableIndex);
-        var open = Regex.Match(before, @"<div\b([^>]*)>\s*$", RegexOptions.IgnoreCase);
+        var open = SafeRegex.Match(before, @"<div\b([^>]*)>\s*$", RegexOptions.IgnoreCase);
         if (!open.Success) return null;
         var attrs = open.Groups[1].Value;
         var keys = new List<string>();
-        var idM = Regex.Match(attrs, @"\bid\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
+        var idM = SafeRegex.Match(attrs, @"\bid\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
         if (idM.Success) { keys.Add("#" + idM.Groups[1].Value); keys.Add("div#" + idM.Groups[1].Value); }
-        var clsM = Regex.Match(attrs, @"\bclass\s*=\s*[""']?([\w \-]+)", RegexOptions.IgnoreCase);
+        var clsM = SafeRegex.Match(attrs, @"\bclass\s*=\s*[""']?([\w \-]+)", RegexOptions.IgnoreCase);
         if (clsM.Success)
             foreach (var c in clsM.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries)) { keys.Add("." + c); keys.Add("div." + c); }
         foreach (var key in keys)
@@ -484,7 +500,7 @@ internal static partial class HtmlToPdfConverter
             && tElemDecl.TryGetValue("width", out var tElemW)
             && !tElemW.Contains('%')
             && TryParseLength(tElemW.Trim()) is { } tElemPt
-            && Regex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase))
             cv.elementTableW = tElemPt;
         // The natural box for a declared-width table carries a 2.25
         // chrome step over the declared width — the probe's symmetric border-
@@ -515,7 +531,7 @@ internal static partial class HtmlToPdfConverter
             {
                 if (b.IsTable || b.IsHardBreak || b.IsImage || string.IsNullOrEmpty(b.Text)) continue;
                 var bfs = b.FontSize > 0 ? b.FontSize : 11.0;
-                foreach (var seg in DashSegments(b.Text))
+                foreach (var seg in DashSegments(b.Text, ideographBreaks: true))
                     if (seg.Length > 2)
                         cv.quirksWrapW = Math.Max(cv.quirksWrapW,
                             MeasureFaceText(cv.dashWrapFace, seg, bfs));
@@ -540,7 +556,7 @@ internal static partial class HtmlToPdfConverter
                 && LoadConverterImage(b.ImageSrc, options) is null)
             {
                 b.IsImage = false;
-                b.Text = b.ImageAlt!.Trim();
+                b.Text = b.ImageAlt.Trim();
                 if (b.FontSize <= 0) b.FontSize = cv.uaFlow ? 12 : 11;
             }
 
@@ -558,7 +574,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>A document with no blocks becomes one blank page; otherwise null to continue.</summary>
-    private static Document? EmptyDocumentOrContinue(ConvertState cv, HtmlLoadOptions? options)
+    private static Document? EmptyDocumentOrContinue(ConvertState cv)
     {
         if (cv.blocks.Count == 0)
         {
@@ -570,20 +586,20 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>The RTL flag, the fixed header and footer regions with their margin charges, and the first-page footer image.</summary>
-    private static void DetectRegionsAndFooterImage(ConvertState cv, HtmlLoadOptions? options)
+    private static void DetectRegionsAndFooterImage(ConvertState cv)
     {
-        cv.profile.rtlDoc = Regex.IsMatch(cv.html, @"<(?:html|body)[^>]*\bdir\s*=\s*[""']?rtl",
+        cv.profile.rtlDoc = SafeRegex.IsMatch(cv.html, @"<(?:html|body)[^>]*\bdir\s*=\s*[""']?rtl",
             RegexOptions.IgnoreCase);
 
         cv.runHeader = null;
         cv.runFooter = null;
-        cv.hMatch = Regex.Match(cv.html, @"<header([^>]*)>(.*?)</header>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        cv.hMatch = SafeRegex.Match(cv.html, @"<header([^>]*)>(.*?)</header>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (cv.hMatch.Success && IsFixedRegion(cv.hMatch.Groups[1].Value, "header", cv.css))
         {
             cv.runHeader = DecodeEntities(HtmlFragment.StripHtmlTags(cv.hMatch.Groups[2].Value)).Trim();
             cv.html = cv.html.Remove(cv.hMatch.Index, cv.hMatch.Length);
         }
-        cv.fMatch = Regex.Match(cv.html, @"<footer([^>]*)>(.*?)</footer>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        cv.fMatch = SafeRegex.Match(cv.html, @"<footer([^>]*)>(.*?)</footer>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (cv.fMatch.Success && IsFixedRegion(cv.fMatch.Groups[1].Value, "footer", cv.css))
         {
             cv.runFooter = DecodeEntities(HtmlFragment.StripHtmlTags(cv.fMatch.Groups[2].Value)).Trim();
@@ -595,17 +611,17 @@ internal static partial class HtmlToPdfConverter
         cv.page1FooterImgSrc = null;
         cv.page1FooterImgW = 0;
         cv.page1FooterImgH = 0;
-        cv.dfMatch = Regex.Match(cv.html, @"<div[^>]*\bid\s*=\s*[""']footer[""'][^>]*>(.*?)</div>",
+        cv.dfMatch = SafeRegex.Match(cv.html, @"<div[^>]*\bid\s*=\s*[""']footer[""'][^>]*>(.*?)</div>",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (cv.dfMatch.Success)
         {
             var footerInner = cv.dfMatch.Groups[1].Value;
-            var footImg = Regex.Match(footerInner, @"<img\b[^>]*>", RegexOptions.IgnoreCase);
+            var footImg = SafeRegex.Match(footerInner, @"<img\b[^>]*>", RegexOptions.IgnoreCase);
             var footerText = DecodeEntities(HtmlFragment.StripHtmlTags(footerInner)).Trim();
             if (footImg.Success && footerText.Length == 0)
             {
                 var tag = footImg.Value;
-                var srcM = Regex.Match(tag, @"\bsrc\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase);
+                var srcM = SafeRegex.Match(tag, @"\bsrc\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase);
                 if (srcM.Success)
                 {
                     cv.page1FooterImgSrc = srcM.Groups[1].Value;
@@ -618,10 +634,10 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>Explicit margins outside the metric flow take the stylesheet's body margins.</summary>
-    private static void ApplyMetricFlowMargins(ConvertState cv, HtmlLoadOptions? options)
+    private static void ApplyMetricFlowMargins(ConvertState cv)
     {
         if (!cv.profile.metricFlow && cv.marginsExplicit && !cv.css.ContainsKey("body")
-            && Regex.IsMatch(cv.html, @"<tr[^>]*style\s*=\s*[""'][^""']*font-size\s*:",
+            && SafeRegex.IsMatch(cv.html, @"<tr[^>]*style\s*=\s*[""'][^""']*font-size\s*:",
                 RegexOptions.IgnoreCase))
         {
             string? letterFam = null;
@@ -633,8 +649,9 @@ internal static partial class HtmlToPdfConverter
                 }
             if (letterFam is not null)
             {
-                var letterFace = WinMetricsFor(letterFam) is not null ? letterFam
-                    : WinMetricsFor("SimSun") is not null ? "SimSun" : null;
+                string? letterFace = null;
+                if (WinMetricsFor(letterFam) is not null) letterFace = letterFam;
+                else if (WinMetricsFor("SimSun") is not null) letterFace = "SimSun";
                 if (letterFace is not null)
                 {
                     cv.profile.metricFlow = true;
@@ -649,7 +666,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>The UA flow and standard-serif flags, the bare-document and HTML5 UA cases, and the UA flow's body width, face and margins.</summary>
-    private static void ResolveUaFlowAndBodyWidth(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResolveUaFlowAndBodyWidth(ConvertState cv)
     {
         cv.uaFlow = cv.uaMshtml || cv.uaNoFontDoc;
         // The full-document path draws Standard-14 serif (no embedding); MSHTML keeps its
@@ -657,30 +674,30 @@ internal static partial class HtmlToPdfConverter
         cv.profile.uaStdSerif = cv.uaNoFontDoc && !cv.uaMshtml;
         // The UA serif flow frames a legend-bearing fieldset at the content width.
         cv.profile.uaFieldsetContent = cv.uaFieldsetBoxes = cv.profile.uaStdSerif
-            && Regex.IsMatch(cv.html, @"<fieldset", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"<legend", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(cv.html, @"<fieldset", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"<legend", RegexOptions.IgnoreCase);
         // A BARE full UA document: a real <html> document with no stylesheet
         // markup at all. Only this shape carries the probed serif-floor and
         // break-paragraph laws - styled or fragment documents keep their
         // calibrated flows (a UTF-16 <body> fragment charges NOTHING for a
         // bare <br> between tables where the full document charges a line box).
         cv.profile.uaBareDoc = cv.profile.uaStdSerif && !cv.profile.deadExternalCss
-            && !Regex.IsMatch(cv.html, @"<(style|link)\b", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"<html\b", RegexOptions.IgnoreCase);
+            && !SafeRegex.IsMatch(cv.html, @"<(style|link)\b", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"<html\b", RegexOptions.IgnoreCase);
         // (a styled UA document whose cell rule forbids wrapping grows its sheet to the nowrap
         // grid's serif floors, as a bare document does - probed on the state analysis: 96 + the
         // 20-column nowrap grid + 90 = 740.29)
         cv.profile.uaNoWrapCellRule = cv.profile.uaStdSerif && !cv.profile.deadExternalCss
             && ElementRule(cv.css, "td") is { } tdNwRule && tdNwRule.TryGetValue("white-space", out var tdNwWs)
-            && Regex.IsMatch(tdNwWs, @"^\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase);
-        cv.html5Doctype = Regex.IsMatch(cv.html, @"<!DOCTYPE\s+html\s*>", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(tdNwWs, @"^\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase);
+        cv.html5Doctype = SafeRegex.IsMatch(cv.html, @"<!DOCTYPE\s+html\s*>", RegexOptions.IgnoreCase);
         _quirksRowStrut = ReadsInQuirksMode(cv.html);
         _limitedQuirks = ReadsInLimitedQuirks(cv.html);
         _remoteBaseHost = RemoteBaseHost(cv.html);
         _fieldListDoc = cv.profile.fieldListDoc;
         cv.profile.bodyOwnFontPt = cv.uaBodyFaceFromAttr ? cv.uaBodyFontPt : 0;
         _uaStdSerifFlow = cv.profile.uaStdSerif;
-        cv.html5BareUa = (cv.profile.uaBareDoc || (cv.profile.uaStdSerif && cv.css.Count == 0 && Regex.IsMatch(cv.html, @"<html\b", RegexOptions.IgnoreCase))) && Regex.IsMatch(cv.html, @"<!DOCTYPE\s+html\s*>", RegexOptions.IgnoreCase);
+        cv.html5BareUa = (cv.profile.uaBareDoc || (cv.profile.uaStdSerif && cv.css.Count == 0 && SafeRegex.IsMatch(cv.html, @"<html\b", RegexOptions.IgnoreCase))) && SafeRegex.IsMatch(cv.html, @"<!DOCTYPE\s+html\s*>", RegexOptions.IgnoreCase);
         // A body styled width:100% — the sheet widens by the UA body inset and
         // its tables sit the measured gap below body text (both measured).
         cv.profile.bodyWidthFullDoc = false;
@@ -700,8 +717,8 @@ internal static partial class HtmlToPdfConverter
                 cv.pageWidth = 90.0 + cv.profile.bodyPinnedW + 90.0;
                 cv.marginLeft = 90.0;
                 cv.marginRight = 90.0;
-                // The authored zero-margin body starts at the plain page margin;
-                // every offset below it is a REAL margin the flow spends
+                // The authored zero-margin body starts at the plain page margin; every
+                // offset below it is a REAL margin the flow spends
                 // (measured: content top = 72 + the first table's own margin).
                 cv.marginTop = 72.0;
             }

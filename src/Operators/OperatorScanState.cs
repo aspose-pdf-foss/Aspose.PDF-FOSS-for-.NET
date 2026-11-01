@@ -12,13 +12,17 @@ internal static partial class ContentStreamOperatorParser
 {
 /// <summary>Per-call working state of the enclosing method. One instance per
 /// invocation; never shared.</summary>
-private sealed class OperatorScanState
+internal sealed class OperatorScanState
 {
-    public List<string> result = null!;
+    // The lines, one per operator - or, scanning for a sink, the sink and no lines.
+    public List<string>? result;
+    public Action<ScannedOperator>? sink;
     public string text = null!;
     public int pos;
     public int len;
-    public List<string> operands = null!;
+    // The operands since the last operator, as ranges of the text; one line per operator is built in `line`.
+    public List<(int start, int end)> operands = null!;
+    public StringBuilder line = null!;
     public byte[] data = default!;
 }
 }

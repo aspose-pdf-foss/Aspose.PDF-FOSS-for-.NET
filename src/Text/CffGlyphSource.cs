@@ -122,7 +122,7 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
     /// on-curve start, its two control points as off-curve points, and an on-curve end.</summary>
     public GlyphOutline? GetCurveOutline(int glyphId) => ReadOutline(glyphId, keepCurves: true);
 
-    private GlyphOutline? ReadOutline(int glyphId, bool keepCurves)
+    private GlyphOutline? ReadOutline(int glyphId, bool keepCurves, bool composing = false)
     {
         if (glyphId < 0 || glyphId >= _charStrings.count) return null;
         var csData = CffParser.ReadIndexEntry(_data, _charStrings, glyphId);
@@ -133,6 +133,13 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
         try
         {
             var outline = interp.Run(csData);
+            // An accented character composed by its endchar draws nothing of its own: it is
+            // its base glyph with the accent glyph placed beside it (an accented capital in a
+            // subset of a condensed face drew as a gap). A composed part composes no further.
+            if (interp.Seac is { } seac && !composing)
+                outline = ComposeAccented(seac, keepCurves);
+            if (fd.Shape is { } shape && outline is not null && !composing)
+                outline = Reshape(outline, shape);
             // A Unicode TTF can only be built over a font addressed by character —
             // CID-keyed programs stay unconverted (the converter leaves them
             // alone: CID-font renders are identical with the flag on).
@@ -141,6 +148,96 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
                 : outline;
         }
         catch { return null; }
+    }
+
+    /// <summary>The outline of an accented character: the StandardEncoding base glyph at the
+    /// origin and the accent glyph moved by the placement the endchar gave, or null when the
+    /// base glyph is not in the font.</summary>
+    private GlyphOutline? ComposeAccented((double Adx, double Ady, int BaseCode, int AccentCode) seac, bool keepCurves)
+    {
+        var baseName = Type1StandardEncoding.GetName(seac.BaseCode);
+        var accentName = Type1StandardEncoding.GetName(seac.AccentCode);
+        var baseOutline = baseName is null ? null : ReadOutline(GidForName(baseName), keepCurves, composing: true);
+        if (baseOutline is null) return null;
+        var accent = accentName is null ? null : ReadOutline(GidForName(accentName), keepCurves, composing: true);
+        if (accent is null) return baseOutline;
+        var contours = new ContourPoint[baseOutline.Contours.Length + accent.Contours.Length][];
+        baseOutline.Contours.CopyTo(contours, 0);
+        for (var i = 0; i < accent.Contours.Length; i++)
+        {
+            var moved = new ContourPoint[accent.Contours[i].Length];
+            for (var j = 0; j < moved.Length; j++)
+            {
+                var p = accent.Contours[i][j];
+                moved[j] = new ContourPoint(p.X + seac.Adx, p.Y + seac.Ady, p.OnCurve);
+            }
+            contours[baseOutline.Contours.Length + i] = moved;
+        }
+        return new GlyphOutline(contours,
+            Math.Min(baseOutline.XMin, accent.XMin + seac.Adx), Math.Min(baseOutline.YMin, accent.YMin + seac.Ady),
+            Math.Max(baseOutline.XMax, accent.XMax + seac.Adx), Math.Max(baseOutline.YMax, accent.YMax + seac.Ady));
+    }
+
+    /// <summary>The outline with every point taken through the font matrix's shape (see
+    /// <see cref="ShapeOf"/>): x' = a·x + c·y, y' = b·x + d·y.</summary>
+    internal static GlyphOutline Reshape(GlyphOutline outline, (double A, double B, double C, double D) shape)
+    {
+        var contours = new ContourPoint[outline.Contours.Length][];
+        double xMin = double.MaxValue, yMin = double.MaxValue, xMax = double.MinValue, yMax = double.MinValue;
+        for (var i = 0; i < contours.Length; i++)
+        {
+            var source = outline.Contours[i];
+            var moved = new ContourPoint[source.Length];
+            for (var j = 0; j < moved.Length; j++)
+            {
+                var p = source[j];
+                var x = shape.A * p.X + shape.C * p.Y;
+                var y = shape.B * p.X + shape.D * p.Y;
+                moved[j] = new ContourPoint(x, y, p.OnCurve);
+                xMin = Math.Min(xMin, x);
+                yMin = Math.Min(yMin, y);
+                xMax = Math.Max(xMax, x);
+                yMax = Math.Max(yMax, y);
+            }
+            contours[i] = moved;
+        }
+        return xMin > xMax ? outline : new GlyphOutline(contours, xMin, yMin, xMax, yMax);
+    }
+
+    private const int FontMatrixOperator = 1200 + 7;
+    private const int FontMatrixLength = 6;
+
+    /// <summary>The largest em an sfnt head table allows; a pair of matrices implying more is not
+    /// read as concatenated (both written as the absolute matrix).</summary>
+    private const double MaxUnitsPerEm = 16384;
+
+    /// <summary>How far a font matrix may sit from a plain scale and still be one.</summary>
+    private const double ShapeTolerance = 1e-6;
+
+    /// <summary>What a font matrix does to an outline beyond scaling it, or null when that is
+    /// nothing (the usual [s 0 0 s 0 0]). A producer writes an oblique face as the upright
+    /// outlines under a sheared matrix ([0.001 0 0.000213 0.001 0 0]) and a narrow one under
+    /// a matrix that scales x alone; read as a plain scale the one drew upright, the other
+    /// small. The matrix is divided by the scale the em is taken from: the horizontal one for
+    /// the top dict (see <see cref="UnitsPerEm"/>), the vertical one for a font dict of a
+    /// CID-keyed program, whose em the top dict sets.</summary>
+    private static (double A, double B, double C, double D)? ShapeOf(Dictionary<int, List<double>> dict, bool emIsHorizontal)
+    {
+        if (!dict.TryGetValue(FontMatrixOperator, out var m) || m.Count < FontMatrixLength) return null;
+        return ShapeOfMatrix(m[0], m[1], m[2], m[3], emIsHorizontal);
+    }
+
+    /// <summary>The shape of a font matrix [a b c d ..] (see <see cref="ShapeOf"/>), shared with
+    /// the Type 1 reader.</summary>
+    internal static (double A, double B, double C, double D)? ShapeOfMatrix(double a, double b, double c, double d, bool emIsHorizontal)
+    {
+        var em = emIsHorizontal ? a : d;
+        if (Math.Abs(em) < double.Epsilon) return null;
+        var shape = (A: a / em, B: b / em, C: c / em, D: d / em);
+        return Math.Abs(shape.A - 1) < ShapeTolerance && Math.Abs(shape.B) < ShapeTolerance
+            && Math.Abs(shape.C) < ShapeTolerance && Math.Abs(shape.D - 1) < ShapeTolerance
+            ? null
+            : shape;
     }
 
     /// <summary>Advance width in font units: the charstring's own width operand
@@ -225,6 +322,17 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
             _fdSelect = ParseFdSelect(fdSelectOffset, _charStrings.count);
             _fonts = ParseFdArray(fdArrayOffset);
             if (_fonts.Length == 0 || _fdSelect is null) return false;
+            // A font dict's matrix sets the em too: concatenated with the top dict's when that one
+            // is written, alone when the top dict leaves it out (a subset whose outlines are in
+            // 2816 units under a font dict matrix of 1/2816 drew every glyph almost thrice its size).
+            var fdScale = _fonts.Select(f => f.EmScale).FirstOrDefault(s => s > 0);
+            var topScale = topDict.ContainsKey(FontMatrixOperator) ? 1.0 / UnitsPerEm : 1.0;
+            if (fdScale > 0 && Math.Abs(fdScale * topScale * UnitsPerEm - 1) > ShapeTolerance
+                && Math.Round(1.0 / (fdScale * topScale)) is var em && em is > 0 and <= MaxUnitsPerEm)
+                UnitsPerEm = (int)em;
+            // A shape the top dict's matrix carries holds for every font dict without its own.
+            if (ShapeOf(topDict, emIsHorizontal: true) is { } topShape)
+                foreach (var font in _fonts) font.Shape ??= topShape;
 
             // CID-keyed subsets need the Charset to map PDF CIDs → CFF GIDs.
             // GID 0 is always .notdef; GID 1..N-1 map to the CIDs stored in the
@@ -235,7 +343,7 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
         else
         {
             // Single Font DICT — Top DICT doubles as the FD.
-            _fonts = new[] { BuildFontDict(topDict) };
+            _fonts = new[] { BuildFontDict(topDict, ofCidKeyedProgram: false) };
 
             // Type 1C subset fonts encode used glyphs via Charset → SID →
             // glyph name. /Differences in the PDF font dict references those
@@ -324,8 +432,8 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
             if (sid <= 0) continue;
             var name = ResolveSidName(sid);
             if (string.IsNullOrEmpty(name)) continue;
-            NameToGid[name!] = gid;
-            if (TextAbsorber.GlyphNameToUnicode.TryGetValue(name!, out var u)
+            NameToGid[name] = gid;
+            if (TextAbsorber.GlyphNameToUnicode.TryGetValue(name, out var u)
                 && u.Length > 0)
             {
                 CMap.TryAdd(u[0], gid);
@@ -453,14 +561,16 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
         {
             var dictBytes = CffParser.ReadIndexEntry(_data, idx, i);
             var dict = CffParser.ParseDict(dictBytes);
-            result[i] = BuildFontDict(dict);
+            result[i] = BuildFontDict(dict, ofCidKeyedProgram: true);
         }
         return result;
     }
 
-    private FontDict BuildFontDict(Dictionary<int, List<double>> dict)
+    private FontDict BuildFontDict(Dictionary<int, List<double>> dict, bool ofCidKeyedProgram)
     {
-        var fd = new FontDict();
+        var fd = new FontDict { Shape = ShapeOf(dict, emIsHorizontal: !ofCidKeyedProgram) };
+        if (ofCidKeyedProgram && dict.TryGetValue(FontMatrixOperator, out var matrix) && matrix.Count >= FontMatrixLength)
+            fd.EmScale = Math.Abs(matrix[3]);
         if (dict.TryGetValue(18, out var priv) && priv.Count >= 2)
         {
             var privSize = (int)priv[0];
@@ -545,5 +655,8 @@ internal sealed class CffGlyphSource : IGlyphOutlineSource
         public int DefaultWidthX;
         public int NominalWidthX;
         public CffParser.IndexInfo LocalSubrs;
+        public (double A, double B, double C, double D)? Shape;
+        // The vertical scale of a CID-keyed program's font dict matrix (0: it has none).
+        public double EmScale;
     }
 }

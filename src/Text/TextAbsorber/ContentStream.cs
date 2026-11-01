@@ -7,17 +7,16 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextAbsorber
 {
     /// <summary>
-    /// Processes one content stream, appending extracted text. Returns whether a font is
-    /// set in the graphics state at the end of the stream, so a page's multiple content
-    /// streams (which share one graphics state) can thread the "font set" flag between them.
+    /// Processes one content stream, appending extracted text. A form XObject's stream is
+    /// entered with the caller's "font set" flag; what it sets stays inside the form.
     /// </summary>
-    private bool ExtractTextFromContentStream(byte[] streamBytes, PdfDictionary pageDict, PdfReader reader,
+    private void ExtractTextFromContentStream(byte[] streamBytes, PdfDictionary pageDict, PdfReader reader,
         int depth = 0, double[]? inheritedBounds = null, double cmTx = 0, double cmTy = 0,
         bool fontSetOnEntry = false, double cmD = 1,
         double cmLinA = 1, double cmLinB = 0, double cmLinC = 0, double cmLinD = 1,
         double cmLinE = 0, double cmLinF = 0)
     {
-        if (depth > 10) return fontSetOnEntry; // prevent infinite recursion
+        if (depth > 10) return; // prevent infinite recursion
         var xs = new ExtractState();
         CaptureExtractInputs(xs, streamBytes, pageDict, reader, depth, inheritedBounds, cmTx, cmTy, fontSetOnEntry, cmD, cmLinA, cmLinB, cmLinC, cmLinD, cmLinE, cmLinF);
         OpenExtractState(xs);
@@ -84,8 +83,8 @@ public sealed partial class TextAbsorber
                             ExtractTextShowOperator(xs, op);
                             break;
                         default:
-                            ProcessOperator(xs, op, xs.operands, xs.fonts, xs.reader, xs.pageDict,
-                                xs.actualText, xs.fontSize, xs.depth, xs.actualTextSingleChar);
+                            ProcessOperator(xs, op, xs.operands, xs.fonts, xs.reader,
+                                xs.actualText, xs.actualTextSingleChar);
                             break;
                     }
                     xs.operands.Clear();
@@ -96,7 +95,6 @@ public sealed partial class TextAbsorber
                     break;
             }
         }
-        return xs.fontSet;
     }
 
     /// <summary>
@@ -108,8 +106,8 @@ public sealed partial class TextAbsorber
     private int _currentPageNumber;
 
     private void ProcessOperator(ExtractState xs, string op, List<PdfObject> operands,
-        Dictionary<string, PdfDictionary> fonts, PdfReader reader, PdfDictionary pageDict,
-        string? actualText, double fontSize, int depth,
+        Dictionary<string, PdfDictionary> fonts, PdfReader reader,
+        string? actualText,
         bool actualTextSingleChar = false)
     {
         // UseFontEngineEncoding: decode via the font program's encoding/cmap instead of
@@ -123,14 +121,18 @@ public sealed partial class TextAbsorber
         {
             var d = string.Empty;
             if (operands[0] is PdfString sp)
-                d = NormalizeDecoded(DecodeString(sp.Value, xs.currentToUnicode, xs.currentFontDict, reader, useFontEngine));
+                d = NormalizeDecoded(DecodeString(sp.Value, xs.currentToUnicode, xs.currentFontDict, reader));
             else if (operands[0] is PdfArray ap)
+            {
+                var shown = new StringBuilder();
                 foreach (var it in ap)
                 {
                     if (it is not PdfString s2) continue;
-                    d += NormalizeDecoded(DecodeString(s2.Value, xs.currentToUnicode, xs.currentFontDict, reader, useFontEngine));
-                    if (d.Length > 1) break;
+                    shown.Append(NormalizeDecoded(DecodeString(s2.Value, xs.currentToUnicode, xs.currentFontDict, reader)));
+                    if (shown.Length > 1) break;
                 }
+                d = shown.ToString();
+            }
             if (d.Length == 1 && d[0] != actualText[0]
                 && char.ToUpperInvariant(d[0]) == char.ToUpperInvariant(actualText[0]))
                 actualText = null;
@@ -138,7 +140,7 @@ public sealed partial class TextAbsorber
         switch (op)
         {
             case "Tf": case "Tj": case "TJ": case "'":
-                ProcessFontAndShowOperator(xs, useFontEngine, operands, fonts, reader, actualText, fontSize, op);
+                ProcessFontAndShowOperator(xs, useFontEngine, operands, fonts, reader, actualText, op);
                 break;
             case "\"": // Set spacing, move to next line, show string
                 RecordLineY(); // see the ' note — keep the line↔Y pairing aligned
@@ -152,25 +154,25 @@ public sealed partial class TextAbsorber
                     }
                     else if (actualText is null)
                     {
-                        AppendShowText(NormalizeDecoded(DecodeString(str3.Value, xs.currentToUnicode, xs.currentFontDict, reader, useFontEngine)));
+                        AppendShowText(NormalizeDecoded(DecodeString(str3.Value, xs.currentToUnicode, xs.currentFontDict, reader)));
                     }
                 }
                 break;
 
-            // Td, TD, Tm, T* are handled before ProcessOperator in the caller switch;
+            // Td, TD, Tm, T* are handled before ProcessOperator in the caller switch, so
             // they should not reach here. Fall through without action if they do.
             case "Td" or "TD":
             case "Tm":
             case "T*":
                 break;
 
-            // cm, q, Q, Do are handled in the outer keyword switch (with CTM context)
+            // The outer keyword switch handles the cm, q, Q and Do operators (with CTM context)
             case "cm":
             case "q":
             case "Q":
                 break;
 
-            // Do is handled in the outer keyword switch (with CTM context)
+            // The outer keyword switch handles the Do operator (with CTM context)
             case "Do":
                 break;
         }
@@ -178,7 +180,7 @@ public sealed partial class TextAbsorber
 
     // Cache of glyph-id → Unicode maps built per Type0 font dictionary so a page's
     // repeated decode calls parse the font program once.
-    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, GidToUnicodeEntry> _gidToUnicodeCache = new();
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, Dictionary<int, int>> _gidToUnicodeCache = new();
 
     // Per-font-dict cache of CidFontInfo for the legacy-CMap decode branch (an entry with
     // LegacyCodepage == 0 means "not a legacy national CMap" and is cached as null).

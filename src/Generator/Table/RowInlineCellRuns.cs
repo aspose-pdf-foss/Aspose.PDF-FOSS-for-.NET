@@ -27,10 +27,11 @@ public partial class Table
     private bool LayoutFragmentSegment(InlineCellLayoutState il, Aspose.Pdf.Text.TextFragment tf, Aspose.Pdf.Text.TextSegment seg, double defaultFontSize, Aspose.Pdf.Text.TextState? cellTextState, HorizontalAlignment cellAlign)
     {
         il.ss = seg.TextState;
-        il.baseFs = il.ss.FontSizeTouched ? il.ss.FontSize
-            : (tf.TextState.FontSizeTouched ? tf.TextState.FontSize : defaultFontSize);
-        il.lineFs = tf.TextState.FontSizeTouched ? tf.TextState.FontSize
-            : il.generatorPitch ? il.baseFs : defaultFontSize;
+        if (il.ss.FontSizeTouched) il.baseFs = il.ss.FontSize;
+        else il.baseFs = tf.TextState.FontSizeTouched ? tf.TextState.FontSize : defaultFontSize;
+        if (tf.TextState.FontSizeTouched) il.lineFs = tf.TextState.FontSize;
+        else if (il.generatorPitch) il.lineFs = il.baseFs;
+        else il.lineFs = defaultFontSize;
         il.segColor = il.ss.ForegroundColor ?? tf.TextState.ForegroundColor ?? cellTextState?.ForegroundColor;
         il.segBold = il.ss.IsBold || tf.TextState.IsBold || (cellTextState?.IsBold ?? false);
         il.segItalic = il.ss.IsItalic || tf.TextState.IsItalic;
@@ -42,7 +43,7 @@ public partial class Table
             return true;
         }
 
-        il.segPieces = seg.Text!.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        il.segPieces = seg.Text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
         for (var spi = 0; spi < il.segPieces.Length; spi++)
         {
             if (!LayoutSegmentPiece(il, spi, cellAlign)) break;
@@ -64,8 +65,12 @@ public partial class Table
                 ? Aspose.Pdf.Text.ArabicTextShaper.Shape(piece) : piece;
             runs.Add((pText, pTtf, pName));
         }
-        double W(string s, byte[]? ttf) => s.Length == 0 ? 0 : ttf is not null
-            ? MeasureWidthWithFont(s, il.baseFs, ttf) : MeasureWidthExact(s, il.baseFs);
+        double W(string s, byte[]? ttf)
+        {
+            if (s.Length == 0) return 0;
+            if (ttf is not null) return MeasureWidthWithFont(s, il.baseFs, ttf);
+            return MeasureWidthExact(s, il.baseFs);
+        }
         double tw = 0;
         foreach (var rn in runs) tw += W(rn.text, rn.ttf);
         // The fit test ignores the token's trailing space: a word that

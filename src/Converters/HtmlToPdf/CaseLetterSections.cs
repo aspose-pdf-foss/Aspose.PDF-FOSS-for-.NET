@@ -33,7 +33,7 @@ internal static partial class HtmlToPdfConverter
                     {
                         if (run.Text.Length > 0)
                             T(ce, 9, lx, y0 + li * ClLine9Pt, run.Text, run.Bold);
-                        lx += W(ce, run.Text, 9, run.Bold) + (run.Bold ? W(ce, "  ", 9, true) : 0);
+                        lx += W(run.Text, 9, run.Bold) + (run.Bold ? W("  ", 9, true) : 0);
                     }
                 }
                 x += boxW;
@@ -59,27 +59,25 @@ internal static partial class HtmlToPdfConverter
         ce.page.AddContentStream(Encoding.ASCII.GetBytes("q 0.663 0.663 0.663 rg\n"));
         T(ce, 20, ClHeadingXPt, ClHeadingBaselinePt, ce.headBold, bold: true);
         if (ce.headRest.Length > 0)
-            T(ce, 20, ClHeadingXPt + W(ce, ce.headBold, 20, bold: true), ClHeadingBaselinePt, " " + ce.headRest);
+            T(ce, 20, ClHeadingXPt + W(ce.headBold, 20, bold: true), ClHeadingBaselinePt, " " + ce.headRest);
         ce.page.AddContentStream(Encoding.ASCII.GetBytes("Q\n"));
 
         for (var i = 0; i < ce.addrLines.Count; i++)
             T(ce, 11, ClAddrXPt, ClAddrBaselinePt + i * ClLine11Pt, ce.addrLines[i]);
         if (ce.dateText.Length > 0)
-            T(ce, 9, ClLeftPt + 472.5 - ClCellChromePt - W(ce, ce.dateText, 9), ClDateBaselinePt, ce.dateText);
+            T(ce, 9, ClLeftPt + 472.5 - ClCellChromePt - W(ce.dateText, 9), ClDateBaselinePt, ce.dateText);
 
         ce.contentX = ClLeftPt + ClCellChromePt;
         ce.proseBox = 472.5 - 2 * ClCellChromePt;
         T(ce, 9, ce.contentX, ClRequestBaselinePt, ce.requestText, bold: true);
-        {
-            var pl = Wrap(ce, ce.paraText, ce.proseBox, 9);
-            for (var i = 0; i < pl.Count; i++)
-                T(ce, 9, ce.contentX, ClParaBaselinePt + i * ClLine9Pt, pl[i]);
-        }
+        var pl = CaseLetterWrap(ce.paraText, ce.proseBox, 9);
+        for (var i = 0; i < pl.Count; i++)
+            T(ce, 9, ce.contentX, ClParaBaselinePt + i * ClLine9Pt, pl[i]);
         T(ce, 9, ce.contentX, ClPleaseBaselinePt, ce.pleaseText, bold: true);
         ce.y = ClBulletBaselinePt;
         foreach (var (text, nested) in ce.bullets)
         {
-            var wl = Wrap(ce, text, ClLeftPt + 472.5 - ClCellChromePt - ClBulletTextXPt, 9);
+            var wl = CaseLetterWrap(text, ClLeftPt + 472.5 - ClCellChromePt - ClBulletTextXPt, 9);
             T(ce, 9, ClBulletMarkerXPt, ce.y, "•");
             for (var i = 0; i < wl.Count; i++)
             {
@@ -100,9 +98,9 @@ internal static partial class HtmlToPdfConverter
     {
         ce.caseTables = new List<ClCaseTable>();
         ce.breakPositions = new List<int>();
-        foreach (Match bm in Regex.Matches(html, @"<div\s+class=""break""", RegexOptions.IgnoreCase))
+        foreach (Match bm in SafeRegex.Matches(html, @"<div\s+class=""break""", RegexOptions.IgnoreCase))
             ce.breakPositions.Add(bm.Index);
-        foreach (Match om in Regex.Matches(html,
+        foreach (Match om in SafeRegex.Matches(html,
             @"<table[^>]*width:630px[^>]*>\s*<tr>\s*<td[^>]*>\s*(?<mk>\d+\.)\s*</td>\s*<td[^>]*>\s*(?<tb><table[^>]*blackBorder[\s\S]*?</table>)\s*</td>",
             RegexOptions.IgnoreCase))
         {
@@ -113,26 +111,26 @@ internal static partial class HtmlToPdfConverter
                 if (bp > prevEnd && bp < om.Index) { ct.BreakBefore = true; break; }
             ct.SourceEnd = om.Index + om.Length;
             var tb = om.Groups["tb"].Value;
-            foreach (Match tr in Regex.Matches(tb, @"<tr>(?<r>[\s\S]*?)</tr>", RegexOptions.IgnoreCase))
+            foreach (Match tr in SafeRegex.Matches(tb, @"<tr>(?<r>[\s\S]*?)</tr>", RegexOptions.IgnoreCase))
             {
                 var row = new List<ClCell>();
-                foreach (Match td in Regex.Matches(tr.Groups["r"].Value,
-                    @"<td(?<a>[^>]*)>(?<c>[\s\S]*?)</td\s*>", RegexOptions.IgnoreCase))
+                foreach (var groups in SafeRegex.Matches(tr.Groups["r"].Value,
+                    @"<td(?<a>[^>]*)>(?<c>[\s\S]*?)</td\s*>", RegexOptions.IgnoreCase).Select(td => td.Groups))
                 {
                     var cell = new ClCell();
-                    var csm = Regex.Match(td.Groups["a"].Value, @"colspan\s*=\s*[""']?(\d+)", RegexOptions.IgnoreCase);
+                    var csm = SafeRegex.Match(groups["a"].Value, @"colspan\s*=\s*[""']?(\d+)", RegexOptions.IgnoreCase);
                     if (csm.Success) cell.ColSpan = int.Parse(csm.Groups[1].Value);
                     // width:NN% on the first row's cells declares the shares.
-                    var wm = Regex.Match(td.Groups["a"].Value, @"width\s*:\s*([\d.]+)\s*%");
+                    var wm = SafeRegex.Match(groups["a"].Value, @"width\s*:\s*([\d.]+)\s*%");
                     if (ct.Rows.Count == 0 && wm.Success)
                         ct.ColPct.Add(double.Parse(wm.Groups[1].Value, ce.inv));
                     // Runs: bold segments stay bold; an uppercase-transform div upper-cases.
-                    var content = td.Groups["c"].Value;
-                    var upper = Regex.IsMatch(content, @"TEXT-TRANSFORM\s*:\s*uppercase", RegexOptions.IgnoreCase);
-                    foreach (Match seg in Regex.Matches(content, @"<b>(?<b>[\s\S]*?)</b>|(?<p>(?:(?!<b>)[\s\S])+?)(?=<b>|$)", RegexOptions.IgnoreCase))
+                    var content = groups["c"].Value;
+                    var upper = SafeRegex.IsMatch(content, @"TEXT-TRANSFORM\s*:\s*uppercase", RegexOptions.IgnoreCase);
+                    foreach (var segGroups in SafeRegex.Matches(content, @"<b>(?<b>[\s\S]*?)</b>|(?<p>(?:(?!<b>)[\s\S])+?)(?=<b>|$)", RegexOptions.IgnoreCase).Select(seg => seg.Groups))
                     {
-                        var bold = seg.Groups["b"].Success;
-                        var text = Clean(ce, bold ? seg.Groups["b"].Value : seg.Groups["p"].Value);
+                        var bold = segGroups["b"].Success;
+                        var text = Clean(bold ? segGroups["b"].Value : segGroups["p"].Value);
                         if (text.Length == 0) continue;
                         if (upper) text = text.ToUpperInvariant();
                         cell.Runs.Add(new ClCellRun { Text = text, Bold = bold });
@@ -145,9 +143,9 @@ internal static partial class HtmlToPdfConverter
         }
         if (ce.caseTables.Count == 0) return false;
 
-        ce.closeM = Regex.Match(html,
+        ce.closeM = SafeRegex.Match(html,
             @"<td[^>]*>\s*(?<t>If you have any questions[\s\S]*?)</td", RegexOptions.IgnoreCase);
-        ce.closeText = ce.closeM.Success ? Clean(ce, ce.closeM.Groups["t"].Value) : "";
+        ce.closeText = ce.closeM.Success ? Clean(ce.closeM.Groups["t"].Value) : "";
         return true;
     }
 
@@ -155,32 +153,32 @@ internal static partial class HtmlToPdfConverter
     private static void ParseCaseBullets(CaseLetterState ce, string html)
     {
         ce.bullets = new List<(string Text, List<string> Nested)>();
-        ce.ulM = Regex.Match(html, @"<ul>(?<b>[\s\S]*?)</ul>\s*</td", RegexOptions.IgnoreCase);
+        ce.ulM = SafeRegex.Match(html, @"<ul>(?<b>[\s\S]*?)</ul>\s*</td", RegexOptions.IgnoreCase);
         if (ce.ulM.Success)
         {
             // Cut the NESTED lists out first (their <li>s would end the outer
             // item's match early), then walk the top-level items.
             var body = ce.ulM.Groups["b"].Value;
             var nestedLists = new List<List<string>>();
-            body = Regex.Replace(body, @"<ul[^>]*>(?<n>[\s\S]*?)</ul>", nm =>
+            body = SafeRegex.Replace(body, @"<ul[^>]*>(?<n>[\s\S]*?)</ul>", nm =>
             {
                 var items = new List<string>();
-                foreach (Match nli in Regex.Matches(nm.Groups["n"].Value, @"<li[^>]*>(?<t>[\s\S]*?)</li>", RegexOptions.IgnoreCase))
-                    items.Add(Clean(ce, nli.Groups["t"].Value));
+                foreach (Match nli in SafeRegex.Matches(nm.Groups["n"].Value, @"<li[^>]*>(?<t>[\s\S]*?)</li>", RegexOptions.IgnoreCase))
+                    items.Add(Clean(nli.Groups["t"].Value));
                 nestedLists.Add(items);
                 return "" + (nestedLists.Count - 1) + "";
             }, RegexOptions.IgnoreCase);
-            foreach (Match li in Regex.Matches(body, @"<li[^>]*>(?<c>[\s\S]*?)</li>", RegexOptions.IgnoreCase))
+            foreach (Match li in SafeRegex.Matches(body, @"<li[^>]*>(?<c>[\s\S]*?)</li>", RegexOptions.IgnoreCase))
             {
                 var c = li.Groups["c"].Value;
                 var nested = new List<string>();
-                var tok = Regex.Match(c, "(" + @"\d+" + ")");
+                var tok = SafeRegex.Match(c, "(" + @"\d+" + ")");
                 if (tok.Success)
                 {
                     nested = nestedLists[int.Parse(tok.Groups[1].Value)];
                     c = c.Remove(tok.Index, tok.Length);
                 }
-                var text = Clean(ce, c);
+                var text = Clean(c);
                 if (text.Length > 0 || nested.Count > 0) ce.bullets.Add((text, nested));
             }
         }
@@ -190,45 +188,45 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Parse the class rule, heading, address, date, request and paragraph texts; a page without the rule is not this dialect.</summary>
     private static bool TryParseCaseHead(CaseLetterState ce, string html)
     {
-        ce.clsRule = Regex.Match(html,
+        ce.clsRule = SafeRegex.Match(html,
             @"\.blackBorder\s*\{[^}]*border-top\s*:[^;}]*;[^}]*border-bottom\s*:[^;}]*;[^}]*border-left\s*:[^;}]*;[^}]*border-right\s*:[^;}]*;",
             RegexOptions.IgnoreCase);
         if (!ce.clsRule.Success) return false;
 
         ce.inv = System.Globalization.CultureInfo.InvariantCulture;
-        ce.headM = Regex.Match(html,
+        ce.headM = SafeRegex.Match(html,
             @"id=""PageHeading""[^>]*>\s*<b>(?<b>[\s\S]*?)</b>(?<r>[\s\S]*?)</td",
             RegexOptions.IgnoreCase);
-        ce.headBold = ce.headM.Success ? Clean(ce, ce.headM.Groups["b"].Value) : "HSBC";
-        ce.headRest = ce.headM.Success ? Clean(ce, ce.headM.Groups["r"].Value) : "";
+        ce.headBold = ce.headM.Success ? Clean(ce.headM.Groups["b"].Value) : "HSBC";
+        ce.headRest = ce.headM.Success ? Clean(ce.headM.Groups["r"].Value) : "";
 
-        ce.addrM = Regex.Match(html,
+        ce.addrM = SafeRegex.Match(html,
             @"<table[^>]*height:120px[^>]*>(?<b>[\s\S]*?)</table\s*>", RegexOptions.IgnoreCase);
         ce.addrLines = new List<string>();
         ce.dateText = "";
         if (ce.addrM.Success)
         {
-            var tds = Regex.Matches(ce.addrM.Groups["b"].Value, @"<td[^>]*>(?<c>[\s\S]*?)</td\s*>", RegexOptions.IgnoreCase);
+            var tds = SafeRegex.Matches(ce.addrM.Groups["b"].Value, @"<td[^>]*>(?<c>[\s\S]*?)</td\s*>", RegexOptions.IgnoreCase);
             if (tds.Count > 0)
-                foreach (var ln in Regex.Split(tds[0].Groups["c"].Value, @"<br\s*/?>", RegexOptions.IgnoreCase))
+                foreach (var ln in SafeRegex.Split(tds[0].Groups["c"].Value, @"<br\s*/?>", RegexOptions.IgnoreCase))
                 {
                     // NBSP survives the whitespace collapse (the "GB   LE1 7BB"
                     // line keeps its gap), then reads back as a plain space.
-                    var t = Regex.Replace(DecodeEntities(Regex.Replace(ln, "<[^>]+>", " ")),
+                    var t = SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(ln, "<[^>]+>", " ")),
                         "[ \t\r\n]+", " ").Trim();
                     t = t.Replace(' ', ' ');
                     if (t.Trim().Length > 0) ce.addrLines.Add(t.Trim().ToUpperInvariant());
                 }
-            if (tds.Count > 1) ce.dateText = Clean(ce, tds[1].Groups["c"].Value).ToUpperInvariant();
+            if (tds.Count > 1) ce.dateText = Clean(tds[1].Groups["c"].Value).ToUpperInvariant();
         }
 
-        ce.reqM = Regex.Match(html, @"<b>\s*(?<t>REQUEST[^<]*)</b>", RegexOptions.IgnoreCase);
-        ce.requestText = ce.reqM.Success ? Clean(ce, ce.reqM.Groups["t"].Value) : "REQUEST FOR INFORMATION";
-        ce.paraM = Regex.Match(html,
+        ce.reqM = SafeRegex.Match(html, @"<b>\s*(?<t>REQUEST[^<]*)</b>", RegexOptions.IgnoreCase);
+        ce.requestText = ce.reqM.Success ? Clean(ce.reqM.Groups["t"].Value) : "REQUEST FOR INFORMATION";
+        ce.paraM = SafeRegex.Match(html,
             @"<td[^>]*>\s*(?<t>This is a request[\s\S]*?)</td", RegexOptions.IgnoreCase);
-        ce.paraText = ce.paraM.Success ? Clean(ce, ce.paraM.Groups["t"].Value) : "";
-        ce.pleaseM = Regex.Match(html, @"<b>\s*(?<t>PLEASE PROVIDE[^<]*)</b>", RegexOptions.IgnoreCase);
-        ce.pleaseText = ce.pleaseM.Success ? Clean(ce, ce.pleaseM.Groups["t"].Value) : "";
+        ce.paraText = ce.paraM.Success ? Clean(ce.paraM.Groups["t"].Value) : "";
+        ce.pleaseM = SafeRegex.Match(html, @"<b>\s*(?<t>PLEASE PROVIDE[^<]*)</b>", RegexOptions.IgnoreCase);
+        ce.pleaseText = ce.pleaseM.Success ? Clean(ce.pleaseM.Groups["t"].Value) : "";
         return true;
     }
 
@@ -245,9 +243,9 @@ internal static partial class HtmlToPdfConverter
                 for (var k = ci; k < System.Math.Min(ci + cl.ColSpan, ce.nCols); k++) boxW += ce.widths[k];
                 boxW -= 2 * ClCellPadXPt;
                 var joined = new StringBuilder();
-                foreach (var run in cl.Runs) { if (joined.Length > 0) joined.Append(' '); joined.Append(run.Text); }
+                foreach (var run in cl.Runs) { if (joined.Length > 0) { joined.Append(' '); } joined.Append(run.Text); }
                 var bold0 = cl.Runs.Count > 0 && cl.Runs[0].Bold;
-                var wl = Wrap(ce, joined.ToString(), System.Math.Max(boxW, 8), 9, bold0);
+                var wl = CaseLetterWrap(joined.ToString(), System.Math.Max(boxW, 8), 9, bold0);
                 cl.Lines = new List<List<ClCellRun>>();
                 foreach (var ln in wl)
                     cl.Lines.Add(new List<ClCellRun> { new() { Text = ln, Bold = bold0 } });
@@ -281,7 +279,8 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Resolve the column count and widths from the declared percentages or the cells' needs; an empty table is skipped.</summary>
     private static bool SizeCaseColumns(CaseLetterState ce, ClCaseTable ct)
     {
-        foreach (var r in ct.Rows) { var c = 0; foreach (var cl in r) c += cl.ColSpan; if (c > ce.nCols) ce.nCols = c; }
+        foreach (var r in ct.Rows) { var c = 0; foreach (var cl in r) c += cl.ColSpan;
+        if (c > ce.nCols) ce.nCols = c; }
         if (ce.nCols == 0) return true;
         ce.shares = new double[ce.nCols];
         if (ct.ColPct.Count == ce.nCols)
@@ -299,7 +298,7 @@ internal static partial class HtmlToPdfConverter
                 if (cl.ColSpan == 1 && ci < ce.nCols)
                     foreach (var run in cl.Runs)
                         foreach (var tok in run.Text.Split(' ', System.StringSplitOptions.RemoveEmptyEntries))
-                            ce.mins[ci] = System.Math.Max(ce.mins[ci], W(ce, tok, 9, run.Bold) + 2 * ClCellPadXPt);
+                            ce.mins[ci] = System.Math.Max(ce.mins[ci], W(tok, 9, run.Bold) + 2 * ClCellPadXPt);
                 ci += cl.ColSpan;
             }
         }

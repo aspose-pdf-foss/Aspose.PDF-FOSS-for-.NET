@@ -65,11 +65,33 @@ public sealed partial class TextAbsorber
     private void TrackRowX(double rowX)
     {
         if (double.IsNaN(rowX)) return;
-        int ls = _text.Length;
-        while (ls > 0 && _text[ls - 1] != '\n') ls--;
+        int ls = CurrentLineStart();
         if (ls != _rowXLineOffset) { _rowXLineOffset = ls; _currentLineRowX = rowX; }
         else if (double.IsNaN(_currentLineRowX) || rowX < _currentLineRowX) _currentLineRowX = rowX;
     }
+
+    // The line start the last walk found, and the text length it was found at.
+    private int _lineScanStart = -1;
+    private int _lineScanLength = -1;
+
+    /// <summary>The offset where the line being built starts: the text after the last newline.
+    /// The walk back resumes from where the last one ended while the text has only grown since
+    /// (every show appends), instead of crossing the whole line again: a sheet set as a grid of
+    /// a million space glyphs made that walk grow with every glyph on the line.</summary>
+    private int CurrentLineStart()
+    {
+        var length = _text.Length;
+        var walked = _lineScanLength >= 0 && _lineScanLength <= length ? _lineScanLength : 0;
+        var ls = length;
+        while (ls > walked && _text[ls - 1] != '\n') ls--;
+        if (ls == walked && walked > 0) ls = _lineScanStart;
+        _lineScanStart = ls;
+        _lineScanLength = length;
+        return ls;
+    }
+
+    /// <summary>Text before the last walk's end was taken off or rewritten: the next walk starts over.</summary>
+    private void ForgetLineStart() => _lineScanLength = -1;
 
     private double _currentLineY = double.NaN;
 
@@ -130,10 +152,6 @@ public sealed partial class TextAbsorber
     private readonly List<(string text, double x, double y, double fs, double width)> _ocrRuns = new();
 
     private bool _collectOcrRuns;
-
-    // Runs collected from Type3 /ActualText spans (Figma exports): the page grid
-    // rebuild also engages when THESE dominate the page's show ops.
-    private int _type3SpanRuns;
 
     // Type3 /Widths cache per font dict: FirstChar + per-code advances scaled by
     // FontMatrix[0] into text space (identity matrix for Figma's fonts, 0.001 for
@@ -257,8 +275,7 @@ public sealed partial class TextAbsorber
 
     private void RestoreEolShowSpaces(int textStart)
     {
-        for (var i = textStart; i < _text.Length; i++)
-            if (_text[i] == EolShowSpaceSentinel) _text[i] = ' ';
+        _text.Replace(EolShowSpaceSentinel, ' ', textStart, _text.Length - textStart);
     }
 
     /// <summary>
@@ -271,16 +288,21 @@ public sealed partial class TextAbsorber
     // Raw mode trims leading whitespace (no empty feeds above
     // a clipped rectangle) but keeps the source stream's own TRAILING space
     // glyphs — a document whose last show is a space extracts with it kept.
-    public string Text => _anyReconstructed
-        ? _text.ToString().TrimEnd('\r', '\n')
-        : ExtractionOptions?.FormattingMode == TextExtractionOptions.TextFormattingMode.Raw
-            ? _text.ToString().TrimStart().TrimEnd('\r', '\n')
+    public string Text
+    {
+        get
+        {
+            if (_anyReconstructed) return _text.ToString().TrimEnd('\r', '\n');
+            if (ExtractionOptions?.FormattingMode == TextExtractionOptions.TextFormattingMode.Raw)
+                return _text.ToString().TrimStart().TrimEnd('\r', '\n');
             // Pure keeps a first line's leading grid pad (a page whose top
             // row starts deep in the grid pads to its column, like every
             // other line) — a rectangle window included, which pads against
             // its own observed minX (an indented header leads its
             // window); only line sentinels trim.
-            : _text.ToString().Trim('\r', '\n');
+            return _text.ToString().Trim('\r', '\n');
+        }
+    }
 
     /// <summary>
     /// The extracted text with only trailing \r\n stripped (preserving trailing
@@ -339,8 +361,9 @@ public sealed partial class TextAbsorber
     public void Visit(Page page)
     {
         var pv = new PageVisitState();
-        pv.page = page;
-        if (pv.page is null) throw new ArgumentNullException("page", "Page can't be null");
+        if (page is null) throw new ArgumentNullException("page", "Page can't be null");
+        // A form a viewer has to build from XFA packets is laid out before its text is read.
+        pv.page = Document.PageToRead(page);
         pv.reader = GetReader(pv.page);
         pv.contentStreams = GetContentStreams(pv.page, pv.reader);
 
@@ -358,8 +381,8 @@ public sealed partial class TextAbsorber
         // is rebuilt on a page-absolute grid instead of the streaming per-word lines.
         if (_collectOcrRuns && RebuildOcrOverlayPage(pv.textStart))
         {
-            // The rebuild replaced the streamed text (with any masked spaces in it);
-            // its grid rows have no trailing textless advances to replay.
+            // The rebuild replaced the streamed text (with any masked spaces in it); its
+            // grid rows have no trailing textless advances to replay.
             TrailingBlankRows = 0;
             return;
         }
@@ -369,6 +392,17 @@ public sealed partial class TextAbsorber
         // reference emits "  Western Cherokee" for the x=42 rows of a window
         // whose leftmost kept line starts at x=36; probed).
         FinishPageVisit(pv);
+        // With SearchInAnnotations the annotations' appearance streams are read after the page's content,
+        // as the fragment absorber reads them.
+        if (TextSearchOptions.SearchInAnnotations) VisitAnnotationAppearances(page);
+    }
+
+    private void VisitAnnotationAppearances(Page page)
+    {
+        foreach (var annotation in page.Annotations)
+        {
+            if (annotation?.NormalAppearance is { } appearance) Visit(appearance);
+        }
     }
 
     // Glue threshold: two words are joined with no space when the gap between the
@@ -454,8 +488,10 @@ public sealed partial class TextAbsorber
                 double fsMin = double.MaxValue;
                 foreach (var w in ws)
                     if (w.fs > 0 && w.fs < fsMin && !IsDashOnly(w.text)) fsMin = w.fs;
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
                 if (fsMin == double.MaxValue)
-                    foreach (var w in ws) if (w.fs > 0 && w.fs < fsMin) fsMin = w.fs;
+#pragma warning restore S1244
+                    foreach (var w in ws.Where(w => w.fs > 0 && w.fs < fsMin)) fsMin = w.fs;
                 int blanks = 0;
                 if (fsMin is > 0 and < double.MaxValue)
                     blanks = Math.Min(2, Math.Max(0, (int)Math.Ceiling(gap / (2.0 * fsMin)) - 1));
@@ -503,10 +539,7 @@ public sealed partial class TextAbsorber
     private static bool IsDashOnly(string s)
     {
         if (s.Length == 0) return false;
-        foreach (var c in s)
-            if (c is not ('-' or '‐' or '‑' or '‒' or '–' or '—'))
-                return false;
-        return true;
+        return !s.Any(c => c is not ('-' or '‐' or '‑' or '‒' or '–' or '—'));
     }
 
     /// <summary>
@@ -519,12 +552,11 @@ public sealed partial class TextAbsorber
         // shift every later line onto its neighbour's Y).
         _lineYPositions.Add(_currentLineIsRotated && !double.IsNaN(_currentLineDevY)
             ? _currentLineDevY
-            : double.IsNaN(_currentLineY) ? double.NaN : _currentLineY + _currentLineCmTy);
+            : _currentLineY + _currentLineCmTy);
         _currentLineDevY = double.NaN;
         // The finished line's start X is only valid when the row tracker actually
         // saw a run on THIS line (offsets match); otherwise it belongs to an older line.
-        int lsRec = _text.Length;
-        while (lsRec > 0 && _text[lsRec - 1] != '\n') lsRec--;
+        int lsRec = CurrentLineStart();
         _lineXPositions.Add(lsRec == _rowXLineOffset ? _currentLineRowX : double.NaN);
         _lineFontSizes.Add(_currentLineEffFs);
         _lineIsRotated.Add(_currentLineIsRotated);
@@ -536,49 +568,51 @@ public sealed partial class TextAbsorber
     /// so removals don't disturb positions still to visit.</summary>
     private void TrimTrailingLineSpaces(int textStart)
     {
-        // RTL lines keep their pad at the LOGICAL END instead: the visual-left
-        // grid pad (leading in LTR emission order) belongs after the last logical
-        // word, so rotate a leading space run to the tail rather than trimming.
-        void HandleLine(int lineStart, int end)
+        // The page's text is read once and written back whole: the buffer's indexer walks its
+        // chunks, and a page of many lines edited in place paid that walk for every character.
+        var page = _text.ToString(textStart, _text.Length - textStart);
+        var trimmed = new StringBuilder(page.Length);
+        var lineStart = 0;
+        while (true)
         {
-            var s = end;
-            while (s > lineStart && _text[s - 1] == ' ') s--;
-            // A line of ONLY spaces is a pad line (placeholder space glyphs
-            // laid out on the grid) — it is kept at full width;
-            // only lines with visible content trim their right edge.
-            if (s == lineStart && end > lineStart) return;
-            int rtl = 0, ltr = 0;
-            for (var k = lineStart; k < s; k++)
-            {
-                var ch = _text[k];
-                if (BidiReorderer.IsRtlChar(ch)) rtl++;
-                else if (char.IsLetter(ch)) ltr++;
-            }
-            if (rtl > ltr && rtl > 0)
-            {
-                var lead = 0;
-                while (lineStart + lead < s && _text[lineStart + lead] == ' ') lead++;
-                if (lead > 0)
-                {
-                    _text.Remove(lineStart, lead);
-                    _text.Insert(end - lead, new string(' ', lead));
-                }
-                return; // keep the (rotated + existing) trailing pad
-            }
-            if (s < end) _text.Remove(s, end - s);
+            var nl = page.IndexOf('\n', lineStart);
+            var end = nl < 0 ? page.Length : nl > lineStart && page[nl - 1] == '\r' ? nl - 1 : nl;
+            AppendTrimmedLine(trimmed, page, lineStart, end);
+            if (nl < 0) break;
+            trimmed.Append(page, end, nl + 1 - end); // the line's terminator
+            lineStart = nl + 1;
         }
+        _text.Length = textStart;
+        _text.Append(trimmed);
+    }
 
-        // Line start offsets, walked backwards so removals keep earlier offsets valid.
-        var end0 = _text.Length;
-        for (var pos = _text.Length - 1; pos >= textStart; pos--)
+    /// <summary>One line of <see cref="TrimTrailingLineSpaces"/>: its trailing spaces dropped. RTL lines
+    /// keep their pad at the LOGICAL END instead: the visual-left grid pad (leading in LTR emission order)
+    /// belongs after the last logical word, so a leading space run rotates to the tail rather than trimming.</summary>
+    private static void AppendTrimmedLine(StringBuilder sb, string page, int lineStart, int end)
+    {
+        var s = end;
+        while (s > lineStart && page[s - 1] == ' ') s--;
+        // A line of ONLY spaces is a pad line (placeholder space glyphs
+        // laid out on the grid) — it is kept at full width; only
+        // lines with visible content trim their right edge.
+        if (s == lineStart && end > lineStart) { sb.Append(page, lineStart, end - lineStart); return; }
+        int rtl = 0, ltr = 0;
+        for (var k = lineStart; k < s; k++)
         {
-            if (_text[pos] != '\n') continue;
-            var lineEnd = end0;
-            HandleLine(pos + 1, lineEnd);
-            end0 = pos > textStart && _text[pos - 1] == '\r' ? pos - 1 : pos;
-            pos = end0; // resume before this line's terminator
+            var ch = page[k];
+            if (BidiReorderer.IsRtlChar(ch)) rtl++;
+            else if (char.IsLetter(ch)) ltr++;
         }
-        HandleLine(textStart, end0);
+        if (rtl > ltr && rtl > 0)
+        {
+            var lead = 0;
+            while (lineStart + lead < s && page[lineStart + lead] == ' ') lead++;
+            // the rotated lead joins the kept trailing pad
+            sb.Append(page, lineStart + lead, end - lineStart - lead).Append(' ', lead);
+            return;
+        }
+        sb.Append(page, lineStart, s - lineStart);
     }
 
     /// <summary>Adjustment added to the raw text-space line Y so that RecordLineY stores a
@@ -638,8 +672,11 @@ public sealed partial class TextAbsorber
     /// coordinates depending on where in the line a run starts. Measured: the expected
     /// row-merge window on a 0.75-degree-skewed sideways page is unchanged wherever along
     /// the reading axis the runs sit, which only the device coordinate reproduces.</remarks>
-    private static double RotatedRowY(double c, double d, double e, double f) =>
-        Math.Abs(c) >= Math.Abs(d) ? (c >= 0 ? e : -e) : (d >= 0 ? f : -f);
+    private static double RotatedRowY(double c, double d, double e, double f)
+    {
+        if (Math.Abs(c) >= Math.Abs(d)) return c >= 0 ? e : -e;
+        return d >= 0 ? f : -f;
+    }
 
     /// <summary>Reading coordinate of a SIDEWAYS baseline origin: its DEVICE position along
     /// the dominant advance axis, signed so the text advances POSITIVELY.</summary>
@@ -649,8 +686,11 @@ public sealed partial class TextAbsorber
     /// columns. Measured on a 0.5-degree-skewed sideways brochure: the device
     /// coordinate reproduces the expected leading-space count on all 29 rows, the
     /// projection is one column short on 24 of them.</remarks>
-    private static double RotatedReadX(double a, double b, double e, double f) =>
-        Math.Abs(a) >= Math.Abs(b) ? (a >= 0 ? e : -e) : (b >= 0 ? f : -f);
+    private static double RotatedReadX(double a, double b, double e, double f)
+    {
+        if (Math.Abs(a) >= Math.Abs(b)) return a >= 0 ? e : -e;
+        return b >= 0 ? f : -f;
+    }
 
     private double _pageHeightForRows;
 

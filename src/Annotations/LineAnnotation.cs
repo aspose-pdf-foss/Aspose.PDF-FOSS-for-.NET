@@ -68,8 +68,15 @@ public partial class LineAnnotation : MarkupAnnotation
                 };
                 if (InternalReader.Resolve(bs.Get("D")) is PdfArray d && d.Count > 0)
                 {
-                    int on = d[0] is PdfInteger di ? (int)di.Value : d[0] is PdfReal dr ? (int)dr.Value : 0;
-                    int off = d.Count > 1 ? (d[1] is PdfInteger oi ? (int)oi.Value : d[1] is PdfReal orr ? (int)orr.Value : on) : on;
+                    int on = d[0] switch { PdfInteger di => (int)di.Value, PdfReal dr => (int)dr.Value, _ => 0 };
+                    int off;
+                    if (d.Count > 1)
+                    {
+                        if (d[1] is PdfInteger oi) off = (int)oi.Value;
+                        else if (d[1] is PdfReal orr) off = (int)orr.Value;
+                        else off = on;
+                    }
+                    else off = on;
                     border.Dash = new Dash(on, off);
                 }
             }
@@ -116,22 +123,30 @@ public partial class LineAnnotation : MarkupAnnotation
         b.SetLineWidth(lw);
         if (dash is not null) b.SetDashPattern(dash);
 
-        // Shaft, pulled back by lw at any arrowed end so it meets the head vertex.
+        // Shaft, pulled back by lw at any arrowed end so it meets the head vertex; an inline
+        // caption sits in a break of the shaft about its midpoint.
+        var caption = ShowCaption && !string.IsNullOrEmpty(Contents) ? Contents : null;
+        var captionWidth = caption is null ? 0 : CaptionWidth(caption);
         var (ax, ay) = MovePointToward(s.X, s.Y, e.X, e.Y, startInset ? lw : 0);
         var (bx, by) = MovePointToward(e.X, e.Y, s.X, s.Y, endInset ? lw : 0);
-        b.MoveTo(ax, ay); b.LineTo(bx, by); b.Stroke();
+        var inlineHalfGap = caption is not null && CaptionPosition == CaptionPosition.Inline
+            ? captionWidth / 2 + CaptionGap : 0;
+        DrawShaft(b, ax, ay, bx, by, inlineHalfGap);
 
         if (endArrow) DrawOpenArrowHead(b, s.X, s.Y, e.X, e.Y, lw);
         if (startArrow) DrawOpenArrowHead(b, e.X, e.Y, s.X, s.Y, lw);
+        if (caption is not null) DrawCaption(b, s, e, lw, caption, captionWidth);
 
         b.RestoreState();
 
         // Grow the annotation rectangle (and the appearance BBox, which maps 1:1 to
         // it) 10·w around the segment so the arrow head and a thick stroke are never
-        // cropped when the appearance is placed — matching the expected /Rect.
+        // cropped when the appearance is placed — matching the expected /Rect. A
+        // caption above the line needs room for its height as well.
         double minX = System.Math.Min(s.X, e.X), maxX = System.Math.Max(s.X, e.X);
         double minY = System.Math.Min(s.Y, e.Y), maxY = System.Math.Max(s.Y, e.Y);
         double m = 10 * lw;
+        if (caption is not null) m = System.Math.Max(m, 2 * CaptionFontSize);
         var bbox = new Rectangle(minX - m, minY - m, maxX + m, maxY + m);
 
         var rArr = new PdfArray();
@@ -139,15 +154,80 @@ public partial class LineAnnotation : MarkupAnnotation
         rArr.Add(new PdfReal(bbox.URX)); rArr.Add(new PdfReal(bbox.URY));
         Dict.Set("Rect", rArr);
 
-        SetNormalAppearance(b.Build(), bbox);
+        if (caption is not null) SetNormalAppearanceWithHelvetica(b.Build(), bbox);
+        else SetNormalAppearance(b.Build(), bbox);
     }
 
-    private static bool IsArrowEnding(LineEnding le) =>
+    // The caption of a line: its /Contents in Helvetica at a fixed size, centred on the line's
+    // midpoint and running along the line - above it (CaptionPosition.Top, a gap clear of the
+    // stroke) or in a break of the shaft (Inline, centred on the line by its cap height) - moved
+    // by the caption offset /CO.
+    private const double CaptionFontSize = 10;
+    private const string CaptionResource = "Helv";
+    private const string CaptionFace = "Helvetica";
+    private const double CaptionGap = 2;
+    private const double CaptionCapHeightEm = 0.718;
+
+    private static double CaptionWidth(string caption)
+    {
+        double units = 0;
+        foreach (var c in caption) units += Text.Standard14Fonts.GetWidth(CaptionFace, c);
+        return units * CaptionFontSize / 1000.0;
+    }
+
+    /// <summary>Stroke the shaft from a to b, leaving a break of twice <paramref name="halfGap"/>
+    /// about its midpoint when the shaft is long enough to hold one.</summary>
+    private static void DrawShaft(Content.ContentStreamBuilder b, double ax, double ay, double bx, double by, double halfGap)
+    {
+        double len = System.Math.Sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
+        if (halfGap > 0 && 2 * halfGap < len)
+        {
+            double mx = (ax + bx) / 2, my = (ay + by) / 2;
+            var (gx, gy) = MovePointToward(mx, my, ax, ay, halfGap);
+            var (hx, hy) = MovePointToward(mx, my, bx, by, halfGap);
+            b.MoveTo(ax, ay); b.LineTo(gx, gy); b.Stroke();
+            b.MoveTo(hx, hy); b.LineTo(bx, by); b.Stroke();
+            return;
+        }
+        b.MoveTo(ax, ay); b.LineTo(bx, by); b.Stroke();
+    }
+
+    private void DrawCaption(Content.ContentStreamBuilder b, Point s, Point e, double lw, string caption, double width)
+    {
+        double dx = e.X - s.X, dy = e.Y - s.Y;
+        double len = System.Math.Sqrt(dx * dx + dy * dy);
+        if (len < 1e-9) return;
+        double ux = dx / len, uy = dy / len;
+        // The caption reads left to right whichever way the line was drawn.
+        if (ux < 0 || (System.Math.Abs(ux) < 1e-9 && uy < 0)) { ux = -ux; uy = -uy; }
+        var offset = CaptionPosition == CaptionPosition.Top
+            ? lw / 2 + CaptionGap
+            : -CaptionFontSize * CaptionCapHeightEm / 2;
+        var co = CaptionOffset;
+        double ox = (s.X + e.X) / 2 - ux * width / 2 - uy * offset + ux * co.X - uy * co.Y;
+        double oy = (s.Y + e.Y) / 2 - uy * width / 2 + ux * offset + uy * co.X + ux * co.Y;
+        b.SetFillColor(Color);
+        b.BeginText();
+        b.SetFont(CaptionResource, CaptionFontSize);
+        b.SetTextMatrix(ux, uy, -uy, ux, ox, oy);
+        b.ShowText(caption);
+        b.EndText();
+    }
+
+    /// <summary>A colour set on a line that already has an appearance is drawn: the appearance is
+    /// painted again with it. A line painted for the first time at the save takes every property
+    /// set by then.</summary>
+    private protected override void OnColorChanged()
+    {
+        if (NormalAppearance is not null) UpdateAppearances();
+    }
+
+    internal static bool IsArrowEnding(LineEnding le) =>
         le is LineEnding.OpenArrow or LineEnding.ClosedArrow
            or LineEnding.ROpenArrow or LineEnding.RClosedArrow;
 
     // Move (px,py) toward (qx,qy) by dist points (no-op for dist ≤ 0 or coincident points).
-    private static (double, double) MovePointToward(double px, double py, double qx, double qy, double dist)
+    internal static (double, double) MovePointToward(double px, double py, double qx, double qy, double dist)
     {
         if (dist <= 0) return (px, py);
         double dx = qx - px, dy = qy - py;
@@ -157,7 +237,7 @@ public partial class LineAnnotation : MarkupAnnotation
     }
 
     // Stroke an open-V arrow head at (tipX,tipY) pointing away from (fromX,fromY).
-    private static void DrawOpenArrowHead(Content.ContentStreamBuilder b,
+    internal static void DrawOpenArrowHead(Content.ContentStreamBuilder b,
         double fromX, double fromY, double tipX, double tipY, double w)
     {
         double dx = tipX - fromX, dy = tipY - fromY;
@@ -175,8 +255,10 @@ public partial class LineAnnotation : MarkupAnnotation
         b.MoveTo(w1x, w1y); b.LineTo(apexX, apexY); b.LineTo(w2x, w2y); b.Stroke();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Regenerate the appearance of <paramref name="annotation"/>.</summary>
     public void UpdateAppearance(LineAnnotation annotation) => annotation?.UpdateAppearances();
+#pragma warning restore S2325
 
     /// <summary>Start point of the line (/L entry, first pair).</summary>
     public Point Starting

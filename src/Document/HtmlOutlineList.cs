@@ -66,7 +66,7 @@ public sealed partial class Document
         hs.marginRight = marginRight;
         hs.htmlColor = htmlColor;
         if (!LoadStepListFaces(hs)) return false;
-        hs.pageW = hs.flow.CurrentPage.Width;
+        hs.pageW = hs.flow.CurrentPage.LayoutFrameWidth;
         var ol = new HtmlOutlineListState();
         ol.hs = hs;
         ol.doc = doc;

@@ -232,8 +232,15 @@ internal sealed class AesCipher
 
     private static readonly byte[] SBox = GenerateSBox();
     private static readonly byte[] ISBox = GenerateISBox();
-    private static readonly uint[] Te0, Te1, Te2, Te3;
-    private static readonly uint[] Td0, Td1, Td2, Td3;
+    // The four round tables of a direction hold the same word rotated right by 0, 8, 16 and 24 bits.
+    private static readonly uint[] Te0 = RoundTable(EncryptWord, 0);
+    private static readonly uint[] Te1 = RoundTable(EncryptWord, 8);
+    private static readonly uint[] Te2 = RoundTable(EncryptWord, 16);
+    private static readonly uint[] Te3 = RoundTable(EncryptWord, 24);
+    private static readonly uint[] Td0 = RoundTable(DecryptWord, 0);
+    private static readonly uint[] Td1 = RoundTable(DecryptWord, 8);
+    private static readonly uint[] Td2 = RoundTable(DecryptWord, 16);
+    private static readonly uint[] Td3 = RoundTable(DecryptWord, 24);
 
     private static readonly uint[] Rcon =
     [
@@ -242,39 +249,31 @@ internal sealed class AesCipher
         0x1B000000, 0x36000000,
     ];
 
-    static AesCipher()
+    private static uint[] RoundTable(Func<int, uint> word, int rotateRight)
     {
-        Te0 = new uint[256];
-        Te1 = new uint[256];
-        Te2 = new uint[256];
-        Te3 = new uint[256];
-        Td0 = new uint[256];
-        Td1 = new uint[256];
-        Td2 = new uint[256];
-        Td3 = new uint[256];
-
+        var table = new uint[256];
         for (var i = 0; i < 256; i++)
         {
-            var s = SBox[i];
-            var x2 = Xtime(s);
-            var x3 = (byte)(x2 ^ s);
-
-            Te0[i] = ((uint)x2 << 24) | ((uint)s << 16) | ((uint)s << 8) | x3;
-            Te1[i] = ((uint)x3 << 24) | ((uint)x2 << 16) | ((uint)s << 8) | s;
-            Te2[i] = ((uint)s << 24) | ((uint)x3 << 16) | ((uint)x2 << 8) | s;
-            Te3[i] = ((uint)s << 24) | ((uint)s << 16) | ((uint)x3 << 8) | x2;
-
-            var si = ISBox[i];
-            var d9 = Mul(si, 9);
-            var db = Mul(si, 0x0B);
-            var dd = Mul(si, 0x0D);
-            var de = Mul(si, 0x0E);
-
-            Td0[i] = ((uint)de << 24) | ((uint)d9 << 16) | ((uint)dd << 8) | db;
-            Td1[i] = ((uint)db << 24) | ((uint)de << 16) | ((uint)d9 << 8) | dd;
-            Td2[i] = ((uint)dd << 24) | ((uint)db << 16) | ((uint)de << 8) | d9;
-            Td3[i] = ((uint)d9 << 24) | ((uint)dd << 16) | ((uint)db << 8) | de;
+            var w = word(i);
+            table[i] = rotateRight == 0 ? w : (w >> rotateRight) | (w << (32 - rotateRight));
         }
+        return table;
+    }
+
+    // SubBytes then MixColumns of one byte: {02}s {01}s {01}s {03}s.
+    private static uint EncryptWord(int i)
+    {
+        var s = SBox[i];
+        var x2 = Xtime(s);
+        var x3 = (byte)(x2 ^ s);
+        return ((uint)x2 << 24) | ((uint)s << 16) | ((uint)s << 8) | x3;
+    }
+
+    // InvSubBytes then InvMixColumns of one byte: {0e}s {09}s {0d}s {0b}s.
+    private static uint DecryptWord(int i)
+    {
+        var si = ISBox[i];
+        return ((uint)Mul(si, 0x0E) << 24) | ((uint)Mul(si, 9) << 16) | ((uint)Mul(si, 0x0D) << 8) | Mul(si, 0x0B);
     }
 
     private static byte[] GenerateSBox()

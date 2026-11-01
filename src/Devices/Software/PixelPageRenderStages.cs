@@ -60,7 +60,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
     }
 
     /// <summary></summary>
-    private void ReconcilePinnedAspect(PixelPageRenderState px)
+    private static void ReconcilePinnedAspect(PixelPageRenderState px)
     {
         if (px.scale > 0 && Math.Abs(px.yFit / px.scale - 1.0) > PinnedAspectTolerance)
         {
@@ -76,7 +76,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
     }
 
     /// <summary></summary>
-    private void FitPixelPageRotation(PixelPageRenderState px)
+    private static void FitPixelPageRotation(PixelPageRenderState px)
     {
         if (px.rot == 90 || px.rot == 180 || px.rot == 270)
         {

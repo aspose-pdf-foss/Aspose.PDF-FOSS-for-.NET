@@ -46,8 +46,8 @@ internal static class FormJsonSerializer
     {
         var roots = new List<FormFieldData>();
         var byPrefix = new Dictionary<string, FormFieldData>();
-        // Static XFA mirrors its fields into the AcroForm (which supplies flags);
-        // pure/dynamic XFA has no AcroForm fields, so skip the lookup entirely.
+        // Static XFA mirrors its fields into the AcroForm (which supplies flags); pure/dynamic
+        // XFA has no AcroForm fields, so skip the lookup entirely.
         var hasAcroFields = form.Fields.Length > 0;
         foreach (var pair in form.GetXfaDatasetsFields())
         {

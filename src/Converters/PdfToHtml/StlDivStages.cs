@@ -40,6 +40,7 @@ public sealed partial class PdfToHtmlConverter
         sd.st0 = sd.styles[sd.first.Style];
         sd.left = (sd.first.Items[0].StartX - sd.pageLLX) / 12.0 - sd.turnedOverShiftLeftEm;
         sd.top = (sd.yTop - sd.baselineY - sd.st0.Ascent * sd.st0.FontSize) / 12.0 - sd.turnedOverShiftTopEm;
+        if (sd.model is not null) RecordStlPartBox(sd);
         sd.sb.Append($"<div class=\"{sd.divCls}\" style=\"left:{Em4T(sd.left)}em;top:{Em4T(sd.top)}em;{sd.zStyle}\">");
 
         sd.popupBoxNum = 0;
@@ -73,10 +74,46 @@ public sealed partial class PdfToHtmlConverter
         sd.sb.Append("</div>\n");
     }
 
+    /// <summary>The part's box for the text-layer model: the div's position, the right edge of
+    /// its rightmost item by the face advance, and a descender's depth under the baseline.</summary>
+    private static void RecordStlPartBox(StlDivState sd)
+    {
+        var right = sd.left;
+        foreach (var span in sd.spans)
+            foreach (var item in span.Items)
+            {
+                var fs = sd.styles[item.Style].FontSize;
+                var r = (item.StartX + item.FaceMilli / 1000.0 * fs - sd.pageLLX) / 12.0 - sd.turnedOverShiftLeftEm;
+                if (r > right) right = r;
+            }
+        var bottom = (sd.yTop - sd.baselineY + DescentFraction * sd.st0.FontSize) / 12.0 - sd.turnedOverShiftTopEm;
+        sd.model!.Boxes.Add(new LineBox(sd.left, sd.top, right, bottom, sd.seq));
+        var lineBottom = 0.0;
+        foreach (var span in sd.spans)
+        {
+            var st = sd.styles[span.Style];
+            lineBottom = Math.Max(lineBottom, LineHeightClassEm(st.LineHeightEm) * st.FontSize);
+        }
+        sd.model.RecordText(sd.top, (sd.yTop - sd.baselineY + lineBottom) / 12.0 - sd.turnedOverShiftTopEm);
+    }
+
+    /// <summary>How far below its baseline a line's box reaches: a descender of a quarter em.</summary>
+    private const double DescentFraction = 0.25;
+
     /// <summary>An empty line ends here; a three-item line without space glyphs becomes a label popup, and a line without popup items emits its parts by span; true when the line was emitted, otherwise null.</summary>
     private static bool? EmitStlPopupsOrEarlyLine(StlDivState sd)
     {
         if (sd.items.Count == 0) return true;
+
+        // Grouping prevented: every rendered glyph stands in its own div at its own pen
+        // position, so nothing depends on how the browser's face advances; the gaps between
+        // glyphs are positions, not spaces.
+        if (sd.perGlyph && sd.popupItems is null)
+        {
+            foreach (var item in sd.items)
+                if (!item.IsSlot) EmitStlPart(sd, new List<StlItem> { item });
+            return true;
+        }
 
         // A single character standing a full quad ahead of the rest of a line
         // that draws NO space glyphs is a NUMBER COLUMN, and a fresh
@@ -206,7 +243,11 @@ public sealed partial class PdfToHtmlConverter
             var drawnPt = sd.spaceDrawnPt > 0.01
                 ? sd.spaceDrawnPt
                 : sd.spaceGlyphMilli / 1000.0 * sd.styles[sd.spaceStyle].FontSize;
-            sd.slotFires = drawnPt > 0.01 ? sd.gapPt >= 0.6 * drawnPt : sd.gapPt >= 0.6 * sd.mPt;
+            // A space drawn wider than a word space and kerned back (a 0.6 em space pulled in by a
+            // third of an em) still leaves a word gap: it is measured against a word space, not
+            // against its own advance.
+            var wordSpacePt = NominalWordSpaceEm * sd.styles[sd.spaceStyle].FontSize;
+            sd.slotFires = drawnPt > 0.01 ? sd.gapPt >= 0.6 * Math.Min(drawnPt, wordSpacePt) : sd.gapPt >= 0.6 * sd.mPt;
         }
         else
         {
@@ -221,7 +262,8 @@ public sealed partial class PdfToHtmlConverter
             var eFold = (sd.penPt + sd.gapPt - sd.ttfPt) / sd.fs * 1000.0;
             sd.items.Add(new StlItem { Ch = sd.g.Ch, Text = sd.itemText, Style = sd.g.Style, StartX = sd.g.StartX,
                 E = eFold, LsE = eFold + (sd.wSum - sd.penPt) / sd.fs * 1000.0 + sd.lsAdjMilli * sd.fsEff / sd.fs, LsEligible = true,
-                FaceMilli = sd.ttfPt / sd.fs * 1000.0 });
+                FaceMilli = sd.ttfPt / sd.fs * 1000.0,
+                KernMilli = (sd.glyphs[sd.itemEnd].KernPt + sd.gapPt) / sd.fs * 1000.0 });
         }
         else
         {
@@ -244,6 +286,9 @@ public sealed partial class PdfToHtmlConverter
         return true;
     }
 
+    /// <summary>The advance of an ordinary word space, in em: a quarter of the font size.</summary>
+    private const double NominalWordSpaceEm = 0.25;
+
     /// <summary>The line's glyph range without its outer spaces, its style registrations, its space-glyph and em-grid facts; true when nothing remains to emit, otherwise null.</summary>
     private static bool? TrimAndClassifyStlLine(StlDivState sd)
     {
@@ -263,6 +308,8 @@ public sealed partial class PdfToHtmlConverter
         {
             if (st.FaceName is null && !st.HasEmbeddedMetrics)
             {
+                // A glyph standing alone in its div needs no advance model at all.
+                if (sd.perGlyph) continue;
                 if (!sd.emGrid) return false;
                 st.UseFallbackMetrics = true;
             }
@@ -272,7 +319,7 @@ public sealed partial class PdfToHtmlConverter
             // every drawn-vs-substitute divergence, so those lines keep the
             // legacy group emission there. The em-compensation dialect never
             // atomizes and solves against the substitute basis.
-            if (!sd.emGrid && st.SubstituteFace) return false;
+            if (!sd.emGrid && !sd.perGlyph && st.SubstituteFace) return false;
         }
 
         sd.items = new List<StlItem>();
@@ -287,7 +334,11 @@ public sealed partial class PdfToHtmlConverter
             {
                 if (IsSpaceGlyph(sd.glyphs[t0].Ch) || IsSpaceGlyph(sd.glyphs[t0 + 1].Ch)) continue;
                 var rg = sd.glyphs[t0 + 1].StartX - sd.glyphs[t0].StartX - sd.glyphs[t0].WidthsAdv;
-                if (rg > 0.02) gaps.Add(rg);
+                // Every pair counts, an abutting pair as a zero gap: a line of separately
+                // positioned words has positive gaps only between its words, and a median
+                // over those alone read the word gap as the line's tracking and lost every
+                // word space. A char-spaced heading keeps its median - all its gaps are positive.
+                gaps.Add(rg > 0.02 ? rg : 0.0);
             }
             const int SpreadMinSamples = 4;
             if (gaps.Count >= SpreadMinSamples)

@@ -84,7 +84,9 @@ internal static class BlendModes
                 return dst + src - (dst * src) / 255;
             case BlendMode.Overlay:
                 // PDF 32000: Overlay(Cb, Cs) = HardLight(Cs, Cb) — args swapped.
+#pragma warning disable S2234 // PDF 32000: Overlay(Cb, Cs) = HardLight(Cs, Cb)
                 return HardLightChannel(src, dst);
+#pragma warning restore S2234
             case BlendMode.Darken:
                 return dst < src ? dst : src;
             case BlendMode.Lighten:
@@ -175,8 +177,12 @@ internal static class BlendModes
 
     private static double Sat(double r, double g, double b)
     {
-        var max = r > g ? (r > b ? r : b) : (g > b ? g : b);
-        var min = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        double max;
+        if (r > g) max = r > b ? r : b;
+        else max = g > b ? g : b;
+        double min;
+        if (r < g) min = r < b ? r : b;
+        else min = g < b ? g : b;
         return max - min;
     }
 
@@ -190,8 +196,12 @@ internal static class BlendModes
     private static (double r, double g, double b) ClipColor(double r, double g, double b)
     {
         var l = Lum(r, g, b);
-        var n = r < g ? (r < b ? r : b) : (g < b ? g : b);
-        var x = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        double n;
+        if (r < g) n = r < b ? r : b;
+        else n = g < b ? g : b;
+        double x;
+        if (r > g) x = r > b ? r : b;
+        else x = g > b ? g : b;
         if (n < 0.0)
         {
             var denom = l - n;

@@ -21,7 +21,7 @@ private sealed class FixedDivReadState
     // (CssClassNamesPrefix renames the stl_ scheme).
     public Dictionary<string, (double? fs, string? fam, string? col, double? ls)> clsFont = null!;
     public Dictionary<string, List<Aspose.Pdf.Converters.HtmlToPdfConverter.OwnFace>> ownFaces = null!;
-    public System.Text.RegularExpressions.MatchCollection pageDivs = null!;
+    public SafeMatchCollection pageDivs = null!;
     public string html = default!;
     public HtmlLoadOptions? options = null;
     public List<FixedPageDiv> divs = default!;

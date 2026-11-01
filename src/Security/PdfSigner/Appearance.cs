@@ -23,8 +23,9 @@ public sealed partial class PdfSigner
         sa.contentsSize = sa.options.ContentsSize;
 
         // The banner's first line names the signer; without an explicit signer
-        // name it shows the certificate's full subject DN.
-        sa.appearance.SignerName ??= sa.certificate.SubjectDn;
+        // name it shows the certificate's full subject DN. The facade passes the signature's
+        // authority, which is empty unless set: empty names no signer either.
+        if (string.IsNullOrEmpty(sa.appearance.SignerName)) sa.appearance.SignerName = sa.certificate.SubjectDn;
         // The signature properties always ride on the visible banner.
         sa.appearance.Reason ??= sa.options.Reason;
         sa.appearance.Location ??= sa.options.Location;
@@ -167,7 +168,7 @@ public sealed partial class PdfSigner
 
         var sb = new StringBuilder();
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        sb.Append(BannerFillRgb).Append(" rg\n");
+        sb.Append(SignatureBanner.TextRgb(appearance)).Append(" rg\n");
         sb.Append("q\n");
         sb.Append("1 0 0 1 0 0 cm\n");
         sb.Append("BT\n");
@@ -205,8 +206,8 @@ public sealed partial class PdfSigner
         f1Dict.Set("Type", new PdfName("Font"));
         f1Dict.Set("Subtype", new PdfName("Type1"));
         f1Dict.Set("BaseFont", new PdfName(baseFont));
-        // The banner lines may carry accented text (a reason such as "Approuvé");
-        // WinAnsi maps those Latin-1 codes to the right glyphs.
+        // The banner lines may carry accented text (a reason such as "Approuvé"); WinAnsi
+        // maps those Latin-1 codes to the right glyphs.
         f1Dict.Set("Encoding", new PdfName("WinAnsiEncoding"));
         fontDict.Set("F1", f1Dict);
         var resources = new PdfDictionary();

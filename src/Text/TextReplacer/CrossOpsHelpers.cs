@@ -14,7 +14,7 @@ public sealed partial class TextReplacer
         if (o.FontDict is null) return null;
         if (cx.metricsCache.TryGetValue(o.FontDict, out var m)) return m;
         FontMetrics? built = null;
-        try { built = FontMetrics.FromFontDict(o.FontDict, cx.reader); } catch { }
+        try { built = FontMetrics.FromFontDict(o.FontDict, cx.reader); } catch { /* a font program that does not parse leaves the fallback metrics in place */ }
         cx.metricsCache[o.FontDict] = built;
         return built;
     }
@@ -65,7 +65,7 @@ public sealed partial class TextReplacer
     private static bool IsPdfWhitespace(byte b) =>
         b is (byte)' ' or (byte)'\n' or (byte)'\r' or (byte)'\t' or (byte)'\f' or 0;
 
-    private static string FormatNum(CrossReplaceState cx, double v) => Math.Round(v, 4).ToString("0.####", CultureInfo.InvariantCulture);
+    private static string FormatNum(double v) => Math.Round(v, 4).ToString("0.####", CultureInfo.InvariantCulture);
 
     private static void CopyRange(CrossReplaceState cx, int to)
     {
@@ -94,10 +94,10 @@ public sealed partial class TextReplacer
     // Can every char of the replacement be encoded in the op's own font? (Reverse
     // ToUnicode coverage; keeps the replacement in the source face — and measured
     // with the source metrics — instead of switching to a fallback font.)
-    private static bool CanEncodeInFont(CrossReplaceState cx, CrossTextOp o, string text)
+    private static bool CanEncodeInFont(CrossTextOp o, string text)
     {
         if (o.ToUnicode is null)
-            return text.All(c => c <= 0xFF); // simple Latin1 encoding
+            return text.All(c => SimpleFontCode(c, o.FontDict) is not null); // single-byte encoding
         var reverse = BuildReverseMap(o.ToUnicode);
         return text.All(c => reverse.ContainsKey(c.ToString()));
     }

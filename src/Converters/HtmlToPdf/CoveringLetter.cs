@@ -36,7 +36,9 @@ internal static partial class HtmlToPdfConverter
     private sealed class LtLine
     {
         public List<OsRun> Segs = new();
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double X, JustifyTo, BoxH, Drop, GapBefore;
+#pragma warning restore S3218
         public bool Bullet;                     // draw the list marker left of X
         public byte[]? Img;
         public double ImgW, ImgH;
@@ -45,8 +47,8 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Parse a letter fragment into styled runs: bold/italic spans, the
     /// superscript raise, break markers; Arial at the 14px base throughout.</summary>
     /// <summary>Covering letter: one html fragment flattened to its plain text.</summary>
-    private static string LtFlat(string s) => Regex.Replace(DecodeEntities(
-        Regex.Replace(s, @"<[^>]+>", "")), @"[ \t\r\n]+", " ").Trim(' ');
+    private static string LtFlat(string s) => SafeRegex.Replace(DecodeEntities(
+        SafeRegex.Replace(s, @"<[^>]+>", "")), @"[ \t\r\n]+", " ").Trim(' ');
 
     private static List<OsRun> LtParseRuns(string frag, out (string Src, double WPx)? img)
     {
@@ -54,28 +56,28 @@ internal static partial class HtmlToPdfConverter
         var runs = new List<OsRun>();
         var stack = new List<(bool Bold, bool Italic, bool Under, double Fs, double Rise)>();
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        foreach (Match m in Regex.Matches(frag, @"<[^>]+>|[^<]+"))
+        foreach (var value in SafeRegex.Matches(frag, @"<[^>]+>|[^<]+").Select(m => m.Value))
         {
-            var tok = m.Value;
+            var tok = value;
             if (tok[0] == '<')
             {
                 var close = tok.Length > 1 && tok[1] == '/';
-                var name = Regex.Match(tok, @"^</?\s*([a-zA-Z0-9]+)").Groups[1].Value.ToLowerInvariant();
+                var name = SafeRegex.Match(tok, @"^</?\s*([a-zA-Z0-9]+)").Groups[1].Value.ToLowerInvariant();
                 switch (name)
                 {
                     case "span" or "sup" when !close:
                     {
-                        var style = Regex.Match(tok, @"style\s*=\s*[""']([^""']*)").Groups[1].Value;
+                        var style = SafeRegex.Match(tok, @"style\s*=\s*[""']([^""']*)").Groups[1].Value;
                         var (bold, italic, under, fs, rise) = stack.Count > 0
                             ? stack[^1] : (false, false, false, 10.5, 0.0);
-                        if (Regex.IsMatch(style, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
+                        if (SafeRegex.IsMatch(style, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
                             bold = true;
-                        if (Regex.IsMatch(style, @"font-style\s*:\s*italic", RegexOptions.IgnoreCase))
+                        if (SafeRegex.IsMatch(style, @"font-style\s*:\s*italic", RegexOptions.IgnoreCase))
                             italic = true;
-                        if (Regex.IsMatch(style, @"text-decoration\s*:\s*underline", RegexOptions.IgnoreCase))
+                        if (SafeRegex.IsMatch(style, @"text-decoration\s*:\s*underline", RegexOptions.IgnoreCase))
                             under = true;
                         if (name == "sup"
-                            || Regex.IsMatch(style, @"font-size\s*:\s*75\s*%", RegexOptions.IgnoreCase))
+                            || SafeRegex.IsMatch(style, @"font-size\s*:\s*75\s*%", RegexOptions.IgnoreCase))
                         {
                             fs *= 0.75;
                             rise += LtSupRise;
@@ -91,8 +93,8 @@ internal static partial class HtmlToPdfConverter
                         break;
                     case "img" when !close:
                     {
-                        var src = Regex.Match(tok, @"src\s*=\s*[""']([^""']*)").Groups[1].Value;
-                        var wM = Regex.Match(tok, @"width\s*=\s*[""']?([\d.]+)");
+                        var src = SafeRegex.Match(tok, @"src\s*=\s*[""']([^""']*)").Groups[1].Value;
+                        var wM = SafeRegex.Match(tok, @"width\s*=\s*[""']?([\d.]+)");
                         if (src.Length > 0)
                             img = (src, wM.Success ? double.Parse(wM.Groups[1].Value, inv) : 80.0);
                         break;
@@ -100,10 +102,12 @@ internal static partial class HtmlToPdfConverter
                 }
                 continue;
             }
-            var text = Regex.Replace(DecodeEntities(tok), @"[ \t\r\n]+", " ");
+            var text = SafeRegex.Replace(DecodeEntities(tok), @"[ \t\r\n]+", " ");
             if (text.Length == 0) continue;
             var st = stack.Count > 0 ? stack[^1] : (Bold: false, Italic: false, Under: false, Fs: 10.5, Rise: 0.0);
-            var face = st.Bold ? "Arial Bold" : st.Italic ? "Arial Italic" : "Arial";
+            string face = "Arial";
+            if (st.Bold) face = "Arial Bold";
+            else if (st.Italic) face = "Arial Italic";
             if (runs.Count > 0 && runs[^1].Text != "\n" && runs[^1].Text.EndsWith(' ')
                 && text.StartsWith(' '))
                 text = text[1..];

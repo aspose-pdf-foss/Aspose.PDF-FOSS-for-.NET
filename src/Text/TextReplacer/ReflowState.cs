@@ -101,7 +101,6 @@ private sealed class ReflowState
     public string replacement = null!;
     public double matchX;
     public IReadOnlyList<(double y, double lx, double rx)> lines = null!;
-    public double leftX;
     public double rightMargin;
     public double pitch;
     public double newLineSpacingFactor;

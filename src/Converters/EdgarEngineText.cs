@@ -18,8 +18,8 @@ internal static partial class EdgarHtmlRenderer
             double top;
             if (_atPageTop)
             {
-                // margins collapse into the body top only on the very first page;
-                // pages after a forced break keep the pending margins.
+                // margins collapse into the body top only on the very first page; pages
+                // after a forced break keep the pending margins.
                 _margins.Add(marginTop);
                 top = _y + (_dropTopMargins ? 0 : _margins.Max()) + borderTop;
                 _atPageTop = false;
@@ -127,7 +127,7 @@ internal static partial class EdgarHtmlRenderer
                         var color = c.Attr("color");
                         if (color.Length > 0 && TryColor(color) is { } cc) s2.Color = cc;
                         var sizeAttr = c.Attr("size");
-                        if (sizeAttr.Length > 0 && int.TryParse(sizeAttr, out var hsz))
+                        if (sizeAttr.Length > 0 && int.TryParse(sizeAttr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var hsz))
                             s2.Size = hsz switch { 1 => 7.5, 2 => 10, 3 => 12, 4 => 13.5, 5 => 18, 6 => 24, 7 => 36, _ => s2.Size };
                         ApplyStyleAttr(c.Attr("style"), s2);
                         Collect(c, s2, runs, pendingAnchors, linkId);
@@ -147,7 +147,7 @@ internal static partial class EdgarHtmlRenderer
                         }
                         var href = c.Attr("href");
                         var lid = linkId;
-                        if (href.StartsWith("#")) lid = GetLinkId(href.Substring(1));
+                        if (href.StartsWith('#')) lid = GetLinkId(href.Substring(1));
                         Collect(c, st, runs, pendingAnchors, lid);
                         break;
                     }
@@ -181,7 +181,7 @@ internal static partial class EdgarHtmlRenderer
                     else
                     {
                         sb.Append(ch);
-                        prevSpace = ch == ' ' ? false : false;
+                        prevSpace = false;
                     }
                 }
                 r.Text = sb.ToString();
@@ -226,7 +226,7 @@ internal static partial class EdgarHtmlRenderer
         {
             // dominant face/size for line metrics: the largest (size, then asc)
             var metricRun = runs.Where(r => r.Text.Length > 0).OrderByDescending(r => r.Size).First();
-            var (pitch, asc, desc) = LineBox(metricRun.Face, metricRun.Size, st.LineHeight);
+            var (_, asc, desc) = LineBox(metricRun.Face, metricRun.Size, st.LineHeight);
 
             var x0 = 96 + st.MarginLeft;
             var width = _contentW - st.MarginLeft;
@@ -361,7 +361,7 @@ internal static partial class EdgarHtmlRenderer
                         page.Annotations.AddLinkAnnotation(new Rectangle(llx, lly, urx, ury), action);
                     })));
                 }
-                foreach (var (order, anchorId, x, y) in pg.AnchorPoints)
+                foreach (var (order, _, x, y) in pg.AnchorPoints)
                 {
                     items.Add((order, (System.Action)(() =>
                     {
@@ -384,7 +384,7 @@ internal static partial class EdgarHtmlRenderer
             return doc;
         }
 
-        static string BuildKernedTj(Face face, string text, byte[] hex, double size)
+        static string BuildKernedTj(Face face, string text, byte[] hex)
         {
             // hex = 2 bytes per UTF-16 unit from the embedder; interleave kern moves
             var sb = new StringBuilder();

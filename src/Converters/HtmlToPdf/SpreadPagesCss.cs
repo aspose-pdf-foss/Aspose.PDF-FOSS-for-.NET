@@ -11,7 +11,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (sp.css.TryGetValue(sel, out var r) && r.TryGetValue(prop, out var v))
         {
-            var m = Regex.Match(v, "([\\d.]+)\\s*em");
+            var m = SafeRegex.Match(v, "([\\d.]+)\\s*em");
             if (m.Success && double.TryParse(m.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var em))

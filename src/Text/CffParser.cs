@@ -132,18 +132,14 @@ internal sealed partial class CffParser
             {
                 // Two-byte operator — the first operator we hit
                 // For 2-byte operators: check parity based on specific operator
-                pos += 2;
-                return DetermineWidth(operands, b0, csData.Length > 1 ? csData[1] : 0, isTwoByte: true);
+                return DetermineWidth(operands, b0, isTwoByte: true);
             }
 
-            if (b0 <= 27 || b0 == 29 || b0 == 31)
+            // Single-byte operator (0-27 are operators, 29 is reserved in charstring context as callgsubr, 31 is hvcurveto)
+            // Actually in Type 2: 0-11 and 13-27 are operators, 12 is escape, 28 is shortint, 29-31 are operators
+            if ((b0 <= 27 || b0 == 29 || b0 == 31) && (b0 <= 11 || (b0 >= 13 && b0 <= 27) || b0 >= 29))
             {
-                // Single-byte operator (0-27 are operators, 29 is reserved in charstring context as callgsubr, 31 is hvcurveto)
-                // Actually in Type 2: 0-11 and 13-27 are operators, 12 is escape, 28 is shortint, 29-31 are operators
-                if (b0 <= 11 || (b0 >= 13 && b0 <= 27) || b0 >= 29)
-                {
-                    return DetermineWidth(operands, b0, 0, isTwoByte: false);
-                }
+                return DetermineWidth(operands, b0, isTwoByte: false);
             }
 
             if (b0 == 28)
@@ -203,7 +199,7 @@ internal sealed partial class CffParser
     /// Given the operands collected before the first operator, determine the glyph width.
     /// The width is optional and depends on the operator and the parity of the operand count.
     /// </summary>
-    private int DetermineWidth(List<double> operands, int op, int op2, bool isTwoByte)
+    private int DetermineWidth(List<double> operands, int op, bool isTwoByte)
     {
         if (operands.Count == 0) return _defaultWidthX;
 
@@ -491,9 +487,6 @@ internal sealed partial class CffParser
             return (int)values[0];
         return defaultValue;
     }
-
-    private int ReadUInt16(int offset) =>
-        (_data[offset] << 8) | _data[offset + 1];
 
     internal static int ReadOffsetStatic(byte[] data, int pos, int offSize)
     {

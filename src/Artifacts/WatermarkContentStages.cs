@@ -14,8 +14,7 @@ public partial class WatermarkArtifact : Artifact
             var rad = Rotation * Math.PI / 180;
             var cos = Math.Cos(rad);
             var sin = Math.Sin(rad);
-            var cx = wc.pageWidth / 2;
-            var cy = wc.pageHeight / 2;
+            var (cx, cy) = RotationPivot(wc.pageWidth, wc.pageHeight);
 
             wc.builder.BeginText();
             wc.builder.SetFont(wc.fontResourceName, wc.fontSize);

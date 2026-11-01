@@ -15,6 +15,7 @@ public sealed partial class SvgDevice
         var sv = new SvgRenderState();
         sv.fonts = ResolveFonts(resources, reader);
         sv.extGStates = ResolveExtGStates(resources, reader);
+        sv.faces = _faces;
         sv.lexer = new PdfLexer(streamBytes);
         sv.operands = new List<PdfObject>();
         sv.tm = new double[] { 1, 0, 0, 1, 0, 0 };
@@ -68,8 +69,11 @@ public sealed partial class SvgDevice
                             }
                             break;
 
-                        case "m": case "l": case "c": case "v": case "y": case "h": case "re": case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n": case "Do":
+                        case "m": case "l": case "c": case "v": case "y": case "h": case "re": case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n": case "W": case "W*": case "Do":
                             if (RenderSvgPathOperator(sv, sb, resources, reader, depth, usedBlendModes, links, op)) return;
+                            break;
+                        case "sh":
+                            RenderShadingOperator(sv, sb, resources, reader);
                             break;
                         case "BI":
                             SkipInlineImage(sv.lexer);
@@ -130,6 +134,7 @@ public sealed partial class SvgDevice
                 // carry U+FFFF from a bfrange to FFFF) still occupies a slot on the
                 // line. Substitute the PUA char U+A880 — the "SVG space" — so the
                 // character count stays aligned with the x list.
+                if (gs.Face is not null) glyph = gs.Face.TextFor(code, glyph);
                 glyph = EscapeXml(glyph);
                 if (glyph.Length == 0 && gs.FontDict is not null)
                     glyph = "ꢀ";
@@ -154,10 +159,30 @@ public sealed partial class SvgDevice
             }
 
             if (text.Length == 0 || firstDevice is null) continue;
-            if (gs.RenderMode == 3) continue; // invisible text: pen already advanced
+            // Invisible and clip-only text: the pen has advanced, nothing is painted.
+            if (!TextModePaintsFill(gs.RenderMode) && !TextModePaintsStroke(gs.RenderMode)) continue;
 
             EmitTextRun(sb, gs, tm, firstDevice, xs, text.ToString(), links);
         }
+    }
+
+    // Text rendering modes (PDF 32000-1 table 106): 0 fill, 1 stroke, 2 fill and stroke,
+    // 3 invisible; 4 to 7 the same four, each adding the glyphs to the clip.
+    private const int TextModeStroke = 1;
+    private const int TextModeFillStroke = 2;
+    private const int TextModeInvisible = 3;
+    private const int TextModeClipOffset = 4;
+
+    private static bool TextModePaintsFill(int mode)
+    {
+        var painting = mode >= TextModeClipOffset ? mode - TextModeClipOffset : mode;
+        return painting is 0 or TextModeFillStroke;
+    }
+
+    private static bool TextModePaintsStroke(int mode)
+    {
+        var painting = mode >= TextModeClipOffset ? mode - TextModeClipOffset : mode;
+        return painting is TextModeStroke or TextModeFillStroke;
     }
 
     /// <summary>Emit one decoded, positioned text run.</summary>
@@ -166,13 +191,24 @@ public sealed partial class SvgDevice
     {
         var fs = gs.FontSize;
         var th = gs.HorizScale;
-        var fill = FormatHex(gs.FillR, gs.FillG, gs.FillB, gs.FillAlpha);
         var style = new StringBuilder();
-        style.Append($"fill:{fill};font-family:{gs.FontName};");
-        // As on the path side, the companion declaration is written BESIDE the colour's own
-        // alpha - here in the style string rather than as an attribute.
-        if (gs.FillAlpha < 1.0)
-            style.Append($"fill-opacity:{F(gs.FillAlpha)};");
+        // The render mode decides what paints: an outlined run (stroke only) must not be filled
+        // with the fill colour, which hides it when that colour is the background's.
+        if (TextModePaintsFill(gs.RenderMode))
+        {
+            var fill = gs.FillPaint ?? FormatHex(gs.FillR, gs.FillG, gs.FillB, gs.FillAlpha);
+            style.Append($"fill:{fill};font-family:{FamilyList(gs)};{FaceStyle(gs)}");
+        }
+        else
+        {
+            style.Append($"fill:none;font-family:{FamilyList(gs)};{FaceStyle(gs)}");
+        }
+        if (TextModePaintsStroke(gs.RenderMode))
+        {
+            var stroke = FormatHex(gs.StrokeR, gs.StrokeG, gs.StrokeB, gs.StrokeAlpha);
+            // The pen width is in user space: the CTM scales it, the text matrix does not.
+            style.Append($"stroke:{stroke};stroke-width:{F(gs.LineWidth * gs.CtmScale)};");
+        }
         if (gs.BlendMode != "Normal")
             style.Append($"mix-blend-mode:{MapBlendMode(gs.BlendMode)};");
 
@@ -190,7 +226,7 @@ public sealed partial class SvgDevice
             style.Append($"font-size:{FD(size)}px;");
             var xList = string.Join(" ", xs.Select(FD));
             if (link is not null) sb.AppendLine($"<a xlink:href=\"{EscapeXml(link.Uri)}\" target=\"_blank\" >");
-            sb.AppendLine($"<text x=\"{xList}\" y=\"{FD(d[5])}\" style=\"{style}\">{text}</text>");
+            sb.AppendLine($"<text{ClipAttribute(gs)} x=\"{xList}\" y=\"{FD(d[5])}\"{SpaceAttribute(text)} style=\"{style}\">{text}</text>");
             if (link is not null) sb.AppendLine("</a>");
         }
         else
@@ -204,18 +240,37 @@ public sealed partial class SvgDevice
             style.Append($"font-size:{FD(fs)}px;");
             var transform = $"matrix({F(t2[0])},{F(t2[1])},{F(Neg(t2[2]))},{F(Neg(t2[3]))},{F(t2[4])},{F(t2[5])})";
             if (link is not null) sb.AppendLine($"<a xlink:href=\"{EscapeXml(link.Uri)}\" target=\"_blank\" >");
-            sb.AppendLine($"<text transform=\"{transform}\" style=\"{style}\">{text}</text>");
+            sb.AppendLine($"<text{ClipAttribute(gs)} transform=\"{transform}\"{SpaceAttribute(text)} style=\"{style}\">{text}</text>");
             if (link is not null) sb.AppendLine("</a>");
         }
+    }
+
+    /// <summary>The run's font-family list: the page's web font first when the font has one, the
+    /// generic family after it for any character the face does not carry.</summary>
+    private static string FamilyList(GState gs) =>
+        gs.Face is null ? gs.FontName : $"'{gs.Face.Family}',{gs.FontName}";
+
+    /// <summary>The slant and weight a run asks for when its face is an installed stand-in of that
+    /// style, so the browser matches the face instead of synthesising the style over it.</summary>
+    private static string FaceStyle(GState gs) =>
+        (gs.Face is { Italic: true } ? "font-style:italic;" : "") + (gs.Face is { Bold: true } ? "font-weight:bold;" : "");
+
+    /// <summary>The xml:space attribute a run needs: each glyph has its own x, so a tab, a line
+    /// break, a leading, trailing or doubled space must stay one character, not be collapsed
+    /// by the viewer's default whitespace handling, or every glyph after it shifts.</summary>
+    private static string SpaceAttribute(string text)
+    {
+        var collapsible = text.Contains('\t') || text.Contains('\n') || text.Contains('\r')
+            || text.Contains("  ", StringComparison.Ordinal)
+            || (text.Length > 0 && (text[0] == ' ' || text[^1] == ' '));
+        return collapsible ? " xml:space=\"preserve\"" : "";
     }
 
     /// <summary>True when a decoded run has no visible glyphs (whitespace and the
     /// U+A880 blank-glyph placeholder only).</summary>
     private static bool IsBlankRun(string text)
     {
-        foreach (var ch in text)
-            if (!char.IsWhiteSpace(ch) && ch != 'ꢀ') return false;
-        return true;
+        return !text.Any(ch => !char.IsWhiteSpace(ch) && ch != 'ꢀ');
     }
 
     /// <summary>Advance the text matrix pen: tm := [1 0 0 1 adv 0] × tm.</summary>
@@ -239,11 +294,11 @@ public sealed partial class SvgDevice
 
         if (fill)
         {
-            var fillColor = FormatHex(gs.FillR, gs.FillG, gs.FillB, gs.FillAlpha);
+            // A shading pattern set as the fill paints its gradient in place of the flat colour.
+            var fillColor = gs.FillPaint ?? FormatOpaqueHex(gs.FillR, gs.FillG, gs.FillB);
             attrs.Append($" fill=\"{fillColor}\"");
-            // The reference writes the companion attribute AS WELL as the colour's alpha byte
-            // (a corpus assertion counts 16 of `fill-opacity="0" pointer-events="none"`), so both are
-            // emitted even though SVG multiplies them - matching the reference is the contract.
+            // The colour is opaque: the alpha is the companion attribute alone (a corpus assertion
+            // counts 16 of `fill-opacity="0" pointer-events="none"`).
             if (gs.FillAlpha < 1.0)
             {
                 attrs.Append($" fill-opacity=\"{F(gs.FillAlpha)}\"");
@@ -263,12 +318,14 @@ public sealed partial class SvgDevice
         if (stroke)
         {
             var scale = gs.CtmScale;
-            var strokeColor = FormatHex(gs.StrokeR, gs.StrokeG, gs.StrokeB, gs.StrokeAlpha);
+            var strokeColor = FormatOpaqueHex(gs.StrokeR, gs.StrokeG, gs.StrokeB);
             attrs.Append($" stroke=\"{strokeColor}\"");
             if (gs.StrokeAlpha < 1.0)
                 attrs.Append($" stroke-opacity=\"{F(gs.StrokeAlpha)}\"");
             var sw = gs.LineWidth * scale;
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
             if (sw != 1.0)
+#pragma warning restore S1244
                 attrs.Append($" stroke-width=\"{F(sw)}\"");
             if (gs.LineCap != 0)
                 attrs.Append($" stroke-linecap=\"{MapLineCap(gs.LineCap)}\"");
@@ -289,9 +346,8 @@ public sealed partial class SvgDevice
         if (gs.BlendMode != "Normal")
             attrs.Append($" style=\"mix-blend-mode:{MapBlendMode(gs.BlendMode)}\"");
 
-        // Every path opens with an empty id, an explicit
-        // clip-rule and an identity transform; consumers diffing outputs see
-        // the same markup shape.
-        sb.AppendLine($"<path id=\"\"  clip-rule=\"evenodd\" transform=\"matrix(1 0 0 1 0 0)\" {attrs} />");
+        // Every path opens with an explicit clip-rule and an identity transform;
+        // consumers diffing outputs see the same markup shape.
+        sb.AppendLine($"<path{ClipAttribute(gs)}  clip-rule=\"evenodd\" transform=\"matrix(1 0 0 1 0 0)\" {attrs} />");
     }
 }

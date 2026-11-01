@@ -21,10 +21,6 @@ public partial class TextBoxField : Field
     /// appearance font size for the whole form.</summary>
     public static new double MinFontSize { get; set; }
 
-    /// <summary>Static default applied to all newly-created TextBoxFields'
-    /// FitIntoRectangle flag. Stored only.</summary>
-    public static new bool FitIntoRectangle { get; set; }
-
     protected override void SetValue(string? value)
         => SetValue(value, validateFormat: true);
 
@@ -66,7 +62,9 @@ public partial class TextBoxField : Field
             if (Reader.Resolve(kid.Get("Rect")) is not PdfArray kr || kr.Count < 4) continue;
             var kidRect = Rectangle.FromPdfArray(kr);
             var kidAp = BuildWidgetApDict(kidRect.Width, kidRect.Height, kid);
-            if (kidAp is not null) kid.Set("AP", kidAp);
+            if (kidAp is null) continue;
+            kid.Set("AP", kidAp);
+            MarkKidDirty(kid);
         }
 
         // A value change fires the form's calculate event (Acrobat semantics).
@@ -90,7 +88,9 @@ public partial class TextBoxField : Field
             if (Reader.Resolve(kid.Get("Rect")) is not PdfArray kr || kr.Count < 4) continue;
             var kidRect = Rectangle.FromPdfArray(kr);
             var kidAp = BuildWidgetApDict(kidRect.Width, kidRect.Height, kid);
-            if (kidAp is not null) kid.Set("AP", kidAp);
+            if (kidAp is null) continue;
+            kid.Set("AP", kidAp);
+            MarkKidDirty(kid);
         }
     }
 
@@ -105,7 +105,7 @@ public partial class TextBoxField : Field
             var v = Value;
             if (!string.IsNullOrEmpty(v))
             {
-                var displayValue = FieldFormatScript.Apply(Dict, Reader, v!);
+                var displayValue = FieldFormatScript.Apply(Dict, Reader, v);
                 RegenerateAppearance(displayValue);
             }
         }
@@ -152,14 +152,14 @@ public partial class TextBoxField : Field
     /// Creates a new text box field associated with the document (page assigned via Form.Add).
     /// </summary>
     public TextBoxField(Document doc, Rectangle rect)
-        : base(BuildTextFieldDict(rect), doc.Pages[1].Reader)
+        : base(BuildTextFieldDict(rect), doc.Reader)
     {
     }
 
     /// <summary>Document-bound text box without a rectangle. Caller sets
     /// <see cref="Width"/> / <see cref="Height"/> or attaches via Form.Add.</summary>
     public TextBoxField(Document doc)
-        : base(BuildTextFieldDict(new Rectangle(0, 0, 0, 0)), doc.Pages[1].Reader)
+        : base(BuildTextFieldDict(new Rectangle(0, 0, 0, 0)), doc.Reader)
     {
     }
 
@@ -244,6 +244,8 @@ public partial class TextBoxField : Field
     private double _layoutHeight;
 
     internal override (double w, double h) GeneratorBlockSize() => (Width, Height);
+
+    internal override void SetGeneratorBlockWidth(double width) => Width = width;
 
     /// <summary>Multiline flag (bit 13 of /Ff). Setter mirrors the
     /// existing read-only <see cref="IsMultiline"/>.</summary>
@@ -376,6 +378,21 @@ public partial class TextBoxField : Field
     /// <summary>The pushbutton flag bit of /Ff (bit 17).</summary>
     private const int PushButtonFlag = 1 << 16;
 
+    /// <summary>The share of the free space left of (or below) a centred picture.</summary>
+    private const double CentredLeftover = 0.5;
+
+    /// <summary>The least space kept between an added picture and the box's edge, in points.</summary>
+    private const double MinIconInset = 2;
+
+    /// <summary>The border width the widget declares (/BS /W, else the third /Border entry), 0 when none.</summary>
+    private double DeclaredBorderWidth()
+    {
+        if (Reader.ResolveDict(Dict.Get("BS")) is { } bs && bs.ContainsKey("W"))
+            return Aspose.Pdf.Functions.PdfArrayHelper.GetDoubleFromDict(bs, "W", 0);
+        return Reader.Resolve(Dict.Get("Border")) is PdfArray { Count: >= 3 } border
+            ? Aspose.Pdf.Functions.PdfArrayHelper.GetDouble(border, 2) : 0;
+    }
+
     private void AddImage(byte[] pngBytes, double imageWidth, double imageHeight)
     {
         PdfStream imgXObject;
@@ -383,13 +400,33 @@ public partial class TextBoxField : Field
         catch (Exception e) when (e is ArgumentException or NotSupportedException) { return; }
         var rect = Reader.Resolve(Dict.Get("Rect")) is PdfArray ra && ra.Count >= 4 ? Rectangle.FromPdfArray(ra) : null;
         if (rect is null || rect.Width <= 0 || rect.Height <= 0 || imageWidth <= 0 || imageHeight <= 0) return;
-        // The picture keeps its aspect, fitted to the box and centred in it (measured: a
-        // square picture in a 300 x 100 box draws 100 x 100 in the middle).
-        var fit = Math.Min(rect.Width / imageWidth, rect.Height / imageHeight);
+        // The picture keeps its aspect, fitted to the box inside the border inset (at least two points) and the
+        // field's margin, and placed in it by the field's alignment, centred when none is set (measured: a 40 x 20
+        // picture in a 200 x 50 box draws 92 x 46 at 54, 2).
+        var inset = Math.Max(MinIconInset, DeclaredBorderWidth());
+        var boxW = rect.Width - 2 * inset - Margin.Left - Margin.Right;
+        var boxH = rect.Height - 2 * inset - Margin.Top - Margin.Bottom;
+        if (boxW <= 0 || boxH <= 0) return;
+        var fit = Math.Min(boxW / imageWidth, boxH / imageHeight);
         var drawW = imageWidth * fit;
         var drawH = imageHeight * fit;
-        var drawX = (rect.Width - drawW) / 2;
-        var drawY = (rect.Height - drawH) / 2;
+        // An alignment counts once it is set: both members default to Left, and an unaligned picture is centred.
+        var alignment = HorizontalAlignmentSet ? HorizontalAlignment
+            : TextHorizontalAlignmentSet ? TextHorizontalAlignment : Aspose.Pdf.HorizontalAlignment.None;
+        var leftoverLeft = alignment switch
+        {
+            Aspose.Pdf.HorizontalAlignment.Left => 0.0,
+            Aspose.Pdf.HorizontalAlignment.Right => 1.0,
+            _ => CentredLeftover,
+        };
+        var leftoverBottom = VerticalAlignment switch
+        {
+            Aspose.Pdf.VerticalAlignment.Bottom => 0.0,
+            Aspose.Pdf.VerticalAlignment.Top => 1.0,
+            _ => CentredLeftover,
+        };
+        var drawX = inset + Margin.Left + (boxW - drawW) * leftoverLeft;
+        var drawY = inset + Margin.Bottom + (boxH - drawH) * leftoverBottom;
 
         Dict.Set("FT", new PdfName("Btn"));
         Dict.Set("Ff", new PdfInteger(PushButtonFlag));
@@ -397,6 +434,15 @@ public partial class TextBoxField : Field
         Dict.Remove("DV");
         var mk = Reader.ResolveDict(Dict.Get("MK")) ?? new PdfDictionary();
         mk.Set("I", imgXObject);
+        // The icon fit says where the picture sits, so a viewer that draws the button again places it alike.
+        var iconFit = new PdfDictionary();
+        iconFit.Set("SW", new PdfName("A"));
+        iconFit.Set("S", new PdfName("P"));
+        var leftover = new PdfArray();
+        leftover.Add(new PdfReal(leftoverLeft));
+        leftover.Add(new PdfReal(leftoverBottom));
+        iconFit.Set("A", leftover);
+        mk.Set("IF", iconFit);
         Dict.Set("MK", mk);
 
         static string F(double v) => v.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);

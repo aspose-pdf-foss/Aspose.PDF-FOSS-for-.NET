@@ -93,13 +93,20 @@ public sealed partial class TableAbsorber
         // (BT/ET blocks, Tm, Td) carries over between streams.
         var combined = ConcatenateStreams(contentStreams);
         var xobjects = TextAbsorber.ResolveXObjects(page.Dict, reader);
-        ExtractTextAndLines(combined, fonts, reader, textRuns, hEdges, vEdges, rA, rB, rC, rD, rE, rF, xobjects);
+        var drawn = new List<PendingLine>();
+        ExtractTextAndLines(combined, fonts, reader, textRuns, hEdges, vEdges, rA, rB, rC, rD, rE, rF, xobjects, drawn: drawn,
+            colourSpaces: ResolveColourSpaces(page.Dict, reader));
 
         if (textRuns.Count == 0 && hEdges.Count == 0 && vEdges.Count == 0) return;
 
         var tables = DetectTables(textRuns, hEdges, vEdges, page.Width, page.Height);
+        DropFigureFrames(tables, drawn);
         var pageFragments = tables.Count > 0 || UseFlowEngine ? AbsorbPageFragments(page) : null;
-        if (tables.Count > 0) FillCellsFromPageFragments(tables, pageFragments!);
+        if (tables.Count > 0)
+        {
+            SplitUnruledColumns(tables, pageFragments!);
+            FillCellsFromPageFragments(tables, pageFragments!);
+        }
         if (UseFlowEngine)
         {
             // The flow engine also reads tables that have no rules, from the text
@@ -134,8 +141,8 @@ public sealed partial class TableAbsorber
         var absorber = new TextFragmentAbsorber();
         absorber.Visit(page);
         var fragments = new List<TextFragment>();
-        foreach (var f in absorber.TextFragments)
-            if (f.Rectangle is not null) fragments.Add(f);
+        foreach (var f in absorber.TextFragments.Where(f => f.Rectangle is not null))
+            fragments.Add(f);
         return fragments;
     }
 
@@ -191,7 +198,8 @@ public sealed partial class TableAbsorber
 
     /// <summary>Cut a single-segment fragment at the given x boundaries by its
     /// character geometry: a glyph goes to the piece on the side its left edge
-    /// lies on. Pieces keep the source page so they stay editable.</summary>
+    /// lies on, and a boundary falling inside a word cuts nothing. Pieces keep the
+    /// source page so they stay editable.</summary>
     private static List<TextFragment> SplitAtColumns(TextFragment f, List<double> bounds)
     {
         var result = new List<TextFragment>();
@@ -228,6 +236,11 @@ public sealed partial class TableAbsorber
         {
             var cut = start;
             while (cut < chars.Count && chars[cut + 1].Rectangle.LLX < b) cut++;
+            // A rule running through a word cuts nothing: the text overflows its
+            // cell (and is clipped there), it is not two cells' text.
+            if (cut > start && cut < chars.Count
+                && !char.IsWhiteSpace(text[cut - 1]) && !char.IsWhiteSpace(text[cut]))
+                continue;
             Emit(start, cut);
             start = cut;
         }
@@ -341,8 +354,9 @@ public sealed partial class TableAbsorber
                 if (score * 2 < degXs.Count) continue; // most stubs must land on columns
                 var capMinY = Math.Min(cap.V.Min(e => e.Y1), cap.H.Min(e => e.Y));
                 var capMaxY = Math.Max(cap.V.Max(e => e.Y2), cap.H.Max(e => e.Y));
-                var gap = capMinY > degMaxY ? capMinY - degMaxY
-                        : degMinY > capMaxY ? degMinY - capMaxY : 0;
+                double gap = 0;
+                if (capMinY > degMaxY) gap = capMinY - degMaxY;
+                else if (degMinY > capMaxY) gap = degMinY - capMaxY;
                 if (gap > 30) continue;
                 if (score > bestScore || (score == bestScore && gap < bestGap))
                 {
@@ -445,37 +459,6 @@ public sealed partial class TableAbsorber
             comp.V.Add(vEdges[vi]);
         }
         return byRoot.Values.ToList();
-    }
-
-    /// <summary>
-    /// Cluster horizontal-edge Y positions into bands separated by large vertical gaps.
-    /// Two tables stacked with a wide blank strip between them fall into separate bands;
-    /// a single table's inter-row gaps stay within one band. Returns each band's
-    /// (minY, maxY) span. A gap threshold well above normal row spacing keeps a single
-    /// table (even one with a tall row) intact — only genuine table-to-table gaps split.
-    /// </summary>
-    private static List<(double Min, double Max)> ComputeYBands(List<HEdge> hEdges)
-    {
-        var ys = hEdges.Select(e => e.Y).Distinct().ToList();
-        ys.Sort();
-        var bands = new List<(double Min, double Max)>();
-        if (ys.Count == 0) return bands;
-
-        // A band break is a blank vertical strip much larger than typical row spacing.
-        const double BandGap = 40;
-        double start = ys[0];
-        double prev = ys[0];
-        for (var i = 1; i < ys.Count; i++)
-        {
-            if (ys[i] - prev > BandGap)
-            {
-                bands.Add((start, prev));
-                start = ys[i];
-            }
-            prev = ys[i];
-        }
-        bands.Add((start, prev));
-        return bands;
     }
 
     /// <summary>BFS flood-fill to find connected valid cells.</summary>

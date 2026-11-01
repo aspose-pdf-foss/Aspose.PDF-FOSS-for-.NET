@@ -44,7 +44,7 @@ public sealed partial class PdfToHtmlConverter
         if (CidOrderingOf(font, reader) == "GB1") return "SimSun";
         Dictionary<int, string>? toUni = null;
         try { toUni = Text.TextAbsorber.ParseToUnicodeFromDict(font, reader); }
-        catch { }
+        catch { /* a ToUnicode map that does not parse - no CJK substitute */ }
         if (toUni is null) return null;
         foreach (var dst in toUni.Values)
             if (dst.Length > 0 && HtmlToPdfConverter.StlIdeograph(dst[0]))
@@ -136,7 +136,7 @@ public sealed partial class PdfToHtmlConverter
             var bytes = Text.SystemFontResolver.Resolve(family);
             if (bytes is not null) parser = new Text.GlyphOutlineParser(bytes);
         }
-        catch { }
+        catch { /* a font that cannot be found or read leaves the fallback in place */ }
         return cache[family] = parser;
     }
 
@@ -170,12 +170,9 @@ public sealed partial class PdfToHtmlConverter
     /// presentation forms).</summary>
     private static bool HasRtlCodepoint(string s)
     {
-        foreach (var c in s)
-            if (c is (>= (char)0x0590 and <= (char)0x08FF)
+        return s.Any(c => c is (>= (char)0x0590 and <= (char)0x08FF)
                 or (>= (char)0xFB1D and <= (char)0xFDFF)
-                or (>= (char)0xFE70 and <= (char)0xFEFF))
-                return true;
-        return false;
+                or (>= (char)0xFE70 and <= (char)0xFEFF));
     }
 
     /// <summary>The single character standing in for a multi-char ligature sequence.</summary>
@@ -199,17 +196,20 @@ public sealed partial class PdfToHtmlConverter
     private static int CodePointCount(string s)
     {
         var n = 0;
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) i++;
             n++;
+            i++;
         }
         return n;
     }
 
     private static bool AllInCmap(string s, HashSet<int> cmapChars)
     {
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             int cp = s[i];
             if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
@@ -218,6 +218,7 @@ public sealed partial class PdfToHtmlConverter
                 i++;
             }
             if (!cmapChars.Contains(cp)) return false;
+            i++;
         }
         return true;
     }

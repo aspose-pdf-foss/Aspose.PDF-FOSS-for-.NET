@@ -10,12 +10,12 @@ public class ChoiceField : Field
     internal ChoiceField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
     public ChoiceField(Document doc)
-        : base(BuildChoiceDict(new Rectangle(0, 0, 0, 0)), doc.Pages[1].Reader)
+        : base(BuildChoiceDict(new Rectangle(0, 0, 0, 0)), doc.Reader)
     {
     }
 
     public ChoiceField(Document doc, Rectangle rect)
-        : base(BuildChoiceDict(rect), doc.Pages[1].Reader)
+        : base(BuildChoiceDict(rect), doc.Reader)
     {
     }
 
@@ -56,8 +56,9 @@ public class ChoiceField : Field
 
         if (IsCombo)
         {
-            // Combo box: render only the selected value (single visible line).
-            var text = Value ?? string.Empty;
+            // Combo box: render only the selected value (single visible line), as the
+            // option's display text - /V holds the export value, which a viewer never shows.
+            var text = DisplayTextOf(Value ?? string.Empty);
             if (text.Length > 0)
             {
                 var escaped = EscapePdfText(text);
@@ -127,6 +128,21 @@ public class ChoiceField : Field
             catch (System.InvalidOperationException) { /* detached field */ }
         }
         return MakeStandardFontResources(fontName);
+    }
+
+    /// <summary>The display text of the option whose export value is <paramref name="exportValue"/>;
+    /// the value itself when no [export, display] pair carries it (typed text, plain options).</summary>
+    private string DisplayTextOf(string exportValue)
+    {
+        if (exportValue.Length == 0 || Reader.Resolve(Dict.Get("Opt")) is not PdfArray options) return exportValue;
+        foreach (var item in options)
+        {
+            if (Reader.Resolve(item) is PdfArray { Count: >= 2 } pair
+                && Reader.Resolve(pair[0]) is PdfString export && export.ToText() == exportValue
+                && Reader.Resolve(pair[1]) is PdfString display)
+                return display.ToText();
+        }
+        return exportValue;
     }
 
     /// <summary>Read the /Opt entries as a flat list of display strings.
@@ -249,16 +265,17 @@ public class ChoiceField : Field
             if (value is null || value.Count == 0)
                 Dict.Set("V", PdfNull.Instance);
             else if (value.Count == 1)
-                Dict.Set("V", new PdfString(System.Text.Encoding.UTF8.GetBytes(value[0])));
+                Dict.Set("V", Field.EncodePdfTextString(value[0]));
             else
             {
                 // Multiple selected values → /V array
                 var arr = new PdfArray();
                 foreach (var val in value)
-                    arr.Add(new PdfString(System.Text.Encoding.UTF8.GetBytes(val)));
+                    arr.Add(Field.EncodePdfTextString(val));
                 Dict.Set("V", arr);
             }
             SyncSelectedIndices(value);
+            RedrawSelection();
             // Mark the field dirty so an incremental save persists the selection change.
             if (OwnerDocument is not null && ObjectNumber >= 0)
                 OwnerDocument.MarkDirty(ObjectNumber, Dict);
@@ -346,6 +363,26 @@ public class ChoiceField : Field
         set => base.Value = value;
     }
 
+    /// <summary>A value set on a combo or list box is what its widget shows: the selected index
+    /// follows it and the appearance is drawn again for it, instead of the index and the
+    /// appearance standing as they were while /V alone changed. A radio group keeps its authored
+    /// states; a field whose widgets are its kids keeps their appearances.</summary>
+    protected override void SetValue(string? value)
+    {
+        base.SetValue(value);
+        if (this is RadioButtonField) return;
+        SyncSelectedIndices(value is null ? null : [value]);
+        RedrawSelection();
+    }
+
+    /// <summary>The widget of a combo or list box draws its new selection, whichever member picked it.</summary>
+    private void RedrawSelection()
+    {
+        if (this is RadioButtonField || !Dict.ContainsKey("Rect")) return;
+        Dict.Remove("AP");
+        GenerateAppearance();
+    }
+
     /// <summary>Add an option to the choice field.</summary>
     public void AddOption(string optionName)
     {
@@ -423,8 +460,8 @@ public class ChoiceField : Field
         if (Reader.ResolveDict(kid.Get("AP")) is { } ap
             && Reader.ResolveDict(ap.Get("N")) is { } n)
         {
-            foreach (var key in n.Keys)
-                if (key != "Off") return key;
+            var key = n.Keys.FirstOrDefault(key => key != "Off");
+            if (key is not null) return key;
         }
         var asName = kid.GetName("AS");
         return asName != "Off" ? asName : null;
@@ -542,8 +579,10 @@ public sealed class OptionCollection : ICollection<Option>
     /// <summary>Always false — the collection is mutable.</summary>
     public bool IsReadOnly => false;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false — the collection is not thread-safe.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Synchronization root for the collection.</summary>
     public object SyncRoot => this;
@@ -621,8 +660,10 @@ public sealed class OptionCollection : ICollection<Option>
         return false;
     }
 
+#pragma warning disable S927 // public API: the published parameter name
     /// <summary>Copies the materialised options into the supplied array starting at the given offset.</summary>
     public void CopyTo(Option[] array, int index) => Materialize().CopyTo(array, index);
+#pragma warning restore S927
 
     /// <summary>
     /// Removes the first option whose Value+Name match the supplied option. Returns true if a
@@ -678,11 +719,11 @@ public class ComboBoxField : ChoiceField
     public ComboBoxField() : base(BuildComboFieldDict(new Rectangle(0, 0, 0, 0)), PdfReader.Empty) { }
 
     /// <summary>Document-bound ctor; rectangle defaults to empty.</summary>
-    public ComboBoxField(Document doc) : base(BuildComboFieldDict(new Rectangle(0, 0, 0, 0)), doc.Pages[1].Reader) { }
+    public ComboBoxField(Document doc) : base(BuildComboFieldDict(new Rectangle(0, 0, 0, 0)), doc.Reader) { }
 
     /// <summary>Document-bound ctor with an explicit rectangle.</summary>
     public ComboBoxField(Document doc, Rectangle rect)
-        : base(BuildComboFieldDict(rect), doc.Pages[1].Reader)
+        : base(BuildComboFieldDict(rect), doc.Reader)
     {
     }
 
@@ -741,7 +782,7 @@ public class ListBoxField : ChoiceField
     /// Creates a new list box field associated with the document (page assigned via Form.Add).
     /// </summary>
     public ListBoxField(Document doc, Rectangle rect)
-        : base(BuildListFieldDict(rect), doc.Pages[1].Reader)
+        : base(BuildListFieldDict(rect), doc.Reader)
     {
     }
 

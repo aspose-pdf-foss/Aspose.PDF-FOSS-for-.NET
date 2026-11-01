@@ -32,7 +32,9 @@ internal static partial class HtmlToPdfConverter
     private sealed class LsPicture
     {
         public byte[] Bytes = null!;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double W, H;
+#pragma warning restore S3218
     }
 
     /// <summary>A text input's box: the metric line plus the UA border and padding, top and bottom.</summary>

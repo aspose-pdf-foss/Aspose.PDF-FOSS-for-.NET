@@ -20,7 +20,6 @@ private sealed class ShowTextArrayState
     public double segTx;
     public double segTy;
     public double consumedW;
-    public int lastStrLen;
     /// <summary>The decoded char range covered by the array's glyph-bearing pieces.</summary>
     public int inkStart = -1;
     public int inkEnd = -1;

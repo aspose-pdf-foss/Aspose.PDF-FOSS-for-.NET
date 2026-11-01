@@ -43,7 +43,7 @@ public class AutoTagCoverTests
     }
 
     private static string Text(double x, double y, string text, double size = 10)
-        => $"BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET\n";
+        => FormattableString.Invariant($"BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET\n");
 
     // The title at the left, two lines of 27 pt; at the right three smaller lines, each on a baseline of its own.
     private static readonly string Band = Text(170, 735, "Field Notes", 27) + Text(170, 707, "Yearbook", 27)

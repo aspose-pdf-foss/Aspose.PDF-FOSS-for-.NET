@@ -237,6 +237,13 @@ public partial class StructureElement : Element, ITextElement
     public virtual StructureElement AppendChild(StructureElement child)
         => AppendChildCore(child, validate: true);
 
+    /// <summary>Append <paramref name="child"/> with an optional
+    /// validation pass. FOSS-extra matching the
+    /// <c>StructureElement.AppendChild</c>
+    /// overload — validate=false skips the containment rules.</summary>
+    public void AppendChild(StructureElement child, bool validate)
+        => AppendChildCore(child, validate);
+
     // Elements this one references (/Ref, PDF 32000 §14.7.4.3) — e.g. a TOCI
     // referencing the header its entry navigates to. Written out by the
     // structure wiring on save, once every element has its object number.
@@ -257,7 +264,9 @@ public partial class StructureElement : Element, ITextElement
     /// structure tree (the /StructTreeRoot itself, or the single element
     /// directly under it).</summary>
     private bool IsDocumentRoot
+#pragma warning disable S3060 // the type test is the rule itself; moving it into the subclasses would scatter it
         => this is StructTreeRootElement || _parent is StructTreeRootElement;
+#pragma warning restore S3060
 
     /// <summary>Containment rules the authoring API enforces when
     /// validate=true: a Table may hold only row groups / rows / captions,
@@ -269,6 +278,7 @@ public partial class StructureElement : Element, ITextElement
         string? rule = null;
         if (child is TOCElement && !IsDocumentRoot)
             rule = "a TOC element may be a child of the root element only";
+#pragma warning disable S3060 // the type test is the rule itself; moving it into the subclasses would scatter it
         else if (child is TOCIElement && this is not TOCElement)
             rule = "a TOCI element may be a child of a TOC element only";
         else if (this is TableElement
@@ -276,6 +286,7 @@ public partial class StructureElement : Element, ITextElement
                      or TableTFootElement or CaptionElement))
             rule = "a Table element may hold only THead/TBody/TFoot/TR/Caption children";
         else if (this is TableTRElement && child is not (TableTHElement or TableTDElement))
+#pragma warning restore S3060
             rule = "a TR element may hold only TH/TD children";
         if (rule is not null)
             throw new Aspose.Pdf.Tagged.TaggedException(
@@ -349,7 +360,7 @@ public partial class StructureElement : Element, ITextElement
     public override string ToString()
     {
         var role = _dict.GetName("S");
-        return string.IsNullOrEmpty(role) ? GetType().Name : role!;
+        return string.IsNullOrEmpty(role) ? GetType().Name : role;
     }
 
     /// <summary>Attach <paramref name="child"/> as a child of this element,
@@ -430,13 +441,6 @@ public partial class StructureElement : Element, ITextElement
         }
     }
 
-    /// <summary>Append <paramref name="child"/> with an optional
-    /// validation pass. FOSS-extra matching the
-    /// <c>StructureElement.AppendChild</c>
-    /// overload — validate=false skips the containment rules.</summary>
-    public void AppendChild(StructureElement child, bool validate)
-        => AppendChildCore(child, validate);
-
     /// <summary>Set the element's text content (stored as
     /// /ActualText). FOSS-extra alias.</summary>
     public void SetText(string text) => ActualText = text;
@@ -476,11 +480,21 @@ public partial class StructureElement : Element, ITextElement
     /// its own (PositionSettings.IsInLineParagraph).</summary>
     internal bool _posInline;
 
+    /// <summary>Horizontal alignment of the element within its column
+    /// (PositionSettings.HorizontalAlignment).</summary>
+    internal HorizontalAlignment _posHAlign = HorizontalAlignment.None;
+
+    /// <summary>A position was requested at all: a paragraph placed through
+    /// AdjustPosition drops its default 2 pt margins, an unstated margin counting as 0.</summary>
+    internal bool _posAdjusted;
+
     /// <summary>Capture the requested layout position for an authored structure
-    /// element: Margin, IsInNewPage and IsInLineParagraph are stored so the
-    /// tagged-content renderer can place the block (Left/Right indent the column,
-    /// Top/Bottom add space around it, IsInNewPage breaks the page,
-    /// IsInLineParagraph flows the element inline).</summary>
+    /// element: Margin, HorizontalAlignment, IsInNewPage and IsInLineParagraph are
+    /// stored so the tagged-content renderer can place the block (Left/Right indent
+    /// the column, Top/Bottom add space around it, the alignment places the lines or
+    /// the box inside the indented column, IsInNewPage breaks the page,
+    /// IsInLineParagraph flows the element inline). VerticalAlignment has no effect
+    /// on a flowing block.</summary>
     public void AdjustPosition(Aspose.Pdf.Tagged.PositionSettings settings)
     {
         if (settings is null) return;
@@ -488,6 +502,8 @@ public partial class StructureElement : Element, ITextElement
             _positionMargin = settings.Margin;
         _posInNewPage = settings.IsInNewPage;
         _posInline = settings.IsInLineParagraph;
+        _posHAlign = settings.HorizontalAlignment;
+        _posAdjusted = true;
     }
 
     /// <summary>Move this element under <paramref name="newParent"/>.
@@ -642,6 +658,6 @@ public partial class StructureElement : Element, ITextElement
     private void SetString(string key, string? value)
     {
         if (string.IsNullOrEmpty(value)) _dict.Remove(key);
-        else _dict.Set(key, new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+        else _dict.Set(key, Aspose.Pdf.Forms.Field.EncodePdfTextString(value));
     }
 }

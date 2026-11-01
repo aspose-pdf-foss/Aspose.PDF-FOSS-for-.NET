@@ -48,7 +48,9 @@ public sealed partial class TextFragmentAbsorber
         {
             prevOf[i] = -1;
             if (runs[i].Text == "\r\n") continue;
+#pragma warning disable S4143 // not a blind overwrite: the slot is seeded first, then raised or finalised
             prevOf[i] = lastContent;
+#pragma warning restore S4143
             lastContent = i;
             var p = prevOf[i];
             if (p < 0) continue;

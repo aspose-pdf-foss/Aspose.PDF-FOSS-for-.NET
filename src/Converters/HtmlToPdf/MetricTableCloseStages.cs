@@ -47,16 +47,16 @@ internal static partial class HtmlToPdfConverter
                     mt.mps.curSeg.MarginBottomPt = mt.mps.curSeg.MarginBottomStatedPt ?? blockMarginEm * pFs;
                 }
                 var pMarkers = string.Concat(
-                    from Match pm in Regex.Matches(mt.mps.divText.ToString(), "\u0002\\d+\u0003")
+                    from Match pm in SafeRegex.Matches(mt.mps.divText.ToString(), "\u0002\\d+\u0003")
                     select pm.Value);
                 if (pMarkers.Length > 0)
                 {
-                    var cleaned = Regex.Replace(mt.mps.divText.ToString(), "\u0002\\d+\u0003", " ");
+                    var cleaned = SafeRegex.Replace(mt.mps.divText.ToString(), "\u0002\\d+\u0003", " ");
                     mt.mps.divText.Clear();
                     mt.mps.divText.Append(cleaned);
                     mt.text.Append(pMarkers);
                 }
-                CloseSeg(mt.mps, mt.text, mt.reportCells, mt.stdSerif);
+                CloseSeg(mt.mps, mt.text, mt.stdSerif);
             }
             // other wrapper flows keep the calibrated blank-line gap
             // (…a UA paragraph declaring `margin: 0` closes on the line break alone - probed on the

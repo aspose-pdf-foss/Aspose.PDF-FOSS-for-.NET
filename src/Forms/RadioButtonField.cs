@@ -126,7 +126,7 @@ public class RadioButtonField : ChoiceField
         var kidCount = 0;
         if (Dict.Get("Kids") is PdfArray existing) kidCount = existing.Count;
         var onState = string.IsNullOrEmpty(option.OptionName)
-            ? $"Option{kidCount + 1}" : option.OptionName!;
+            ? $"Option{kidCount + 1}" : option.OptionName;
 
         base.AddOption(onState); // /Opt entry on the parent field
 
@@ -144,20 +144,7 @@ public class RadioButtonField : ChoiceField
         ap.Set("N", n);
         kid.Set("AP", ap);
 
-        // /MK appearance characteristics: border colour (and background when set).
-        var mk = new PdfDictionary();
-        mk.Set("BC", ColorComponents(option.Characteristics.Border));
-        if (option.Characteristics.Background.A != 0)
-            mk.Set("BG", ColorComponents(option.Characteristics.Background));
-        kid.Set("MK", mk);
-
-        // /BS border width when the option carries a border.
-        if (option.Border is { Width: > 0 } border)
-        {
-            var bs = new PdfDictionary();
-            bs.Set("W", new PdfReal(border.Width));
-            kid.Set("BS", bs);
-        }
+        WriteOptionCharacteristics(option, kid);
 
         var kids = Dict.Get("Kids") as PdfArray;
         if (kids is null) { kids = new PdfArray(); Dict.Set("Kids", kids); }
@@ -166,13 +153,74 @@ public class RadioButtonField : ChoiceField
         option.KidDict = kid;
         option.KidReader = Reader;
         option.OwnerRadio = this;
+        _options.Add(option);
+    }
+
+    private readonly System.Collections.Generic.List<RadioButtonOptionField> _options = new();
+
+    /// <summary>The option's look on its widget: /MK border colour (and background when set) and the glyph
+    /// style as the ZapfDingbats caption character, /BS width when it carries a border. Written when the
+    /// option is added and again when the appearance is built, since callers style an option after adding it.</summary>
+    private static void WriteOptionCharacteristics(RadioButtonOptionField option, PdfDictionary kid)
+    {
+        var mk = new PdfDictionary();
+        mk.Set("BC", ColorComponents(option.Characteristics.Border));
+        if (option.Characteristics.Background.A != 0)
+            mk.Set("BG", ColorComponents(option.Characteristics.Background));
+        mk.Set("CA", new PdfString(Compat.Latin1.GetBytes(StyleCharacter(option.Style))));
+        kid.Set("MK", mk);
+        if (option.Border is { Width: > 0 } border)
+        {
+            var bs = new PdfDictionary();
+            bs.Set("W", new PdfReal(border.Width));
+            kid.Set("BS", bs);
+        }
+        else kid.Remove("BS");
+    }
+
+    /// <summary>The ZapfDingbats character of a glyph style, as /MK /CA carries it.</summary>
+    private static string StyleCharacter(BoxStyle style) => style switch
+    {
+        BoxStyle.Check => "4",
+        BoxStyle.Cross => "8",
+        BoxStyle.Diamond => "u",
+        BoxStyle.Square => "n",
+        BoxStyle.Star => "H",
+        _ => "l",
+    };
+
+    private static BoxStyle StyleOf(string? character) => character switch
+    {
+        "4" => BoxStyle.Check,
+        "8" => BoxStyle.Cross,
+        "u" => BoxStyle.Diamond,
+        "n" => BoxStyle.Square,
+        "H" => BoxStyle.Star,
+        _ => BoxStyle.Circle,
+    };
+
+    /// <summary>Gap between an option's widget and its caption, and the caption's vertical seat.</summary>
+    private const double CaptionGap = 2;
+
+    /// <summary>Writes the caption of every option placed by its own rectangle onto the page beside the
+    /// widget; an option the generator lays out in a table gets its caption from the table instead.</summary>
+    internal void PlaceOptionCaptions(Page page)
+    {
+        foreach (var option in _options)
+        {
+            if (option.Caption is not { } caption || string.IsNullOrEmpty(caption.Text) || option.PendingRect is not { } rect)
+                continue;
+            var size = caption.TextState.FontSize;
+            caption.Position = new Text.Position(rect.URX + CaptionGap, rect.LLY + Math.Max(0, (rect.Height - size) / 2));
+            new Text.TextBuilder(page) { SeatsInPageSpace = true }.AppendText(caption);
+        }
     }
 
     /// <summary>Position <paramref name="option"/>'s widget at <paramref name="rect"/> (page
     /// space) and register it in <paramref name="page"/>'s /Annots, so a radio option laid out
     /// by the generator round-trips as an interactive widget rather than just a drawn glyph.
     /// Refreshes the option's on/off appearance using its border and marker colours.</summary>
-    internal void PlaceOptionWidget(RadioButtonOptionField option, Page page, Rectangle rect)
+    internal static void PlaceOptionWidget(RadioButtonOptionField option, Page page, Rectangle rect)
     {
         var kid = option.KidDict;
         if (kid is null) return;
@@ -185,7 +233,7 @@ public class RadioButtonField : ChoiceField
 
         var annots = page.Dict.Get("Annots") as PdfArray;
         if (annots is null) { annots = new PdfArray(); page.Dict.Set("Annots", annots); }
-        foreach (var a in annots) if (ReferenceEquals(a, kid)) return; // already placed
+        if (annots.Any(a => ReferenceEquals(a, kid))) return; // already placed
         annots.Add(kid);
     }
 
@@ -197,8 +245,8 @@ public class RadioButtonField : ChoiceField
         if (w <= 0 || h <= 0) return;
         var onName = "Off";
         if (kid.Get("AP") is PdfDictionary apd && apd.Get("N") is PdfDictionary nd0)
-            foreach (var key in nd0.Keys) if (key != "Off") { onName = key; break; }
-        if (onName == "Off") onName = string.IsNullOrEmpty(option.OptionName) ? "On" : option.OptionName!;
+            onName = nd0.Keys.FirstOrDefault(key => key != "Off") ?? onName;
+        if (onName == "Off") onName = string.IsNullOrEmpty(option.OptionName) ? "On" : option.OptionName;
 
         var border = option.Characteristics.Border;
         var marker = option.DefaultAppearance?.TextColor ?? System.Drawing.Color.Black;
@@ -241,6 +289,8 @@ public class RadioButtonField : ChoiceField
     /// radio group render without a viewer's NeedAppearances pass.</summary>
     internal override void GenerateAppearance()
     {
+        foreach (var option in _options)
+            if (option.KidDict is { } kid) WriteOptionCharacteristics(option, kid);
         // Targets are the kid widgets carrying a /Rect; with none, the field's
         // own dict is the widget (a single-widget radio, e.g. one rebuilt from a
         // flat import).
@@ -269,25 +319,25 @@ public class RadioButtonField : ChoiceField
             double w = r.Width, h = r.Height;
             if (w <= 0 || h <= 0) continue;
 
-            // The on-state name is the non-"Off" key already present in /AP/N;
-            // failing that, /AS itself (if not "Off"); failing that, the field's
+            // The on-state name is the non-"Off" key already present in /AP/N; failing
+            // that, /AS itself (if not "Off"); failing that, the field's
             // /V (so a flat-imported single-widget radio adopts the selected
             // name); finally fall back to "On".
             var onName = "On";
             if (Reader.ResolveDict(kid.Get("AP")) is { } apd &&
                 Reader.ResolveDict(apd.Get("N")) is { } nd)
             {
-                foreach (var key in nd.Keys)
-                    if (key != "Off") { onName = key; break; }
+                var key = nd.Keys.FirstOrDefault(key => key != "Off");
+                if (key is not null) { onName = key; }
             }
             else if (kid.GetName("AS") is { } existingAs && existingAs != "Off")
                 onName = existingAs;
             else if (!string.IsNullOrEmpty(fieldOn) && fieldOn != "Off")
-                onName = fieldOn!;
+                onName = fieldOn;
 
             var n = new PdfDictionary();
-            n.Set(onName, BuildRadioStream(w, h, filled: true));
-            n.Set("Off", BuildRadioStream(w, h, filled: false));
+            n.Set(onName, BuildRadioStream(kid, w, h, filled: true));
+            n.Set("Off", BuildRadioStream(kid, w, h, filled: false));
             var ap = new PdfDictionary();
             ap.Set("N", n);
             kid.Set("AP", ap);
@@ -301,20 +351,41 @@ public class RadioButtonField : ChoiceField
         }
     }
 
-    private static PdfStream BuildRadioStream(double w, double h, bool filled)
+    /// <summary>The outline width of a widget without a /BS entry.</summary>
+    private const double DefaultOutlineWidth = 0.5;
+
+    /// <summary>The widget's outline in its /MK /BC colour and /BS /W width, and for the on state the
+    /// glyph its /MK /CA style names, instead of a black half-point disc whatever the option asked for.</summary>
+    private PdfStream BuildRadioStream(PdfDictionary kid, double w, double h, bool filled)
     {
+        var mk = Reader.ResolveDict(kid.Get("MK"));
+        var bs = Reader.ResolveDict(kid.Get("BS"));
+        var width = bs is not null && AsNumber(Reader.Resolve(bs.Get("W"))) is { } bw && bw > 0 ? bw : DefaultOutlineWidth;
+        var stroke = (mk is null ? null : MkColorOperator(mk.Get("BC"), fill: false)) ?? "0 0 0 RG";
+        var style = StyleOf(mk is null ? null : (Reader.Resolve(mk.Get("CA")) as PdfString)?.ToText());
         var sb = new System.Text.StringBuilder();
-        sb.Append("q 0.5 w 0 0 0 RG ");
+        sb.Append($"q {FmtNum(width)} w {stroke} ");
         double cx = w / 2, cy = h / 2, rad = System.Math.Min(w, h) / 2 - 1;
         if (rad <= 0) rad = System.Math.Min(w, h) / 2;
         sb.Append(CirclePath(cx, cy, rad)).Append("S ");
-        if (filled)
-        {
-            sb.Append("0 0 0 rg ");
-            sb.Append(CirclePath(cx, cy, rad * 0.5)).Append("f ");
-        }
+        if (filled) sb.Append("0 0 0 rg 0 0 0 RG 1 w ").Append(OnGlyph(style, cx, cy, rad));
         sb.Append("Q ");
         return MakeApXObject(sb.ToString(), w, h);
+    }
+
+    /// <summary>The on-state mark of a style, centred in the outline: a disc, a cross, a check, a square or a diamond.</summary>
+    private static string OnGlyph(BoxStyle style, double cx, double cy, double rad)
+    {
+        var half = rad * 0.5;
+        return style switch
+        {
+            BoxStyle.Cross => $"{FmtNum(cx - half)} {FmtNum(cy - half)} m {FmtNum(cx + half)} {FmtNum(cy + half)} l S "
+                            + $"{FmtNum(cx - half)} {FmtNum(cy + half)} m {FmtNum(cx + half)} {FmtNum(cy - half)} l S ",
+            BoxStyle.Check => $"{FmtNum(cx - half)} {FmtNum(cy)} m {FmtNum(cx - half * 0.3)} {FmtNum(cy - half)} l {FmtNum(cx + half)} {FmtNum(cy + half)} l S ",
+            BoxStyle.Square => $"{FmtNum(cx - half)} {FmtNum(cy - half)} {FmtNum(rad)} {FmtNum(rad)} re f ",
+            BoxStyle.Diamond => $"{FmtNum(cx)} {FmtNum(cy + half)} m {FmtNum(cx + half)} {FmtNum(cy)} l {FmtNum(cx)} {FmtNum(cy - half)} l {FmtNum(cx - half)} {FmtNum(cy)} l f ",
+            _ => CirclePath(cx, cy, half) + "f ",
+        };
     }
 
     /// <summary>Approximate a circle with four cubic Béziers (kappa = 0.5523).</summary>
@@ -400,11 +471,15 @@ public class RadioButtonField : ChoiceField
         }
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether this is a radio button (always true for RadioButtonField).</summary>
     public bool IsRadio => true;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether this is a pushbutton (always false for RadioButtonField).</summary>
     public bool IsPushbutton => false;
+#pragma warning restore S2325
 
     /// <summary>
     /// Currently selected value, or null if nothing is selected.
@@ -497,10 +572,7 @@ public class RadioButtonField : ChoiceField
     {
         var ap = Reader.ResolveDict(kid.Get("AP"));
         var n = ap is null ? null : Reader.ResolveDict(ap.Get("N"));
-        if (n is not null)
-            foreach (var k in n.Keys)
-                if (k != "Off") return k;
-        return null;
+        return n?.Keys.FirstOrDefault(k => k != "Off");
     }
 
     /// <summary>
@@ -547,10 +619,9 @@ public class RadioButtonField : ChoiceField
             var nObj = Reader.Resolve(apDict.Get("N"));
             if (nObj is PdfDictionary nDict)
             {
-                foreach (var key in nDict.Keys)
+                foreach (var key in nDict.Keys.Where(key => key != "Off" && seen.Add(key)))
                 {
-                    if (key != "Off" && seen.Add(key))
-                        values.Add(key);
+                    values.Add(key);
                 }
             }
         }

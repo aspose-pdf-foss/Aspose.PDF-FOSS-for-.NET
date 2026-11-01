@@ -88,10 +88,12 @@ public sealed partial class TextReplacer
             _replacementCount++;
         }
         else if (TryReplaceTJArray(arr, search, replacement,
-            rr.currentToUnicode, rr.currentFontDict, reader, rr.currentFontSize) is { } newArr)
+            rr.currentToUnicode, rr.currentFontDict, reader, rr.currentFontSize,
+            ReflowLineOnReplace && PenCarriesOn(streamBytes, endPos)) is { } newArr)
         {
             WriteTJArray(rr.result, newArr);
             rr.result.Write(" TJ"u8);
+            RecordFollowerShift(rr, arr, newArr, reader);
             _replacementCount++;
         }
 

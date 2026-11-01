@@ -5,8 +5,13 @@ namespace Aspose.Pdf.Text;
 
 public sealed partial class TextParagraph
 {
-    /// <summary>Record one built visual line against the fragment it came from.</summary>
-    private void Emit(VisualLinesState vl, List<(string, TextState)> line) { vl.result.Add(line); _visualLineFragments.Add(vl.current!); }
+    /// <summary>Record one built visual line against the fragment it came from, and whether a wrap ended it.</summary>
+    private void Emit(VisualLinesState vl, List<(string, TextState)> line, bool wrapped = false)
+    {
+        vl.result.Add(line);
+        _visualLineFragments.Add(vl.current!);
+        _visualLineWrapped.Add(wrapped);
+    }
 
     /// <summary>Emit a single run (one TextState) as one-or-more visual lines via the
     /// historical per-run wrap, which also handles discretionary hyphenation.</summary>
@@ -15,8 +20,11 @@ public sealed partial class TextParagraph
         if (vl.wrap)
         {
             foreach (var hardLine in runText.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
-                foreach (var wl in WrapText(hardLine, ts.Font, ts.FontSize, vl.maxWidth, vl.wrapMode))
-                    Emit(vl, new List<(string, TextState)> { (wl, ts) });
+            {
+                var lines = WrapText(hardLine, ts.Font, ts.FontSize, vl.maxWidth, vl.wrapMode);
+                for (var k = 0; k < lines.Count; k++)
+                    Emit(vl, new List<(string, TextState)> { (lines[k], ts) }, k < lines.Count - 1);
+            }
         }
         else
         {

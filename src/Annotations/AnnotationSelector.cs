@@ -30,6 +30,10 @@ public class AnnotationSelector
         _template = annotation;
     }
 
+    /// <summary>Called for an annotation of a kind with no typed Visit overload (a sound, a printer's mark or
+    /// trap network read from a file, a subtype this library does not model): it is selected like any other.</summary>
+    internal void Admit(Annotation annotation) => Match(annotation);
+
     private void Match(Annotation annotation)
     {
         if (annotation is null) return;
@@ -41,6 +45,9 @@ public class AnnotationSelector
         // (the cast '(LinkAnnotation)anno' would otherwise crash when a
         // StampAnnotation was admitted on a mixed-annotation page).
         if (_template is not null && annotation.GetType() != _template.GetType())
+            return;
+        // The kinds this library does not model share one class: a template of one selects that kind alone.
+        if (_template is GenericAnnotation generic && annotation.AnnotationType != generic.AnnotationType)
             return;
         Selected.Add(annotation);
     }
@@ -100,8 +107,8 @@ public class AnnotationSelector
     /// <summary>Called for each underline annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(UnderlineAnnotation underline) => Match(underline);
 
-    /// <summary>Visit the WatermarkAnnotation builder type.</summary>
-    public virtual void Visit(WatermarkAnnotation watermark) { _ = watermark; }
+    /// <summary>Called for each watermark annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
+    public virtual void Visit(WatermarkAnnotation watermark) => Match(watermark);
 
     /// <summary>Called for each widget annotation during a walk; the default implementation adds it to <c>Selected</c> (only when its class matches the template annotation, if one was given). Override to filter.</summary>
     public virtual void Visit(WidgetAnnotation widget) => Match(widget);
@@ -271,7 +278,7 @@ public sealed partial class ColorBarAnnotation : Annotation
         for (var i = 0; i < n; i++)
         {
             double px, py, pw, ph;
-            if (vertical) { pw = w; ph = h / n; px = r.LLX; py = r.LLY + i * ph; }
+            if (vertical) { ph = h / n; px = r.LLX; py = r.LLY + i * ph; }
             else { pw = w / n; ph = h; px = r.LLX + i * pw; py = r.LLY; }
             if (ColorBarTints[i] >= 50) b.SetFillColor(1, 1, 1);
             else b.SetFillColor(ColorBarTintColor(100));
@@ -326,8 +333,10 @@ public sealed partial class ColorBarAnnotation : Annotation
     }
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>A 3D annotation that shows 3D artwork (U3D or PRC data) in a rectangle on the page. The artwork, its views and its poster image can be read from an existing document.</summary>
 public sealed partial class PDF3DAnnotation : Annotation
+#pragma warning restore S101
 {
     private byte[] _imagePreview = System.Array.Empty<byte>();
     private int _defaultViewIndex;
@@ -452,9 +461,9 @@ public sealed partial class PDF3DAnnotation : Annotation
             // A DCT/JPX poster's raw stream IS the image file; other filters
             // (flate pixel data) hand back the decoded samples.
             var filter = reader.Resolve(img.Dict.Get("Filter"));
-            var filterName = filter is PdfName fn ? fn.Value
-                : filter is PdfArray { Count: 1 } fa && reader.Resolve(fa[0]) is PdfName fan ? fan.Value
-                : null;
+            string? filterName = null;
+            if (filter is PdfName fn) filterName = fn.Value;
+            else if (filter is PdfArray { Count: 1 } fa && reader.Resolve(fa[0]) is PdfName fan) filterName = fan.Value;
             if (filterName is "DCTDecode" or "JPXDecode")
                 return img.RawData;
             byte[] samples;
@@ -592,10 +601,9 @@ public sealed partial class PDF3DAnnotation : Annotation
 
         // A view that names no lighting scheme / render mode inherits the
         // default view's; the viewer-default scheme is Headlamp over Solid.
+        var viewIndex = _defaultViewIndex >= 1 && _defaultViewIndex <= artwork.ViewArray.Count ? _defaultViewIndex : 1;
         var defView = _annotDefaultView
-            ?? (artwork.ViewArray.Count > 0
-                ? artwork.ViewArray[_defaultViewIndex >= 1 && _defaultViewIndex <= artwork.ViewArray.Count ? _defaultViewIndex : 1]
-                : null);
+            ?? (artwork.ViewArray.Count > 0 ? artwork.ViewArray[viewIndex] : null);
         var defLs = defView?.LightingScheme ?? new PDF3DLightingScheme(LightingSchemeType.Headlamp);
         var defRm = defView?.RenderMode ?? new PDF3DRenderMode(RenderModeType.Solid);
         if (defView is not null)

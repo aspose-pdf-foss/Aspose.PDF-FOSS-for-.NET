@@ -15,6 +15,10 @@ private sealed class TableParseState
     public int boldDepth = 0;
     /// <summary>Word mail: cell runs face from their paragraph class, bold runs split, td borders read per side.</summary>
     public bool wordMailCells = false;
+    /// <summary>The table stands in another table's cell (built for the nested grid render).</summary>
+    public bool nestedGrid = false;
+    /// <summary>The form-grid dialect (its mixed-weight lines draw through FormGridRuns).</summary>
+    public bool formGridDialect = false;
     /// <summary>Word mail: the open paragraph's `line-height: N%`, and the percent each pushed line was paced at.</summary>
     public double curLineHeightPct = 0;
     public Dictionary<int, double>? lineHeightPctByIdx = null;
@@ -32,8 +36,15 @@ private sealed class TableParseState
     // <table> nesting depth: 1 inside the outer table, >1 inside a table
     // nested in a cell (whose structure tags must not drive the outer grid).
     public int tableDepth = 0;
+    // The position of the open row in its row group (1-based; a hidden row counts, as the browser counts it),
+    // and whether the sheet addresses rows by position at all (read once at the first cell).
+    public int rowOrdinal = 0;
+    public bool? rowPositionRules = null;
     public int hiddenSubDepth = 0;
     public string? hiddenSubTag = null;
+    /// <summary>The sheet's descendant rules that hide their target, and the elements open in the current cell they match against.</summary>
+    public List<(string Context, string Target, string Prop)> hidingChains = null!;
+    public List<HtmlNode>? cellOpenElems = null;
     public int dwSelectDepth = 0;
     public bool dwTextareaOpen = false;
     public StringBuilder dwOptBuf = new StringBuilder();
@@ -192,6 +203,9 @@ private sealed class TableParseState
     // build their whole column grid out of `<img width="15" height="1">` spacer
     // GIFs, and a text-only measure leaves every one of those columns empty.
     public double cellImgWidthPt = 0;
+    // The widest image sized as a FRACTION of the cell (pt, its own width): it shrinks with the
+    // column, so it is max-content only - the column may grow to it, never has to.
+    public double cellImgMaxPt = 0;
     // The widest UA text control the cell holds (pt): its intrinsic box plus the advance its
     // chrome adds - the UA grid seats the control at that width whatever the column was asked,
     // so the probe floors the column with it (see OpenInputControl).
@@ -232,8 +246,8 @@ private sealed class TableParseState
     // left untouched.)
     public int cellRowSpan = 1;
     // Declared-ZERO bottom padding on a cell (overrides the table's
-    // cellpadding — the filing shell's `padding-bottom: 0px` host cells;
-    // the top half of the pair stays, matching the expected row seats).
+    // cellpadding — the filing shell's `padding-bottom: 0px` host cells; the
+    // top half of the pair stays, matching the expected row seats).
     public bool cellVPadZeroBot = false;
     // Legacy WIDTH="N%" cell attributes (the classic empty sizing row of filing
     // HTML) declare the column split as fractions of the table width. Tracked
@@ -280,8 +294,14 @@ private sealed class TableParseState
     public bool resetSheetGrid = false;
     /// <summary>The UA serif flow's control grid (checkbox/radio cells): an empty cell keeps one line box, as the browser's does.</summary>
     public bool uaControlGrid;
+    /// <summary>No table or cell rule faces the grid: its cells inherit the face the body rule names, drawn through that face's own variants.</summary>
+    public bool bodyFaceCells;
     /// <summary>The UA control grid's checkbox fields of the open cell, in document order (they join the cell as paragraphs at its close).</summary>
     public List<Aspose.Pdf.Forms.CheckboxField>? cellCheckboxes;
+    /// <summary>A field-cell grid's fields of the open cell, in document order (they join the cell as paragraphs at its close).</summary>
+    public List<Aspose.Pdf.Forms.Field>? cellFields;
+    /// <summary>The select or textarea of a field-cell grid whose tokens are passing.</summary>
+    public GridFieldCapture? fieldCapture;
     /// <summary>The page sheet's `th` rule: header cells fill with its background and seat their text by its text-align.</summary>
     public Color? thBackground = null;
     public HorizontalAlignment? thAlign = null;

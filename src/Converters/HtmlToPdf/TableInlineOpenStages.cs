@@ -17,7 +17,7 @@ internal static partial class HtmlToPdfConverter
                     (io.ps.lineDecorUnion ??= new()).Add((kind, c));
             }
             if (rdA.TryGetValue("style", out var rdSt) && rdSt is not null
-                && Regex.Match(rdSt, @"text-decoration\s*:\s*([^;]+)",
+                && SafeRegex.Match(rdSt, @"text-decoration\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase) is { Success: true } rdTd)
             {
                 var rdv = rdTd.Groups[1].Value;
@@ -61,34 +61,34 @@ internal static partial class HtmlToPdfConverter
                     + (CssBoxSidePt(inl, "padding", "padding-left", 3, uaFs) ?? 0);
                 if (uaInset > 0) io.ps.lineMarginLeft = uaInset;
             }
-            var fsm = Regex.Match(inl, @"font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+            var fsm = SafeRegex.Match(inl, @"font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
             if (fsm.Success && TryParseLength(fsm.Groups[1].Value.Trim()) is { } fsp) io.ps.curFontPt = fsp;
             // A UA-boxed cell's percent size is a percent of the running size (`font-size: 140%` at
             // Verdana 6 -> 8.4).
             else if (fsm.Success && io.ps.uaCellBoxes
-                && Regex.Match(fsm.Groups[1].Value.Trim(), @"^([\d.]+)\s*%$") is { Success: true } fpm
+                && SafeRegex.Match(fsm.Groups[1].Value.Trim(), @"^([\d.]+)\s*%$") is { Success: true } fpm
                 && double.TryParse(fpm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var fPct) && fPct > 0)
                 io.ps.curFontPt = (io.ps.curFontPt > 0 ? io.ps.curFontPt : io.ps.uaBaseFontPt) * fPct / 100.0;
-            var ffm = Regex.Match(inl, @"font-family\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+            var ffm = SafeRegex.Match(inl, @"font-family\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
             if (ffm.Success && FirstFontFamily(ffm.Groups[1].Value) is { Length: > 0 } fam) io.ps.curFamily = fam;
             // The redline document QUOTES its families
             // (`font-family: 'Times New Roman'`) — read through
             // the quotes where the bare read came up empty.
             else if ((io.redlineCells || io.ps.wordMailCells)
-                && Regex.Match(inl, @"font-family\s*:\s*['""]([^'"";]+)['""]",
+                && SafeRegex.Match(inl, @"font-family\s*:\s*['""]([^'"";]+)['""]",
                     RegexOptions.IgnoreCase) is { Success: true } ffq
                 && FirstFontFamily(ffq.Groups[1].Value) is { Length: > 0 } famq)
                 io.ps.curFamily = famq;
             // …and its own colour: `<p style="color:#004178">` paints THIS
             // paragraph, while its black sibling in the same cell stays black.
-            var colm = Regex.Match(inl, @"(?<![-\w])color\s*:\s*([^;""']+)",
+            var colm = SafeRegex.Match(inl, @"(?<![-\w])color\s*:\s*([^;""']+)",
                 RegexOptions.IgnoreCase);
             if (colm.Success && ParseCssColor(colm.Groups[1].Value.Trim()) is { } inlCol)
                 io.ps.curColor = inlCol;
             // An inline font-weight (the expanded `font: bold …` shorthand)
             // opens a bold run like <b> does, restored at the closing tag.
-            if (Regex.IsMatch(inl, @"font-weight\s*:\s*(bold|[7-9]00)", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(inl, @"font-weight\s*:\s*(bold|[7-9]00)", RegexOptions.IgnoreCase))
             {
                 io.styleBold = true;
                 UaMarkBoldRun(io.ps, io.ps.boldDepth > 0);
@@ -99,7 +99,7 @@ internal static partial class HtmlToPdfConverter
             // An inline font-style italic opens an italic run the same
             // way (the form-grid band titles), restored at the close.
             if ((io.formGridDialect || (io.ps.uaCellBoxes))
-                && Regex.IsMatch(inl, @"font-style\s*:\s*italic", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(inl, @"font-style\s*:\s*italic", RegexOptions.IgnoreCase))
             {
                 io.styleItalic = true;
                 io.ps.italicDepth++;
@@ -144,7 +144,7 @@ internal static partial class HtmlToPdfConverter
                     && FirstFontFamily(rff) is { Length: > 0 } rfam) io.ps.curFamily = rfam;
                 if (io.ps.sheetTdBoxRule && !io.styleBold
                     && rcd.TryGetValue("font-weight", out var rfw)
-                    && Regex.IsMatch(rfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
+                    && SafeRegex.IsMatch(rfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
                 {
                     io.styleBold = true;
                     io.ps.boldDepth++;
@@ -162,7 +162,8 @@ internal static partial class HtmlToPdfConverter
             var fDigits = 0;
             while (fDigits < fst.Length && (char.IsDigit(fst[fDigits])
                    || (fDigits == 0 && fst[0] is '+' or '-'))) fDigits++;
-            if (fDigits > 0 && int.TryParse(fst[..fDigits], out var fSz))
+            if (fDigits > 0 && int.TryParse(fst[..fDigits], System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var fSz))
             {
                 if (fst[0] is '+' or '-') fSz = 3 + fSz;
                 io.ps.curFontPt = HtmlFontSizeToPt(Compat.Clamp(fSz, 1, 7));
@@ -184,9 +185,11 @@ internal static partial class HtmlToPdfConverter
                     chSpanElem.Display = sdisp.Trim().ToLowerInvariant();
                 if (srd.TryGetValue("font-size", out var sfs))
                 {
-                    var sBase = io.ps.curFontPt > 0 ? io.ps.curFontPt
-                        : io.ps.cellClassPt > 0 ? io.ps.cellClassPt : io.cellFontSize;
-                    var spm = Regex.Match(sfs.Trim(), @"^([\d.]+)\s*%$");
+                    double sBase;
+                    if (io.ps.curFontPt > 0) sBase = io.ps.curFontPt;
+                    else if (io.ps.cellClassPt > 0) sBase = io.ps.cellClassPt;
+                    else sBase = io.cellFontSize;
+                    var spm = SafeRegex.Match(sfs.Trim(), @"^([\d.]+)\s*%$");
                     if (spm.Success && double.TryParse(spm.Groups[1].Value,
                             System.Globalization.NumberStyles.Float,
                             System.Globalization.CultureInfo.InvariantCulture, out var sPct)
@@ -199,14 +202,14 @@ internal static partial class HtmlToPdfConverter
                 // this run (`.SmallerTitle` under a bold plate).
                 if (srd.TryGetValue("font-weight", out var sfwN)
                     && io.ps.boldDepth > 0
-                    && Regex.IsMatch(sfwN, @"^\s*(normal|[1-5]00)", RegexOptions.IgnoreCase))
+                    && SafeRegex.IsMatch(sfwN, @"^\s*(normal|[1-5]00)", RegexOptions.IgnoreCase))
                 {
                     io.chainUnbold.Add((io.tag, io.ps.boldDepth));
                     io.ps.boldDepth = 0;
                 }
                 ChainBoxOpenMaybe(io.ps, io.options, io.cellFontSize, chSpanElem, srd);
                 if (!io.styleBold && srd.TryGetValue("font-weight", out var sfw)
-                    && Regex.IsMatch(sfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
+                    && SafeRegex.IsMatch(sfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
                 {
                     io.styleBold = true;
                     UaMarkBoldRun(io.ps, io.ps.boldDepth > 0);
@@ -223,7 +226,7 @@ internal static partial class HtmlToPdfConverter
     {
         if ((io.bandDialect || io.ptCellWidths || io.redlineCells) && io.tag == "p")
         {
-            var mtm = Regex.Match(inl, @"margin-top\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+            var mtm = SafeRegex.Match(inl, @"margin-top\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
             if (mtm.Success && double.TryParse(mtm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var pmt) && pmt > 0)
@@ -232,7 +235,7 @@ internal static partial class HtmlToPdfConverter
             // resolved font size), netted against a NEGATIVE text-indent —
             // the "margin-left:2em; text-indent:-2em" hanging-indent idiom
             // leaves the first line at the content edge.
-            var mlm = Regex.Match(inl, @"margin-left\s*:\s*([\d.]+)\s*(pt|em)", RegexOptions.IgnoreCase);
+            var mlm = SafeRegex.Match(inl, @"margin-left\s*:\s*([\d.]+)\s*(pt|em)", RegexOptions.IgnoreCase);
             if (mlm.Success && double.TryParse(mlm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var pml) && pml > 0)
@@ -240,7 +243,7 @@ internal static partial class HtmlToPdfConverter
                 var emBase = io.ps.curFontPt > 0 ? io.ps.curFontPt : 8;
                 var ml = mlm.Groups[2].Value.Equals("em", StringComparison.OrdinalIgnoreCase)
                     ? pml * emBase : pml;
-                var tim = Regex.Match(inl, @"text-indent\s*:\s*(-?[\d.]+)\s*(pt|em)", RegexOptions.IgnoreCase);
+                var tim = SafeRegex.Match(inl, @"text-indent\s*:\s*(-?[\d.]+)\s*(pt|em)", RegexOptions.IgnoreCase);
                 if (tim.Success && double.TryParse(tim.Groups[1].Value,
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out var ti) && ti < 0)
@@ -251,7 +254,7 @@ internal static partial class HtmlToPdfConverter
             // Redline cell paragraphs spell margin-top in a
             // 1-3 value shorthand (`margin: 4pt 0pt 0pt`).
             if (io.redlineCells && io.ps.cellFirstPMarginTopPt <= 0
-                && Regex.Match(inl,
+                && SafeRegex.Match(inl,
                     @"(?<![-\w])margin\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase) is { Success: true } rlcm
                 && double.TryParse(rlcm.Groups[1].Value,
@@ -260,7 +263,7 @@ internal static partial class HtmlToPdfConverter
                 && rlcmv > 0)
                 io.ps.cellFirstPMarginTopPt = rlcmv;
             if (io.redlineCells && io.ps.lineMarginTop <= 0
-                && Regex.Match(inl,
+                && SafeRegex.Match(inl,
                     @"(?<![-\w])margin\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase) is { Success: true } rlmt
                 && double.TryParse(rlmt.Groups[1].Value,
@@ -273,7 +276,7 @@ internal static partial class HtmlToPdfConverter
             // same way (`margin:0pt 6.4pt 0pt 1.7pt`), and
             // the RIGHT (2nd) narrows its wrap box.
             if (io.ptCellWidths
-                && Regex.Match(inl,
+                && SafeRegex.Match(inl,
                     @"(?<![-\w])margin\s*:\s*[\d.]+\w*\s+([\d.]+)\s*pt\s+[\d.]+\w*\s+([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase) is { Success: true } msh4)
             {
@@ -293,7 +296,7 @@ internal static partial class HtmlToPdfConverter
             // cell (the numeric columns' `text-align:right`
             // rides the <p>, not the <td>).
             if ((io.ptCellWidths || io.redlineCells)
-                && Regex.Match(inl, @"text-align\s*:\s*(left|right|center)",
+                && SafeRegex.Match(inl, @"text-align\s*:\s*(left|right|center)",
                     RegexOptions.IgnoreCase) is { Success: true } ptaM)
             {
                 io.ps.alignSet = true;
@@ -312,46 +315,51 @@ internal static partial class HtmlToPdfConverter
     {
         if (io.liftNestedTables && !io.bandDialect && io.tag == "p")
         {
-            var pEmBase = Regex.Match(inl, @"(?<![-\w])font-size\s*:\s*([^;""']+)",
+            double pEmBase;
+            if (SafeRegex.Match(inl, @"(?<![-\w])font-size\s*:\s*([^;""']+)",
                     RegexOptions.IgnoreCase) is { Success: true } pfm
-                && TryParseLength(pfm.Groups[1].Value.Trim()) is { } pfsPt && pfsPt > 0
-                ? pfsPt
-                : io.ps.curFontPt > 0 ? io.ps.curFontPt
-                : io.ps.cellClassPt > 0 ? io.ps.cellClassPt : io.cellFontSize;
+                && TryParseLength(pfm.Groups[1].Value.Trim()) is { } pfsPt && pfsPt > 0)
+                pEmBase = pfsPt;
+            else if (io.ps.curFontPt > 0) pEmBase = io.ps.curFontPt;
+            else if (io.ps.cellClassPt > 0) pEmBase = io.ps.cellClassPt;
+            else pEmBase = io.cellFontSize;
             double pTop = 0, pBot = 0;
-            if (Regex.Match(inl, @"(?<![-\w])margin\s*:\s*([^;""']+)",
+            if (SafeRegex.Match(inl, @"(?<![-\w])margin\s*:\s*([^;""']+)",
                     RegexOptions.IgnoreCase) is { Success: true } pShm)
             {
                 var parts = pShm.Groups[1].Value
                     .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                double PartPt(string v) =>
-                    v.EndsWith("em", StringComparison.OrdinalIgnoreCase)
-                    && double.TryParse(v[..^2], System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var em)
-                        ? em * pEmBase
-                        : TryParseLength(v) is { } abs ? abs : 0;
+                double PartPt(string v)
+                {
+                    if (v.EndsWith("em", StringComparison.OrdinalIgnoreCase)
+                        && double.TryParse(v[..^2], System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out var em))
+                        return em * pEmBase;
+                    if (TryParseLength(v) is { } abs) return abs;
+                    return 0;
+                }
                 if (parts.Length > 0) pTop = pBot = PartPt(parts[0]);
                 if (parts.Length >= 3) pBot = PartPt(parts[2]);
             }
-            if (Regex.Match(inl, @"(?<![-\w])margin-top\s*:\s*([^;""']+)",
+            if (SafeRegex.Match(inl, @"(?<![-\w])margin-top\s*:\s*([^;""']+)",
                     RegexOptions.IgnoreCase) is { Success: true } pTm)
             {
                 var v = pTm.Groups[1].Value.Trim();
-                pTop = v.EndsWith("em", StringComparison.OrdinalIgnoreCase)
+                if (v.EndsWith("em", StringComparison.OrdinalIgnoreCase)
                     && double.TryParse(v[..^2], System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var emT)
-                    ? emT * pEmBase
-                    : TryParseLength(v) is { } absT ? absT : pTop;
+                        System.Globalization.CultureInfo.InvariantCulture, out var emT))
+                    pTop = emT * pEmBase;
+                else if (TryParseLength(v) is { } absT) pTop = absT;
             }
-            if (Regex.Match(inl, @"(?<![-\w])margin-bottom\s*:\s*([^;""']+)",
+            if (SafeRegex.Match(inl, @"(?<![-\w])margin-bottom\s*:\s*([^;""']+)",
                     RegexOptions.IgnoreCase) is { Success: true } pBm)
             {
                 var v = pBm.Groups[1].Value.Trim();
-                pBot = v.EndsWith("em", StringComparison.OrdinalIgnoreCase)
+                if (v.EndsWith("em", StringComparison.OrdinalIgnoreCase)
                     && double.TryParse(v[..^2], System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var emB)
-                    ? emB * pEmBase
-                    : TryParseLength(v) is { } absB ? absB : pBot;
+                        System.Globalization.CultureInfo.InvariantCulture, out var emB))
+                    pBot = emB * pEmBase;
+                else if (TryParseLength(v) is { } absB) pBot = absB;
             }
             var pCollapsed = Math.Max(pTop, io.ps.cellPrevPBottomPt);
             if (pCollapsed > 0) io.ps.lineMarginTop = pCollapsed;
@@ -380,7 +388,7 @@ internal static partial class HtmlToPdfConverter
     {
         string? al = null;
         if (io.tok.Attributes!.TryGetValue("style", out var st)
-            && Regex.Match(st, @"text-align\s*:\s*(left|right|center)", RegexOptions.IgnoreCase) is { Success: true } m)
+            && SafeRegex.Match(st, @"text-align\s*:\s*(left|right|center)", RegexOptions.IgnoreCase) is { Success: true } m)
             al = m.Groups[1].Value;
         else if (io.tok.Attributes.TryGetValue("align", out var at)) al = at;
         if (al is null || ParseAlignAttr(al) is not { } a) return;
@@ -394,7 +402,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The percent of a `line-height: N%` declaration, 0 when the style carries none.</summary>
     private static double WordMailLineHeightPct(string? style)
         => style is not null
-            && Regex.Match(style, @"(?<![-\w])line-height\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase) is { Success: true } m
+            && SafeRegex.Match(style, @"(?<![-\w])line-height\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase) is { Success: true } m
             && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var pct) && pct > 0
             ? pct : 0;

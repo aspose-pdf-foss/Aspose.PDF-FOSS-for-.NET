@@ -60,7 +60,23 @@ public partial class Table
             && IsSerifCssFamily(sbtf.TextState.Font?.FontName)
             && (sk.fragBold ? BoldSerifTtf() : SerifTtf()) is { } spanSerifTtf)
         {
-            LayoutSpanBlockFaceLines(sk, paragraph, spanSerifTtf);
+            LayoutSpanBlockFaceLines(sk, paragraph, spanSerifTtf, sk.fragBold ? "Times New Roman Bold" : "Times New Roman");
+            StampSpanBlockParagraph(sk);
+            return true;
+        }
+        // …and a grid pitched on its own installed face (the inline or inherited face) draws its spanning
+        // cells in that face as its other cells, not in the Standard-14 fallback.
+        if (HonorCellTtfFaces && InlineFaceGridRatio > 0 && paragraph is TextFragment ftf
+            && ftf.TextState.Font?.FontName is { Length: > 0 } spanFace
+            && !ContainsCjk(sk.text!) && !Aspose.Pdf.Text.ArabicTextShaper.ContainsArabic(sk.text)
+            && CellFaceTtf(spanFace, sk.fragBold) is { } spanFaceTtf)
+        {
+            // (a mixed-weight line keeps its runs' weights, wrapped across them as in a grid cell)
+            if (HtmlWrapStyleRuns && ftf.FormGridRuns is { Count: > 1 } gridRuns && sk.text!.IndexOf('\n') < 0 && sk.availWidth > 0
+                && CellStyleRuns(gridRuns, spanFace, sk.fragBold, false) is { } spanRuns)
+                LayoutSpanBlockStyleRuns(sk, paragraph, spanRuns, spanFaceTtf, CellFaceName(spanFace, sk.fragBold, false));
+            else
+                LayoutSpanBlockFaceLines(sk, paragraph, spanFaceTtf, CellFaceName(spanFace, sk.fragBold, false));
             StampSpanBlockParagraph(sk);
             return true;
         }
@@ -106,7 +122,7 @@ public partial class Table
     }
 
     /// <summary></summary>
-    private void LayoutSpanBlockFaceLines(SpanBlockLinesState sk, BaseParagraph paragraph, byte[] spanSerifTtf)
+    private void LayoutSpanBlockFaceLines(SpanBlockLinesState sk, BaseParagraph paragraph, byte[] spanSerifTtf, string faceName)
     {
         if (sk.text!.IndexOf('☐') >= 0 || sk.text.IndexOf('☒') >= 0)
             sk.text = sk.text.Replace('☐', '□').Replace('☒', '□');
@@ -129,11 +145,32 @@ public partial class Table
                     ForegroundColor = sk.color,
                     Align = sk.fragAlign,
                     Type0Ttf = spanSerifTtf,
-                    Type0FontName = sk.fragBold ? "Times New Roman Bold" : "Times New Roman",
+                    Type0FontName = faceName,
                     KernTj = true,
                     KernedWidth = MeasureWidthKerned(l, sk.fragFontSize, spanSerifTtf),
                 });
         }
+        if (ParagraphMargin(paragraph) is { Top: > 0 } sbm && sk.block.Lines.Count > sk.fragFirstLine)
+            sk.block.Lines[sk.fragFirstLine].TopGap = sbm.Top;
+    }
+
+    /// <summary>A spanning cell's mixed-weight line as style runs, wrapped across them to the span's width.</summary>
+    private static void LayoutSpanBlockStyleRuns(SpanBlockLinesState sk, BaseParagraph paragraph,
+        List<(string Text, byte[] Ttf, string Name)> runs, byte[] faceTtf, string faceName)
+    {
+        foreach (var runLine in WrapStyleRuns(runs, sk.fragFontSize, sk.availWidth))
+            sk.block.Lines.Add(new CellLine
+            {
+                Text = runLine.Text,
+                FontSize = sk.fragFontSize,
+                ForegroundColor = sk.color,
+                Align = sk.fragAlign,
+                Type0Ttf = faceTtf,
+                Type0FontName = faceName,
+                StyleRuns = runLine.Runs,
+                KernTj = true,
+                KernedWidth = runLine.Width,
+            });
         if (ParagraphMargin(paragraph) is { Top: > 0 } sbm && sk.block.Lines.Count > sk.fragFirstLine)
             sk.block.Lines[sk.fragFirstLine].TopGap = sbm.Top;
     }
@@ -167,7 +204,7 @@ public partial class Table
                 sk.fragAlign = HorizontalAlignment.Right;
             else if (hAligned.IndexOf("text-align:center", StringComparison.OrdinalIgnoreCase) >= 0)
                 sk.fragAlign = HorizontalAlignment.Center;
-            var hfs = Regex.Match(html.HtmlContent ?? "", @"font-size\s*:\s*([\d.]+)\s*px",
+            var hfs = SafeRegex.Match(html.HtmlContent ?? "", @"font-size\s*:\s*([\d.]+)\s*px",
                 RegexOptions.IgnoreCase);
             if (hfs.Success && double.TryParse(hfs.Groups[1].Value, NumberStyles.Float,
                     CultureInfo.InvariantCulture, out var hpx) && hpx > 0)

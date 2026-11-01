@@ -40,5 +40,7 @@ private sealed class SearchFragmentState
     public List<int> charToRun = null!;
     public int[] runStartChar = null!;
     public int[]? bidiPerm = null;
+    // Folded search-text index -> index in the text as drawn (the char maps' space); null when nothing folded.
+    public int[]? foldMap = null;
 }
 }

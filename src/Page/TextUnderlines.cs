@@ -31,6 +31,11 @@ public sealed partial class Page
         _underlineRemovalFragments.Add(fragment);
     }
 
+    /// <summary>Take a fragment out of the save-time rule redraw: its underline was switched
+    /// off after a text change had registered it, so no rule is drawn under the new text.</summary>
+    internal void UnregisterUnderlineFragment(Text.TextFragment fragment)
+        => _underlineFragments?.Remove(fragment);
+
     /// <summary>
     /// Splice out the source underline rectangles for every registered removal fragment by
     /// matching their captured raw <c>re</c> operands against the page content operators.
@@ -59,6 +64,7 @@ public sealed partial class Page
         {
             if (frag.CapturedUnderlineSources is { } list) targets.AddRange(list);
             if (frag.CapturedBackgroundSources is { } bgList) targets.AddRange(bgList);
+            if (frag.CapturedStrikeOutSources is { } soList) targets.AddRange(soList);
             if (frag.CompanionRuleSources is { } compList) targets.AddRange(compList);
             if (_underlineFragments?.Contains(frag) == true
                 || _underlineRedrawn?.Contains(frag) == true) continue;
@@ -66,7 +72,8 @@ public sealed partial class Page
             var from = frag.SourceUnderlineRunEndX;
             if (from <= pr.Llx || pr.Urx - from <= 0.5) continue;
             var col = frag.TextState.ForegroundColor;
-            survivors.SaveState();
+            // Measured where the text was read - in the turned view of a page viewed turned - and appended.
+            SaveDecorationState(survivors, AppendedDecorationMatrix(frag.PositionFrame, FromReadFrame(frag.PositionFrame), inRunSpace: false));
             survivors.SetFillColor(col?.R / 255.0 ?? 0, col?.G / 255.0 ?? 0, col?.B / 255.0 ?? 0);
             survivors.Rectangle(from, pr.Lly, pr.Urx - from, pr.Ury - pr.Lly);
             survivors.Fill();
@@ -82,22 +89,24 @@ public sealed partial class Page
         // a bare `f*` behind, which fills whatever path happens to be current - an operator
         // list that reads as valid but is not what the page draws.
         var paintOfRe = new System.Collections.Generic.Dictionary<Operator, Operator>();
+        // A rectangle that sets a clip paints nothing: a cell clip sharing the geometry of a
+        // captured cell background stays, or every run drawn under it loses its clip.
+        var clipRects = new System.Collections.Generic.HashSet<Operator>();
+        var scan = ops.ToList();
+        for (var i = 0; i < scan.Count; i++)
         {
-            var scan = ops.ToList();
-            for (var i = 0; i < scan.Count; i++)
+            if (scan[i] is not Aspose.Pdf.Operators.Re && scan[i].CommandName != "re") continue;
+            for (var j = i + 1; j < scan.Count && j <= i + 2; j++)
             {
-                if (scan[i] is not Aspose.Pdf.Operators.Re && scan[i].CommandName != "re") continue;
-                for (var j = i + 1; j < scan.Count && j <= i + 2; j++)
-                {
-                    var cmd = scan[j].CommandName;
-                    if (cmd is "f" or "F" or "f*" or "b" or "b*" or "B" or "B*" or "n" or "s" or "S")
-                    { paintOfRe[scan[i]] = scan[j]; break; }
-                    if (cmd is not ("W" or "W*")) break;
-                }
+                var cmd = scan[j].CommandName;
+                if (cmd is "f" or "F" or "f*" or "b" or "b*" or "B" or "B*" or "n" or "s" or "S")
+                { paintOfRe[scan[i]] = scan[j]; break; }
+                if (cmd is not ("W" or "W*")) break;
+                clipRects.Add(scan[i]);
             }
         }
         var doomedPaint = new System.Collections.Generic.HashSet<Operator>();
-        var removed = ops.RemoveWhere(op => IsRemovedUnderlineOp(op, doomedPaint, targets, paintOfRe));
+        var removed = ops.RemoveWhere(op => !clipRects.Contains(op) && IsRemovedUnderlineOp(op, doomedPaint, targets, paintOfRe));
         // Persist the edited operator list back to the page content stream.
         if (removed > 0) ops.FlushToPage();
         if (anySurvivor)

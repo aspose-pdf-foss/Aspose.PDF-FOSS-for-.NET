@@ -242,8 +242,10 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         var maxX = (int)Math.Ceiling(Math.Max(p0x, Math.Max(p1x, p2x)));
         var minY = (int)Math.Floor(Math.Min(p0y, Math.Min(p1y, p2y)));
         var maxY = (int)Math.Ceiling(Math.Max(p0y, Math.Max(p1y, p2y)));
-        if (minX < 0) minX = 0; if (minY < 0) minY = 0;
-        if (maxX > ctx.PixelW) maxX = ctx.PixelW; if (maxY > ctx.PixelH) maxY = ctx.PixelH;
+        if (minX < 0) minX = 0;
+        if (minY < 0) minY = 0;
+        if (maxX > ctx.PixelW) maxX = ctx.PixelW;
+        if (maxY > ctx.PixelH) maxY = ctx.PixelH;
         if (maxX <= minX || maxY <= minY) return;
 
         // Edge-function denominator (twice signed area).
@@ -547,7 +549,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         {
             // Lab-encoded scanner-class ICC channels (L/100, (a+128)/255,
             // (b+128)/255 — see ContentStreamParser.IsLabEncodedIcc).
-            static double C(double v) => v < 0 ? 0 : v > 1 ? 1 : v;
+            static double C(double v) => v switch { < 0 => 0, > 1 => 1, _ => v };
             (rd, gd, bd) = LabColor.ToRgb(C(components[0]) * 100.0, C(components[1]) * 255.0 - 128.0,
                 C(components[2]) * 255.0 - 128.0);
         }

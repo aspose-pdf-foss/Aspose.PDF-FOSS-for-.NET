@@ -13,7 +13,6 @@ public sealed partial class Form : IDisposable
 {
     private Document? _doc;
     private readonly bool _ownsDoc;
-    private string? _destPath;
     private bool _ownsDestStream;
     private FormImportResult[] _importResult = Array.Empty<FormImportResult>();
 
@@ -60,7 +59,7 @@ public sealed partial class Form : IDisposable
     public Form(Document document, string destFileName)
     {
         _doc = document;
-        _destPath = destFileName;
+        DestFileName = destFileName;
     }
 
     /// <summary>Create a Form facade from input and output file paths.</summary>
@@ -68,7 +67,7 @@ public sealed partial class Form : IDisposable
     {
         _doc = Document.Open(srcFileName);
         _ownsDoc = true;
-        _destPath = destFileName;
+        DestFileName = destFileName;
         // Callers reach for DestStream directly, so it exists from construction. The handle
         // is shared and released on Dispose: several facades are routinely pointed at one
         // destination, and an exclusive handle held for the facade's lifetime would fail the
@@ -123,7 +122,7 @@ public sealed partial class Form : IDisposable
     public Form(Stream srcStream, string destFileName)
         : this(srcStream)
     {
-        _destPath = destFileName;
+        DestFileName = destFileName;
     }
 
     /// <summary>The underlying document.</summary>
@@ -205,8 +204,10 @@ public sealed partial class Form : IDisposable
     }
 
     private Aspose.Pdf.PdfFormat? _convertTo;
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>Target PDF/A or PDF version for the saved output. Stored only; the save path emits plain PDF.</summary>
     public Aspose.Pdf.PdfFormat ConvertTo
+#pragma warning restore S2376
     {
         set => _convertTo = value;
     }
@@ -266,7 +267,9 @@ public sealed partial class Form : IDisposable
         // template into a flattened static page is a separate, unimplemented feature.
         if (_doc.Form.IsXfa)
         {
-            if (_doc.Form.Type == FormType.Dynamic)
+            // The pages of a form the catalog asks a viewer to build only carry a notice:
+            // the form is laid out onto them, as it stands before its fields are locked.
+            if (_doc.LayOutXfaForm() || _doc.Form.Type == FormType.Dynamic)
             {
                 _doc.Form.SetXfaFieldsReadOnly();
                 return;
@@ -278,6 +281,8 @@ public sealed partial class Form : IDisposable
             // the folded appearances are subset-embedded at save so the flattened text
             // keeps an embedded font.
             _doc.EmbedStandardFonts = true;
+            // A value the datasets alone hold is what a viewer shows: it goes into its widget before the fold.
+            _doc.Form.MergeXfaDataIntoEmptyFields();
             _doc.Form.Flatten(_doc,
                 settings: new Forms.Form.FlattenSettings { HideButtons = true, UpdateAppearances = false },
                 frmStartIndex: 1, flattenNonWidgets: true);
@@ -294,11 +299,7 @@ public sealed partial class Form : IDisposable
     }
 
     /// <summary>Destination file name for saving.</summary>
-    public string? DestFileName
-    {
-        get => _destPath;
-        set => _destPath = value;
-    }
+    public string? DestFileName { get; set; }
 
     /// <summary>Destination stream for saving.</summary>
     public Stream? DestStream { get; set; }
@@ -314,12 +315,18 @@ public sealed partial class Form : IDisposable
             _doc.SetVersion(name.Substring(2).Replace('_', '.'));
     }
 
+    /// <summary>The document's bytes for a save. A signed document is updated incrementally so the
+    /// original bytes (and thus the existing signature's /ByteRange) survive; a full rewrite
+    /// would invalidate the signature.</summary>
+    private byte[] SerializedBytes()
+        => _doc!.Form is { SignaturesExist: true } ? _doc.ToArrayIncremental() : _doc.ToArray();
+
     /// <summary>Save the modified document.</summary>
     public void Save()
     {
         if (_doc is null) return;
         ApplyConvertTo();
-        var bytes = _doc.ToArray();
+        var bytes = SerializedBytes();
         if (DestStream is not null)
         {
             // The destination may be the very stream the document was read from
@@ -347,9 +354,9 @@ public sealed partial class Form : IDisposable
                 DestStream.Flush();
             }
         }
-        else if (_destPath is not null)
+        else if (DestFileName is not null)
         {
-            File.WriteAllBytes(_destPath, bytes);
+            File.WriteAllBytes(DestFileName, bytes);
         }
     }
 
@@ -358,7 +365,7 @@ public sealed partial class Form : IDisposable
     {
         if (_doc is null) return;
         ApplyConvertTo();
-        File.WriteAllBytes(destFile, _doc.ToArray());
+        File.WriteAllBytes(destFile, SerializedBytes());
     }
 
     /// <summary>Save the modified document to a stream.</summary>
@@ -366,7 +373,7 @@ public sealed partial class Form : IDisposable
     {
         if (_doc is null) return;
         ApplyConvertTo();
-        var bytes = _doc.ToArray();
+        var bytes = SerializedBytes();
         destStream.Write(bytes, 0, bytes.Length);
     }
 
@@ -375,7 +382,7 @@ public sealed partial class Form : IDisposable
     {
         if (_doc is null) return [];
         ApplyConvertTo();
-        return _doc.ToArray();
+        return SerializedBytes();
     }
 
     /// <summary>Close the facade.</summary>
@@ -474,7 +481,7 @@ public sealed partial class Form : IDisposable
     public void RenameField(string fieldName, string newFieldName)
     {
         if (_doc?.Form is null) return;
-        _doc.Form.FindFieldOrNull(fieldName)?.SetPartialName(newFieldName);
+        _doc.Form.RenameField(fieldName, newFieldName);
     }
 
 }

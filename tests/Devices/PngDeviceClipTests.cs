@@ -106,6 +106,73 @@ public class PngDeviceClipTests
         AssertPixel(rgba, 612, x: 225, y: 67, r: 255, g: 0, b: 0);
     }
 
+    [Fact]
+    public void ClipOfASingleMoveToHidesWhatFollows()
+    {
+        // A path of one point encloses nothing: the fill after it is clipped away entirely.
+        var pdf = PdfBuilder.BuildWithTextContent(Encoding.ASCII.GetBytes(
+            "300 400 m W n\n0 0 1 rg\n0 0 612 792 re f"));
+
+        AssertPixel(RenderToRgba(pdf), 612, x: 300, y: 392, r: 255, g: 255, b: 255);
+    }
+
+    [WindowsOnlyFact]
+    public void ClipOfASingleMoveToHidesWhatFollows_OnTheNativeSurface()
+    {
+        var pdf = PdfBuilder.BuildWithTextContent(Encoding.ASCII.GetBytes(
+            "300 400 m W n\n0 0 1 rg\n0 0 612 792 re f"));
+
+#pragma warning disable CA1416 // Windows-only renderer, guarded by the attribute
+        var rgba = new GdiPlusPageRenderer().RenderPage(pdf, 1, 72).Data;
+#pragma warning restore CA1416
+        AssertPixel(rgba, 612, x: 300, y: 392, r: 255, g: 255, b: 255);
+        AssertPixel(rgba, 612, x: 100, y: 100, r: 255, g: 255, b: 255);
+    }
+
+    [Fact]
+    public void ClipThinnerThanAPixelKeepsThePixelsItRunsAlong()
+    {
+        // A band 0.3 px wide between two pixel centres, 100 px long: one column of it is painted.
+        var rgba = RenderToRgba(PdfBuilder.BuildWithTextContent(Encoding.ASCII.GetBytes(ThinBandContent)));
+
+        Assert.Equal(ThinBandRows, BlueInRows(rgba, ThinBandTop, ThinBandTop + ThinBandRows));
+    }
+
+    [WindowsOnlyFact]
+    public void ClipThinnerThanAPixelKeepsThePixelsItRunsAlong_OnTheNativeSurface()
+    {
+        var pdf = PdfBuilder.BuildWithTextContent(Encoding.ASCII.GetBytes(ThinBandContent));
+
+#pragma warning disable CA1416 // Windows-only renderer, guarded by the attribute
+        var rgba = new GdiPlusPageRenderer().RenderPage(pdf, 1, 72).Data;
+#pragma warning restore CA1416
+        Assert.Equal(ThinBandRows, BlueInRows(rgba, ThinBandTop, ThinBandTop + ThinBandRows));
+    }
+
+    // x 300.6..300.9, y 400..500 on a 792 pt page at 72 dpi: rows 292..391; the first and last rows are
+    // left out of the count, where the band's ends decide.
+    private const string ThinBandContent =
+        "300.6 400 m 300.9 400 l 300.9 500 l 300.6 500 l h W n\n0 0 1 rg\n0 0 612 792 re f";
+    private const int ThinBandTop = 296;
+    private const int ThinBandRows = 90;
+
+    /// <summary>Rows of the range that hold exactly one blue pixel.</summary>
+    private static int BlueInRows(byte[] rgba, int top, int bottom)
+    {
+        var rows = 0;
+        for (var y = top; y < bottom; y++)
+        {
+            var blue = 0;
+            for (var x = 0; x < 612; x++)
+            {
+                var i = (y * 612 + x) * 4;
+                if (rgba[i] == 0 && rgba[i + 1] == 0 && rgba[i + 2] == 255) blue++;
+            }
+            if (blue == 1) rows++;
+        }
+        return rows;
+    }
+
     private static byte[] RenderToRgba(byte[] pdfBytes)
     {
         using var doc = Document.Open(pdfBytes);

@@ -81,7 +81,7 @@ internal static class PsBuiltGlyphs
                 : PsValue.Int(code));
             i.Invoke(proc);
         }
-        catch (PsErrorSignal e)
+        catch (PsErrorException e)
         {
             i.RecordError(e.ErrorName);
         }

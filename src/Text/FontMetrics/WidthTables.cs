@@ -90,6 +90,8 @@ internal sealed partial class FontMetrics
             || descriptor.Get("FontFile2") is not null || descriptor.Get("FontFile3") is not null);
     }
 
+    private const string IdentityCMapPrefix = "Identity-";
+
     private static FontMetrics BuildCidMetrics(PdfDictionary fontDict, PdfReader reader,
         string normalizedBase, bool isStandard14)
     {
@@ -130,6 +132,11 @@ internal sealed partial class FontMetrics
         {
             metrics._type0Dict = fontDict;
             metrics._reader = reader;
+            if (fontDict.GetName("Encoding") is { } cmapName
+                && !cmapName.StartsWith(IdentityCMapPrefix, StringComparison.Ordinal))
+                metrics._codeCMap = PredefinedCMap.TryGet(cmapName);
+            else if (ShowCodespace.Of(fontDict, reader) is { IsTwoByte: false } codespace)
+                metrics._codespace = codespace;
             // Keep the embedded program for the Unicode-measure char->GID lookup.
             try
             {
@@ -137,7 +144,7 @@ internal sealed partial class FontMetrics
                 if (mDesc is not null && reader.ResolveStream(mDesc.Get("FontFile2")) is { } mFf2)
                     metrics._embeddedProgram = reader.DecodeStream(mFf2);
             }
-            catch { }
+            catch { /* a stream that does not decode is skipped, as if absent */ }
             PopulateDescriptorMetrics(metrics, cidFontDict, reader);
             if (cidWidths is not null && cidWidths.Count > 0)
                 metrics._cidWidthsExact = BuildCidExactWidths(cidFontDict, reader, cidWidths);
@@ -184,8 +191,9 @@ internal sealed partial class FontMetrics
             // zero high byte resolves to CID 0, and overriding it would perturb every
             // glyph's measured advance rather than restore a real glyph's precision.
             if (cid == 0) continue;
-            var gid = cidToGid is null ? cid
-                : (cid >= 0 && cid < cidToGid.Length ? cidToGid[cid] : 0);
+            int gid;
+            if (cidToGid is null) gid = cid;
+            else gid = cid >= 0 && cid < cidToGid.Length ? cidToGid[cid] : 0;
             if (gid <= 0 || gid >= ttf.GlyphWidths.Length) continue;
             var w = ttf.GlyphWidths[gid] * scale;
             if (Math.Abs(w - intWidth) <= 1.0)
@@ -265,14 +273,23 @@ internal sealed partial class FontMetrics
     /// <summary>
     /// Read ascent, descent, and cap height from the font descriptor.
     /// </summary>
+    /// <summary>A descriptor metric in glyph-space units, whole: an integer as it is, a real rounded, anything else 0.</summary>
+    private static int MetricUnits(PdfDictionary descriptor, PdfReader reader, string key) => reader.Resolve(descriptor.Get(key)) switch
+    {
+        PdfInteger whole => (int)whole.Value,
+        PdfReal real => (int)Math.Round(real.Value),
+        _ => 0,
+    };
+
     private static void PopulateDescriptorMetrics(FontMetrics metrics, PdfDictionary fontDict, PdfReader reader)
     {
         var descriptor = reader.ResolveDict(fontDict.Get("FontDescriptor"));
         if (descriptor is null) return;
 
-        var rawAscent = (int)descriptor.GetInt("Ascent", 0);
-        var rawDescent = (int)descriptor.GetInt("Descent", 0);
-        var rawCapHeight = (int)descriptor.GetInt("CapHeight", 0);
+        // A descriptor may state its metrics as reals (a Descent of -256.3): read either number form.
+        var rawAscent = MetricUnits(descriptor, reader, "Ascent");
+        var rawDescent = MetricUnits(descriptor, reader, "Descent");
+        var rawCapHeight = MetricUnits(descriptor, reader, "CapHeight");
 
         // PDF spec requires Descent to be negative (PDF 32000-1:2008 §9.8, Table 122).
         // Some font descriptors incorrectly use positive values — always negate them.
@@ -407,7 +424,7 @@ internal sealed partial class FontMetrics
         yield return baseName;
         var comma = baseName.Replace(',', ' ').Replace('-', ' ');
         if (comma != baseName) yield return comma;
-        var camel = System.Text.RegularExpressions.Regex.Replace(
+        var camel = SafeRegex.Replace(
             comma, "(?<=[a-z])(?=[A-Z])", " ");
         if (camel != comma) yield return camel;
     }

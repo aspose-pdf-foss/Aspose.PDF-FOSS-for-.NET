@@ -18,7 +18,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static bool DnnWalkStep(DnnWalkState dw)
     {
-        dw.m = Regex.Match(dw.inner[dw.pos..], @"<(div|table|ol|hr|br)\b[^>]*/?>", RegexOptions.IgnoreCase);
+        dw.m = SafeRegex.Match(dw.inner[dw.pos..], @"<(div|table|ol|hr|br)\b[^>]*/?>", RegexOptions.IgnoreCase);
         if (!dw.m.Success) return false;
         dw.openIdx = dw.pos + dw.m.Index;
         dw.open = dw.m.Value;
@@ -30,7 +30,7 @@ internal static partial class HtmlToPdfConverter
 
         if (dw.cls.Contains("PrintHidden", StringComparison.OrdinalIgnoreCase)
             || dw.cls.Contains("aspNetHidden", StringComparison.OrdinalIgnoreCase)
-            || Regex.IsMatch(dw.st, @"display\s*:\s*none", RegexOptions.IgnoreCase))
+            || SafeRegex.IsMatch(dw.st, @"display\s*:\s*none", RegexOptions.IgnoreCase))
         {
             var hEnd = dw.tag == "hr" ? -2 : DnnTagEnd(dw.inner, dw.openIdx, dw.tag);
             dw.pos = hEnd < 0 ? dw.openIdx + dw.open.Length : dw.inner.IndexOf('>', hEnd) + 1;

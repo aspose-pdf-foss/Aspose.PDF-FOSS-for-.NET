@@ -31,6 +31,7 @@ internal static partial class HtmlToPdfConverter
         mr.rowRealBottom = double.MaxValue;
         mr.flatSkip = 0;
         var rowPage = mr.cursor.page;
+        var openPage = rowPage;
         // Every cell flows from the row's top on the page the row opened on, and the row ends
         // on the furthest page any of them reached, under the lowest of the cells that ended
         // there (probed on the Words letter: the right-hand block stands beside the address
@@ -63,7 +64,9 @@ internal static partial class HtmlToPdfConverter
         // the grid ended there, whatever its box measured on the page it opened on (the
         // report's comment section broke to page 2 and its footer followed a page later,
         // seated off the old page's bottom).
-        if (mr.rowSubBottom < double.MaxValue && !ReferenceEquals(mr.cursor.page, rowPage))
+        // (…the page the row OPENED on decides: a cell that moved whole took the row page along,
+        // and the cursor still stands on the page it left)
+        if (mr.rowSubBottom < double.MaxValue && !ReferenceEquals(mr.cursor.page, openPage))
         {
             mr.cursor.y = mr.rowSubBottom - mr.p;
             return;

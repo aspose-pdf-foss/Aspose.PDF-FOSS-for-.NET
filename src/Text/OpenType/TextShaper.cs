@@ -92,15 +92,17 @@ internal static class TextShaper
     private static List<ShapedGlyph> Buffer(string text, Func<int, ushort> glyphOf)
     {
         var buf = new List<ShapedGlyph>(text.Length);
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
             {
                 buf.Add(new ShapedGlyph(glyphOf(char.ConvertToUtf32(text[i], text[i + 1])), i));
-                i++;
+                i += 2;
                 continue;
             }
             buf.Add(new ShapedGlyph(glyphOf(text[i]), i));
+            i++;
         }
         return buf;
     }
@@ -145,10 +147,14 @@ internal static class TextShaper
             {
                 buf.Add(new ShapedGlyph(glyphOf(char.ConvertToUtf32(text[i], text[i + 1])), i)
                 { Category = IndicShaper.CatOther });
+#pragma warning disable S127 // a surrogate pair is one code point - the scan steps over its low half
                 i++;
+#pragma warning restore S127
                 continue;
             }
-            buf.Add(new ShapedGlyph(glyphOf(cp), i) { Category = IndicShaper.Categorise(cp) });
+            // A two-part vowel sign is drawn as its parts, the first of them before the consonant.
+            foreach (var part in IndicShaper.SplitVowelSign(cp) ?? cp.ToString())
+                buf.Add(new ShapedGlyph(glyphOf(part), i) { Category = IndicShaper.Categorise(part) });
         }
 
         var gsub = new GsubEngine(layout);
@@ -159,17 +165,15 @@ internal static class TextShaper
         //    Done for the WHOLE run first: substitution can merge glyphs away, and a
         //    syllable is then found again by its id rather than by an index range.
         var syllableScripts = new List<string?>();
+        var start = 0;
+        while (start < buf.Count)
         {
-            var start = 0;
-            while (start < buf.Count)
-            {
-                if (buf[start].Category == IndicShaper.CatOther) { start++; continue; }
-                var end = SyllableEnd(buf, start);
-                var id = syllableScripts.Count;
-                syllableScripts.Add(ScriptOfCluster(text, buf, start));
-                MarkSyllable(buf, start, end, id);
-                start = end;
-            }
+            if (buf[start].Category == IndicShaper.CatOther) { start++; continue; }
+            var end = SyllableEnd(buf, start);
+            var id = syllableScripts.Count;
+            syllableScripts.Add(ScriptOfCluster(text, buf, start));
+            MarkSyllable(buf, start, end, id);
+            start = end;
         }
 
         // 2. Substitute. The masks scope each feature to the glyphs it may touch, so the

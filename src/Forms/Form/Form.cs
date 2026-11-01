@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -33,8 +33,8 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         {
             if (_groupFieldDicts.Count == 0) return _fields.ToArray();
             var terminals = new List<Field>(_fields.Count);
-            foreach (var f in _fields)
-                if (!_groupFieldDicts.Contains(f.Dict)) terminals.Add(f);
+            foreach (var f in _fields.Where(f => !_groupFieldDicts.Contains(f.Dict)))
+                terminals.Add(f);
             return terminals.ToArray();
         }
     }
@@ -93,6 +93,11 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         // Propagate document ref after OwnerDocument is set (deferred)
     }
 
+    private Form(List<Field> fields)
+    {
+        _fields = fields;
+    }
+
     /// <summary>Propagate OwnerDocument to all fields.</summary>
     private void PropagateOwnerToFields()
     {
@@ -112,7 +117,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         if (pagesDict is null)
             return Empty;
 
-        CollectWidgetsFromPagesNode(pagesDict, reader, list);
+        CollectWidgetsFromPagesNode(pagesDict, reader, list, new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance));
         // These fields were reconstructed from page widgets (the AcroForm /Fields
         // was missing/empty), so AutoRestoreForm=false can later drop them.
         return list.Count > 0 ? new Form(list) { _autoRestored = true } : Empty;
@@ -126,13 +131,8 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     /// </summary>
     internal static Form CreateEmptyForDocument(PdfReader reader) => new(new PdfDictionary(), reader);
 
-    private Form(List<Field> fields)
-    {
-        _fields = fields;
-    }
-
     private static void CollectWidgetsFromPagesNode(
-        PdfDictionary node, PdfReader reader, List<Field> result)
+        PdfDictionary node, PdfReader reader, List<Field> result, HashSet<PdfDictionary> seen)
     {
         var type = node.GetName("Type");
         if (type == "Page")
@@ -145,6 +145,8 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 if (annot is null) continue;
                 if (annot.GetName("Subtype") != "Widget") continue;
                 if (!annot.ContainsKey("T") && !annot.ContainsKey("FT")) continue;
+                // A widget a page lists twice is one field.
+                if (!seen.Add(annot)) continue;
                 result.Add(Field.Create(annot, reader));
             }
             return;
@@ -157,7 +159,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         {
             var kidDict = reader.ResolveDict(kid);
             if (kidDict is not null)
-                CollectWidgetsFromPagesNode(kidDict, reader, result);
+                CollectWidgetsFromPagesNode(kidDict, reader, result, seen);
         }
     }
 
@@ -168,7 +170,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     /// descendants are not walked. This is a different view from <see cref="Fields"/>,
     /// which flattens the tree to terminal fields (and splits a radio group into its
     /// option fields). Falls back to the flattened count for forms with no AcroForm
-    /// <c>/Fields</c> array (e.g. reconstructed from page widgets).
+    /// <c>/Fields</c> array, or an empty one (e.g. reconstructed from page widgets).
     /// </summary>
     public int Count
     {
@@ -188,9 +190,10 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 if (fieldsArray is not null)
                 {
                     var n = 0;
-                    foreach (var item in fieldsArray)
-                        if (reader.ResolveDict(item) is not null) n++;
-                    return n;
+                    foreach (var item in fieldsArray.Where(item => reader.ResolveDict(item) is not null))
+                        n++;
+                    // An empty /Fields array lists none of the fields the pages' widgets hold: those count.
+                    if (n > 0 || _fields.Count == 0) return n;
                 }
             }
             return _fields.Count;
@@ -223,6 +226,25 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             _fields.Add(field);
         }
     }
+
+    /// <summary>Lists the fields a form that tracked none takes from its AcroForm, as a document opened on it
+    /// would - a group's options as fields of their own, the groups kept for lookup by name - so that what a
+    /// caller sets on them before the save is what the save writes. A form already tracking fields keeps them
+    /// and the state they hold.</summary>
+    private void ListFieldsOfEmptyForm()
+    {
+        if (_fields.Count > 0 || _reader is null || _acroForm is null) return;
+        if (_reader.Resolve(_acroForm.Get("Fields")) is not PdfArray fieldsArray) return;
+        var expandedGroups = new HashSet<PdfDictionary>();
+        CollectFields(fieldsArray, _reader, _fields, expandedGroups);
+        CollectGroupFields(_reader, _fields, expandedGroups, _groupFieldDicts);
+        PropagateOwnerToFields();
+        foreach (var f in _fields) _convertedAppearanceDicts.Add(f.Dict);
+    }
+
+    /// <summary>The fields a conversion listed: their appearances were drawn from their values just now,
+    /// so a flatten stamps them as they are (a value set afterwards redraws its own appearance).</summary>
+    private readonly HashSet<PdfDictionary> _convertedAppearanceDicts = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>Optional back-reference to the owning document (set by Document.Form getter).</summary>
     private Document? _ownerDocument;
@@ -269,7 +291,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         var acroForm = reader.ResolveDict(catalog.Get("AcroForm"));
         if (acroForm is null)
         {
-            acroForm = new PdfDictionary();
+            // A form made for a document without one keeps its own (still detached) dictionary: that
+            // becomes the document's, so what the form registers later (/DR fonts) lands in the file.
+            acroForm = _acroForm ?? new PdfDictionary();
             catalog.Set("AcroForm", acroForm);
         }
 
@@ -296,7 +320,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         acroForm.Set("NeedAppearances", PdfBoolean.True);
 
         // Ensure default resources include Helvetica
-        EnsureDefaultResources(acroForm);
+        EnsureDefaultResources(acroForm, reader);
 
         // Embed a custom font set via the field's DefaultAppearance into the form's
         // /DR as a composite (Type0) face, and point the field's /DA at it.
@@ -311,6 +335,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
 
         // Add the field's widget annotation(s) to the page's /Annots array.
         PlaceFieldWidgets(field.Dict, reader, pageIndex);
+        // A radio option placed by its own rectangle shows its caption beside the widget.
+        if (field is RadioButtonField radio && OwnerDocument is { } owner && pageIndex >= 1 && pageIndex <= owner.Pages.Count)
+            radio.PlaceOptionCaptions(owner.Pages[pageIndex]);
 
         // Add to internal fields list
         _fields.Add(field);
@@ -365,12 +392,13 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             names.Add((t, ft == "Btn", d));
         }
 
-        var indexed = new Regex("^" + Regex.Escape(baseName) + @"#\d+$");
-        bool Taken(string n) { foreach (var e in names) if (e.name == n) return true; return false; }
-        bool HasButtonGroup() { foreach (var e in names) if (e.isButton && (e.name == baseName || indexed.IsMatch(e.name))) return true; return false; }
-        bool BaseInUse() { if (Taken(baseName)) return true; foreach (var e in names) if (indexed.IsMatch(e.name)) return true; return false; }
-        int CountIndexed() { var c = 0; foreach (var e in names) if (indexed.IsMatch(e.name)) c++; return c; }
-        var baseHasIndexSuffix = Regex.IsMatch(baseName, @"#\d+$");
+        var indexed = new Regex("^" + Regex.Escape(baseName) + @"#\d+$", RegexOptions.None, RegexLimits.Timeout);
+        bool Taken(string n) { foreach (var e in names) if (e.name == n) { return true; } return false; }
+        bool HasButtonGroup() { foreach (var e in names) if (e.isButton && (e.name == baseName || SafeRegex.IsMatch(indexed, e.name))) { return true; } return false; }
+        bool BaseInUse() { if (Taken(baseName)) return true;
+        return names.Any(e => SafeRegex.IsMatch(indexed, e.name)); }
+        int CountIndexed() { var c = 0; foreach (var e in names.Where(e => SafeRegex.IsMatch(indexed, e.name))) { c++; } return c; }
+        var baseHasIndexSuffix = SafeRegex.IsMatch(baseName, @"#\d+$");
 
         if (isButton && (HasButtonGroup() || empty))
         {
@@ -454,8 +482,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             // rectangle) — don't add the same dict twice.
             var annotsArr = AnnotsFor(target);
             var present = false;
-            foreach (var a in annotsArr)
-                if (ReferenceEquals(reader.Resolve(a), widget)) { present = true; break; }
+            if (annotsArr.Any(a => ReferenceEquals(reader.Resolve(a), widget))) { present = true; }
             if (!present) annotsArr.Add(widget);
             // Record the owning page (/P) so PageIndex resolves without an
             // /Annots identity scan (which can't see through a re-serialized file).
@@ -495,16 +522,18 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         return widgets;
     }
 
-    private static void EnsureDefaultResources(PdfDictionary acroForm)
+    /// <summary>The AcroForm's /DR /Font dictionary, made (with Helvetica as /Helv) when absent. Given the
+    /// reader, an indirect /DR or /Font is followed rather than replaced.</summary>
+    private static PdfDictionary EnsureDefaultResources(PdfDictionary acroForm, PdfReader? reader = null)
     {
-        var dr = acroForm.Get("DR") as PdfDictionary;
+        var dr = acroForm.Get("DR") as PdfDictionary ?? reader?.ResolveDict(acroForm.Get("DR"));
         if (dr is null)
         {
             dr = new PdfDictionary();
             acroForm.Set("DR", dr);
         }
 
-        var fontDict = dr.Get("Font") as PdfDictionary;
+        var fontDict = dr.Get("Font") as PdfDictionary ?? reader?.ResolveDict(dr.Get("Font"));
         if (fontDict is null)
         {
             fontDict = new PdfDictionary();
@@ -520,19 +549,43 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             helvetica.Set("Encoding", new PdfName("WinAnsiEncoding"));
             fontDict.Set("Helv", helvetica);
         }
+        return fontDict;
     }
 
-    /// <summary>Embed the embeddable font carried by a field's
-    /// <see cref="Field.DefaultAppearance"/> into the AcroForm /DR as a composite
-    /// (Type0) face under a generated <c>C{n}_0</c> resource name, repoint the
-    /// field's /DA at it, and record the name on the DefaultAppearance. No-op when
-    /// the field carries no embeddable default-appearance font.</summary>
-    /// <summary>Embed a field's default-appearance font (when embeddable) into the
-    /// form's /DR. Resolves the AcroForm from the field's reader, so it can be
-    /// invoked both during <see cref="Add(Field,int)"/> (font set before the field
-    /// was added) and from the DefaultAppearance setter (font set afterwards). A
-    /// no-op when there is no AcroForm /DR yet, or no embeddable font.</summary>
+    /// <summary>Put a field's default-appearance font into the form's /DR: an embeddable face as a
+    /// composite font under a generated <c>C{n}_0</c> name the /DA is repointed at, any other font
+    /// under the name the /DA gives it. Resolves the AcroForm from the field's reader, so it can be
+    /// invoked both during <see cref="Add(Field,int)"/> (font set before the field was added) and
+    /// from the DefaultAppearance setter (font set afterwards). A no-op while the document has no
+    /// AcroForm.</summary>
     internal static void EmbedDefaultAppearanceFont(Field field)
+    {
+        EmbedDefaultAppearanceFace(field);
+        RegisterDefaultAppearanceFont(field);
+    }
+
+    /// <summary>Register the font a field's own /DA names in the AcroForm /DR when /DR lacks it: a /DA
+    /// font must name a /DR resource (ISO 32000-1 12.7.3.3), or a viewer that rebuilds the field has no
+    /// face to draw with. The entry is the font dictionary the field's appearance declares.</summary>
+    internal static void RegisterDefaultAppearanceFont(Field field)
+    {
+        // An appearance that only restyles (colour, size) and names no font of its own adds none.
+        if (field.DefaultAppearanceIfSet is { FontChosen: false }) return;
+        if (field.Dict.Get("DA") is not PdfString da) return;
+        var parts = da.ToText().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var tf = Array.IndexOf(parts, "Tf");
+        if (tf < 2 || parts[tf - 2] is not { Length: > 1 } operand || operand[0] != '/') return;
+        PdfDictionary? acroForm;
+        try { acroForm = field.Reader.ResolveDict(field.Reader.Catalog.Get("AcroForm")); }
+        catch (InvalidOperationException) { return; } // detached field, no trailer
+        if (acroForm is null) return;
+        var fonts = EnsureDefaultResources(acroForm, field.Reader);
+        var name = operand.Substring(1);
+        if (fonts.ContainsKey(name)) return;
+        fonts.Set(name, Field.MakeAppearanceFont(name));
+    }
+
+    private static void EmbedDefaultAppearanceFace(Field field)
     {
         var da = field.DefaultAppearance;
         if (da?.EmbeddedFont is not { } font) return;
@@ -560,11 +613,11 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             && da.FontResourceName.Contains('_') && fontDict.ContainsKey(da.FontResourceName))
             return;
 
-        // Composite fonts are named C{n}_0.
+        // Composite fonts are named C{n}_0; a face another field already put there is shared.
         var n = 0;
         foreach (var key in fontDict.Keys)
             if (key.Length > 1 && key[0] == 'C' && key.Contains('_')) n++;
-        var resName = $"C{n}_0";
+        var resName = Aspose.Pdf.Text.Type0FontEmbedder.IsEmbedded(fontDict, ttf) ? null : $"C{n}_0";
 
         // Prefer the face's PostScript name (name table id 6) for /BaseFont —
         // "BitstreamCyberCJK-Roman", not the family "Bitstream CyberCJK".
@@ -577,7 +630,11 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         }
         catch { /* fall back to the family-derived name */ }
         if (psName is null or "" or "Unknown") psName = font.BaseFont ?? font.FontName;
-        fontDict.Set(resName, BuildType0Font(ttf, psName));
+        // The composite embedder gives the face its /W and /ToUnicode as values are drawn through it and
+        // carries a CFF program as /FontFile3; the program itself ships whole, for values typed later.
+        (resName, _) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(fontDict, ttf, psName.Replace(" ", ""), "",
+            resNameHint: resName);
+        Aspose.Pdf.Text.Type0FontEmbedder.KeepWhole(fontDict, ttf);
         da.FontResourceName = resName;
 
         var c = da.TextColor;
@@ -590,53 +647,6 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         field.Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(daStr)));
     }
 
-    /// <summary>Build a composite (Type0/CIDFontType2, Identity-H) font dictionary
-    /// that embeds the supplied TrueType data as /FontFile2.</summary>
-    private static PdfDictionary BuildType0Font(byte[] ttf, string baseFontName)
-    {
-        var psName = (baseFontName ?? "EmbeddedFont").Replace(" ", "");
-
-        var descriptor = new PdfDictionary();
-        descriptor.Set("Type", new PdfName("FontDescriptor"));
-        descriptor.Set("FontName", new PdfName(psName));
-        descriptor.Set("Flags", new PdfInteger(4)); // Symbolic
-        descriptor.Set("Ascent", new PdfInteger(750));
-        descriptor.Set("Descent", new PdfInteger(-250));
-        descriptor.Set("ItalicAngle", new PdfInteger(0));
-        descriptor.Set("CapHeight", new PdfInteger(700));
-        descriptor.Set("StemV", new PdfInteger(80));
-        var bbox = new PdfArray();
-        bbox.Add(new PdfInteger(-200)); bbox.Add(new PdfInteger(-250));
-        bbox.Add(new PdfInteger(1000)); bbox.Add(new PdfInteger(900));
-        descriptor.Set("FontBBox", bbox);
-        var fontFile = new PdfStream(new PdfDictionary(), ttf);
-        fontFile.Dict.Set("Length1", new PdfInteger(ttf.Length));
-        descriptor.Set("FontFile2", fontFile);
-
-        var cidFont = new PdfDictionary();
-        cidFont.Set("Type", new PdfName("Font"));
-        cidFont.Set("Subtype", new PdfName("CIDFontType2"));
-        cidFont.Set("BaseFont", new PdfName(psName));
-        var sysInfo = new PdfDictionary();
-        sysInfo.Set("Registry", new PdfString(System.Text.Encoding.ASCII.GetBytes("Adobe")));
-        sysInfo.Set("Ordering", new PdfString(System.Text.Encoding.ASCII.GetBytes("Identity")));
-        sysInfo.Set("Supplement", new PdfInteger(0));
-        cidFont.Set("CIDSystemInfo", sysInfo);
-        cidFont.Set("FontDescriptor", descriptor);
-        cidFont.Set("DW", new PdfInteger(1000));
-        cidFont.Set("CIDToGIDMap", new PdfName("Identity"));
-
-        var type0 = new PdfDictionary();
-        type0.Set("Type", new PdfName("Font"));
-        type0.Set("Subtype", new PdfName("Type0"));
-        type0.Set("BaseFont", new PdfName(psName));
-        type0.Set("Encoding", new PdfName("Identity-H"));
-        var descendants = new PdfArray();
-        descendants.Add(cidFont);
-        type0.Set("DescendantFonts", descendants);
-        return type0;
-    }
-
     /// <summary>
     /// All radio-button groups in the form.
     /// Radio buttons that share the same full field name are combined into one
@@ -647,9 +657,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         get
         {
             var map = new Dictionary<string, List<RadioButtonField>>();
-            foreach (var field in _fields)
+            foreach (var formField in _fields)
             {
-                if (field is not RadioButtonField rbf) continue;
+                if (formField is not RadioButtonField rbf) continue;
                 var key = rbf.FullName ?? rbf.PartialName ?? "";
                 if (!map.TryGetValue(key, out var list))
                 {
@@ -658,7 +668,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 }
                 list.Add(rbf);
             }
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
             return map.Values.Select(list => new RadioButtonGroup(list)).ToList();
+#pragma warning restore S2365
         }
     }
 
@@ -726,10 +738,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     {
         if (HasField(fieldName)) return true;
         if (!searchChildren || !IsXfa) return false;
-        foreach (var name in GetXfaFieldNames())
-            if (string.Equals(name, fieldName, StringComparison.Ordinal))
-                return true;
-        return false;
+        return GetXfaFieldNames().Any(name => string.Equals(name, fieldName, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -765,9 +774,11 @@ public sealed class XfaAccessor
 {
     // Standard XFA namespaces — used to resolve "tpl:", "xfa:", "datasets:"
     // prefixes in XPath queries against the template/datasets documents.
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
     private const string TemplateNs = "http://www.xfa.org/schema/xfa-template/2.6/";
     private const string XfaNs = "http://www.xfa.org/schema/xfa-data/1.0/";
     private const string DatasetsNs = "http://www.xfa.org/schema/xfa-datasets/2.6/";
+#pragma warning restore S5332
 
     private readonly Form _form;
     private XmlDocument? _templateDoc;
@@ -831,7 +842,7 @@ public sealed class XfaAccessor
     /// <summary>Marker that callers use after a batch of field updates to
     /// signal "no more updates pending". This implementation does not
     /// cache updates, so the call is a no-op kept for source compatibility.</summary>
-    public void EndCachedUpdates() { }
+    public void EndCachedUpdates() { /* updates are not cached */ }
 
     /// <summary>Get the XFA Datasets as an XmlElement.
     /// If the XFA has a separate "datasets" part, returns its root element.
@@ -889,7 +900,7 @@ public sealed class XfaAccessor
 
     private string[] EnumerateFieldNames() => _form.GetXfaFieldNames();
 
-    private XmlNode? WalkTemplateByPath(XmlNode root, string path)
+    private static XmlNode? WalkTemplateByPath(XmlNode root, string path)
     {
         var parts = Form.SplitSomPath(path);
         XmlNode? current = root;
@@ -897,7 +908,7 @@ public sealed class XfaAccessor
         {
             if (current is null) return null;
             // part is "name[N]" — find the Nth child element with that @name
-            var match = System.Text.RegularExpressions.Regex.Match(part, @"^(.+)\[(\d+)\]$");
+            var match = SafeRegex.Match(part, @"^(.+)\[(\d+)\]$");
             string name; int idx;
             if (match.Success) { name = match.Groups[1].Value; idx = int.Parse(match.Groups[2].Value); }
             else { name = part; idx = 0; }
@@ -920,14 +931,14 @@ public sealed class XfaAccessor
         return null;
     }
 
-    private XmlNode? WalkDatasetsByPath(XmlNode root, string path)
+    private static XmlNode? WalkDatasetsByPath(XmlNode root, string path)
     {
         var parts = Form.SplitSomPath(path);
         XmlNode? current = root;
         foreach (var part in parts)
         {
             if (current is null) return null;
-            var match = System.Text.RegularExpressions.Regex.Match(part, @"^(.+)\[(\d+)\]$");
+            var match = SafeRegex.Match(part, @"^(.+)\[(\d+)\]$");
             string name; int idx;
             if (match.Success) { name = match.Groups[1].Value; idx = int.Parse(match.Groups[2].Value); }
             else { name = part; idx = 0; }

@@ -140,7 +140,9 @@ internal static class BackgroundPicturePainter
         bool Reaches(double at) => at < high - ReachTolerance && at + length > low + ReachTolerance;
         var onward = towardsStart ? -step : step;
         bool forward = true, back = true;
+#pragma warning disable S1994 // the loop runs on its own exit condition; the counter only numbers the passes
         for (var k = 1; forward || back; k++)
+#pragma warning restore S1994
         {
             if (forward)
             {

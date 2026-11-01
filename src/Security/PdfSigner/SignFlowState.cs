@@ -30,6 +30,8 @@ private sealed class SignFlowState
     public Aspose.Pdf.Core.PdfIndirectRef? existingFieldRef;
     public Aspose.Pdf.Core.PdfDictionary? existingFieldDict;
     public bool adoptDirectField;
+    // The page a new invisible widget belongs to.
+    public Aspose.Pdf.Core.PdfIndirectRef? pageRef;
     // Allocate object numbers for: sig value dict, sig field, updated AcroForm
     public int sigValObjNum;
     public int sigFieldObjNum;

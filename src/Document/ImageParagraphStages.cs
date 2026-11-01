@@ -27,8 +27,12 @@ public sealed partial class Document
             // under FixHeight 20 draws 240x20, under FixWidth 100 draws 100x60.
             // (Spanning the band on the unset axis stretched every lone-Fix
             // picture to the content width.)
-            imgW = ip.img.FixWidth > 0 ? ip.img.FixWidth : haveNat ? fixNatW : ip.availW;
-            imgH = ip.img.FixHeight > 0 ? ip.img.FixHeight : haveNat ? fixNatH : ip.availH;
+            if (ip.img.FixWidth > 0) imgW = ip.img.FixWidth;
+            else if (haveNat) imgW = fixNatW;
+            else imgW = ip.availW;
+            if (ip.img.FixHeight > 0) imgH = ip.img.FixHeight;
+            else if (haveNat) imgH = fixNatH;
+            else imgH = ip.availH;
             // A Fix box larger than the content band is squashed to the
             // band on that axis (never clipped or spilled to a fresh
             // page): a 662 pt FixHeight on a 451 pt landscape band
@@ -108,7 +112,7 @@ public sealed partial class Document
     }
 
     /// <summary>Image paragraph: one frame seated on its page and drawn.</summary>
-    private bool LayoutImageFrame(ImageParagraphState ip, int frameIdx)
+    private static bool LayoutImageFrame(ImageParagraphState ip, int frameIdx)
     {
         var frameData = ip.frames![frameIdx];
         var (imgW, imgH) = MeasureImageFrame(ip, frameData);
@@ -125,9 +129,9 @@ public sealed partial class Document
         // a fresh page would still not fit and loses the flow position. A fresh
         // page is the flow's NEXT region, so it follows this page wherever the
         // document already has pages after it.
-        var fitsNowhere = boxH > ip.page.Height - ip.marginTop - ip.marginBottom;
+        var fitsNowhere = boxH > ip.page.LayoutFrameHeight - ip.marginTop - ip.marginBottom;
         var fitsHere = ip.flow.CurrentY - boxH >= ip.marginBottom
-            || (fitsNowhere && ip.flow.CurrentY >= ip.page.Height - ip.marginTop - 1e-6);
+            || (fitsNowhere && ip.flow.CurrentY >= ip.page.LayoutFrameHeight - ip.marginTop - 1e-6);
         if (frameIdx > 0 || !fitsHere) ip.flow.ForceNewPage();
         var yTop = ip.flow.CurrentY;
         // Honour the image's horizontal alignment within the content
@@ -196,8 +200,8 @@ public sealed partial class Document
         if (ip.img.IsBlackWhite
             && IO.CcittTiffExtractor.TryExtract(ip.imgData!) is { Count: > 0 } g4Frames)
         {
-            var availWbw = ip.page.Width - ip.marginLeft - ip.marginRight;
-            var availHbw = ip.page.Height - ip.marginTop - ip.marginBottom;
+            var availWbw = ip.page.LayoutFrameWidth - ip.marginLeft - ip.marginRight;
+            var availHbw = ip.page.LayoutFrameHeight - ip.marginTop - ip.marginBottom;
             for (int fi = 0; fi < g4Frames.Count; fi++)
             {
                 var g4 = g4Frames[fi];
@@ -228,9 +232,9 @@ public sealed partial class Document
                 {
                     ip.flow.Commit();
                     targetPageBw = Pages.Add();
-                    targetPageBw.MediaBox = new Rectangle(0, 0, ip.page.Width, ip.page.Height);
+                    targetPageBw.MediaBox = new Rectangle(0, 0, ip.page.LayoutFrameWidth, ip.page.LayoutFrameHeight);
                     Table.RegisterFont(targetPageBw);
-                    yTopBw = ip.page.Height - ip.marginTop;
+                    yTopBw = ip.page.LayoutFrameHeight - ip.marginTop;
                 }
                 var rectBw = new Rectangle(ip.marginLeft, yTopBw - imgHbw,
                                            ip.marginLeft + imgWbw, yTopBw);
@@ -255,8 +259,8 @@ public sealed partial class Document
         if (XImageCollection.IsSvg(ip.imgData!))
         {
             // With a Fix box the artwork is letterboxed (aspect-fit,
-            // centred) onto a canvas of the box's aspect;
-            // the box itself may then stretch/clamp freely.
+            // centred) onto a canvas of the box's aspect; the
+            // box itself may then stretch/clamp freely.
             byte[]? svgPng;
             if (ip.img.FixWidth > 0 && ip.img.FixHeight > 0)
                 svgPng = ImageRasterizer.RasterizeSvgOnCanvas(ip.imgData!, ip.img.FixWidth, ip.img.FixHeight);

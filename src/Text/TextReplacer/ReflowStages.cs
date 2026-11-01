@@ -9,10 +9,10 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextReplacer
 {
     /// <summary>Writes one content operation of the re-flowed stream: replaced text with its new advances, everything else verbatim.</summary>
-    private bool EmitReflowedOp(ReflowState rf, CrossTextOp o)
+    private static bool EmitReflowedOp(ReflowState rf, CrossTextOp o)
     {
         var pl = rf.byOp[o];
-        var (tx0, ty0) = SolveTm(rf, o, pl[0].x, BaseY(rf, pl[0].line));
+        var (tx0, ty0) = SolveTm(o, pl[0].x, BaseY(rf, pl[0].line));
         bool moved = Math.Abs(tx0 - o.TmTx) > 1e-4 || Math.Abs(ty0 - o.TmTy) > 1e-4;
         bool isHead = ReferenceEquals(o, rf.head);
         bool split = pl.Count > 1;
@@ -26,8 +26,8 @@ public sealed partial class TextReplacer
             var (px2, li2, bytes2, sw2, off2) = pl[i];
             if (i > 0 || moved || split)
             {
-                var (tx, ty) = SolveTm(rf, o, px2, BaseY(rf, li2));
-                rf.result.Write(Encoding.ASCII.GetBytes(TmOf(rf, o, tx, ty)));
+                var (tx, ty) = SolveTm(o, px2, BaseY(rf, li2));
+                rf.result.Write(Encoding.ASCII.GetBytes(TmOf(o, tx, ty)));
                 wroteTm = true;
             }
             if (sw2 is not null && rf.switchedFace?.TtfData is not null)
@@ -39,7 +39,7 @@ public sealed partial class TextReplacer
                     pageFonts, rf.switchedFace.TtfData, rf.switchedFamily, sw2,
                     stripSpacesInBaseFont: true);
                 rf.result.Write(Encoding.ASCII.GetBytes(
-                    $"/{resName} {N(rf, o.FontSize)} Tf <{Compat.ToHexString(hexIds)}> Tj /{o.FontName} {N(rf, o.FontSize)} Tf"));
+                    $"/{resName} {N(o.FontSize)} Tf <{Compat.ToHexString(hexIds)}> Tj /{o.FontName} {N(o.FontSize)} Tf"));
             }
             else if (isHead || split || o.BytesRewritten)
             {
@@ -49,7 +49,7 @@ public sealed partial class TextReplacer
                 // as a bare Tj would visibly close its word gaps and leave the line
                 // narrower than every width the wrap was decided with. The kern that
                 // sits ON the split boundary belongs to the break and is dropped.
-                var inner = KernsInside(rf, o, off2, bytes2.Length);
+                var inner = KernsInside(o, off2, bytes2.Length);
                 if (inner.Count > 0)
                 {
                     rf.result.Write("["u8);
@@ -62,7 +62,7 @@ public sealed partial class TextReplacer
                             WriteStringOperand(rf.result, bytes2[at..(at + take)], o.IsHex);
                             at += take;
                         }
-                        rf.result.Write(Encoding.ASCII.GetBytes(N(rf, amount)));
+                        rf.result.Write(Encoding.ASCII.GetBytes(N(amount)));
                         rf.result.Write(" "u8);
                     }
                     if (at < bytes2.Length) WriteStringOperand(rf.result, bytes2[at..], o.IsHex);
@@ -82,7 +82,7 @@ public sealed partial class TextReplacer
             }
         }
         if (wroteTm)
-            rf.result.Write(Encoding.ASCII.GetBytes(TmOf(rf, o, o.TmTx, o.TmTy)));
+            rf.result.Write(Encoding.ASCII.GetBytes(TmOf(o, o.TmTx, o.TmTy)));
         rf.lastWritePos = o.OpEnd;
         return true;
     }
@@ -101,7 +101,7 @@ public sealed partial class TextReplacer
             rf.wOrig = lc.px + AdvPage(rf, lc.op, lc.op.Bytes, own: true) - px;
         }
         rf.gap = j > 0 && li == rf.prevOrigLine ? px - rf.prevOrigEnd : 0.0;
-        if (rf.gap < -1.0 || rf.gap > 3.0 * o.FontSize * TmScaleOf(rf, o) * ScaleOf(rf, o)) rf.gap = 0.0;
+        if (rf.gap < -1.0 || rf.gap > 3.0 * o.FontSize * TmScaleOf(o) * ScaleOf(o)) rf.gap = 0.0;
         // Crossing a source line break with nothing to separate the words: the break
         // itself was the separator, so it becomes one space. When either side already
         // carries the space 
@@ -111,18 +111,14 @@ public sealed partial class TextReplacer
             && !(rf.prevOrigText.Length > 0 && char.IsWhiteSpace(rf.prevOrigText[^1])))
             rf.gap = SpaceAdv(rf, o);
         rf.startX = j == 0 ? px : rf.cursor + rf.gap;
-        if (rf.isHead && rf.switchedFace is not null)
-        {
-            if (ReflowSwitchedFaceHead(rf, o, li, px)) return true;
-        }
+        if (rf.isHead && rf.switchedFace is not null && ReflowSwitchedFaceHead(rf, o, li, px)) return true;
         rf.headParts = new List<(byte[] bytes, int off)>();
         if (rf.isHead)
         {
-            int mAt = rf.crossHeadMatchAt >= 0
-                ? rf.crossHeadMatchAt
-                : rf.seqHeadText is null && rf.head.Bytes.Length == rf.head.Text.Length
-                    ? rf.head.Text.IndexOf(rf.search, StringComparison.Ordinal)
-                    : -1;
+            int mAt = -1;
+            if (rf.crossHeadMatchAt >= 0) mAt = rf.crossHeadMatchAt;
+            else if (rf.seqHeadText is null && rf.head.Bytes.Length == rf.head.Text.Length)
+                mAt = rf.head.Text.IndexOf(rf.search, StringComparison.Ordinal);
             var repl = mAt >= 0 ? TryEncodeInFont(rf, rf.replacement) : null;
             if (mAt >= 0 && repl is not null)
             {
@@ -162,7 +158,7 @@ public sealed partial class TextReplacer
         rf.opOrder.Sort((a, b) => a.OpStart.CompareTo(b.OpStart));
 
         rf.deleteSpans = new List<(int s, int e)>();
-        foreach (var c in rf.consumed) rf.deleteSpans.Add((c.op.OpStart, c.op.OpEnd));
+        foreach (var cop in rf.consumed.Select(c => c.op)) rf.deleteSpans.Add((cop.OpStart, cop.OpEnd));
         rf.inserts = new List<(int pos, byte[] bytes)>();
 
         // An operator this pass does NOT rewrite still moves if one before it in the same text
@@ -170,20 +166,18 @@ public sealed partial class TextReplacer
         // carries every following show along with it. Pin each such operator to its OWN text
         // matrix — the one it was read at — so it stays where it was drawn. Without this a
         // re-flow drags untouched text off the page (a 612 pt sheet reached 662).
+        var rewrittenFrom = new Dictionary<int, int>(); // BtStart -> earliest rewritten OpStart
+        foreach (var o in rf.opOrder)
         {
-            var rewrittenFrom = new Dictionary<int, int>(); // BtStart -> earliest rewritten OpStart
-            foreach (var o in rf.opOrder)
-            {
-                if (o.BtStart < 0) continue;
-                if (!rewrittenFrom.TryGetValue(o.BtStart, out var at) || o.OpStart < at)
-                    rewrittenFrom[o.BtStart] = o.OpStart;
-            }
-            foreach (var o in rf.textOps)
-            {
-                if (o.BtStart < 0 || rf.byOp.ContainsKey(o)) continue;
-                if (!rewrittenFrom.TryGetValue(o.BtStart, out var from) || o.OpStart <= from) continue;
-                rf.inserts.Add((o.OpStart, Encoding.ASCII.GetBytes(TmOf(rf, o, o.TmTx, o.TmTy))));
-            }
+            if (o.BtStart < 0) continue;
+            if (!rewrittenFrom.TryGetValue(o.BtStart, out var at) || o.OpStart < at)
+                rewrittenFrom[o.BtStart] = o.OpStart;
+        }
+        foreach (var o in rf.textOps)
+        {
+            if (o.BtStart < 0 || rf.byOp.ContainsKey(o)) continue;
+            if (!rewrittenFrom.TryGetValue(o.BtStart, out var from) || o.OpStart <= from) continue;
+            rf.inserts.Add((o.OpStart, Encoding.ASCII.GetBytes(TmOf(o, o.TmTx, o.TmTy))));
         }
 
         // ---- Underline regeneration ----
@@ -195,9 +189,7 @@ public sealed partial class TextReplacer
         // baseline − 0.189·fs, H = 0.05·fs, W = the op's re-measured advance (glyph
         // widths − TJ kerns, NO Tc — decimal-exact at tol 0.001).
         // Whitespace-only covered ops get an empty q/0 g/cm/Q group.
-        {
-            PinUnrewrittenOps(rf);
-        }
+        PinUnrewrittenOps(rf);
         rf.deleteSpans.Sort((a, b) => a.s.CompareTo(b.s));
         // Stable sort: two bars inserting before the same BT keep coverage order.
         rf.inserts = rf.inserts
@@ -208,21 +200,18 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>Finds the head line of the match when no line index carried it; false when no operation holds the search string.</summary>
-    private bool ResolveReflowHead(ReflowState rf)
+    private static bool ResolveReflowHead(ReflowState rf)
     {
-        if (rf.headIdx < 0)
-        {
-            if (!SearchReflowHead(rf)) return false;
-        }
+        if (rf.headIdx < 0 && !SearchReflowHead(rf)) return false;
         return true;
     }
 
     /// <summary>Records one text-showing operation's line, x range and bytes for the re-flow.</summary>
-    private bool CollectReflowTextOp(ReflowState rf, CrossTextOp o)
+    private static bool CollectReflowTextOp(ReflowState rf, CrossTextOp o)
     {
         int li = LineOf(rf, o);
         if (li < 0) return true;
-        double px = PageX(rf, o);
+        double px = PageX(o);
         if (px < rf.lines[li].lx - 0.5 || px > rf.lines[li].rx + 1.0) return true;
         if (string.IsNullOrEmpty(o.Text)) return true;
         rf.mapped.Add((o, li, px));
@@ -235,15 +224,12 @@ public sealed partial class TextReplacer
         // from line 0 itself, which is the match's line in this view; the two agree in
         // the ordinary case and the guard keeps its meaning.
         double line0Left = Math.Min(rf.matchX, rf.lines[0].lx);
-        if (li == 0 && px < line0Left - 0.5)
-        {
-            // Runs entirely BEFORE the match stay put; the run CONTAINING the
-            // match (line drawn as one operator, match mid-run) joins whole —
-            // the head rewrite keeps its prefix verbatim at the run's own X.
-            if (!o.Text.Contains(rf.search, StringComparison.Ordinal)
-                || px + AdvPage(rf, o, o.Bytes, own: true) < rf.matchX + 0.5)
-                return true;
-        }
+        // Runs entirely BEFORE the match stay put; the run CONTAINING the
+        // match (line drawn as one operator, match mid-run) joins whole —
+        // the head rewrite keeps its prefix verbatim at the run's own X.
+        if (li == 0 && px < line0Left - 0.5 && (!o.Text.Contains(rf.search, StringComparison.Ordinal)
+            || px + AdvPage(rf, o, o.Bytes, own: true) < rf.matchX + 0.5))
+            return true;
         // Type0 (2-byte) runs move whole but are never split or rewritten; the
         // head checks below bail when the MATCH itself sits in a CID run.
         rf.affected.Add((o, li, px));
@@ -265,11 +251,11 @@ public sealed partial class TextReplacer
             else
                 w2 = o2.FontSize * 0.5 * bytes2.Length;
             if (own2) w2 -= o2.KernSum / 1000.0 * o2.FontSize;
-            return w2 * TmScaleOf(rf, o2) * ScaleOf(rf, o2);
+            return w2 * TmScaleOf(o2) * ScaleOf(o2);
         }
         var consumedSet = new HashSet<CrossTextOp>();
         foreach (var c in rf.consumed) consumedSet.Add(c.op);
-        double fsHead = rf.head.FontSize * TmScaleOf(rf, rf.head) * ScaleOf(rf, rf.head);
+        double fsHead = rf.head.FontSize * TmScaleOf(rf.head) * ScaleOf(rf.head);
         foreach (var r in CollectFillRects(rf.streamBytes))
         {
             if (r.H > 0.15 * fsHead || r.W < 0.5) continue;
@@ -310,14 +296,14 @@ public sealed partial class TextReplacer
                     pieceBytes = cpl[0].bytes; pieceSw = cpl[0].sw;
                     whole = cpl.Count == 1 && pieceSw is null && !ReferenceEquals(co, rf.head);
                 }
-                double fsOp = co.FontSize * TmScaleOf(rf, co) * ScaleOf(rf, co);
+                double fsOp = co.FontSize * TmScaleOf(co) * ScaleOf(co);
                 double y = baseY - 0.189 * fsOp;
                 var sb2 = new StringBuilder();
                 if (string.IsNullOrWhiteSpace(co.Text))
                 {
                     // Leading newline: the insertion point may abut the previous
                     // token (BtStart precedes the whitespace before BT).
-                    sb2.Append("\nq\n0 g\n1 0 0 1 ").Append(N(rf, newX)).Append(' ').Append(N(rf, y))
+                    sb2.Append("\nq\n0 g\n1 0 0 1 ").Append(N(newX)).Append(' ').Append(N(y))
                        .Append(" cm\nQ\n");
                 }
                 else
@@ -328,14 +314,14 @@ public sealed partial class TextReplacer
                         double wsw;
                         try { wsw = rf.switchedFace.MeasureString(pieceSw, co.FontSize); }
                         catch { wsw = co.FontSize * 0.5 * pieceSw.Length; }
-                        wBar = wsw * TmScaleOf(rf, co) * ScaleOf(rf, co);
+                        wBar = wsw * TmScaleOf(co) * ScaleOf(co);
                     }
                     else if (pieceBytes is not null)
                         wBar = AdvNoTc(co, pieceBytes, own2: whole);
                     else
                         wBar = AdvNoTc(co, co.Bytes, own2: true);
-                    sb2.Append("\nq\n0 g\n1 0 0 1 ").Append(N(rf, newX)).Append(' ').Append(N(rf, y))
-                       .Append(" cm\n0 0 ").Append(N(rf, wBar)).Append(' ').Append(N(rf, 0.05 * fsOp))
+                    sb2.Append("\nq\n0 g\n1 0 0 1 ").Append(N(newX)).Append(' ').Append(N(y))
+                       .Append(" cm\n0 0 ").Append(N(wBar)).Append(' ').Append(N(0.05 * fsOp))
                        .Append(" re\nf*\nQ\n");
                 }
                 rf.inserts.Add((co.BtStart, Encoding.ASCII.GetBytes(sb2.ToString())));
@@ -363,13 +349,12 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>A head line whose replacement switched face is re-flowed through the substitute face; true when the line was finished here.</summary>
-    private bool ReflowSwitchedFaceHead(ReflowState rf, CrossTextOp o, int li, double px)
+    private static bool ReflowSwitchedFaceHead(ReflowState rf, CrossTextOp o, int li, double px)
     {
-        rf.matchAt = rf.crossHeadMatchAt >= 0
-            ? rf.crossHeadMatchAt
-            : rf.seqHeadText is null && rf.head.Bytes.Length == rf.head.Text.Length
-                ? rf.head.Text.IndexOf(rf.search, StringComparison.Ordinal)
-                : -1;
+        if (rf.crossHeadMatchAt >= 0) rf.matchAt = rf.crossHeadMatchAt;
+        else if (rf.seqHeadText is null && rf.head.Bytes.Length == rf.head.Text.Length)
+            rf.matchAt = rf.head.Text.IndexOf(rf.search, StringComparison.Ordinal);
+        else rf.matchAt = -1;
         rf.headSuffix = Array.Empty<byte>();
         if (rf.matchAt >= 0)
         {
@@ -391,16 +376,14 @@ public sealed partial class TextReplacer
         }
         rf.swRest = rf.matchAt >= 0 ? rf.replacement : rf.newHeadText;
         rf.swDoubleSeparator = false;
+        var firstSpace = rf.swRest.IndexOf(' ');
+        if (firstSpace > 0 && MonospacedRun(rf, o))
         {
-            var firstSpace = rf.swRest.IndexOf(' ');
-            if (firstSpace > 0 && MonospacedRun(rf, o))
-            {
-                var newWord = 0.0;
-                try { newWord = rf.switchedFace!.MeasureString(rf.swRest[..firstSpace], o.FontSize); }
-                catch { newWord = 0; }
-                var oldWord = OriginalFirstWordWidth(rf, o, rf.search);
-                rf.swDoubleSeparator = oldWord > 0 && newWord > oldWord;
-            }
+            var newWord = 0.0;
+            try { newWord = rf.switchedFace!.MeasureString(rf.swRest[..firstSpace], o.FontSize); }
+            catch { newWord = 0; }
+            var oldWord = OriginalFirstWordWidth(rf, o, rf.search);
+            rf.swDoubleSeparator = oldWord > 0 && newWord > oldWord;
         }
         rf.guardSw = 0;
         while (true)
@@ -418,7 +401,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>Prints the re-flow's notes when the debug variable asks for them.</summary>
-    private void ReportReflowDebug(ReflowState rf)
+    private static void ReportReflowDebug(ReflowState rf)
     {
         if (Environment.GetEnvironmentVariable("Q_PIECEDBG") is { Length: > 0 } pdbg)
         {
@@ -436,7 +419,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>Orders the affected operations, picks the head line and its replacement text and face; false when the match cannot be re-flowed.</summary>
-    private bool SelectReflowHead(ReflowState rf)
+    private static bool SelectReflowHead(ReflowState rf)
     {
         rf.affected.Sort((a, b) => a.li != b.li ? a.li.CompareTo(b.li) : a.px.CompareTo(b.px));
 
@@ -450,7 +433,7 @@ public sealed partial class TextReplacer
             if (rf.affected[j].li != rf.affected[j - 1].li) continue;
             var prev = rf.affected[j - 1];
             var prevEnd = prev.px + AdvPage(rf, prev.op, prev.op.Bytes, own: true);
-            var columnGap = 3.0 * prev.op.FontSize * TmScaleOf(rf, prev.op) * ScaleOf(rf, prev.op);
+            var columnGap = 3.0 * prev.op.FontSize * TmScaleOf(prev.op) * ScaleOf(prev.op);
             if (rf.affected[j].px - prevEnd <= columnGap) continue;
             rf.affected.RemoveRange(j, rf.affected.Count - j);
             break;
@@ -484,8 +467,8 @@ public sealed partial class TextReplacer
             var fam = SourceFontFamily(rf.head.FontDict);
             if (!string.IsNullOrEmpty(fam))
             {
-                rf.switchedFace = FontRepository.FindFontData(fam!);
-                if (rf.switchedFace?.TtfData is not null) rf.switchedFamily = fam!;
+                rf.switchedFace = FontRepository.FindFontData(fam);
+                if (rf.switchedFace?.TtfData is not null) rf.switchedFamily = fam;
             }
             if (rf.switchedFace?.TtfData is null)
                 rf.switchedFace = FontRepository.FindFontData("Times New Roman");
@@ -500,7 +483,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>Searches the head line's operations for the match: the operation holding the search string, or the run of operations it crosses; false when none holds it.</summary>
-    private bool SearchReflowHead(ReflowState rf)
+    private static bool SearchReflowHead(ReflowState rf)
     {
         rf.cat = new StringBuilder();
         rf.starts = new List<int>();
@@ -569,7 +552,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>When the match crosses operations, the head is the operation whose text starts it and the rest is consumed.</summary>
-    private void ResolveCrossLineHead(ReflowState rf)
+    private static void ResolveCrossLineHead(ReflowState rf)
     {
         // The match ran off the end of its own line, so the run that finishes it
         // belongs to the NEXT baseline: gluing its surviving tail onto the head
@@ -609,7 +592,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>The text left after the switched-face head goes back into the original face on the same line.</summary>
-    private void EmitSwitchedFaceSuffix(ReflowState rf, CrossTextOp o)
+    private static void EmitSwitchedFaceSuffix(ReflowState rf, CrossTextOp o)
     {
         int sOff = rf.matchAt + rf.search.Length;
         var restBytes = rf.headSuffix;
@@ -646,7 +629,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>Fits as much of the switched-face replacement onto the current line as its width allows, wrapping the rest.</summary>
-    private bool WrapSwitchedFaceLine(ReflowState rf, CrossTextOp o)
+    private static bool WrapSwitchedFaceLine(ReflowState rf, CrossTextOp o)
     {
         if (++rf.guardSw > 64) return false;
         double w2 = SwitchedAdv(rf, rf.swRest);
@@ -658,20 +641,18 @@ public sealed partial class TextReplacer
             return false;
         }
         int ks = -1;
+        double run = 0;
+        for (int k2 = 0; k2 < rf.swRest.Length; k2++)
         {
-            double run = 0;
-            for (int k2 = 0; k2 < rf.swRest.Length; k2++)
-            {
-                // A break is offered at a space whose PRECEDING text fits: the
-                // space itself may overhang the margin, so charging it first
-                // rejects the last word that actually belongs on the line.
-                if (rf.swRest[k2] == ' ' && rf.startX + run <= rf.rightMargin + 0.25) ks = k2 + 1;
-                double gw;
-                try { gw = rf.switchedFace!.MeasureString(rf.swRest[k2].ToString(), o.FontSize); }
-                catch { gw = o.FontSize * 0.5; }
-                run += (gw + o.Tc) * TmScaleOf(rf, o) * ScaleOf(rf, o);
-                if (rf.startX + run > rf.rightMargin + 0.25) break;
-            }
+            // A break is offered at a space whose PRECEDING text fits: the
+            // space itself may overhang the margin, so charging it first
+            // rejects the last word that actually belongs on the line.
+            if (rf.swRest[k2] == ' ' && rf.startX + run <= rf.rightMargin + 0.25) ks = k2 + 1;
+            double gw;
+            try { gw = rf.switchedFace!.MeasureString(rf.swRest[k2].ToString(), o.FontSize); }
+            catch { gw = o.FontSize * 0.5; }
+            run += (gw + o.Tc) * TmScaleOf(o) * ScaleOf(o);
+            if (rf.startX + run > rf.rightMargin + 0.25) break;
         }
         if (ks <= 0 || ks >= rf.swRest.Length)
         {
@@ -700,11 +681,10 @@ public sealed partial class TextReplacer
     private bool PlaceHeadPartLine(ReflowState rf, CrossTextOp o, int li, double px)
     {
         if (++rf.guard > 64) return false; // runaway split: fall back
-        double w = rf.wholeOriginal
-            ? AdvPage(rf, o, rf.rest, own: true)
-            : rf.curLi == li
-                ? PieceAdv(rf, o, rf.rest, rf.restOff, rf.rest.Length)
-                : AdvPage(rf, o, rf.rest, own: false);
+        double w;
+        if (rf.wholeOriginal) w = AdvPage(rf, o, rf.rest, own: true);
+        else if (rf.curLi == li) w = PieceAdv(rf, o, rf.rest, rf.restOff, rf.rest.Length);
+        else w = AdvPage(rf, o, rf.rest, own: false);
         if (rf.startX + w - TrailingSpaceAdv(rf, o, rf.rest) <= rf.rightMargin + 0.25)
         {
             NoteMove(rf, o, rf.startX, rf.curLi, li, rf.rest, null);
@@ -772,7 +752,7 @@ public sealed partial class TextReplacer
                     var keep = prevPc.bytes[..js];
                     var tail = prevPc.bytes[js..];
                     rf.pieces[^1] = (prevPc.op, prevPc.x, prevPc.line, keep, null, prevPc.off);
-                    rf.pendingPush = (PageX(rf, prevPc.op) + AdvPage(rf, prevPc.op, keep, own: false),
+                    rf.pendingPush = (PageX(prevPc.op) + AdvPage(rf, prevPc.op, keep, own: false),
                         prevPc.line);
                     rf.curLi++;
                     double nx = LeftOf(rf, rf.curLi);
@@ -788,7 +768,7 @@ public sealed partial class TextReplacer
                     // ("{{" pulled up alone ahead of its word): move the
                     // WHOLE piece down so the word stays together —
                     // the greedy reflow works at word granularity.
-                    rf.pendingPush = (PageX(rf, prevPc.op), prevPc.line);
+                    rf.pendingPush = (PageX(prevPc.op), prevPc.line);
                     rf.curLi++;
                     double nx = LeftOf(rf, rf.curLi);
                     NoteMove(rf, prevPc.op, nx, rf.curLi, prevPc.line, prevPc.bytes, null);

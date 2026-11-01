@@ -252,7 +252,9 @@ internal static class PageContentScan
         {
             var op = Current();
             var rm = Shown(GraphicsState.MultiplyMatrices(state.TextMatrix, state.Ctm), shown);
-            var size = state.FontSize * Math.Sqrt(rm[2] * rm[2] + rm[3] * rm[3]);
+            // (a negative size turns the glyphs over - set against a page's flipped space, a mirroring scale: the text
+            // is as large as its magnitude)
+            var size = Math.Abs(state.FontSize) * Math.Sqrt(rm[2] * rm[2] + rm[3] * rm[3]);
             if (op.Kind != ContentOpKind.TextShow)
             {
                 op.Kind = ContentOpKind.TextShow;
@@ -415,32 +417,56 @@ internal static class PageContentScan
                 rules.Add(new Rule(false, (a.X + b.X) / 2, Math.Min(a.Y, b.Y), Math.Max(a.Y, b.Y), Width: width));
         }
 
+        // A filled box thinner than a rule is one.
+        bool Bar(double l, double r, double lo, double hi)
+        {
+            if (!filled) return false;
+            if (hi - lo < RuleThickness && r - l >= RuleThickness) rules.Add(new Rule(true, (lo + hi) / 2, l, r, Width: hi - lo));
+            else if (r - l < RuleThickness && hi - lo >= RuleThickness) rules.Add(new Rule(false, (l + r) / 2, lo, hi, Width: r - l));
+            else return false;
+            return true;
+        }
+        // (a box drawn as its four corners, filled, is drawn as a rectangle is - a frame's sides mitred at their ends too:
+        // the whole path four corners, the first perhaps drawn again to close it; a glyph's outline drawn as a path holds
+        // its strokes as parts of one, which rule nothing)
+        var corners = 0;
+        var parts = 0;
+        var curved = false;
+        double firstX = 0, firstY = 0, lastX = 0, lastY = 0, minX = 0, maxX = 0, minY = 0, maxY = 0;
+        void Corner((double X, double Y) p)
+        {
+            if (corners == 0) (firstX, firstY, minX, maxX, minY, maxY) = (p.X, p.Y, p.X, p.X, p.Y, p.Y);
+            else (minX, maxX, minY, maxY) = (Math.Min(minX, p.X), Math.Max(maxX, p.X), Math.Min(minY, p.Y), Math.Max(maxY, p.Y));
+            (lastX, lastY) = p;
+            corners++;
+        }
+
         (double X, double Y)? start = null, pen = null;
         foreach (var c in cmds)
         {
             switch (c.Op)
             {
                 case PathOp.MoveTo:
+                    parts++;
                     start = pen = T(c.X1, c.Y1);
+                    if (filled) Corner(start.Value);
                     break;
                 case PathOp.LineTo:
                     var to = T(c.X1, c.Y1);
                     if (stroked && pen is { } from) Segment(from, to);
                     pen = to;
+                    if (filled) Corner(to);
                     break;
                 case PathOp.Close:
                     if (stroked && pen is { } p && start is { } s) Segment(p, s);
                     pen = start;
                     break;
                 case PathOp.Rect:
+                    parts++;
                     var a = T(c.X1, c.Y1);
                     var b = T(c.X1 + c.X2, c.Y1 + c.Y2);
                     double l = Math.Min(a.X, b.X), r = Math.Max(a.X, b.X), lo = Math.Min(a.Y, b.Y), hi = Math.Max(a.Y, b.Y);
-                    if (filled && hi - lo < RuleThickness && r - l >= RuleThickness)
-                        rules.Add(new Rule(true, (lo + hi) / 2, l, r, Width: hi - lo));
-                    else if (filled && r - l < RuleThickness && hi - lo >= RuleThickness)
-                        rules.Add(new Rule(false, (l + r) / 2, lo, hi, Width: r - l));
-                    else if (stroked)
+                    if (!Bar(l, r, lo, hi) && stroked)
                     {
                         Segment((l, lo), (r, lo)); Segment((l, hi), (r, hi));
                         Segment((l, lo), (l, hi)); Segment((r, lo), (r, hi));
@@ -449,10 +475,17 @@ internal static class PageContentScan
                     break;
                 default:
                     pen = null; // curves are not rules
+                    curved = true;
                     break;
             }
         }
+        if (filled && parts == 1 && !curved
+            && (corners == 4 || (corners == 5 && Math.Abs(lastX - firstX) <= CornerTolerance && Math.Abs(lastY - firstY) <= CornerTolerance)))
+            Bar(minX, maxX, minY, maxY);
     }
+
+    // A shape drawn again from its first corner closes on it within this many points.
+    private const double CornerTolerance = 0.5;
 
     /// <summary>A form paints inside its /BBox: the box through the form's /Matrix and the
     /// matrix at its Do is where it stands on the page (the unit square, without a box).</summary>

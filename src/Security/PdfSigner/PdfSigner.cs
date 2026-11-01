@@ -21,7 +21,7 @@ public sealed partial class PdfSigner
     public static byte[] SignDocumentTimestamp(byte[] pdfData, SignatureOptions options)
     {
         // A TSA token embeds the TSA certificate chain, so reserve generously.
-        const int contentsSize = 16384;
+        const int contentsSize = SignatureOptions.TimestampTokenReserve;
 
         using var doc = OpenDoc(pdfData, options.Password);
         var reader = doc.Reader;
@@ -31,11 +31,11 @@ public sealed partial class PdfSigner
         var fieldName = ResolveSignatureFieldName(doc, options.FieldName);
 
         var maxObj = 0;
-        foreach (var entry in xref.Entries.Values)
-            if (entry.ObjectNumber > maxObj) maxObj = entry.ObjectNumber;
+        foreach (var objectNumber in xref.Entries.Values.Select(entry => entry.ObjectNumber).Where(objectNumber => objectNumber > maxObj))
+            maxObj = objectNumber;
         var nextObj = maxObj + 1;
 
-        var existingFieldRef = FindTopLevelFieldRef(doc, fieldName);
+        var existingFieldRef = FindField(doc, fieldName).Ref;
         var existingFieldDict = existingFieldRef is not null
             ? doc.Reader.ResolveDict(existingFieldRef)
             : null;
@@ -52,9 +52,11 @@ public sealed partial class PdfSigner
         var sigValDict = BuildTimestampValueDict(contentsSize);
         var sigFieldDict = existingFieldDict is not null
             ? BuildUpdatedSignatureFieldDict(existingFieldDict, sigValObjNum)
-            : BuildSignatureFieldDict(fieldName, sigValObjNum, doc);
+            : BuildSignatureFieldDict(fieldName, sigValObjNum, FindPageRef(reader, 0));
         var acroFormDict = BuildAcroFormDict(doc, sigFieldObjNum,
             appendField: existingFieldDict is null);
+        if (reader.Decryptor is { } decryptor)
+            EncryptAppendedDict(decryptor, acroFormObjNum, acroFormDict);
 
         var offsets = new Dictionary<int, long>();
 
@@ -284,29 +286,31 @@ public sealed partial class PdfSigner
 
     #region Private helpers
 
-    /// <summary>Find the indirect reference of a top-level AcroForm field whose
-    /// /T equals <paramref name="fieldName"/>, or null when no such field
-    /// exists. Used to reuse a pre-existing blank signature field rather than
-    /// appending a duplicate one when signing.</summary>
-    /// <summary>The named top-level field, however /Fields carries it. A form built by
-    /// <c>FormEditor.AddField</c> states the field INLINE, with no object number of its
-    /// own, and a lookup that only accepts an indirect reference misses it - the signer
-    /// then appends a SECOND field of the same name and the original keeps its blank
-    /// placeholder appearance. The direct case reports a null ref, and the caller gives
-    /// the adopted dict a fresh object number and rewrites the /Fields entry to match.</summary>
-    private static (PdfIndirectRef? Ref, PdfDictionary? Dict) FindTopLevelField(
-        Document doc, string fieldName)
+    /// <summary>The field whose fully qualified name - the /T of it and of each ancestor, joined
+    /// by periods - is <paramref name="fieldName"/>, however deep in the field tree it sits, so
+    /// signing reuses a blank signature field instead of appending an orphan one under its
+    /// dotted name. A form built by <c>FormEditor.AddField</c> states a top-level field INLINE,
+    /// with no object number of its own: that case reports a null ref, and the caller gives the
+    /// adopted dict a fresh object number and rewrites the /Fields entry to match. An inline
+    /// field below the top level is not adopted (its parent's /Kids would keep the old copy).</summary>
+    private static (PdfIndirectRef? Ref, PdfDictionary? Dict) FindField(Document doc, string fieldName)
     {
         var acroForm = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("AcroForm"));
-        var fields = acroForm is null ? null : doc.Reader.Resolve(acroForm.Get("Fields")) as PdfArray;
-        if (fields is null) return (null, null);
-        foreach (var f in fields)
+        if (doc.Reader.Resolve(acroForm?.Get("Fields")) is not PdfArray fields) return (null, null);
+        var pending = new Stack<(PdfObject Entry, string? Parent, bool TopLevel)>();
+        for (var i = fields.Count - 1; i >= 0; i--) pending.Push((fields[i], null, true));
+        var seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        while (pending.Count > 0)
         {
-            var dict = f is PdfIndirectRef r ? doc.Reader.ResolveDict(r) : f as PdfDictionary;
-            if (dict is null) continue;
-            var name = doc.Reader.Resolve(dict.Get("T")) as PdfString;
-            if (name is null || name.ToText() != fieldName) continue;
-            return (f as PdfIndirectRef, dict);
+            var (entry, parent, topLevel) = pending.Pop();
+            var dict = entry is PdfIndirectRef r ? doc.Reader.ResolveDict(r) : entry as PdfDictionary;
+            if (dict is null || !seen.Add(dict)) continue;
+            var partial = (doc.Reader.Resolve(dict.Get("T")) as PdfString)?.ToText();
+            var name = partial is null ? parent : parent is null ? partial : parent + "." + partial;
+            if (partial is not null && name == fieldName)
+                return entry is PdfIndirectRef || topLevel ? (entry as PdfIndirectRef, dict) : (null, null);
+            if (doc.Reader.Resolve(dict.Get("Kids")) is PdfArray kids)
+                for (var i = kids.Count - 1; i >= 0; i--) pending.Push((kids[i], name, false));
         }
         return (null, null);
     }
@@ -350,6 +354,9 @@ public sealed partial class PdfSigner
         // out re-fonts the whole banner to Arial).
         static string? Meta(string? fromAppearance, string? fromOptions)
             => !string.IsNullOrEmpty(fromAppearance) ? fromAppearance : fromOptions;
+        // A picture shown without its properties carries no text layer content at all.
+        if (appearance is { ShowText: false, ImageBytes.Length: > 0 })
+            return BuildPictureOnlyObjects(w, h, appearance.ImageBytes, nextObj);
         var lines = SignatureBanner.Lines(
             Meta(appearance?.SignerName, options.SignerName) ?? certificate.SubjectName,
             appearance?.SignDate ?? options.SigningDate ?? DateTime.Now,
@@ -373,14 +380,18 @@ public sealed partial class PdfSigner
         var objects = new List<(int, PdfDictionary, bool)>();
         var fontObj = AppendBannerFace(face, widths, toUnicode, objects, ref nextObj);
         const string fontRes = "C0_0";
-        var n2Obj = AppendBannerTextForm(w, h, hexLines, fontObj, fontRes,
-            bannerFontSize > 0 ? bannerFontSize : 10, objects, ref nextObj);
-
         // A caller-supplied graphic is the /n0 layer under the text: the frame draws
-        // the picture first, then the banner over it.
+        // the picture first, then the banner over it. A foreground picture is drawn in the
+        // text layer instead, over the layer's background fill and under its text.
+        var pictureObj = appearance?.ImageBytes is { Length: > 0 } picture
+            ? SignatureBanner.PictureForm(picture, w, h, ref nextObj, objects)
+            : null;
+        var foregroundPicture = appearance is { ForegroundImage: true } ? pictureObj : null;
+        var n2Obj = AppendBannerTextForm(w, h, hexLines, fontObj, fontRes,
+            bannerFontSize > 0 ? bannerFontSize : 10, appearance, foregroundPicture, objects, ref nextObj);
+
         var layers = new List<(string Name, int Obj)>();
-        if (appearance?.ImageBytes is { Length: > 0 } picture
-            && SignatureBanner.PictureForm(picture, w, h, ref nextObj, objects) is { } n0Obj)
+        if (pictureObj is { } n0Obj && foregroundPicture is null)
             layers.Add(("n0", n0Obj));
         layers.Add(("n2", n2Obj));
         var frmObj = nextObj++;
@@ -391,20 +402,40 @@ public sealed partial class PdfSigner
         return (apObj, objects, nextObj);
     }
 
+    // The name the text layer draws a foreground picture by.
+    private const string ForegroundPictureRes = "Im0";
+
+    /// <summary>The appearance of a signature that shows its picture alone: the /n0 picture layer
+    /// under an empty /n2, as the banner nests them. Null when the bytes are no picture.</summary>
+    private static (int ApObjNum, List<(int Num, PdfDictionary Dict, bool IsStream)> Objects, int NextObj)?
+        BuildPictureOnlyObjects(double w, double h, byte[] picture, int nextObj)
+    {
+        var objects = new List<(int, PdfDictionary, bool)>();
+        if (SignatureBanner.PictureForm(picture, w, h, ref nextObj, objects) is not { } n0Obj) return null;
+        var n2Obj = nextObj++;
+        objects.Add((n2Obj, SignatureBanner.Wrapper(Array.Empty<(string, int)>(), w, h, "n2"), true));
+        var frmObj = nextObj++;
+        objects.Add((frmObj, SignatureBanner.Wrapper(new[] { ("n0", n0Obj), ("n2", n2Obj) }, w, h, "FRM"), true));
+        var apObj = nextObj++;
+        objects.Add((apObj, SignatureBanner.Wrapper("FRM", frmObj, w, h, null), true));
+        return (apObj, objects, nextObj);
+    }
+
     /// <summary>The banner's face, bottom up: program, descriptor, CID font, Type0. Returns the
     /// Type0 font's object number, the one the appearance stream names.</summary>
     private static int AppendBannerFace((byte[] Ttf, string Name) face,
         SortedDictionary<int, int> widths, SortedDictionary<int, char> toUnicode,
         List<(int, PdfDictionary, bool)> objects, ref int nextObj)
     {
+        var (program, name) = BannerProgram(face, widths);
         var fileObj = nextObj++;
         var fileDict = new PdfDictionary();
         // The program is DEFLATED. Raw, a font's tables carry
         // long runs of zero bytes straight into the file, and a signed document is
         // checked for exactly that (a run of 50 NULs reads as an unfilled placeholder).
-        var packed = DeflateBytes(face.Ttf);
+        var packed = DeflateBytes(program);
         fileDict.Set("Filter", new PdfName("FlateDecode"));
-        fileDict.Set("Length1", new PdfInteger(face.Ttf.Length));
+        fileDict.Set("Length1", new PdfInteger(program.Length));
         fileDict.Set("Length", new PdfInteger(packed.Length));
         fileDict.Set("__StreamData", new PdfString(packed));
         objects.Add((fileObj, fileDict, true));
@@ -412,7 +443,7 @@ public sealed partial class PdfSigner
         var descObj = nextObj++;
         var descDict = new PdfDictionary();
         descDict.Set("Type", new PdfName("FontDescriptor"));
-        descDict.Set("FontName", new PdfName(face.Name));
+        descDict.Set("FontName", new PdfName(name));
         descDict.Set("Flags", new PdfInteger(32));
         descDict.Set("ItalicAngle", new PdfInteger(0));
         var (faceAscent, faceDescent, _, _) = Aspose.Pdf.Text.FontRepository.ReadTtfMetrics(face.Ttf);
@@ -430,7 +461,7 @@ public sealed partial class PdfSigner
         var cidDict = new PdfDictionary();
         cidDict.Set("Type", new PdfName("Font"));
         cidDict.Set("Subtype", new PdfName("CIDFontType2"));
-        cidDict.Set("BaseFont", new PdfName(face.Name));
+        cidDict.Set("BaseFont", new PdfName(name));
         var sysInfo = new PdfDictionary();
         sysInfo.Set("Registry", new PdfString(Encoding.ASCII.GetBytes("Adobe")));
         sysInfo.Set("Ordering", new PdfString(Encoding.ASCII.GetBytes("Identity")));
@@ -454,7 +485,7 @@ public sealed partial class PdfSigner
         var fontDict = new PdfDictionary();
         fontDict.Set("Type", new PdfName("Font"));
         fontDict.Set("Subtype", new PdfName("Type0"));
-        fontDict.Set("BaseFont", new PdfName(face.Name));
+        fontDict.Set("BaseFont", new PdfName(name));
         fontDict.Set("Encoding", new PdfName("Identity-H"));
         var descFonts = new PdfArray();
         descFonts.Add(new PdfIndirectRef(cidObj, 0));
@@ -473,9 +504,30 @@ public sealed partial class PdfSigner
         return fontObj;
     }
 
+    /// <summary>The program the banner embeds and the name it goes by: the face cut to the glyphs the banner draws
+    /// (their numbers kept, so the codes stay valid) under a subset tag - a few kilobytes, where the whole system
+    /// face is about a megabyte at every signature - or the whole face, under its own name, when it cannot be cut.</summary>
+    private static (byte[] Program, string Name) BannerProgram((byte[] Ttf, string Name) face,
+        SortedDictionary<int, int> widths)
+    {
+        try
+        {
+            var parser = new Aspose.Pdf.Text.TrueTypeParser(face.Ttf);
+            parser.Parse();
+            var subset = new Aspose.Pdf.Text.TrueTypeSubsetter(face.Ttf, parser).SubsetSparse(widths.Keys);
+            if (subset.Length < face.Ttf.Length)
+                return (subset, Aspose.Pdf.Text.Type0FontEmbedder.GenerateSubsetTag() + "+" + face.Name);
+        }
+        catch (Exception)
+        {
+            // A program the subsetter cannot read travels whole.
+        }
+        return (face.Ttf, face.Name);
+    }
+
     /// <summary>/n2 holds the text; /FRM invokes it; the widget's /N invokes /FRM.</summary>
     private static int AppendBannerTextForm(double w, double h, List<string> hexLines,
-        int fontObj, string fontRes, double fontSize,
+        int fontObj, string fontRes, double fontSize, SignatureAppearance? appearance, int? pictureObj,
         List<(int, PdfDictionary, bool)> objects, ref int nextObj)
     {
         var n2Obj = nextObj++;
@@ -495,8 +547,15 @@ public sealed partial class PdfSigner
         n2Fonts.Set(fontRes, new PdfIndirectRef(fontObj, 0));
         var n2Res = new PdfDictionary();
         n2Res.Set("Font", n2Fonts);
+        if (pictureObj is { } picture)
+        {
+            var n2XObjects = new PdfDictionary();
+            n2XObjects.Set(ForegroundPictureRes, new PdfIndirectRef(picture, 0));
+            n2Res.Set("XObject", n2XObjects);
+        }
         n2.Set("Resources", n2Res);
-        var content = SignatureBanner.Content(hexLines, fontRes, fontSize, h);
+        var content = SignatureBanner.Content(hexLines, fontRes, fontSize, w, h, appearance,
+            pictureObj is null ? null : ForegroundPictureRes);
         n2.Set("Length", new PdfInteger(content.Length));
         n2.Set("__StreamData", new PdfString(content));
         objects.Add((n2Obj, n2, true));

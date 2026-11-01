@@ -54,29 +54,29 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Read the header, folder name and item bodies out of the markup. False when the card has no header text or no items.</summary>
     private static bool ReadListingCardMarkup(ListingCardState lc)
     {
-        lc.headM = Regex.Match(lc.html,
+        lc.headM = SafeRegex.Match(lc.html,
             @"class\s*=\s*[""']container-header[""'][^>]*>(?<body>[\s\S]*?)</div>",
             RegexOptions.IgnoreCase);
         if (!lc.headM.Success) return false;
         lc.headHtml = lc.headM.Groups["body"].Value;
-        lc.folderM = Regex.Match(lc.headHtml,
+        lc.folderM = SafeRegex.Match(lc.headHtml,
             @"<span\b[^>]*class\s*=\s*[""']folder-name[""'][^>]*>([\s\S]*?)</span>",
             RegexOptions.IgnoreCase);
         lc.folderText = lc.folderM.Success
-            ? Regex.Replace(DecodeEntities(lc.folderM.Groups[1].Value), @"\s+", " ").Trim() : "";
-        lc.headText = Regex.Replace(DecodeEntities(
-            Regex.Replace(Regex.Replace(lc.headHtml, @"<span[\s\S]*?</span>", ""), @"<[^>]+>", "")),
+            ? SafeRegex.Replace(DecodeEntities(lc.folderM.Groups[1].Value), @"\s+", " ").Trim() : "";
+        lc.headText = SafeRegex.Replace(DecodeEntities(
+            SafeRegex.Replace(SafeRegex.Replace(lc.headHtml, @"<span[\s\S]*?</span>", ""), @"<[^>]+>", "")),
             @"\s+", " ").Trim();
 
         lc.items = new List<(string SvgXml, string Text)>();
-        foreach (Match im in Regex.Matches(lc.html,
+        foreach (Match im in SafeRegex.Matches(lc.html,
             @"<div\b[^>]*class\s*=\s*[""']item[""'][^>]*>(?<body>[\s\S]*?)</div>",
             RegexOptions.IgnoreCase))
         {
             var bodyHtml = im.Groups["body"].Value;
-            var svgM = Regex.Match(bodyHtml, @"<svg\b[\s\S]*?</svg>", RegexOptions.IgnoreCase);
-            var text = Regex.Replace(DecodeEntities(
-                Regex.Replace(Regex.Replace(bodyHtml, @"<svg\b[\s\S]*?</svg>", ""), @"<[^>]+>", "")),
+            var svgM = SafeRegex.Match(bodyHtml, @"<svg\b[\s\S]*?</svg>", RegexOptions.IgnoreCase);
+            var text = SafeRegex.Replace(DecodeEntities(
+                SafeRegex.Replace(SafeRegex.Replace(bodyHtml, @"<svg\b[\s\S]*?</svg>", ""), @"<[^>]+>", "")),
                 @"\s+", " ").Trim();
             lc.items.Add((svgM.Success ? svgM.Value : "", text));
         }
@@ -105,7 +105,7 @@ internal static partial class HtmlToPdfConverter
             System.Globalization.CultureInfo.InvariantCulture, out var contPct);
         lc.contPct = contPct;
         lc.borderW = 1.5;                                      // 2px
-        lc.bm = Regex.Match(borderV, @"([\d.]+)\s*px");
+        lc.bm = SafeRegex.Match(borderV, @"([\d.]+)\s*px");
         if (lc.bm.Success) lc.borderW = double.Parse(lc.bm.Groups[1].Value,
             System.Globalization.CultureInfo.InvariantCulture) * 0.75;
         lc.borderCol = ParseCssColor(borderV) ?? Color.FromArgb(149, 151, 153);

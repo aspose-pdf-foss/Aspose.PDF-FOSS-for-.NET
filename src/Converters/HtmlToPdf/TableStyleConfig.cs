@@ -50,6 +50,10 @@ private sealed class TableStyleConfig
     // declared percent share at the squeeze.
     public bool breakAnywhereDoc;
     public bool hasBorder;
+    // How strongly the cells' box was set: the specificity of the rule that boxed them (none for the table's own
+    // style), CellOwnBoxSpec for a box a cell's own style draws. A chain rule clears only what it outranks, and never
+    // the box a border attribute draws: a table that carries one keeps its cell boxes and frame whole.
+    public int cellBoxSpec;
     public double borderWidth;
     public Color borderColor = null!;
     public double pad;
@@ -97,6 +101,15 @@ private sealed class TableStyleConfig
     public bool authoredCellChrome;
     public List<CssChainRule>? chainRules;
     public List<CssElem>? cssAncestors;
+    // The containers open above a grid that is built without its ancestor chain (cssAncestors null):
+    // read only to decide whether a rule through them clears the cells' borders.
+    public List<CssElem>? hostChain;
+    // The body face the host grid's cells draw in, handed to a grid nested in one of them (null = the host has none).
+    public string? hostBodyFace;
+    // A chain rule through the grid's ancestors clears its cells' border (`div.form .grid td { border: 0 }`).
+    public bool chainClearsCellBorder;
+    // The document's flow sets its prose in the sheet's faces: a grid no rule faces takes the body face too.
+    public bool bodyFaceGrid;
     public string? defaultCellFace;
     public bool docElementGrid;
     public bool dwFormCells;
@@ -105,9 +118,14 @@ private sealed class TableStyleConfig
     public double formGridStrutDropPt;
     public double formGridStrutPt;
     public bool fullWidthCjkMin;
-    public Func<string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio;
+    public Func<string, string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio;
     /// <summary>Factory for a checkbox input in a UA-flow grid cell: (checked) -> a CheckboxField already on the form; the cell carries it as a paragraph the row plan seats.</summary>
     public Func<bool, Aspose.Pdf.Forms.CheckboxField>? makeCheckbox;
+    /// <summary>Factory for a text input, select or textarea of a field-cell grid (see HtmlDocProfile.fieldCellGrids): the field already on the form, carried by its cell as a paragraph.</summary>
+    public Func<GridFieldSpec, Aspose.Pdf.Forms.Field>? makeField;
+    /// <summary>A field-cell grid: its controls are boxes in their cells - the render build seats their fields
+    /// (makeField), a width probe only measures them.</summary>
+    public bool fieldCells;
     /// <summary>The table's class rule declares border-collapse: collapse - the cells' borders are the grid, with no spacing and no second outer frame (UA control grids).</summary>
     public bool collapsedGrid;
     public bool overDeclaredDraw;

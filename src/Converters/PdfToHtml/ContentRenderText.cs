@@ -30,6 +30,7 @@ public sealed partial class PdfToHtmlConverter
         sr.effRise = ct.rise * sr.scale;
         sr.posX = sr.dev.E;
         sr.posY = sr.dev.F;
+        sr.across = AcrossCoordinate(sr.dev, sr.posX, sr.posY);
 
         sr.cssAngle = -Math.Atan2(sr.dev.B, sr.dev.A) * (180.0 / Math.PI);
         if (Math.Abs(sr.cssAngle) < 0.05) sr.cssAngle = 0;
@@ -44,18 +45,38 @@ public sealed partial class PdfToHtmlConverter
         sr.sameLine = ct.groupActive &&
             Math.Abs(sr.effRise - ct.groupRise) <= 0.01 &&
             Math.Abs(sr.cssAngle - ct.groupAngle) <= 0.1 &&
-            Math.Abs(sr.posY - ct.groupY) <= sr.lineYTol &&
-            (sr.wsOnlyShow || (styleReg is not null && ct.lineOk) ||
+            Math.Abs(sr.across - GroupAcross(ct)) <= sr.lineYTol &&
+            (sr.wsOnlyShow ||
              (ct.fontFamily == ct.groupFamily && ct.fontCssFamily == ct.groupCssFamily &&
               ct.fontWeight == ct.groupWeight && ct.fontStyle == ct.groupStyle &&
-              ct.r == ct.groupR && ct.g == ct.groupG && ct.b == ct.groupB &&
-              Invisible(ct) == ct.groupTransparent));
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
+              ct.r == ct.groupR && ct.g == ct.groupG && ct.b == ct.groupB && ct.fillAlpha == ct.groupAlpha &&
+#pragma warning restore S1244
+              Invisible(ct) == ct.groupTransparent) ||
+             // A run of another style joins the line only when the line solver will take it and part the
+             // styles into spans of their own; a line it declines is written as one span in its first style.
+             // A line whose extent is unknown places no run of its own reliably and keeps joining.
+             (styleReg is not null && ct.lineOk
+                 && (!ct.groupPinned || SolverMeasuresLine(ct, ct.lineStyles, fonts, emCompensation))));
         sr.backTolPt = emCompensation ? 1.5 : 0.5;
-        if (textOnly && sr.sameLine && ct.groupSegs.Count > 0 && sr.posX < ct.groupPenX - sr.backTolPt)
+        // A show starting inside the trailing space of the show before it (the next word
+        // seated a hair short of the pen) continues the line, its space keeping a negative
+        // gap; a show further back is a backward draw and opens its own line.
+        if (textOnly && sr.sameLine && ct.groupSegs.Count > 0
+            && sr.posX < ct.groupPenX - ct.groupTailSpacePt - sr.backTolPt)
+            sr.sameLine = false;
+        // A same-baseline show lying WHOLLY left of the line's start, a column gap or more
+        // away, is not part of the line: it opens its own block at its own left (a caption
+        // drawn after the caption to its right was appended to that one and written over the
+        // next). A show reaching the line start - a wrap-back, a justified half - joins as
+        // before; a right-to-left line, drawn word by word leftward, keeps its own rule.
+        if (styleReg is not null && !textOnly && sr.sameLine && ct.groupSegs.Count > 0
+            && !double.IsNaN(advTextSpace) && !HasRtlCodepoint(text)
+            && sr.posX + advTextSpace * sr.scale < LineStartX(ct) - sr.divGapPt)
             sr.sameLine = false;
         if (!sr.sameLine)
         {
-            OpenNewLineGroup(sr, ct, sb, pageHeight, pageWidth, emCompensation, textOnly, styleReg, classNamer, linkTargets, rotReg, pageLLX, yTopRef, zCounter, pageTurnedOver, advTextSpace);
+            OpenNewLineGroup(sr, ct, fonts, sb, pageHeight, pageWidth, emCompensation, textOnly, styleReg, classNamer, linkTargets, rotReg, pageLLX, yTopRef, zCounter, pageTurnedOver, advTextSpace);
         }
         ct.groupMcSeq = ct.mcSeq;
         ct.groupPenX = Math.Max(ct.groupPenX, sr.posX);

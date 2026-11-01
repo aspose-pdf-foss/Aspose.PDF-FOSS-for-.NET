@@ -132,9 +132,9 @@ public sealed class UnsignedContentAbsorber
     private static long SignedExtent(Document document)
     {
         long end = -1;
-        foreach (var signature in Forms.Signature.EnumerateSignatures(document))
+        foreach (var byteRangeRaw in Forms.Signature.EnumerateSignatures(document).Select(signature => signature.ByteRangeRaw))
         {
-            var range = signature.ByteRangeRaw;
+            var range = byteRangeRaw;
             if (range is null || range.Length < 4) continue;
             end = Math.Max(end, range[2] + range[3]);
         }

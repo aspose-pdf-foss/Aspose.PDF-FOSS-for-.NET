@@ -7,6 +7,9 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>A line with no room left under the flow cursor opens the next page and re-seats on it; inside a float column it is clipped instead, and the caller stops. False means the caller writes no line.</summary>
+    /// <summary>The line box, in ems, a page's first line drops by under a zero top margin before its baseline.</summary>
+    private const double ZeroTopMarginLineBoxEm = 1.15;
+
     private static bool SeatLineOnPage(BlockTextState bt, double needRoom)
     {
         if (bt.flow.y - needRoom < bt.marginBottom)
@@ -24,6 +27,11 @@ internal static partial class HtmlToPdfConverter
             if (bt.profile.sheetBoxFlow && bt.block.FontFamily is { Length: > 0 } contFace
                 && WinMetricsFor(contFace) is not null && bt.metrics.blockFontSize > 0)
                 bt.flow.y -= LineBoxAbove(contFace, bt.metrics.blockFontSize, bt.metrics.lineHeight);
+            // A zero top margin: this line is the fresh page's first and drops by its line box now, as a block
+            // opening a page does, or its baseline would stand on the page edge with its glyphs above it.
+            else if (bt.flow.pendingTopDrop && !bt.profile.metricFlow)
+                bt.flow.y -= bt.metrics.blockFontSize * ZeroTopMarginLineBoxEm;
+            bt.flow.pendingTopDrop = false;
         }
         return true;
     }

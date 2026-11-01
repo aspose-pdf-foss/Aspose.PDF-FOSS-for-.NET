@@ -9,8 +9,8 @@ public sealed partial class TextParagraph
     internal static string EnsureXObject(Page page, PdfStream xobject)
     {
         var xobjects = EnsureResourceDict(page, "XObject");
-        foreach (var key in xobjects.Keys)
-            if (ReferenceEquals(xobjects.Get(key), xobject)) return key;
+        var key = xobjects.Keys.FirstOrDefault(key => ReferenceEquals(xobjects.Get(key), xobject));
+        if (key is not null) return key;
         var prefix = xobject.Dict.Get("Subtype") is PdfName { Value: "Form" } ? "Fm" : "Im";
         var n = 1;
         while (xobjects.ContainsKey($"{prefix}{n}")) n++;

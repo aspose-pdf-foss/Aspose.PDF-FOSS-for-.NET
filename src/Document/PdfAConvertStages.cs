@@ -28,6 +28,10 @@ public sealed partial class Document : IDisposable
             ReportProhibitedOptionalContentAS(pa.options, pa.strip);
         }
 
+        // 12b. A separation whose tint transform is no function is given a linear ramp in its
+        // alternate space: left as it is, the appearance or form painting it fails to draw.
+        if (pa.fix) RepairSeparationTintTransforms();
+
         // 12c. Flat-colour DCT images (part 2+): a JPEG whose decoded samples use at
         // most 256 distinct colours gets an /Indexed /DeviceRGB palette colorspace.
         // The conversion emits a fixed 256-slot palette (hival 255) for
@@ -69,7 +73,7 @@ public sealed partial class Document : IDisposable
         // 14. PDF/A-1 content-stream normalisation:
         //  - every page's content is bracketed in a q…Q pair so graphics state left
         //    open by the original stream can't leak into content the conversion
-        //    appends (observable as exactly +2 operators per page);
+        //    appends (observable as exactly +2 operators per page),
         //  - ISO 19005-1 §6.1.13 implementation limits: a real value must fit ±32767,
         //    so an out-of-range path coordinate is rounded to an integer (sub-unit
         //    precision that far off the page is meaningless).
@@ -97,7 +101,7 @@ public sealed partial class Document : IDisposable
         // failed. PDF/A-1 additionally flags object-level fractional reals beyond
         // ±32767 (convertable: the fraction truncates toward zero).
         if (pa.part is "1" or "2")
-            CheckImplementationLimits(pa.options, pa.part);
+            CheckImplementationLimits(pa.options.ConversionLog, pa.part, repairReals: true);
 
         pa.autoTag = pa.options.AutoTaggingSettings is { EnableAutoTagging: true } || pa.conformance == "A";
         if (pa.fix && pa.autoTag)
@@ -137,9 +141,17 @@ public sealed partial class Document : IDisposable
             var asked = pa.options.AutoTaggingSettings is { EnableAutoTagging: true };
             var keep = !asked && IsProducedByThisLibrary() && Tagged.AutoTagger.HasCompleteTagging(this);
             if (!keep)
+            {
+                if (_taggedContent is null) _taggedForPdfAOnly = true;
                 Tagged.AutoTagger.Apply(this, pa.options.AutoTaggingSettings ?? AutoTaggingSettings.Default);
+            }
         }
     }
+
+    /// <summary>Set when a PDF/A conversion built the structure tree of a document that had no
+    /// authored one. Tagging for PDF/A is not a claim to PDF/UA, so the save that flushes the
+    /// tree does not add the UA identifier.</summary>
+    private bool _taggedForPdfAOnly;
 
     /// <summary>PDF/X trapping and boxes, and the level-A structure requirements of parts 2 and 3.</summary>
     private void ApplyPdfXAndLevelAFixes(PdfAConvertState pa)
@@ -201,7 +213,7 @@ public sealed partial class Document : IDisposable
         if (!pa.isPdfX)
         {
             if (pa.part == "1") ReportInvalidFontProgramSubtypes(pa.options);
-            ReportInvalidRenderingIntents(pa.options);
+            CheckPageImages(pa);
             // Parts 2 and 3 state the colour rule as clause 6.2.4.3; the OutputIntent the
             // conversion just added is the one the check reads.
             if (pa.part is "2" or "3") ReportUnmatchedDeviceColorSpaces(pa.options);
@@ -250,10 +262,10 @@ public sealed partial class Document : IDisposable
         // the page; a page with none anywhere gets an empty dict).
         if (pa.fix)
         {
-            foreach (var page in Pages)
+            foreach (var dict in Pages.Select(page => page.Dict))
             {
-                if (page.Dict.ContainsKey("Resources")) continue;
-                page.Dict.Set("Resources", FindInheritedRaw(page.Dict, "Resources") ?? new PdfDictionary());
+                if (dict.ContainsKey("Resources")) continue;
+                dict.Set("Resources", FindInheritedRaw(dict, "Resources") ?? new PdfDictionary());
             }
         }
 
@@ -269,6 +281,8 @@ public sealed partial class Document : IDisposable
             foreach (var page in Pages)
                 try { RemoveNotdefGlyphShows(page, pa.options, pa.strip); }
                 catch { /* unparsable content: leave the page as-is */ }
+        _notdefEncodings = null;
+        _notdefCidFonts = null;
 
         // 7. Add OutputIntent
         if (pa.isPdfX && pa.fix)
@@ -282,13 +296,9 @@ public sealed partial class Document : IDisposable
             // page XObjects OR queued as DOM paragraphs (Image, ImageStamp)
             // that Save() will flush after Convert returns.
             var hasDeviceColors = false;
-            foreach (var page in Pages)
+            if (Pages.Any(page => PageHasDeviceDependentColors(page) || PageHasDeviceDependentParagraphs(page)))
             {
-                if (PageHasDeviceDependentColors(page) || PageHasDeviceDependentParagraphs(page))
-                {
-                    hasDeviceColors = true;
-                    break;
-                }
+                hasDeviceColors = true;
             }
             if (hasDeviceColors)
             {
@@ -359,7 +369,7 @@ public sealed partial class Document : IDisposable
             if (pa.fix && pa.options.TransparencyAction == ConvertTransparencyAction.Mask)
                 foreach (var page in Pages)
                 {
-                    var res = _reader.ResolveDict(page.Dict.Get("Resources"));
+                    var res = Devices.SoftwarePageRenderer.ResolveInheritedPageResources(page.Dict, _reader);
                     var content = page.GetContentStreamBytes();
                     if (res is not null && content is { Length: > 0 })
                         MaskConstantAlphaImages(content, res, 1.0,
@@ -372,22 +382,28 @@ public sealed partial class Document : IDisposable
             // Rewrite such paint operators to no-ops FIRST, while the alpha values are
             // still readable.
             if (pa.fix)
+            {
+                // A form drawn on many pages is rewritten once for each resources it is drawn under.
+                var done = new HashSet<(PdfDictionary Form, PdfDictionary Resources)>();
                 foreach (var page in Pages)
-                    try { SuppressAlphaZeroPaint(page); }
+                    try { SuppressAlphaZeroPaint(page, done); }
                     catch { /* unparsable content: leave as-is; neutralisation still applies */ }
+            }
 
             // ExtGState soft masks, constant alpha (ca/CA < 1) and non-Normal blend modes
             // are equally prohibited by PDF/A-1. Neutralise them in every graphics-state
-            // dictionary reachable from the pages (including nested Form XObjects) so the
-            // content renders opaquely instead of failing validation.
+            // dictionary reachable from the pages (the page tree's inherited resources and
+            // nested Form XObjects included) so the content renders opaquely instead of
+            // failing validation.
             foreach (var page in Pages)
-                NeutralizeExtGStateTransparency(page.Dict, pa.options, page.Number, pa.fix,
-                    new HashSet<PdfDictionary>());
+                NeutralizeExtGStateTransparency(
+                    Devices.SoftwarePageRenderer.ResolveInheritedPageResources(page.Dict, _reader),
+                    pa.options, page.Number, pa.fix, new HashSet<PdfDictionary>());
 
             // PDF/A-1 implementation limits (ISO 19005-1 / PDF 1.4 Annex C): real numbers
-            // must stay within ±32767. Round out-of-range FRACTIONAL reals in the page
-            // content to integers (integral magnitudes beyond the limit are tolerated by
-            // the target validators, and rounding keeps far-off-page geometry harmless).
+            // must stay within ±32767. Round out-of-range reals in the page content to
+            // integers (integer tokens beyond the limit are tolerated by the target
+            // validators, and rounding keeps far-off-page geometry harmless).
             if (pa.fix)
                 foreach (var page in Pages)
                 {
@@ -562,7 +578,7 @@ public sealed partial class Document : IDisposable
         // name = BaseFont with the subset prefix stripped). Conversion proceeds —
         // the problem is informational (Convertable stays true).
         if (pa.part is "2" or "3")
-            ReportNotdefGlyphReferences(pa.options);
+            ReportNotdefGlyphReferences(pa.options.ConversionLog, rememberFonts: true);
 
         // ISO 19005-4 (clause 6.1.2): PDF/A-4 is defined over PDF 2.0 — a 1.x
         // document must be brought to 2.0 FIRST (Convert(v_2_0)), or the A-4
@@ -616,7 +632,7 @@ public sealed partial class Document : IDisposable
             if (string.IsNullOrEmpty(uaMeta.Get("xmp:CreateDate")) && Info.CreationDate != DateTime.MinValue)
                 uaMeta.Set("xmp:CreateDate", FormatXmpDate(Info.CreationDate, Info.CreationTimeZone));
             if (string.IsNullOrEmpty(uaMeta.Get("xmp:ModifyDate")) && Info.ModDate != DateTime.MinValue)
-                uaMeta.Set("xmp:ModifyDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
+                uaMeta.SetStamped("xmp:ModifyDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
             if (_reader.Trailer.Get("ID") is null)
             {
                 _forceWriteId = true;
@@ -720,7 +736,7 @@ public sealed partial class Document : IDisposable
             // Keep the catalog /Version in sync so a reloaded document reports
             // the downgraded version regardless of header/catalog precedence.
             _reader.Catalog.Set("Version", new PdfName(pa.plainVersion));
-            return true;
+            return DowngradeToPlainVersion(pa.plainVersion, pa.options.ConversionLog);
         }
         return null;
     }
@@ -767,7 +783,7 @@ public sealed partial class Document : IDisposable
         if (string.IsNullOrEmpty(pa.meta.Get("xmp:CreateDate")) && Info.CreationDate != DateTime.MinValue)
             pa.meta.Set("xmp:CreateDate", FormatXmpDate(Info.CreationDate, Info.CreationTimeZone));
         if (string.IsNullOrEmpty(pa.meta.Get("xmp:ModifyDate")) && Info.ModDate != DateTime.MinValue)
-            pa.meta.Set("xmp:ModifyDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
+            pa.meta.SetStamped("xmp:ModifyDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
         if (string.IsNullOrEmpty(pa.meta.Get("xmp:MetadataDate")) && Info.ModDate != DateTime.MinValue)
             pa.meta.Set("xmp:MetadataDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
 
@@ -780,11 +796,17 @@ public sealed partial class Document : IDisposable
         // would report the value "present" without it ever being serialised.
         if (!pa.meta.ContainsKey("pdf:Keywords") && !string.IsNullOrEmpty(Info.Keywords))
             pa.meta.Set("pdf:Keywords", Info.Keywords);
-        if (!pa.meta.ContainsKey("dc:creator") && !string.IsNullOrEmpty(Info.Author))
-            pa.meta.Set("dc:creator", Info.Author);
         if (!pa.meta.ContainsKey("dc:description") && !string.IsNullOrEmpty(Info.Subject))
             pa.meta.Set("dc:description", Info.Subject);
-        if (!pa.meta.ContainsKey("xmp:CreatorTool") && !string.IsNullOrEmpty(Info.Creator))
+        // ISO 19005-1 6.7.3: /Author and /Creator are the same values as dc:creator (one entry)
+        // and xmp:CreatorTool, and where a packet left by another tool disagrees the /Info
+        // value is kept. An /Author present but empty is mirrored as one empty entry.
+        if (Info.GetRawString("Author") is { } author && !XmpHolds(pa.meta, "dc:creator", author))
+            pa.meta.Set("dc:creator", author);
+        if (!string.IsNullOrEmpty(Info.Creator) && !XmpHolds(pa.meta, "xmp:CreatorTool", Info.Creator))
             pa.meta.Set("xmp:CreatorTool", Info.Creator);
     }
+
+    private static bool XmpHolds(XmpMetadata meta, string key, string value) =>
+        meta.ContainsKey(key) && meta.Get(key) == value;
 }

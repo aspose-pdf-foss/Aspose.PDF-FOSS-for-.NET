@@ -52,6 +52,10 @@ internal sealed class XfaFormEngine
         catch { return null; }
     }
 
+    /// <summary>An engine over a template already parsed, which it only reads; null for no template.</summary>
+    internal static XfaFormEngine? TryCreate(XmlDocument? template) =>
+        template?.DocumentElement is { } root ? new XfaFormEngine(root) : null;
+
     /// <summary>Resolve the flat rendered field set. <paramref name="resolveRawValue"/> maps a field
     /// SOM path to its bound data value (for the scripts' data-dependent conditions); may be null.</summary>
     internal List<XfaFlatField> BuildRenderedFields(Func<string, string?>? resolveRawValue)
@@ -148,8 +152,8 @@ internal sealed class XfaFormEngine
     /// <summary>Top-level body subforms (direct subform children of the root) — the flowing content.</summary>
     private static IEnumerable<XfaNode> TopBodyBlocks(XfaFormModel model)
     {
-        foreach (var c in model.Root.Children)
-            if (c.Kind is "subform" or "subformSet" or "area") yield return c;
+        foreach (var c in model.Root.Children.Where(c => c.Kind is "subform" or "subformSet" or "area"))
+            yield return c;
     }
 
     private static string? BreakBeforeTarget(System.Xml.XmlNode subform)

@@ -16,8 +16,8 @@ internal static partial class HtmlToPdfConverter
         co.infraEnd = co.infraIdx >= 0 ? co.tables[co.infraIdx].start : 0;
         for (var ti = 0; ti < co.tables.Count; ti++)
         {
-            if (co.tables[ti].start <= co.infraEnd || !Leaf(co, co.tables[ti].body)) continue;
-            foreach (var row in Rows(co, co.tables[ti].body))
+            if (co.tables[ti].start <= co.infraEnd || !Leaf(co.tables[ti].body)) continue;
+            foreach (var row in Rows(co.tables[ti].body))
             {
                 var line = string.Join("  ", row);
                 if (line.Trim().Length == 0) continue;
@@ -40,14 +40,14 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static void RenderInfraTable(CjkOrderReportState co)
     {
-        co.routeM = Regex.Match(co.html, @">([⺀-鿿]{2,4}\s*\([^<)]{1,30}\))<");
+        co.routeM = SafeRegex.Match(co.html, @">([⺀-鿿]{2,4}\s*\([^<)]{1,30}\))<");
         Mixed(co, 12.5, CjkContentL, 518.0, co.routeM.Success ? co.routeM.Groups[1].Value : "", true);
-        co.infraHeadM = Regex.Match(co.html, @">([⺀-鿿]{6,12})<");
+        co.infraHeadM = SafeRegex.Match(co.html, @">([⺀-鿿]{6,12})<");
         Mixed(co, 12.5, CjkContentL, 543.4,
             "基础设施详细信息", true);
         _ = co.infraHeadM;
-        co.infraIdx = co.tables.FindIndex(t => Leaf(co, t.body) && t.body.Contains("基础设施编号"));
-        co.infraRows = co.infraIdx >= 0 ? Rows(co, co.tables[co.infraIdx].body) : new List<List<string>>();
+        co.infraIdx = co.tables.FindIndex(t => Leaf(t.body) && t.body.Contains("基础设施编号"));
+        co.infraRows = co.infraIdx >= 0 ? Rows(co.tables[co.infraIdx].body) : new List<List<string>>();
         co.infraEdges = new[] { 554.5, 572.7, 590.0, 607.3, 624.5, 651.9, 669.2, 686.5 };
         for (var c = 0; c < 3; c++)
             VL(co, new[] { 96.0, 258.9, 502.4 }[c], co.infraEdges[0], co.infraEdges[^1]);
@@ -74,16 +74,16 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static void RenderActivityTables(CjkOrderReportState co)
     {
-        co.secM = Regex.Match(co.html, @">([⺀-鿿]{4,10})<[^>]*>?\s*<[^>]*>?\s*1-",
+        co.secM = SafeRegex.Match(co.html, @">([⺀-鿿]{4,10})<[^>]*>?\s*<[^>]*>?\s*1-",
             RegexOptions.IgnoreCase);
         Mixed(co, 12.5, CjkContentL, 350.8, co.secM.Success ? co.secM.Groups[1].Value : "前道准备活动", true);
         co.actHeads = new List<string>();
-        foreach (Match hm in Regex.Matches(co.html, @">\s*(\d-\s*[A-Za-z][^<]{2,40})<"))
-            co.actHeads.Add(Flat(co, hm.Groups[1].Value));
+        foreach (Match hm in SafeRegex.Matches(co.html, @">\s*(\d-\s*[A-Za-z][^<]{2,40})<"))
+            co.actHeads.Add(Flat(hm.Groups[1].Value));
         co.actIdx = new List<int>();
         for (var ti = 0; ti < co.tables.Count && co.actIdx.Count < 2; ti++)
-            if (Leaf(co, co.tables[ti].body)
-                && Regex.IsMatch(co.tables[ti].attrs, @"border\s*=\s*[""']?1")
+            if (Leaf(co.tables[ti].body)
+                && SafeRegex.IsMatch(co.tables[ti].attrs, @"border\s*=\s*[""']?1")
                 && co.tables[ti].attrs.Contains("text-bold", StringComparison.OrdinalIgnoreCase))
                 co.actIdx.Add(ti);
         ActTable(co, co.actIdx.Count > 0 ? co.actIdx[0] : -1,
@@ -95,10 +95,10 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static void RenderPageOneInfo(CjkOrderReportState co)
     {
-        co.titleM = Regex.Match(co.html, @"<(?:div|p|span)\b[^>]*>(?<t>[^<]{0,20})</",
+        co.titleM = SafeRegex.Match(co.html, @"<(?:div|p|span)\b[^>]*>(?<t>[^<]{0,20})</",
             RegexOptions.IgnoreCase);
         co.title = "产品订单";
-        co.tM2 = Regex.Match(co.html, @">([⺀-鿿]{2,8})<");
+        co.tM2 = SafeRegex.Match(co.html, @">([⺀-鿿]{2,8})<");
         if (co.tM2.Success) co.title = co.tM2.Groups[1].Value;
         _ = co.titleM;
         for (var i = 0; i < co.title.Length && i < 8; i++)
@@ -113,15 +113,15 @@ internal static partial class HtmlToPdfConverter
         co.rightRow = new Dictionary<string, int>
             { ["来源/单位"] = 0, ["目的地"] = 1, ["检测员"] = 2, ["请求开始"] = 5 };
         var infoIdx = co.tables.FindIndex(t => t.attrs.Contains("border=\"1\"")
-            || t.attrs.Contains("border='1'") || Regex.IsMatch(t.attrs, @"border\s*=\s*1"));
+            || t.attrs.Contains("border='1'") || SafeRegex.IsMatch(t.attrs, @"border\s*=\s*1"));
         if (infoIdx >= 0)
         {
             var cellsInOrder = new List<string>();
-            foreach (Match cM in Regex.Matches(co.tables[infoIdx].body,
+            foreach (Match cM in SafeRegex.Matches(co.tables[infoIdx].body,
                 @"<t[dh]\b[^>]*>(?<c>(?:(?!<t[dh]\b|</t[dh]>|<table)[\s\S])*)</t[dh]>",
                 RegexOptions.IgnoreCase))
             {
-                var t = Flat(co, cM.Groups["c"].Value);
+                var t = Flat(cM.Groups["c"].Value);
                 if (t.Length > 0) cellsInOrder.Add(t);
             }
             string? curLabel = null;
@@ -164,24 +164,22 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static void ScanTables(CjkOrderReportState co)
     {
-        co.html = Regex.Replace(co.html, @"<style[^>]*>[\s\S]*?</style>", " ", RegexOptions.IgnoreCase);
+        co.html = SafeRegex.Replace(co.html, @"<style[^>]*>[\s\S]*?</style>", " ", RegexOptions.IgnoreCase);
         co.tables = new List<(int start, string attrs, string body)>();
+        var opens = new List<(int pos, int end, string attrs)>();
+        foreach (Match tm in SafeRegex.Matches(co.html, @"<table\b([^>]*)>", RegexOptions.IgnoreCase))
+            opens.Add((tm.Index, tm.Index + tm.Length, tm.Groups[1].Value));
+        foreach (var (pos, end, attrs) in opens)
         {
-            var opens = new List<(int pos, int end, string attrs)>();
-            foreach (Match tm in Regex.Matches(co.html, @"<table\b([^>]*)>", RegexOptions.IgnoreCase))
-                opens.Add((tm.Index, tm.Index + tm.Length, tm.Groups[1].Value));
-            foreach (var (pos, end, attrs) in opens)
+            var depth = 1;
+            var close = co.html.Length;
+            foreach (Match t in SafeRegex.Matches(co.html[end..], @"<table\b|</table>",
+                RegexOptions.IgnoreCase))
             {
-                var depth = 1;
-                var close = co.html.Length;
-                foreach (Match t in Regex.Matches(co.html[end..], @"<table\b|</table>",
-                    RegexOptions.IgnoreCase))
-                {
-                    depth += t.Value.StartsWith("</") ? -1 : 1;
-                    if (depth == 0) { close = end + t.Index; break; }
-                }
-                co.tables.Add((pos, attrs, co.html[end..close]));
+                depth += t.Value.StartsWith("</") ? -1 : 1;
+                if (depth == 0) { close = end + t.Index; break; }
             }
+            co.tables.Add((pos, attrs, co.html[end..close]));
         }
     }
 }

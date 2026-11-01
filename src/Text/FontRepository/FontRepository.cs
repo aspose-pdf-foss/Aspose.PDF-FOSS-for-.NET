@@ -8,8 +8,10 @@ public partial class FontRepository
 {
     private static FontSourceCollection _sources = new();
 
+#pragma warning disable S1118 // public API: the published constructor
     /// <summary>Creates a font repository instance; all of its members are static, so an instance is not needed to use them.</summary>
     public FontRepository() { }
+#pragma warning restore S1118
 
     /// <summary>
     /// The collection of font sources used for font resolution.
@@ -41,6 +43,32 @@ public partial class FontRepository
     /// </summary>
     public static Font FindFont(string fontName) =>
         (Font?)FindFontInternal(fontName, ignoreCase: false)
+        ?? throw new FontNotFoundException($"Font {fontName} was not found");
+
+    /// <summary>
+    /// Find a font by family name and style. Style is honoured by family lookup
+    /// (no synthesis); when no styled variant exists the closest match is returned.
+    /// Throws <see cref="FontNotFoundException"/> when nothing resolves.
+    /// </summary>
+    public static Font FindFont(string fontFamilyName, FontStyles stl) =>
+        FindFontStyled(fontFamilyName, stl, ignoreCase: false)
+        ?? throw new FontNotFoundException($"Font {fontFamilyName} was not found");
+
+    /// <summary>
+    /// Find a font by family name and style with optional case-insensitive matching.
+    /// Throws <see cref="FontNotFoundException"/> when nothing resolves.
+    /// </summary>
+    public static Font FindFont(string fontFamilyName, FontStyles stl, bool ignoreCase) =>
+        FindFontStyled(fontFamilyName, stl, ignoreCase)
+        ?? throw new FontNotFoundException($"Font {fontFamilyName} was not found");
+
+    /// <summary>
+    /// Find a font by name with optional case-insensitive matching.
+    /// Searches Standard-14 fonts first, then registered sources, then the built-in
+    /// faces. Throws <see cref="FontNotFoundException"/> when nothing resolves.
+    /// </summary>
+    public static Font FindFont(string fontName, bool ignoreCase) =>
+        (Font?)FindFontInternal(fontName, ignoreCase)
         ?? throw new FontNotFoundException($"Font {fontName} was not found");
 
     /// <summary>Null-returning twin of <see cref="FindFont(string)"/> for internal
@@ -77,36 +105,8 @@ public partial class FontRepository
     internal static bool FaceInstalled(string family)
     {
         if (string.IsNullOrEmpty(family)) return false;
-        foreach (var source in _sources)
-            if (source.FindFont(family, ignoreCase: true) is not null) return true;
-        return false;
+        return _sources.Any(source => source.FindFont(family, ignoreCase: true) is not null);
     }
-
-    /// <summary>
-    /// Find a font by family name and style. Style is honoured by family lookup
-    /// (no synthesis); when no styled variant exists the closest match is returned.
-    /// Throws <see cref="FontNotFoundException"/> when nothing resolves.
-    /// </summary>
-    public static Font FindFont(string fontFamilyName, FontStyles stl) =>
-        FindFontStyled(fontFamilyName, stl, ignoreCase: false)
-        ?? throw new FontNotFoundException($"Font {fontFamilyName} was not found");
-
-    /// <summary>
-    /// Find a font by family name and style with optional case-insensitive matching.
-    /// Throws <see cref="FontNotFoundException"/> when nothing resolves.
-    /// </summary>
-    public static Font FindFont(string fontFamilyName, FontStyles stl, bool ignoreCase) =>
-        FindFontStyled(fontFamilyName, stl, ignoreCase)
-        ?? throw new FontNotFoundException($"Font {fontFamilyName} was not found");
-
-    /// <summary>
-    /// Find a font by name with optional case-insensitive matching.
-    /// Searches Standard-14 fonts first, then registered sources, then the built-in
-    /// faces. Throws <see cref="FontNotFoundException"/> when nothing resolves.
-    /// </summary>
-    public static Font FindFont(string fontName, bool ignoreCase) =>
-        (Font?)FindFontInternal(fontName, ignoreCase)
-        ?? throw new FontNotFoundException($"Font {fontName} was not found");
 
     /// <summary>The FAMILY behind a /BaseFont name: the 6-letter subset tag goes (per PDF
     /// §9.6.4) and so does a trailing style word, so "WBUJFI+Arial" and "Helvetica-Bold"
@@ -232,11 +232,9 @@ public partial class FontRepository
         var comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
         // Search Standard-14 fonts
-        foreach (var name in Standard14Names)
-        {
-            if (string.Equals(name, fontName, comparison))
-                return new FontData(name, FontType.Type1);
-        }
+        var name = Standard14Names.FirstOrDefault(name => string.Equals(name, fontName, comparison));
+        if (name is not null)
+            return new FontData(name, FontType.Type1);
 
         // Search registered font sources. System fonts resolve through the
         // SystemFontSource registered by default — clearing Sources genuinely cuts
@@ -246,13 +244,18 @@ public partial class FontRepository
         foreach (var source in _sources)
         {
             haveSystemSource |= source is SystemFontSource;
-            var found = source is SystemFontSource sys
-                ? sys.FindFont(fontName, ignoreCase, systemNameTableScan)
+            var found = source is SystemFontSource
+                ? SystemFontSource.FindFont(fontName, ignoreCase, systemNameTableScan)
                 : source.FindFont(fontName, ignoreCase);
             if (found is not null) return found;
         }
 
         if (FindBuiltinFont(fontName, ignoreCase) is { } builtin) return builtin;
+
+        // A predefined CJK face is declared by name, its glyphs left to the reader: it
+        // answers ahead of the host's stand-ins so its text keeps the face's own metrics.
+        if (PredefinedCidFont.Find(fontName, ignoreCase) is { } cid)
+            return new FontData(fontName, FontType.Type0) { PredefinedCid = cid };
 
         // Host-resolver fallback LAST: SystemFontResolver applies substitution aliasing
         // (registry names, styled aliases, stand-in faces), so running it inside the
@@ -261,6 +264,24 @@ public partial class FontRepository
         // beat an "Arial Unicode MS"→Arial stand-in). Gated on a registered
         // SystemFontSource so Sources.Clear() still cuts the host's fonts off.
         return haveSystemSource ? SystemFontSource.HostResolverFallback(fontName) : null;
+    }
+
+    /// <summary>The TrueType program of the face a registered source carries under <paramref name="name"/>
+    /// - by file name or by any name of its name table - without the Standard-14 names, the
+    /// built-in faces and the host resolver's stand-ins: a document font's own face, or nothing.
+    /// Without <paramref name="includeInstalled"/> the host's installed fonts (the system source and
+    /// the per-user font folder) are left out.</summary>
+    internal static byte[]? FindSourceFaceProgram(string name, bool includeInstalled)
+    {
+        foreach (var source in _sources)
+        {
+            if (!includeInstalled && source is SystemFontSource or FolderFontSource { IsDefaultUserFolder: true }) continue;
+            var found = source is SystemFontSource
+                ? SystemFontSource.FindFont(name, ignoreCase: true, nameTableScan: true)
+                : source.FindFont(name, ignoreCase: true);
+            if (found?.TtfData is { Length: > 0 } program) return program;
+        }
+        return null;
     }
 
     /// <summary>Faces the library itself carries as embedded resources — reachable,
@@ -426,7 +447,7 @@ public partial class FontRepository
                 if (off + 2 <= data.Length)
                     glyphWidths[gi] = (int)Math.Round(ReadUInt16BE(data, off) * scale);
             }
-            var charToGlyph = ReadCmapFormat4(data, cmapOffset);
+            var charToGlyph = ReadUnicodeCmap(data, cmapOffset);
             for (int ch = 0; ch < 256; ch++)
             {
                 // hmtx stores an advance only for the first numberOfHMetrics glyphs;
@@ -476,7 +497,7 @@ public partial class FontRepository
             var tOffset = (int)ReadUInt32BE(data, offset + 8);
             switch (tag)
             {
-                case "head": if (tOffset + 18 <= data.Length) unitsPerEm = ReadUInt16BE(data, tOffset + 18); break;
+                case "head": if (tOffset + 18 <= data.Length) { unitsPerEm = ReadUInt16BE(data, tOffset + 18); } break;
                 case "hhea": hheaOffset = tOffset; break;
                 case "hmtx": hmtxOffset = tOffset; break;
                 case "cmap": cmapOffset = tOffset; break;
@@ -492,7 +513,7 @@ public partial class FontRepository
                 var off = hmtxOffset + gi * 4;
                 if (off + 2 <= data.Length) glyphWidths[gi] = ReadUInt16BE(data, off);
             }
-            var charToGlyph = ReadCmapFormat4(data, cmapOffset);
+            var charToGlyph = ReadUnicodeCmap(data, cmapOffset);
             for (int ch = 0; ch < 256; ch++)
             {
                 // Glyphs past hmtx's numberOfHMetrics entries repeat the last advance
@@ -512,7 +533,9 @@ public partial class FontRepository
     /// Open a font from a file path.
     /// </summary>
     /// <exception cref="PdfException">If the file does not exist or cannot be opened as a font.</exception>
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
     public static Font OpenFont(string fontFilePath) => OpenFontInternal(fontFilePath)!;
+#pragma warning restore S8969
 
     /// <summary>
     /// Open a Type 1 font from a pair of <c>.pfb</c> + <c>.afm</c> files.
@@ -524,7 +547,11 @@ public partial class FontRepository
             throw new PdfException($"Font file not found: {fontFilePath}");
         if (!string.IsNullOrEmpty(metricsFilePath) && !System.IO.File.Exists(metricsFilePath))
             throw new PdfException($"Metrics file not found: {metricsFilePath}");
-        return OpenFontInternal(fontFilePath)!;
+        var font = OpenFontInternal(fontFilePath);
+        if (!string.IsNullOrEmpty(metricsFilePath)) font.MetricsFilePath = metricsFilePath;
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
+        return font!;
+#pragma warning restore S8969
     }
 
     /// <summary>
@@ -539,14 +566,17 @@ public partial class FontRepository
         var name = ReadTtfFontName(data);
         var fd = new FontData(name, FontType.TrueType);
         fd.SetTtfData(data);
+        RememberOpenedProgram(data);
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
         return fd!;
+#pragma warning restore S8969
     }
 
     /// <summary>
     /// Force the font sources to enumerate available fonts. The FOSS resolver
     /// is fully lazy so this is a no-op; provided for API compatibility.
     /// </summary>
-    public static void LoadFonts() { }
+    public static void LoadFonts() { /* fonts load lazily on first lookup */ }
 
     /// <summary>
     /// Reset the source collection to its default state (a single SystemFontSource).
@@ -577,6 +607,7 @@ public partial class FontRepository
             fontName = ReadTtfFontName(data);
             var fd = new FontData(fontName, fontType, filePath);
             fd.SetTtfData(data);
+            RememberOpenedProgram(data);
             return fd;
         }
         return new FontData(fontName, fontType, filePath);

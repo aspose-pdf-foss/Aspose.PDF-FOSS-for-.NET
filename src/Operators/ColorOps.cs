@@ -5,8 +5,10 @@ using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf.Operators;
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>rg — Set RGB fill color.</summary>
 public sealed class SetRGBColor : Operator
+#pragma warning restore S101
 {
     /// <summary>Gets or sets the red component of the fill color, from 0 (none) to 1 (full).</summary>
     public double R { get; set; }
@@ -56,7 +58,7 @@ public abstract class SetColorOperator : Operator
         return System.Drawing.Color.Black;
     }
 
-    private static int Clamp255(double v) => v <= 0 ? 0 : v >= 1 ? 255 : (int)System.Math.Round(v * 255);
+    private static int Clamp255(double v) => v switch { <= 0 => 0, >= 1 => 255, _ => (int)System.Math.Round(v * 255) };
 }
 
 /// <summary>Common base for the rg/RG/g/G/k/K family. Exposes get-only
@@ -122,8 +124,10 @@ public sealed class SetGrayStroke : BasicSetColorOperator
     public override System.Drawing.Color getColor() => SetColorOperator.ToSystemColor(new[] { Gray });
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>RG — Set RGB stroke color.</summary>
 public sealed class SetRGBColorStroke : BasicSetColorOperator
+#pragma warning restore S101
 {
     /// <summary>Gets or sets the red component of the stroke color, from 0 (none) to 1 (full).</summary>
     public new double R { get; set; }
@@ -142,8 +146,10 @@ public sealed class SetRGBColorStroke : BasicSetColorOperator
     public override System.Drawing.Color getColor() => SetColorOperator.ToSystemColor(new[] { R, G, B });
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>k — Set CMYK fill color.</summary>
 public sealed class SetCMYKColor : BasicSetColorOperator
+#pragma warning restore S101
 {
     /// <summary>Gets or sets the cyan component of the fill color, from 0 to 1.</summary>
     public new double C { get; set; }
@@ -160,8 +166,10 @@ public sealed class SetCMYKColor : BasicSetColorOperator
     public override System.Drawing.Color getColor() => SetColorOperator.ToSystemColor(new[] { C, M, Y, K });
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>K — Set CMYK stroke color.</summary>
 public sealed class SetCMYKColorStroke : BasicSetColorOperator
+#pragma warning restore S101
 {
     /// <summary>Gets or sets the cyan component of the stroke color, from 0 to 1.</summary>
     public new double C { get; set; }
@@ -228,7 +236,7 @@ public sealed class SetColor : SetColorOperator
     /// <summary>Gets or sets the red component (the first of three); reads 0 unless the color has at least three components. Setting it on a color with fewer than three components replaces the color with three zeroed components first.</summary>
     public double R { get => Color.Length >= 3 ? Color[0] : 0; set => SetSlotRgb(0, value); }
     /// <summary>Gets or sets the green component (the second of three), or the gray level when the color has a single component; reads 0 otherwise. Setting it on an empty color creates a one-component gray.</summary>
-    public double G { get => Color.Length == 1 ? Color[0] : (Color.Length >= 3 ? Color[1] : 0); set => SetSlotG(value); }
+    public double G { get => Color.Length switch { 1 => Color[0], >= 3 => Color[1], _ => 0 }; set => SetSlotG(value); }
     /// <summary>Gets or sets the blue component (the third of three); reads 0 unless the color has at least three components. Setting it on a color with fewer than three components replaces the color with three zeroed components first.</summary>
     public double B { get => Color.Length >= 3 ? Color[2] : 0; set => SetSlotRgb(2, value); }
     /// <summary>Gets or sets the cyan component (the first of four); reads 0 unless the color has exactly four components. Setting it on a color with fewer than four components replaces the color with four zeroed components first.</summary>
@@ -242,8 +250,8 @@ public sealed class SetColor : SetColorOperator
 
     public override System.Drawing.Color getColor() => SetColorOperator.ToSystemColor(Color);
 
-    private void SetSlotRgb(int idx, double v) { if (Color.Length < 3) Color = new double[3]; Color[idx] = v; }
-    private void SetSlotCmyk(int idx, double v) { if (Color.Length < 4) Color = new double[4]; Color[idx] = v; }
+    private void SetSlotRgb(int idx, double v) { if (Color.Length < 3) { Color = new double[3]; } Color[idx] = v; }
+    private void SetSlotCmyk(int idx, double v) { if (Color.Length < 4) { Color = new double[4]; } Color[idx] = v; }
     private void SetSlotG(double v)
     {
         if (Color.Length == 0) Color = new double[1];
@@ -279,7 +287,7 @@ public sealed class SetColorStroke : SetColorOperator
     /// <summary>Gets or sets the red component (the first of three); reads 0 unless the color has at least three components. Setting it on a color with fewer than three components replaces the color with three zeroed components first.</summary>
     public double R { get => Color.Length >= 3 ? Color[0] : 0; set => SetSlotRgb(0, value); }
     /// <summary>Gets or sets the green component (the second of three), or the gray level when the color has a single component; reads 0 otherwise. Setting it on an empty color creates a one-component gray.</summary>
-    public double G { get => Color.Length == 1 ? Color[0] : (Color.Length >= 3 ? Color[1] : 0); set => SetSlotG(value); }
+    public double G { get => Color.Length switch { 1 => Color[0], >= 3 => Color[1], _ => 0 }; set => SetSlotG(value); }
     /// <summary>Gets or sets the blue component (the third of three); reads 0 unless the color has at least three components. Setting it on a color with fewer than three components replaces the color with three zeroed components first.</summary>
     public double B { get => Color.Length >= 3 ? Color[2] : 0; set => SetSlotRgb(2, value); }
     /// <summary>Gets or sets the cyan component (the first of four); reads 0 unless the color has exactly four components. Setting it on a color with fewer than four components replaces the color with four zeroed components first.</summary>
@@ -293,8 +301,8 @@ public sealed class SetColorStroke : SetColorOperator
 
     public override System.Drawing.Color getColor() => SetColorOperator.ToSystemColor(Color);
 
-    private void SetSlotRgb(int idx, double v) { if (Color.Length < 3) Color = new double[3]; Color[idx] = v; }
-    private void SetSlotCmyk(int idx, double v) { if (Color.Length < 4) Color = new double[4]; Color[idx] = v; }
+    private void SetSlotRgb(int idx, double v) { if (Color.Length < 3) { Color = new double[3]; } Color[idx] = v; }
+    private void SetSlotCmyk(int idx, double v) { if (Color.Length < 4) { Color = new double[4]; } Color[idx] = v; }
     private void SetSlotG(double v)
     {
         if (Color.Length == 0) Color = new double[1];

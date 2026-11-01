@@ -13,10 +13,17 @@ internal sealed partial class ContentRedactor
     private PdfStream? BlankedImage(PdfStream image, double[] ctm, ResourceCopy resources, bool isMask = false)
     {
         if (UnitArea(ctm) is not { } area) return null;
+        // A JBIG2 scan is taken apart first: the layout's page is what the filter decodes to, and
+        // the rewrite below takes the layout as it is, instead of taking the stream apart again.
+        var layout = Jbig2LayoutOf(image);
         byte[] decoded;
-        try { decoded = _reader.DecodeStream(image); }
-        catch (Exception) { return null; }
-        if (Painted(image.Dict, decoded, area, resources, isMask, image.RawData) is not { } result) return null;
+        if (layout is not null) decoded = FilterSamplesOf(layout);
+        else
+        {
+            try { decoded = _reader.DecodeStream(image); }
+            catch (Exception) { return null; }
+        }
+        if (Painted(image.Dict, decoded, area, resources, isMask, image.RawData, layout) is not { } result) return null;
         var (dict, data) = result;
 
         foreach (var maskKey in new[] { "SMask", "Mask" })
@@ -26,6 +33,24 @@ internal sealed partial class ContentRedactor
             else dict.Remove(maskKey);
         }
         return new PdfStream(dict, data);
+    }
+
+    /// <summary>The image taken apart as a JBIG2 stream, when its data is one; null otherwise.</summary>
+    private Jbig2Layout? Jbig2LayoutOf(PdfStream image)
+    {
+        var filter = _reader.Resolve(image.Dict.Get("Filter"));
+        if (filter is PdfArray { Count: 1 } one) filter = _reader.Resolve(one[0]);
+        if (filter is not PdfName { Value: "JBIG2Decode" }) return null;
+        try { return Jbig2Decoder.Analyze(image.RawData, Jbig2Globals(Jbig2Parms(image.Dict))); }
+        catch (Exception) { return null; }
+    }
+
+    /// <summary>The samples the JBIG2 filter decodes a page to: its rows with 0 for black.</summary>
+    private static byte[] FilterSamplesOf(Jbig2Layout layout)
+    {
+        var samples = new byte[layout.Page.Length];
+        for (var i = 0; i < samples.Length; i++) samples[i] = (byte)~layout.Page[i];
+        return samples;
     }
 
     /// <summary>Plan an inline image as <see cref="PlanImage"/> plans a drawn one; the new BI ... EI
@@ -111,8 +136,10 @@ internal sealed partial class ContentRedactor
         {
             var p = polygon[i];
             var q = polygon[(i + 1) % polygon.Count];
+#pragma warning disable S1244 // degenerate geometry (zero radius, coincident ends, horizontal edge) - only the exact case is degenerate
             if ((p.Y - y) * (q.Y - y) > 0 || p.Y == q.Y && p.Y != y) continue;
             if (p.Y == q.Y)
+#pragma warning restore S1244
             {
                 from = Math.Min(from, Math.Min(p.X, q.X));
                 to = Math.Max(to, Math.Max(p.X, q.X));

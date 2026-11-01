@@ -61,6 +61,10 @@ public sealed partial class PdfToHtmlConverter
         /// <summary>The font serves a SUBSTITUTE face's subset (SimSun standing in
         /// for a non-embedded, non-installed CJK font).</summary>
         public bool SubstituteFace { get; init; }
+        /// <summary>The family of the overflow face serving a shown CHARACTER CODE whose glyph
+        /// is not the one its character has in the font's primary face; null for a code the
+        /// primary face serves. Null func = every code is served by the primary face.</summary>
+        public Func<int, string?>? OverflowFamily { get; init; }
     }
 
     /// <summary>Build a code → advance (em fraction) lookup for <paramref name="font"/>:
@@ -83,8 +87,7 @@ public sealed partial class PdfToHtmlConverter
                         && reader.Resolve(desc.Get("MissingWidth")) is PdfInteger mw ? mw.Value : 0;
                     var arr = new double[widths.Count];
                     for (var i = 0; i < widths.Count; i++)
-                        arr[i] = widths[i] is PdfInteger wi ? wi.Value
-                            : widths[i] is PdfReal wr ? wr.Value : 0;
+                        arr[i] = widths[i] switch { PdfInteger wi => wi.Value, PdfReal wr => wr.Value, _ => 0 };
                     return code => code >= first && code - first < arr.Length
                         ? arr[code - first] / 1000.0 : missing / 1000.0;
                 }
@@ -98,7 +101,9 @@ public sealed partial class PdfToHtmlConverter
                     double dw = reader.Resolve(descFont.Get("DW")) is PdfInteger d ? d.Value : 1000;
                     var map = reader.Resolve(descFont.Get("W")) is PdfArray w
                         ? ReadCidWidths(reader, w) : new Dictionary<int, double>();
+#pragma warning disable S1244 // the default width 1000 (a literal or a PDF integer) - exact on purpose
                     if (map.Count > 0 || dw != 1000)
+#pragma warning restore S1244
                         return code => map.TryGetValue(code, out var v) ? v / 1000.0 : dw / 1000.0;
                 }
             }
@@ -146,8 +151,7 @@ public sealed partial class PdfToHtmlConverter
         return map;
     }
 
-    private static double NumAt(PdfObject? o) => o is PdfInteger pi ? pi.Value
-        : o is PdfReal pr ? pr.Value : 0;
+    private static double NumAt(PdfObject? o) => o switch { PdfInteger pi => pi.Value, PdfReal pr => pr.Value, _ => 0 };
 
     /// <summary>
     /// Per-font output-character registry for ligature and unmapped-code handling.
@@ -163,14 +167,22 @@ public sealed partial class PdfToHtmlConverter
     {
         private readonly Dictionary<int, string> _codeToText = new();
         private readonly HashSet<char> _owned = new();
+        // The characters taken from the mint, which stand for a glyph and are no text of their own.
+        private readonly HashSet<char> _minted = new();
         private char _mint = '\uA880';
+
+        /// <summary>Each code given a stand-in so far, with the text written for it.</summary>
+        public IEnumerable<KeyValuePair<int, string>> Assigned => _codeToText;
+
+        /// <summary>True when <paramref name="ch"/> was minted for a glyph rather than read as text.</summary>
+        public bool IsMinted(char ch) => _minted.Contains(ch);
 
         /// <summary>Register a collapsed ligature code with its preferred character.</summary>
         public string Register(int code, char desired)
         {
             if (_codeToText.TryGetValue(code, out var existing)) return existing;
             var ch = desired;
-            while (_owned.Contains(ch)) ch = _mint++;
+            while (_owned.Contains(ch)) _minted.Add(ch = _mint++);
             _owned.Add(ch);
             var text = ch.ToString();
             _codeToText[code] = text;
@@ -184,11 +196,38 @@ public sealed partial class PdfToHtmlConverter
             var ch = _mint++;
             while (_owned.Contains(ch)) ch = _mint++;
             _owned.Add(ch);
+            _minted.Add(ch);
             var text = ch.ToString();
             _codeToText[code] = text;
             return text;
         }
     }
+
+    /// <summary>The span text with a zero-width space between a space and a minted stand-in that Unicode classes
+    /// as a combining mark. The stand-ins are taken from the block above U+A880, whose vowel signs and virama
+    /// a browser joins to the character before them: after a space it draws the pair from a face that has
+    /// the script, and the word spacing of the space falls after the sign. The zero-width space draws nothing
+    /// and starts a new cluster.</summary>
+    private static string SeparateStandInMarks(string text, Func<char, bool>? isMinted)
+    {
+        if (isMinted is null) return text;
+        StringBuilder? sb = null;
+        var copied = 0;
+        for (var i = 1; i < text.Length; i++)
+        {
+            if (text[i - 1] is not (' ' or StandInNoBreakSpace) || !IsCombiningMark(text[i]) || !isMinted(text[i])) continue;
+            (sb ??= new StringBuilder(text.Length + 4)).Append(text, copied, i - copied).Append(ZeroWidthSpace);
+            copied = i;
+        }
+        return sb is null ? text : sb.Append(text, copied, text.Length - copied).ToString();
+    }
+
+    private static bool IsCombiningMark(char ch) => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch)
+        is System.Globalization.UnicodeCategory.NonSpacingMark
+        or System.Globalization.UnicodeCategory.SpacingCombiningMark
+        or System.Globalization.UnicodeCategory.EnclosingMark;
+
+    private const char StandInNoBreakSpace = '\u00A0';
 
     /// <summary>Resolve the /Font entries of one resource dictionary (a page's or a
     /// Form XObject's own) into decode-ready <see cref="HtmlFontRecord"/> records.</summary>
@@ -202,7 +241,9 @@ public sealed partial class PdfToHtmlConverter
         var fontDict = reader.ResolveDict(resources.Get("Font"));
         if (fontDict is null) return result;
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var key in fontDict.Keys)
+#pragma warning restore S3267
         {
             if (!ResolveFontResource(key, fontDict, reader, preferFontCmap, substitutors, defaultFontName, friendlyFamilies, result)) break;
         }
@@ -271,7 +312,9 @@ public sealed partial class PdfToHtmlConverter
             // A subset whose hhea is the degenerate 1-em placeholder (1536/-512
             // at 2048) still carries the real face metrics in OS/2
             // usWinAscent/usWinDescent; a live hhea stays authoritative.
+#pragma warning disable S1244 // the degenerate 1-em hhea placeholder (1536/-512 at 2048) divides to exactly 1.0 - exact on purpose
             if (hheaLh != 0.0 && hheaLh != 1.0) return hheaLh;
+#pragma warning restore S1244
             if (os2 > 0 && os2 + 78 <= sfnt.Length)
             {
                 var winA = U16(os2 + 74);

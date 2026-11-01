@@ -58,8 +58,8 @@ public sealed partial class Document
     }
 
     // Greedy space-break wrap with pair kerning (IsBreakWords=false semantics: a word
-    // never splits; an overlong word overflows). The space a line breaks at is dropped;
-    // all other spaces stay in-string, so a run boundary keeps its inter-word space.
+    // never splits; an overlong word overflows). The space a line breaks at is dropped; all
+    // other spaces stay in-string, so a run boundary keeps its inter-word space.
     private static List<List<(char c, bool bold)>> Wrap(HtmlStepListState hs, List<(char c, bool bold)> stream, double size, double maxW)
     {
         var lines = new List<List<(char c, bool bold)>>();

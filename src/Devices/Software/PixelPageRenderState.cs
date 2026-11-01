@@ -15,7 +15,6 @@ public sealed partial class SoftwarePageRenderer
 private sealed class PixelPageRenderState
 {
     public IO.PdfReader reader = null!;
-    public Rectangle rawMb = null!;
     // The visible region is the crop box clipped to the media box; content is
     // sized and offset to it so anything outside the crop area is excluded.
     public Rectangle crop = null!;

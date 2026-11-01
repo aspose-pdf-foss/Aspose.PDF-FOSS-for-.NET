@@ -97,10 +97,10 @@ internal static partial class HtmlToPdfConverter
                 W32((uint)t.data.Length);
                 cur += (t.data.Length + 3) & ~3;
             }
-            foreach (var t in tables)
+            foreach (var tdata in tables.Select(t => t.data))
             {
-                sf.Write(t.data, 0, t.data.Length);
-                for (var p = t.data.Length; (p & 3) != 0; p++) sf.WriteByte(0);
+                sf.Write(tdata, 0, tdata.Length);
+                for (var p = tdata.Length; (p & 3) != 0; p++) sf.WriteByte(0);
             }
             return sf.ToArray();
         }
@@ -120,7 +120,9 @@ internal static partial class HtmlToPdfConverter
         public (double r, double g, double b)? Color;   // null = transparent (selection-only text)
 
         // white-space:pre spans keep literal newlines: each line lays out separately.
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public string[] Lines => Text.Replace("\r", "").Split('\n');
+#pragma warning restore S3218
 
         /// <summary>All of the document's own font programs, tried when the span's own
         /// family list resolves none — the exporter's class families are display
@@ -158,7 +160,8 @@ internal static partial class HtmlToPdfConverter
         bool includeWs = true)
     {
         double w = 0;
-        for (var i = 0; i < line.Length; i++)
+        var i = 0;
+        while (i < line.Length)
         {
             int cp = line[i];
             if (char.IsHighSurrogate(line[i]) && i + 1 < line.Length && char.IsLowSurrogate(line[i + 1]))
@@ -183,6 +186,7 @@ internal static partial class HtmlToPdfConverter
             }
             if (includeLs) w += s.LetterSpacing;
             if (includeWs && s.WordSpacing != 0 && cp == ' ') w += s.WordSpacing;
+            i++;
         }
         return w;
     }
@@ -220,7 +224,7 @@ internal static partial class HtmlToPdfConverter
                 case "serif": return "Times New Roman";
                 case "monospace": return "Courier New";
             }
-            t = Regex.Replace(t, @"^[A-Z]{6}\+", "");   // subset prefix
+            t = SafeRegex.Replace(t, @"^[A-Z]{6}\+", "");   // subset prefix
             // Family aliases the converter emits for the standard-14 fold.
             var baseName = t.Split('-')[0];
             var isBold = t.Contains("Bold", StringComparison.OrdinalIgnoreCase);
@@ -234,8 +238,10 @@ internal static partial class HtmlToPdfConverter
                 _ => baseName,
             };
             var styled = mapped
-                + (isBold && isItalic ? " Bold Italic" : isBold ? " Bold" : isItalic ? " Italic" : "");
+                + ((isBold, isItalic) switch { (true, true) => " Bold Italic", (true, _) => " Bold", (_, true) => " Italic", _ => "" });
+#pragma warning disable S3267 // a first-match search over candidates that may be null - FirstOrDefault cannot tell no match from a null candidate
             foreach (var candidate in new[] { t, t.Replace('-', ' '), styled, mapped })
+#pragma warning restore S3267
                 if (PosFace(candidate).parser is not null)
                     return candidate;
         }
@@ -249,7 +255,8 @@ internal static partial class HtmlToPdfConverter
     {
         var face = PosFace(cssFace);
         double w = 0;
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
             int cp = text[i];
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
@@ -267,6 +274,7 @@ internal static partial class HtmlToPdfConverter
                 ? 0.5 * fontSize
                 : Math.Round(f.parser.GetAdvanceWidth(gid) * 1000.0 / f.upm) * fontSize / 1000.0;
             w += letterSpacing;
+            i++;
         }
         return w;
     }
@@ -362,7 +370,8 @@ internal static partial class HtmlToPdfConverter
     private static bool ParserCovers(Text.GlyphOutlineParser parser, string s)
     {
         int total = 0, hit = 0;
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             int cp = s[i];
             if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
@@ -370,9 +379,10 @@ internal static partial class HtmlToPdfConverter
                 cp = char.ConvertToUtf32(s[i], s[i + 1]);
                 i++;
             }
-            if (cp == ' ' || cp == 0x00A0) continue;
+            if (cp == ' ' || cp == 0x00A0) { i++; continue; }
             total++;
             if (parser.CMap.TryGetValue(cp, out var g) && g != 0) hit++;
+            i++;
         }
         return total == 0 || hit * 10 >= total * 9;
     }
@@ -384,19 +394,19 @@ internal static partial class HtmlToPdfConverter
     {
         var result = new Dictionary<string, List<OwnFace>>(StringComparer.OrdinalIgnoreCase);
         var linkDir = "";
-        var link = Regex.Match(html, @"<link(?=[^>]*rel=""stylesheet"")[^>]*href=""(?<h>[^""]+)""", RegexOptions.IgnoreCase);
+        var link = SafeRegex.Match(html, @"<link(?=[^>]*rel=""stylesheet"")[^>]*href=""(?<h>[^""]+)""", RegexOptions.IgnoreCase);
         if (link.Success)
         {
             var slash = link.Groups["h"].Value.LastIndexOf('/');
             if (slash > 0) linkDir = link.Groups["h"].Value[..(slash + 1)];
         }
 
-        foreach (Match m in Regex.Matches(css, @"@font-face\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline))
+        foreach (Match m in SafeRegex.Matches(css, @"@font-face\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline))
         {
             var body = m.Groups["body"].Value;
-            var fam = Regex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
+            var fam = SafeRegex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
             if (!fam.Success) continue;
-            foreach (Match u in Regex.Matches(body, @"url\(""?(?<u>[^)""]+?)""?\)"))
+            foreach (Match u in SafeRegex.Matches(body, @"url\(""?(?<u>[^)""]+?)""?\)"))
             {
                 var url = u.Groups["u"].Value;
                 if (url.EndsWith(".eot", StringComparison.OrdinalIgnoreCase)

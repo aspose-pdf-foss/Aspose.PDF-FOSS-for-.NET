@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
@@ -17,7 +18,7 @@ private sealed class WrapTextState
     public List<string> lines = null!;
     public string[] words = null!;
     public double spaceW;
-    public string currentLine = null!;
+    public StringBuilder currentLine = new();
     public double currentWidth;
     // "Has this line been opened yet" is NOT "is it still empty": a line opened by
     // the empty token that leads a run of spaces has length zero and still owns

@@ -43,7 +43,9 @@ public sealed partial class PdfPageStamp : Stamp
     /// geometry — turn this off to avoid double-adding.</summary>
     internal bool CarryAnnotations { get; set; } = true;
 
-
+    /// <summary>Draw the source page as stored - its whole media box, unturned - for a caller that draws
+    /// over it in the page's own media coordinates (the side-by-side comparison sheet).</summary>
+    internal bool KeepsMediaFrame { get; set; }
 
     /// <summary>The source page being stamped.</summary>
     public Page PdfPage
@@ -63,12 +65,50 @@ public sealed partial class PdfPageStamp : Stamp
     {
         _sourcePage = pdfPage;
         _sourceReader = pdfPage.Reader;
-        Width = pdfPage.Width;
-        Height = pdfPage.Height;
+        (Width, Height) = ShownPageSize(pdfPage);
     }
 
-    /// <summary>Alias for <see cref="ApplyTo"/> matching the public surface.</summary>
-    public override void Put(Page page) => ApplyTo(page);
+    private const int QuarterTurn = 90;
+    private const int HalfTurn = 180;
+    private const int ThreeQuarterTurn = 270;
+
+    /// <summary>The part of the page a viewer shows: its crop box, cut to the media box.</summary>
+    private static Rectangle VisibleBox(Page page)
+    {
+        var media = page.MediaBox;
+        var visible = page.CropBox.Intersect(media);
+        return visible.IsEmpty ? media : visible;
+    }
+
+    /// <summary>The size <paramref name="box"/> shows at: a quarter-turned page shows it on its side.</summary>
+    private static (double Width, double Height) ShownSize(int rotation, Rectangle box)
+        => rotation is QuarterTurn or ThreeQuarterTurn ? (box.Height, box.Width) : (box.Width, box.Height);
+
+    /// <summary>The size a page is stamped at by default: its visible box as a viewer shows it.</summary>
+    internal static (double Width, double Height) ShownPageSize(Page page) => ShownSize(page.RotationQuarter, VisibleBox(page));
+
+    /// <summary>The form /Matrix that turns the page's visible box the way its /Rotate shows it and puts
+    /// the box's displayed lower-left corner at the form origin; null for an unturned page, whose form
+    /// keeps the page's own coordinates.</summary>
+    private static PdfArray? ShownFormMatrix(Rectangle box, int rotation)
+    {
+        if (ShownTurn(box, rotation) is not { } m) return null;
+        var array = new PdfArray();
+        foreach (var v in m) array.Add(new PdfReal(v));
+        return array;
+    }
+
+    private static double[]? ShownTurn(Rectangle box, int rotation) => rotation switch
+    {
+        QuarterTurn => [0, -1, 1, 0, -box.LLY, box.URX],
+        HalfTurn => [-1, 0, 0, -1, box.URX, box.URY],
+        ThreeQuarterTurn => [0, 1, -1, 0, box.URY, -box.LLX],
+        _ => null,
+    };
+
+    /// <summary>The matrix (a b c d e f) a turned page's stamp form draws through, for callers that place the
+    /// page's annotations with it; null for an unturned page.</summary>
+    internal static double[]? ShownTurn(Page page) => ShownTurn(VisibleBox(page), page.RotationQuarter);
 
     /// <summary>Create a PdfPageStamp from page <paramref name="pageIndex"/>
     /// (1-based) of the PDF at <paramref name="fileName"/>.</summary>
@@ -80,6 +120,9 @@ public sealed partial class PdfPageStamp : Stamp
     public PdfPageStamp(Stream stream, int pageIndex)
         : this(Document.Open(ReadStream(stream)).Pages.At(pageIndex)) { }
 
+    /// <summary>Alias for <see cref="ApplyTo"/> matching the public surface.</summary>
+    public override void Put(Page page) => ApplyTo(page);
+
     private static byte[] ReadStream(Stream stream)
     {
         using var ms = new MemoryStream();
@@ -90,17 +133,24 @@ public sealed partial class PdfPageStamp : Stamp
     /// <summary>A matrix coefficient in the content stream's number format.</summary>
     private static string Fmt(double v) => v.ToString("0.######", CultureInfo.InvariantCulture);
 
-    internal override byte[] BuildContentStream(Page targetPage)
+    internal override byte[] BuildContentStream(Page page)
     {
         var pg = new PageStampContentState();
-        pg.targetPage = targetPage;
+        pg.targetPage = page;
         pg.sourcePage = _sourcePage;
         pg.sourceReader = _sourceReader;
+        // Paragraphs and a background a save has not laid out yet are stamped too, as a device draws them:
+        // the pass runs once per page.
+        if (!pg.sourcePage.LayoutApplied && (pg.sourcePage.Paragraphs is { Count: > 0 } || pg.sourcePage.ExplicitBackground is not null))
+            pg.sourcePage.ProcessParagraphs();
 
         pg.sourceContent = GetPageContent(pg.sourcePage.Dict, pg.sourceReader);
         if (pg.sourceContent.Length == 0) return [];
 
-        pg.mb = pg.sourcePage.MediaBox;
+        // A caller drawing over the page in its own media coordinates keeps the page as it is stored.
+        pg.mb = KeepsMediaFrame ? pg.sourcePage.MediaBox : VisibleBox(pg.sourcePage);
+        pg.srcRot = KeepsMediaFrame ? 0 : pg.sourcePage.RotationQuarter;
+        (pg.shownWidth, pg.shownHeight) = ShownSize(pg.srcRot, pg.mb);
         pg.targetReader = pg.targetPage.Reader;
         pg.targetDoc = pg.targetReader.OwnerDocument;
 
@@ -141,15 +191,35 @@ public sealed partial class PdfPageStamp : Stamp
 
         pg.xobjectDict.Set(pg.xobjName, pg.formObject);
 
-        pg.sx = Width / pg.mb.Width * ZoomX;
-        pg.sy = Height / pg.mb.Height * ZoomY;
+        pg.sx = Width / pg.shownWidth * ZoomX;
+        pg.sy = Height / pg.shownHeight * ZoomY;
 
         ComputeStampPlacement(pg);
 
-        pg.gsName = pg.targetPage.AddExtGState(new Content.ExtGState());
+        // The stamp's opacity rides the graphics state the form is drawn under.
+        pg.gsName = pg.targetPage.AddExtGState(new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
+        if (Opacity < FullOpacity) DrawFormAsTransparencyGroup(pg);
         pg.idComment = StampId != 0 ? $"%StampId={StampId}\n" : "";
-        pg.content = $"/Artifact BDC\n{pg.idComment}q\n/{pg.gsName} gs\n{pg.matrix} cm\n/{pg.xobjName} Do\nQ\nEMC\n";
+        // A tag with no property list opens marked content with BMC; BDC takes both.
+        pg.content = $"/Artifact BMC\n{pg.idComment}q\n/{pg.gsName} gs\n{pg.matrix} cm\n/{pg.xobjName} Do\nQ\nEMC\n";
         return System.Text.Encoding.ASCII.GetBytes(pg.content);
+    }
+
+    private const double FullOpacity = 1.0;
+
+    /// <summary>Make the stamped page's form a transparency group (PDF 32000 §11.6.6), so it is
+    /// composited as one object under the stamp's alpha. Drawn as a plain form, its content's own
+    /// graphics states - a page converted from a word processor sets ca 1 - replaced the alpha the
+    /// stamp set, and a stamp at Opacity 0.05 came out opaque. A group drawn at full opacity paints
+    /// as the plain form did, so the form shared by every application of the stamp keeps it.</summary>
+    private static void DrawFormAsTransparencyGroup(PageStampContentState pg)
+    {
+        var form = pg.formObject as PdfStream ?? pg.targetReader.ResolveStream(pg.formObject);
+        if (form is null || form.Dict.ContainsKey("Group")) return;
+        var group = new PdfDictionary();
+        group.Set("Type", new PdfName("Group"));
+        group.Set("S", new PdfName("Transparency"));
+        form.Dict.Set("Group", group);
     }
 
     /// <summary>
@@ -166,17 +236,15 @@ public sealed partial class PdfPageStamp : Stamp
 
         if (IsBackground)
         {
-            // Prepend stamp content before existing page content. The page's
-            // /Contents may be a single stream or an array of streams — decode
-            // both so the underlying page content is preserved beneath the stamp.
-            byte[] existingData = GetPageContent(page.Dict, page.Reader);
-
-            var combined = new byte[stampBytes.Length + 1 + existingData.Length];
-            stampBytes.CopyTo(combined, 0);
-            combined[stampBytes.Length] = (byte)'\n';
-            existingData.CopyTo(combined, stampBytes.Length + 1);
-
-            page.SetContentStream(combined);
+            // The stamp goes in as a stream of its own ahead of the page's content,
+            // as Page.AddStamp puts a background. Rewriting /Contents as one stream
+            // of stamp and content lost the stamp on a page drawn through
+            // page.Contents: the operators held there are the page's content, and
+            // saving wrote them over the stream that had taken their place.
+            var background = new byte[stampBytes.Length + 1];
+            stampBytes.CopyTo(background, 0);
+            background[stampBytes.Length] = (byte)'\n';
+            page.PrependContentStream(background);
         }
         else
         {

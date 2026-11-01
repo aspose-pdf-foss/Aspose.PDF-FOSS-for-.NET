@@ -15,12 +15,10 @@ internal static partial class HtmlToPdfConverter
         sp.options = options;
         sp.pageWidth = pageWidth;
         sp.pageHeight = pageHeight;
-        sp.orphan = Regex.Match(sp.html, @"</table\s*>\s*<td\b[^>]*\browspan\s*=",
+        sp.orphan = SafeRegex.Match(sp.html, @"</table\s*>\s*<td\b[^>]*\browspan\s*=",
             RegexOptions.IgnoreCase);
         if (!sp.orphan.Success) return null;
-        sp.headM = Regex.Match(sp.html, @"<table\b[^>]*>[\s\S]*?</table\s*>", RegexOptions.IgnoreCase);
-        if (!sp.headM.Success || sp.headM.Index > sp.orphan.Index) { }
-        sp.innerM = Regex.Match(sp.html[sp.orphan.Index..],
+        sp.innerM = SafeRegex.Match(sp.html[sp.orphan.Index..],
             @"<table\b[^>]*width\s*=\s*[""']?100%[\s\S]*?<td\b([^>]*)>([\s\S]*)",
             RegexOptions.IgnoreCase);
         if (!sp.innerM.Success) return null;
@@ -50,11 +48,10 @@ internal static partial class HtmlToPdfConverter
         sp.mainX0 = sp.sbX1 + 0.75;
         sp.mainX1 = sp.marginLeft + sp.contentW * 0.97 + 0.4; // measured 498.2
 
-        sp.tdSplit = Regex.Matches(sp.html[sp.orphan.Index..], @"<td\b[^>]*>", RegexOptions.IgnoreCase);
         sp.seg2 = sp.html[sp.orphan.Index..];
-        sp.sbM = Regex.Match(sp.seg2, @"<td\b[^>]*width\s*=\s*[""']?16%[^>]*>([\s\S]*?)</td>",
+        sp.sbM = SafeRegex.Match(sp.seg2, @"<td\b[^>]*width\s*=\s*[""']?16%[^>]*>([\s\S]*?)</td>",
             RegexOptions.IgnoreCase);
-        sp.mainM = Regex.Match(sp.seg2, @"<td\b[^>]*width\s*=\s*[""']?84%[^>]*>([\s\S]*)",
+        sp.mainM = SafeRegex.Match(sp.seg2, @"<td\b[^>]*width\s*=\s*[""']?84%[^>]*>([\s\S]*)",
             RegexOptions.IgnoreCase);
 
         sp.sbBlocks = sp.sbM.Success ? SpParseFlow(sp.sbM.Groups[1].Value) : new List<SpBlock>();
@@ -67,7 +64,9 @@ internal static partial class HtmlToPdfConverter
         sp.pageIdx = 0;
         sp.pages = new List<Page> { sp.page };
         sp.p1PanelBottom = 0;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var b in sp.mainBlocks)
+#pragma warning restore S3267
         {
             if (!EmitMainBlock(sp, b)) break;
         }
@@ -82,7 +81,9 @@ internal static partial class HtmlToPdfConverter
         sp.sbW = sp.sbX1 - sp.sbX0 - 6.0;
         sp.sbH = 0;
         sp.sbLaid = new List<(SpBlock B, List<List<(SpRun, string)>> Lines, double Pitch, (double asc, double sum) Fm)>();
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var b in sp.sbBlocks)
+#pragma warning restore S3267
         {
             if (!LayoutSidebarBlock(sp, b)) break;
         }

@@ -19,5 +19,7 @@ private sealed class XfaFieldValueState
     public string? result;
     public string path = default!;
     public bool strict = false;
+    public XmlDocument? datasets;   // the datasets, parsed at the first lookup of this read
+    public bool leafFallback;       // the last lookup matched the leaf name anywhere, not the path
 }
 }

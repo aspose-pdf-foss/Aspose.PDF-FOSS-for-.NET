@@ -36,7 +36,7 @@ internal static partial class HtmlToPdfConverter
             cell.LeadCheckboxName = attrs.TryGetValue("name", out var cbName) && cbName.Trim().Length > 0 ? cbName.Trim() : "";
             cell.LeadCheckboxChecked = attrs.ContainsKey("checked");
             if (mt.mps.uaFormCells && attrs.TryGetValue("style", out var cbSt) && cbSt is not null
-                && Regex.Match(cbSt, @"(?<![-\w])margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mlM
+                && SafeRegex.Match(cbSt, @"(?<![-\w])margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mlM
                 && TryParseLength(mlM.Groups[1].Value.Trim()) is { } mlPt && mlPt >= 0)
                 cell.LeadCheckboxMarginLeftPt = mlPt;
             return;
@@ -137,14 +137,14 @@ internal static partial class HtmlToPdfConverter
     private static string SelectedOptionText(string tableHtml, string name)
     {
         var sel = name.Length > 0
-            ? Regex.Match(tableHtml, @"<select\b[^>]*\bname\s*=\s*[""']?" + Regex.Escape(name) + @"[""'\s>][^>]*>(?<b>.*?)</select\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline)
-            : Regex.Match(tableHtml, @"<select\b[^>]*>(?<b>.*?)</select\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            ? SafeRegex.Match(tableHtml, @"<select\b[^>]*\bname\s*=\s*[""']?" + Regex.Escape(name) + @"[""'\s>][^>]*>(?<b>.*?)</select\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline)
+            : SafeRegex.Match(tableHtml, @"<select\b[^>]*>(?<b>.*?)</select\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (!sel.Success) return "";
-        var options = Regex.Matches(sel.Groups["b"].Value, @"<option\b(?<a>[^>]*)>(?<t>[^<]*)", RegexOptions.IgnoreCase);
+        var options = SafeRegex.Matches(sel.Groups["b"].Value, @"<option\b(?<a>[^>]*)>(?<t>[^<]*)", RegexOptions.IgnoreCase);
         if (options.Count == 0) return "";
-        foreach (Match o in options)
-            if (Regex.IsMatch(o.Groups["a"].Value, @"\bselected\b", RegexOptions.IgnoreCase))
-                return CollapseWs(DecodeEntities(o.Groups["t"].Value)).Trim();
+        var o = options.FirstOrDefault(o => SafeRegex.IsMatch(o.Groups["a"].Value, @"\bselected\b", RegexOptions.IgnoreCase));
+        if (o is not null)
+            return CollapseWs(DecodeEntities(o.Groups["t"].Value)).Trim();
         return CollapseWs(DecodeEntities(options[0].Groups["t"].Value)).Trim();
     }
 
@@ -166,8 +166,8 @@ internal static partial class HtmlToPdfConverter
                 if (mt.css.TryGetValue(tag + "." + cn, out var qualified)) Merge(qualified);
             }
         if (attrs.TryGetValue("style", out var st) && st is not null)
-            foreach (Match d in StyleDeclRx.Matches(st))
-                bag[d.Groups[1].Value.Trim()] = d.Groups[2].Value.Trim();
+            foreach (var groups in SafeRegex.Matches(StyleDeclRx, st).Select(d => d.Groups))
+                bag[groups[1].Value.Trim()] = groups[2].Value.Trim();
         return bag;
     }
 
@@ -225,16 +225,18 @@ internal static partial class HtmlToPdfConverter
     {
         var fs = bag.TryGetValue("font-size", out var fsDecl) && TryParseCssFontSize(fsDecl.Trim()) is { } fsPt && fsPt > 0
             ? fsPt : UaControlDefaultFontPt;
-        var face = bag.TryGetValue("font-family", out var famDecl) && FirstFontFamily(famDecl) is { } fam
-            && WinMetricsFor(fam) is not null ? fam
-            : bag.ContainsKey("font-family") ? cellFace : UaControlDefaultFace;
+        string face = UaControlDefaultFace;
+        if (bag.TryGetValue("font-family", out var famDecl) && FirstFontFamily(famDecl) is { } fam
+            && WinMetricsFor(fam) is not null)
+            face = fam;
+        else if (bag.ContainsKey("font-family")) face = cellFace;
         box.FontSize = fs;
         box.Face = face;
         double lineBox;
         if (bag.TryGetValue("line-height", out var lh) && MetricControlLineHeightPt(lh.Trim(), fs) is { } lhPt) lineBox = lhPt;
         else lineBox = MetricLineHeight(fs, HheaLineSumFor(face) ?? WinMetricsFor(face)?.sum ?? Table.CssNormalLineHeight);
         var border = UaControlBorderPx * PxPt;
-        if (bag.TryGetValue("border-style", out var bst) && Regex.IsMatch(bst, @"^\s*(none|hidden)\s*$", RegexOptions.IgnoreCase)) border = 0;
+        if (bag.TryGetValue("border-style", out var bst) && SafeRegex.IsMatch(bst, @"^\s*(none|hidden)\s*$", RegexOptions.IgnoreCase)) border = 0;
         else if (bag.TryGetValue("border", out var bsh) && CssBorderShorthand(bsh.Trim()) is { } side) border = side.W;
         else if (bag.TryGetValue("border-width", out var bwd) && CssBorderWidthOf(bwd.Trim()) is { } bwPt) border = bwPt;
         var padV = UaControlPaddingVPx * PxPt;
@@ -254,7 +256,7 @@ internal static partial class HtmlToPdfConverter
         box.WidgetHPt = box.BoxHPt + 2 * UaControlWidgetOverhangPt;
         if (bag.TryGetValue("margin", out var mg) && TryParseLength(mg.Trim()) is { } mgPt && mgPt > 0) box.MarginPt = mgPt;
         box.AdvanceExtraPt = 2 * (border + padH + box.MarginPt);
-        var columns = attrs.TryGetValue("size", out var sz) && int.TryParse(sz?.Trim(), out var szN) && szN > 0 ? szN : UaControlDefaultColumns;
+        var columns = attrs.TryGetValue("size", out var sz) && int.TryParse(sz?.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var szN) && szN > 0 ? szN : UaControlDefaultColumns;
         box.IntrinsicWidthPt = columns * UaControlColumnEm(face) * fs + 2 * (border + padH);
         if (box.WidthPt <= 0 && box.WidthFrac <= 0) box.WidthPt = box.IntrinsicWidthPt;
     }
@@ -265,7 +267,7 @@ internal static partial class HtmlToPdfConverter
     /// verification row - the next cell's text starts 3 past the widget).</summary>
     private static double UaTextControlAdvancePt(Dictionary<string, string> attrs)
     {
-        var columns = attrs.TryGetValue("size", out var sz) && int.TryParse(sz?.Trim(), out var n) && n > 0 ? n : UaControlDefaultColumns;
+        var columns = attrs.TryGetValue("size", out var sz) && int.TryParse(sz?.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) && n > 0 ? n : UaControlDefaultColumns;
         return columns * UaControlColumnEm(UaControlDefaultFace) * UaControlDefaultFontPt + 2 * UaTextControlChromePt;
     }
 
@@ -277,15 +279,15 @@ internal static partial class HtmlToPdfConverter
     /// inline `width`, or a class rule's - in pt; null when it declares none (or a percent).</summary>
     private static double? NestedGridDeclaredWidthPt(MetricTableState mt, string tableHtml)
     {
-        var tag = Regex.Match(tableHtml, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(tableHtml, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
         if (!tag.Success) return null;
         var attrs = tag.Groups[1].Value;
         var st = DivStyleOf(tag.Value);
-        if (st.Length > 0 && Regex.Match(st, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } sw)
+        if (st.Length > 0 && SafeRegex.Match(st, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } sw)
             return TryParseLength(sw.Groups[1].Value.Trim());
-        var wa = Regex.Match(attrs, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)(?:px)?[""'\s>]", RegexOptions.IgnoreCase);
+        var wa = SafeRegex.Match(attrs, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)(?:px)?[""'\s>]", RegexOptions.IgnoreCase);
         if (wa.Success) return DtpNum(wa.Groups[1].Value) * PxPt;
-        var cls = Regex.Match(attrs, @"\bclass\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+        var cls = SafeRegex.Match(attrs, @"\bclass\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
         if (cls.Success)
             foreach (var cn in cls.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 if (mt.css.TryGetValue("." + cn, out var rule) && rule.TryGetValue("width", out var cw)
@@ -332,9 +334,9 @@ internal static partial class HtmlToPdfConverter
             // A percent-wide control asks its column for that share of its intrinsic box plus the
             // control chrome (probed: 50 % → 66.8, 25 % → 33.4, 100 % → 133.6 of max-content for
             // the 118.54 intrinsic box); an absolute or plain one for its box and margins.
-            var bw = box.WidthFrac > 0
-                ? box.WidthFrac * (box.IntrinsicWidthPt + UaPercentControlChromePt)
-                : (box.WidthPt > 0 ? box.WidthPt : box.IntrinsicWidthPt) + box.AdvanceExtraPt;
+            double bw;
+            if (box.WidthFrac > 0) bw = box.WidthFrac * (box.IntrinsicWidthPt + UaPercentControlChromePt);
+            else bw = (box.WidthPt > 0 ? box.WidthPt : box.IntrinsicWidthPt) + box.AdvanceExtraPt;
             if (box.AfterText && mc.Text.Length > 0)
                 bw += MeasureFaceText(CellFaceName(mt.face, mt.boldFace, mc), BrLineMeasureText(LastBrSegment(mc.Text)) + " ", fs);
             w = Math.Max(w, bw);
@@ -422,10 +424,10 @@ internal static partial class HtmlToPdfConverter
     private static bool TryOpenMetricAbsText(MetricTableState mt, Token tok)
     {
         if (tok.Attributes is not { } a || !a.TryGetValue("style", out var st) || st is null) return false;
-        if (!Regex.IsMatch(st, @"(?<![-\w])position\s*:\s*absolute", RegexOptions.IgnoreCase)) return false;
+        if (!SafeRegex.IsMatch(st, @"(?<![-\w])position\s*:\s*absolute", RegexOptions.IgnoreCase)) return false;
         double? Px(string prop)
         {
-            var m = Regex.Match(st, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)\s*px", RegexOptions.IgnoreCase);
+            var m = SafeRegex.Match(st, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)\s*px", RegexOptions.IgnoreCase);
             return m.Success ? DtpNum(m.Groups[1].Value) * PxPt : null;
         }
         var left = Px("left");
@@ -458,7 +460,7 @@ internal static partial class HtmlToPdfConverter
     private static void RenderMetricCellAbsTexts(MetricRowsState mr, Page page)
     {
         if (mr.mc.AbsTexts is not { Count: > 0 } texts) return;
-        var drop = CellDropOf(mr.mps, mr.stdSerif, mr.fm, mr.mc, mr.cellFs, mr.cellLineH);
+        var drop = CellDropOf(mr.fm, mr.mc, mr.cellFs, mr.cellLineH);
         foreach (var abs in texts)
         {
             var x = mr.mps.pageMarginLeft + abs.LeftPt;
@@ -474,11 +476,11 @@ internal static partial class HtmlToPdfConverter
     private static void ExpandBorderShorthand(string shorthand, Dictionary<string, string> decl)
     {
         var rest = shorthand;
-        var styleM = Regex.Match(rest, @"(?<![-\w])(none|hidden|solid|dashed|dotted|double|groove|ridge|inset|outset)\b", RegexOptions.IgnoreCase);
+        var styleM = SafeRegex.Match(rest, @"(?<![-\w])(none|hidden|solid|dashed|dotted|double|groove|ridge|inset|outset)\b", RegexOptions.IgnoreCase);
         if (!styleM.Success) return;
         decl["border-style"] = styleM.Value;
         rest = rest.Remove(styleM.Index, styleM.Length);
-        var widthM = Regex.Match(rest, @"(?<![-\w.])\d*\.?\d+\s*(px|pt|em|mm|cm|in)\b", RegexOptions.IgnoreCase);
+        var widthM = SafeRegex.Match(rest, @"(?<![-\w.])\d*\.?\d+\s*(px|pt|em|mm|cm|in)\b", RegexOptions.IgnoreCase);
         if (widthM.Success)
         {
             decl["border-width"] = widthM.Value;
@@ -527,8 +529,10 @@ internal static partial class HtmlToPdfConverter
         public string Value = "";
         /// <summary>An inline `width: N%` of the cell's content width (0 = none).</summary>
         public double WidthFrac;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         /// <summary>An inline absolute width, pt (0 = none).</summary>
         public double WidthPt;
+#pragma warning restore S3218
         /// <summary>Ink precedes it on its line: it seats after the last line's text.</summary>
         public bool AfterText;
         /// <summary>A textarea: a multi-line text field.</summary>

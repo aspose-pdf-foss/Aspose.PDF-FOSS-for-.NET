@@ -27,6 +27,8 @@ private sealed class StampTextState
     public bool inline;
     public double drawX;
     public double drawY;
+    /// <summary>How many hard line breaks the text holds: the lines it draws beyond its first.</summary>
+    public int extraLines;
     public HorizontalAlignment alignment;
     public Content.ContentStreamBuilder builder = null!;
     public double textW;

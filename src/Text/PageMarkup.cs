@@ -8,14 +8,12 @@ namespace Aspose.Pdf.Text;
 public sealed class PageMarkup
 {
     private readonly List<MarkupSection> _sections;
-    private readonly ParagraphAbsorberOptions _options;
     private bool _isMulticolumn;
 
     internal PageMarkup(int pageNumber, List<MarkupSection> sections, ParagraphAbsorberOptions options)
     {
         Number = pageNumber;
         _sections = sections;
-        _options = options;
     }
 
     /// <summary>The 1-based page number.</summary>
@@ -122,10 +120,10 @@ public sealed class PageMarkup
         }
         groups.Sort((x, y) => x.left.CompareTo(y.left));
         var columns = new List<List<MarkupSection>>();
-        foreach (var g in groups)
+        foreach (var gmembers in groups.Select(g => g.members))
         {
-            g.members.Sort((x, y) => y.Rectangle.URY.CompareTo(x.Rectangle.URY));
-            columns.Add(g.members);
+            gmembers.Sort((x, y) => y.Rectangle.URY.CompareTo(x.Rectangle.URY));
+            columns.Add(gmembers);
         }
         return columns;
     }

@@ -10,7 +10,13 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
 // Quote schedule: 
-    private static Text.Font Face(QuoteScheduleState qs, bool b, bool i) => b && i ? qs.boldItalic! : b ? qs.bold! : i ? qs.italic! : qs.regular!;
+    private static Text.Font Face(QuoteScheduleState qs, bool b, bool i)
+    {
+        if (b && i) return qs.boldItalic!;
+        if (b) return qs.bold!;
+        if (i) return qs.italic!;
+        return qs.regular!;
+    }
 
     private static double Measure(QuoteScheduleState qs, string t, double fontPx, bool b, bool i)
     {

@@ -68,8 +68,8 @@ public sealed partial class Document : IDisposable
         // its own tiny page with just a line or two.
         private List<byte[]>? _overflowBuffer;
 
-        // Slot index of the currently-active write target. -1 means _startPage;
-        // 0+ means the i-th overflow page that the current _overflowBuffer will
+        // Slot index of the currently-active write target. -1 means _startPage; 0+
+        // means the i-th overflow page that the current _overflowBuffer will
         // flush into. Tracking this lets link annotations and paragraph-position
         // records survive into pages that don't exist yet (overflow buffers are
         // flushed in the outer loop after this layout finishes).
@@ -190,10 +190,8 @@ public sealed partial class Document : IDisposable
             _marginRight = marginRight;
             _marginTop = marginTop;
             _marginBottom = marginBottom;
-            // The MEDIA frame's height (see Page.LayoutFrameHeight): a /Rotate
-            // page's paragraphs seat against the media edges and paint upright in
-            // them; Page.Height answers the rotated DISPLAY frame, which put the
-            // whole layout past the media edge, where it clipped away.
+            // The layout frame's height (see Page.LayoutFrameHeight): a /Rotate
+            // page's paragraphs lay out in the page as shown.
             _startPageHeight = startPage.LayoutFrameHeight;
             _curY = startY;
             _logNotifications = logNotifications;
@@ -347,8 +345,7 @@ public sealed partial class Document : IDisposable
         private static bool HasNonLatin1(string? text)
         {
             if (string.IsNullOrEmpty(text)) return false;
-            foreach (var c in text) if (c > 0xFF) return true;
-            return false;
+            return text.Any(c => c > 0xFF);
         }
 
         /// <summary>Rounding guard on the wrap test: a word stays on a line only
@@ -496,7 +493,9 @@ public sealed partial class Document : IDisposable
         internal sealed class BandLine
         {
             public List<(double x, string text, StyledRun run, double size)> Cells = new();
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
             public double Pitch;          // line advance: text height + leading, or the mark alone
+#pragma warning restore S3218
             public double TextHeight;     // the line's text size (0 on a mark-only line)
             public bool HasText;
             public double NaturalWidth;   // ink extent from the line's left
@@ -839,21 +838,23 @@ public sealed partial class Document : IDisposable
         //     F's pitch on this line (its largest segment size + leading), baseline
         //     = box bottom + the face descent (12 pt and 20 pt segments of one
         //     fragment share the 20 pt box; a 12 / 20 / 8 pt inline chain seats
-        //     each member on its own box from the same line top);
+        //     each member on its own box from the same line top),
         //   • an image run stands on the line top (its box hangs below it) and only
-        //     advances the pen;
+        //     advances the pen,
         //   • the line advances by the pitch of the LAST text fragment on it (the
         //     12 / 20 / 8 chain continues 8 below), or by the tallest image when the
-        //     line holds no text;
-        //   • Right / Center alignment shifts the whole line by its slack;
+        //     line holds no text,
+        //   • Right / Center alignment shifts the whole line by its slack,
         //   • a note mark (half the parent size, in the default face) stands on a
         //     box whose bottom sits (pitch − mark size) above the parent box bottom.
         internal sealed class InlineRun
         {
             public string Text = string.Empty;
             public double Size;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
             /// <summary>Font size plus the owning fragment's leading.</summary>
             public double Pitch;
+#pragma warning restore S3218
             /// <summary>Index of the owning fragment in the chain.</summary>
             public int Group;
             public Text.TextState State = new();

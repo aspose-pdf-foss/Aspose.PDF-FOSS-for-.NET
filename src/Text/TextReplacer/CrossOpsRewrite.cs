@@ -18,16 +18,16 @@ public sealed partial class TextReplacer
         mw.matchedLastLen = Compat.Clamp(rm.meIdx - mw.lo.CharStart + 1, 0, mw.lo.Text.Length);
         mw.suffixText = mw.lo.Text.Substring(mw.matchedLastLen);
 
-        mw.prefixBytes = mw.prefixText.Length > 0 ? EncodeString(mw.prefixText, mw.fo.ToUnicode, mw.fo.FontDict) : Array.Empty<byte>();
-        mw.suffixBytes = mw.suffixText.Length > 0 ? EncodeString(mw.suffixText, mw.lo.ToUnicode, mw.lo.FontDict) : Array.Empty<byte>();
-        mw.matchedLastBytes = mw.matchedLastLen > 0 ? EncodeString(mw.lo.Text.Substring(0, mw.matchedLastLen), mw.lo.ToUnicode, mw.lo.FontDict) : Array.Empty<byte>();
+        mw.prefixBytes = mw.prefixText.Length > 0 ? EncodeString(mw.prefixText, mw.fo.ToUnicode, mw.fo.FontDict, cx.reader) : Array.Empty<byte>();
+        mw.suffixBytes = mw.suffixText.Length > 0 ? EncodeString(mw.suffixText, mw.lo.ToUnicode, mw.lo.FontDict, cx.reader) : Array.Empty<byte>();
+        mw.matchedLastBytes = mw.matchedLastLen > 0 ? EncodeString(mw.lo.Text.Substring(0, mw.matchedLastLen), mw.lo.ToUnicode, mw.lo.FontDict, cx.reader) : Array.Empty<byte>();
 
         mw.advMatched = 0.0;
         if (ShiftFollowersByAdvance)
         {
             var matchedFirstText = mw.fo.Text.Substring(Math.Min(mw.prefixText.Length, mw.fo.Text.Length));
             if (matchedFirstText.Length > 0)
-                mw.advMatched += Adv(cx, mw.fo, EncodeString(matchedFirstText, mw.fo.ToUnicode, mw.fo.FontDict), own: false);
+                mw.advMatched += Adv(cx, mw.fo, EncodeString(matchedFirstText, mw.fo.ToUnicode, mw.fo.FontDict, cx.reader), own: false);
             for (var oi = rm.firstOp + 1; oi < rm.lastOp; oi++)
                 mw.advMatched += Adv(cx, cx.textOps[oi], cx.textOps[oi].Bytes, own: true);
             if (mw.matchedLastBytes.Length > 0)
@@ -48,14 +48,15 @@ public sealed partial class TextReplacer
         CopyRange(cx, mw.lo.OpStart);
         mw.advPrefix = mw.prefixBytes.Length > 0 ? Adv(cx, mw.fo, mw.prefixBytes, own: false) : 0;
         mw.advMatchedLast = mw.matchedLastBytes.Length > 0 ? Adv(cx, mw.lo, mw.matchedLastBytes, own: false) : 0;
-        mw.oldSuffixTmX = mw.lo.TmTx + mw.advMatchedLast;
-        mw.newSuffixTmX = ReflowLineOnReplace ? mw.fo.TmTx + mw.advPrefix + mw.advRepl : mw.oldSuffixTmX;
+        // Advances are text-space; the Tm operand is user-space, scaled by the matrix.
+        mw.oldSuffixTmX = mw.lo.TmTx + mw.lo.TmA * mw.advMatchedLast;
+        mw.newSuffixTmX = ReflowLineOnReplace ? mw.fo.TmTx + mw.fo.TmA * (mw.advPrefix + mw.advRepl) : mw.oldSuffixTmX;
         if (mw.suffixBytes.Length > 0)
         {
             // Leading space: the copied gap can end in a keyword ("… Tc") with no
             // trailing delimiter, and "Tc1 0 0 …" would lex as an unknown keyword.
             cx.result.Write(Encoding.ASCII.GetBytes(
-                $" {FormatNum(cx, mw.lo.TmA)} {FormatNum(cx, mw.lo.TmB)} {FormatNum(cx, mw.lo.TmC)} {FormatNum(cx, mw.lo.TmD)} {FormatNum(cx, mw.newSuffixTmX)} {FormatNum(cx, mw.lo.TmTy)} Tm "));
+                $" {FormatNum(mw.lo.TmA)} {FormatNum(mw.lo.TmB)} {FormatNum(mw.lo.TmC)} {FormatNum(mw.lo.TmD)} {FormatNum(mw.newSuffixTmX)} {FormatNum(mw.lo.TmTy)} Tm "));
             WriteStringOperand(cx.result, mw.suffixBytes, mw.lo.IsHex);
             cx.result.Write(Encoding.ASCII.GetBytes(" Tj"));
         }
@@ -70,31 +71,27 @@ public sealed partial class TextReplacer
         ShiftFollowers(cx, rm, mw);
     }
 
-    /// <summary></summary>
+    /// <summary>What the line's followers owe the rewrite, applied to the written stream
+    /// once every match is done: under a reflow they move by the width the match gained;
+    /// and a suffix re-anchored by an absolute Tm moved the line matrix off what the
+    /// stream states, which the first relative seat after it has to take back out.</summary>
     private void ShiftFollowers(CrossReplaceState cx, ReplaceMatchState rm, MatchRewriteState mw)
     {
-        if (Math.Abs(mw.delta) > 0.01)
+        if (mw.lo.TmB == 0 && mw.lo.TmC == 0 && mw.lo.TmA > 0)
         {
-            for (var j = rm.lastOp + 1; j < cx.textOps.Count; j++)
-            {
-                var fl = cx.textOps[j];
-                if (!fl.TmPositioned) continue;
-                if (fl.TmXTokStart < cx.lastWrite) continue;
-                bool sameCtm = Math.Abs(fl.CtmA - mw.lo.CtmA) < 1e-6 && Math.Abs(fl.CtmC - mw.lo.CtmC) < 1e-6
-                    && Math.Abs(fl.CtmD - mw.lo.CtmD) < 1e-6 && Math.Abs(fl.CtmTx - mw.lo.CtmTx) < 1e-6
-                    && Math.Abs(fl.CtmTy - mw.lo.CtmTy) < 1e-6;
-                if (!sameCtm || Math.Abs(fl.TmTy - mw.lo.TmTy) >= 2.0) continue;
-                if (fl.TmXVal <= mw.fo.TmTx) continue;
-                cx.patches[fl.TmXTokStart] = (fl.TmXTokEnd,
-                    Encoding.ASCII.GetBytes(FormatNum(cx, fl.TmXVal - mw.delta)));
-            }
+            var carried = mw.suffixBytes.Length > 0 ? mw.newSuffixTmX - mw.lo.TlmTx : 0;
+            // A replacement re-dressed in another face has only a guessed advance: the
+            // followers are not moved on a guess (the reference leaves them in place).
+            var delta = mw.advReplEstimated ? 0 : -mw.delta;
+            cx.pendingShifts.Add(new PendingShift((int)cx.result.Position, mw.lo.TmTy, mw.lo.TmTx, delta, carried));
         }
 
         // AdjustSpaceWidth: the words AFTER the replacement sit behind its new
         // advance even when the line is not reflowed. A Tm-positioned line re-states
         // an absolute Tm at the shifted x before every following glyph; on a
         // Td-chained line one relative move carries them all, so nudge the first
-        // Td after the match and let the chain do the rest.
+        // Td after the match and let the chain do the rest. The chain ends with the
+        // text object: a run in the next BT seats itself afresh, whatever its Tm y.
         if (ShiftFollowersByAdvance && !ReflowLineOnReplace)
         {
             var advDelta = mw.advRepl - mw.advMatched;
@@ -102,10 +99,11 @@ public sealed partial class TextReplacer
                 for (var j = rm.lastOp + 1; j < cx.textOps.Count; j++)
                 {
                     var fl = cx.textOps[j];
+                    if (fl.BtStart != mw.lo.BtStart) break;
                     if (Math.Abs(fl.TmTy - mw.lo.TmTy) >= 2.0) continue;
                     if (!fl.TdPositioned || fl.TdXTokStart < cx.lastWrite) continue;
                     cx.patches[fl.TdXTokStart] = (fl.TdXTokEnd,
-                        Encoding.ASCII.GetBytes(FormatNum(cx, fl.TdXVal + advDelta)));
+                        Encoding.ASCII.GetBytes(FormatNum(fl.TdXVal + advDelta)));
                     _shiftedFollowers = true;
                     break;
                 }
@@ -121,9 +119,9 @@ public sealed partial class TextReplacer
             cx.result.Write(Encoding.ASCII.GetBytes(" Tj "));
         }
 
-        if (cx.replacement.Length > 0 && CanEncodeInFont(cx, mw.fo, cx.replacement))
+        if (cx.replacement.Length > 0 && CanEncodeInFont(mw.fo, cx.replacement))
         {
-            var replBytes = EncodeString(cx.replacement, mw.fo.ToUnicode, mw.fo.FontDict);
+            var replBytes = EncodeString(cx.replacement, mw.fo.ToUnicode, mw.fo.FontDict, cx.reader);
             WriteStringOperand(cx.result, replBytes, mw.fo.IsHex);
             cx.result.Write(Encoding.ASCII.GetBytes(" Tj "));
             mw.advRepl = Adv(cx, mw.fo, replBytes, own: false);
@@ -140,6 +138,7 @@ public sealed partial class TextReplacer
                 est += cw > 0 ? cw : 500;
             }
             mw.advRepl = est / 1000.0 * mw.fo.FontSize;
+            mw.advReplEstimated = true;
         }
         else
             mw.advRepl = 0;

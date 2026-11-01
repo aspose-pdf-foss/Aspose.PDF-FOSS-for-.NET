@@ -69,18 +69,6 @@ public sealed class Matrix
     /// <summary>Create a translation matrix.</summary>
     public static Matrix Translate(double tx, double ty) => new(1, 0, 0, 1, tx, ty);
 
-    /// <summary>Create a scaling matrix.</summary>
-    public static Matrix Scale(double sx, double sy) => new(sx, 0, 0, sy, 0, 0);
-
-    /// <summary>Create a rotation matrix (angle in degrees).</summary>
-    public static Matrix Rotate(double degrees)
-    {
-        var rad = degrees * Math.PI / 180;
-        var cos = Math.Cos(rad);
-        var sin = Math.Sin(rad);
-        return new Matrix(cos, sin, -sin, cos, 0, 0);
-    }
-
     // ── Composition factories ─────────────────────────────────────────────
 
     /// <summary>Compose a translation onto <paramref name="source"/>: returns source × translate(dx, dy).</summary>
@@ -90,11 +78,30 @@ public sealed class Matrix
         return source.Multiply(Translate(dx, dy));
     }
 
+    /// <summary>Create a scaling matrix.</summary>
+    public static Matrix Scale(double sx, double sy) => new(sx, 0, 0, sy, 0, 0);
+
     /// <summary>Compose a scaling onto <paramref name="source"/>: returns source × scale(sx, sy).</summary>
     public static Matrix Scale(double sx, double sy, Matrix source)
     {
         if (source is null) throw new ArgumentNullException(nameof(source));
         return source.Multiply(Scale(sx, sy));
+    }
+
+    /// <summary>Apply only the scale portion of this matrix (drops the translation component).</summary>
+    public void Scale(double x, double y, out double x1, out double y1)
+    {
+        x1 = A * x + C * y;
+        y1 = B * x + D * y;
+    }
+
+    /// <summary>Create a rotation matrix (angle in degrees).</summary>
+    public static Matrix Rotate(double degrees)
+    {
+        var rad = degrees * Math.PI / 180;
+        var cos = Math.Cos(rad);
+        var sin = Math.Sin(rad);
+        return new Matrix(cos, sin, -sin, cos, 0, 0);
     }
 
     /// <summary>Create a rotation matrix; <paramref name="alpha"/> is in radians.</summary>
@@ -160,6 +167,30 @@ public sealed class Matrix
         y1 = B * x + D * y + F;
     }
 
+    /// <summary>Transform a point.</summary>
+    public Point Transform(Point p)
+    {
+        var (x, y) = TransformPoint(p.X, p.Y);
+        return new Point(x, y);
+    }
+
+    /// <summary>
+    /// Transform a rectangle. Returns the axis-aligned bounding rectangle of the four
+    /// transformed corners.
+    /// </summary>
+    public Rectangle Transform(Rectangle rect)
+    {
+        var (x1, y1) = TransformPoint(rect.LLX, rect.LLY);
+        var (x2, y2) = TransformPoint(rect.URX, rect.LLY);
+        var (x3, y3) = TransformPoint(rect.URX, rect.URY);
+        var (x4, y4) = TransformPoint(rect.LLX, rect.URY);
+        var minX = Math.Min(Math.Min(x1, x2), Math.Min(x3, x4));
+        var minY = Math.Min(Math.Min(y1, y2), Math.Min(y3, y4));
+        var maxX = Math.Max(Math.Max(x1, x2), Math.Max(x3, x4));
+        var maxY = Math.Max(Math.Max(y1, y2), Math.Max(y3, y4));
+        return new Rectangle(minX, minY, maxX, maxY);
+    }
+
     /// <summary>Transform a point by the inverse of this matrix (returns the result via tuple).</summary>
     public (double x, double y) InverseTransformPoint(double x, double y)
         => Inverse().TransformPoint(x, y);
@@ -168,13 +199,6 @@ public sealed class Matrix
     public void UnTransform(double x1, double y1, out double x, out double y)
     {
         (x, y) = InverseTransformPoint(x1, y1);
-    }
-
-    /// <summary>Apply only the scale portion of this matrix (drops the translation component).</summary>
-    public void Scale(double x, double y, out double x1, out double y1)
-    {
-        x1 = A * x + C * y;
-        y1 = B * x + D * y;
     }
 
     /// <summary>Apply the inverse scale (drops translation).</summary>
@@ -208,34 +232,12 @@ public sealed class Matrix
     /// <summary>Calculates reverse (inverse) matrix.</summary>
     public Matrix Reverse() => Inverse();
 
-    /// <summary>Transform a point.</summary>
-    public Point Transform(Point p)
-    {
-        var (x, y) = TransformPoint(p.X, p.Y);
-        return new Point(x, y);
-    }
-
-    /// <summary>
-    /// Transform a rectangle. Returns the axis-aligned bounding rectangle of the four
-    /// transformed corners.
-    /// </summary>
-    public Rectangle Transform(Rectangle rect)
-    {
-        var (x1, y1) = TransformPoint(rect.LLX, rect.LLY);
-        var (x2, y2) = TransformPoint(rect.URX, rect.LLY);
-        var (x3, y3) = TransformPoint(rect.URX, rect.URY);
-        var (x4, y4) = TransformPoint(rect.LLX, rect.URY);
-        var minX = Math.Min(Math.Min(x1, x2), Math.Min(x3, x4));
-        var minY = Math.Min(Math.Min(y1, y2), Math.Min(y3, y4));
-        var maxX = Math.Max(Math.Max(x1, x2), Math.Max(x3, x4));
-        var maxY = Math.Max(Math.Max(y1, y2), Math.Max(y3, y4));
-        return new Rectangle(minX, minY, maxX, maxY);
-    }
-
     public override bool Equals(object? obj)
     {
         if (obj is not Matrix m) return false;
+#pragma warning disable S1244 // value equality of the type - exact by contract, as its hash code
         return A == m.A && B == m.B && C == m.C && D == m.D && E == m.E && F == m.F;
+#pragma warning restore S1244
     }
 
     public override int GetHashCode() => HashCode.Combine(A, B, C, D, E, F);

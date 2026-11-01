@@ -34,7 +34,7 @@ public sealed partial class TextReplacer
     /// is unambiguous (1 byte/char simple encoding or 2 bytes/char CID). Returns null
     /// when the match isn't found or the boundaries can't be mapped to bytes.
     /// </summary>
-    private TjSplitPlan? ComputeTjSplit(PdfArray arr, string search, Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, double fontSize, double tc, double tw, PdfReader reader)
+    private static TjSplitPlan? ComputeTjSplit(PdfArray arr, string search, Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, double fontSize, double tc, double tw, PdfReader reader)
     {
         var js = new TjSplitComputeState();
         js.arr = arr;
@@ -68,7 +68,7 @@ public sealed partial class TextReplacer
             }
             else
             {
-                double v = js.arr[i] is PdfInteger ai ? ai.Value : js.arr[i] is PdfReal ar2 ? ar2.Value : 0;
+                double v = js.arr[i] switch { PdfInteger ai => ai.Value, PdfReal ar2 => ar2.Value, _ => 0 };
                 if (js.tjRule.Breaks(v) && js.sb.Length > 0 && js.sb[^1] != ' ') js.sb.Append(' ');
                 js.localX += -v * js.fontSize / 1000.0;
             }
@@ -117,8 +117,7 @@ public sealed partial class TextReplacer
         // position instead of where the trailing text actually is.
         while (js.plan.Suffix.Count > 0 && js.plan.Suffix[0] is not PdfString)
         {
-            double kv = js.plan.Suffix[0] is PdfInteger ki2 ? ki2.Value
-                : js.plan.Suffix[0] is PdfReal kr2 ? kr2.Value : 0;
+            double kv = js.plan.Suffix[0] switch { PdfInteger ki2 => ki2.Value, PdfReal kr2 => kr2.Value, _ => 0 };
             js.plan.LeadingGap += -kv * js.fontSize / 1000.0;
             js.plan.Suffix.RemoveAt(0);
         }
@@ -153,7 +152,7 @@ public sealed partial class TextReplacer
                 $" {N(tmA)} {N(tmB)} {N(tmC)} {N(tmD)} {N(tmTx)} {N(tmTy)} Tm"));
     }
 
-    private bool WriteAnchoredTJSplit(MemoryStream result, PdfArray arr, string search, string replacement,
+    private static bool WriteAnchoredTJSplit(MemoryStream result, PdfArray arr, string search, string replacement,
         Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, double fontSize,
         double tmA, double tmB, double tmC, double tmD, double tmTx, double tmTy,
         double tc, double tw, PdfReader reader, bool restoreTlm)
@@ -169,7 +168,7 @@ public sealed partial class TextReplacer
         var headArr = new PdfArray();
         foreach (var el in plan.Head) headArr.Add(el);
         if (replacement.Length > 0)
-            headArr.Add(new PdfString(EncodeString(replacement, toUnicode, fontDict), plan.IsHex));
+            headArr.Add(new PdfString(EncodeString(replacement, toUnicode, fontDict, reader), plan.IsHex));
         if (headArr.Count > 0)
         {
             WriteTJArray(result, headArr);
@@ -192,7 +191,7 @@ public sealed partial class TextReplacer
         return true;
     }
 
-    private bool WriteFontSwitchedTJSplit(MemoryStream result, PdfArray arr, string search, string replacement,
+    private static bool WriteFontSwitchedTJSplit(MemoryStream result, PdfArray arr, string search, string replacement,
         Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, string? fontName, double fontSize,
         double tmA, double tmB, double tmC, double tmD, double tmTx, double tmTy,
         double tc, double tw, PdfReader reader, PdfDictionary pageDict, bool restoreTlm,

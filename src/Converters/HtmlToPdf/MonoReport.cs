@@ -45,13 +45,13 @@ internal static partial class HtmlToPdfConverter
         mr.html = html;
         mr.pageWidth = pageWidth;
         mr.pageHeight = pageHeight;
-        mr.bqM = Regex.Match(mr.html, @"<blockquote\b[^>]*>([\s\S]*)</blockquote\s*>",
+        mr.bqM = SafeRegex.Match(mr.html, @"<blockquote\b[^>]*>([\s\S]*)</blockquote\s*>",
             RegexOptions.IgnoreCase);
         if (!mr.bqM.Success) return null;
         mr.body = mr.bqM.Groups[1].Value;
-        if (!Regex.IsMatch(mr.body, @"<font\b[^>]*face\s*=\s*[""']?courier new", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(mr.body, @"<font\b[^>]*face\s*=\s*[""']?courier new", RegexOptions.IgnoreCase))
             return null;
-        if (Regex.Matches(mr.body, @"<nobr\b", RegexOptions.IgnoreCase).Count < 50) return null;
+        if (SafeRegex.Matches(mr.body, @"<nobr\b", RegexOptions.IgnoreCase).Count < 50) return null;
         mr.face = "Courier New";
         if (WinMetricsFor(mr.face) is null) return null;
         mr.adv = MeasureFaceText(mr.face, "0", MonoFontPt);
@@ -60,14 +60,16 @@ internal static partial class HtmlToPdfConverter
         mr.tIdx = mr.body.IndexOf("<table", StringComparison.OrdinalIgnoreCase);
         mr.headMarkup = mr.tIdx >= 0 ? mr.body[..mr.tIdx] : mr.body;
         mr.header = new List<string>();
-        foreach (Match nm in Regex.Matches(mr.headMarkup, @"<nobr\b[^>]*>([\s\S]*?)</nobr\s*>",
+        foreach (Match nm in SafeRegex.Matches(mr.headMarkup, @"<nobr\b[^>]*>([\s\S]*?)</nobr\s*>",
                      RegexOptions.IgnoreCase))
             mr.header.Add(MonoNobrText(nm.Groups[1].Value));
         if (mr.header.Count == 0) return null;
 
         mr.rows = new List<List<(string Text, Color? Bg)>>();
         if (mr.tIdx >= 0)
-            foreach (Match rm in Regex.Matches(mr.body[mr.tIdx..], @"<tr\b[^>]*>([\s\S]*?)</tr\s*>",
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+            foreach (Match rm in SafeRegex.Matches(mr.body[mr.tIdx..], @"<tr\b[^>]*>([\s\S]*?)</tr\s*>",
+#pragma warning restore S3267
                          RegexOptions.IgnoreCase))
             {
                 if (!ReadMonoReportHeadRow(mr, rm)) break;
@@ -96,7 +98,7 @@ internal static partial class HtmlToPdfConverter
         EnsureFont(mr.page, mr.face.Replace(" ", ""), mr.res);
 
         mr.invc = System.Globalization.CultureInfo.InvariantCulture;
-        mr.bodyBgM = Regex.Match(mr.html,
+        mr.bodyBgM = SafeRegex.Match(mr.html,
             @"<body\b[^>]*bgcolor\s*=\s*[""']?(#[0-9a-fA-F]{3,6})", RegexOptions.IgnoreCase);
         if (mr.bodyBgM.Success && ParseCssColor(mr.bodyBgM.Groups[1].Value) is { } bodyBg)
             mr.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(mr.invc,

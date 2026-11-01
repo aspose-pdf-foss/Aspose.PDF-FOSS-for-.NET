@@ -109,7 +109,7 @@ internal sealed class ZipWriter : IDisposable
 
     private static (ushort Time, ushort Date) ToDosDateTime(DateTime value)
     {
-        if (value.Year < DosEpochYear) value = new DateTime(DosEpochYear, 1, 1);
+        if (value.Year < DosEpochYear) value = new DateTime(DosEpochYear, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
         var time = (ushort)((value.Hour << 11) | (value.Minute << 5) | (value.Second / 2));
         var date = (ushort)(((value.Year - DosEpochYear) << 9) | (value.Month << 5) | value.Day);
         return (time, date);

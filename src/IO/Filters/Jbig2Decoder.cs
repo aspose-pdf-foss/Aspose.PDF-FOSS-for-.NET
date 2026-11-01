@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO.Filters;
 
@@ -60,7 +60,6 @@ internal static partial class Jbig2Decoder
         public int HeaderStart;
         public int Type;
         public int[] ReferredTo = [];
-        public int PageAssoc;
         public int DataStart;
         public int DataLength;
     }
@@ -171,7 +170,7 @@ internal static partial class Jbig2Decoder
             }
 
             // Referred-to segment numbers — width from THIS segment's number (§7.2.5).
-            var refByteSize = hdr.Number <= 256 ? 1 : hdr.Number <= 65536 ? 2 : 4;
+            var refByteSize = hdr.Number switch { <= 256 => 1, <= 65536 => 2, _ => 4 };
             hdr.ReferredTo = new int[Math.Max(0, refCount)];
             for (var i = 0; i < refCount; i++)
             {
@@ -184,13 +183,12 @@ internal static partial class Jbig2Decoder
             if (pageAssocSize == 4)
             {
                 if (pos + 4 > _data.Length) return null;
-                hdr.PageAssoc = ReadInt32BE(_data, pos);
                 pos += 4;
             }
             else
             {
                 if (pos >= _data.Length) return null;
-                hdr.PageAssoc = _data[pos++];
+                pos++;
             }
 
             // Segment data length
@@ -330,7 +328,7 @@ internal static partial class Jbig2Decoder
                         ctx = (ctx << 1) | bm.GetPixel(x + dx, y + dy);
                     foreach (var (dx, dy) in refer)
                         ctx = (ctx << 1) | reference.GetPixel(x + dx - offsetX, y + dy - offsetY);
-                    if (ad.DecodeBit(grCtx[ctx]))
+                    if (ad.DecodeBit(ref grCtx[ctx]))
                         bm.Data[y * bm.RowBytes + (x >> 3)] |= (byte)(0x80 >> (x & 7));
                 }
             }
@@ -352,35 +350,7 @@ internal static partial class Jbig2Decoder
         private void CompositeRegionOntoPage(Jbig2Bitmap region, int rx, int ry, int combOp)
         {
             if (_pageBitmap is null) return;
-            var rRow = region.RowBytes;
-            for (var y = 0; y < region.Height; y++)
-            {
-                var py = ry + y;
-                if (py < 0 || py >= _pageHeight) continue;
-
-                for (var x = 0; x < region.Width; x++)
-                {
-                    var px = rx + x;
-                    if (px < 0 || px >= _pageWidth) continue;
-
-                    var srcBit = (region.Data[y * rRow + (x >> 3)] >> (7 - (x & 7))) & 1;
-                    var dstIdx = py * _pageRowBytes + (px >> 3);
-                    var dstMask = (byte)(0x80 >> (px & 7));
-                    var dstBit = (_pageBitmap[dstIdx] & dstMask) != 0 ? 1 : 0;
-
-                    var result = combOp switch
-                    {
-                        0 => srcBit | dstBit,
-                        1 => srcBit & dstBit,
-                        2 => srcBit ^ dstBit,
-                        3 => ~(srcBit ^ dstBit) & 1,
-                        _ => srcBit,
-                    };
-
-                    if (result != 0) _pageBitmap[dstIdx] |= dstMask;
-                    else _pageBitmap[dstIdx] &= (byte)~dstMask;
-                }
-            }
+            Jbig2Bitmap.Composite(region, rx, ry, combOp, _pageBitmap, _pageRowBytes, _pageWidth, _pageHeight);
         }
 
         /// <summary>Decode a strict-T.6 (Group 4) MMR bitmap of the given size from
@@ -458,28 +428,62 @@ internal static partial class Jbig2Decoder
         }
 
         public void CompositeAt(Jbig2Bitmap src, int destX, int destY, int combOp)
+            => Composite(src, destX, destY, combOp, Data, RowBytes, Width, Height);
+
+        /// <summary>Combine <paramref name="src"/> into a packed bitmap of
+        /// <paramref name="dstWidth"/> x <paramref name="dstHeight"/> at (destX, destY) under
+        /// the T.88 combination operator, a row at a time.</summary>
+        public static void Composite(Jbig2Bitmap src, int destX, int destY, int combOp,
+            byte[] dst, int dstRowBytes, int dstWidth, int dstHeight)
         {
+            var sx0 = Math.Max(0, -destX);
+            var count = Math.Min(src.Width, dstWidth - destX) - sx0;
+            if (count <= 0) return;
             for (var y = 0; y < src.Height; y++)
             {
                 var dy = destY + y;
-                if ((uint)dy >= (uint)Height) continue;
-                for (var x = 0; x < src.Width; x++)
-                {
-                    var dx = destX + x;
-                    if ((uint)dx >= (uint)Width) continue;
-                    var srcBit = src.GetPixel(x, y);
-                    var dstBit = GetPixel(dx, dy);
-                    var result = combOp switch
-                    {
-                        0 => srcBit | dstBit,
-                        1 => srcBit & dstBit,
-                        2 => srcBit ^ dstBit,
-                        3 => ~(srcBit ^ dstBit) & 1,
-                        _ => srcBit,
-                    };
-                    SetPixel(dx, dy, result);
-                }
+                if ((uint)dy >= (uint)dstHeight) continue;
+                CombineRow(src.Data, y * src.RowBytes, src.RowBytes, sx0, dst, dy * dstRowBytes, destX + sx0, count, combOp);
             }
+        }
+
+        /// <summary>Combine <paramref name="count"/> bits of a source row, from bit
+        /// <paramref name="sx0"/>, into a destination row from bit <paramref name="dx0"/>:
+        /// each destination byte takes the eight source bits that line up with it, read across
+        /// the source byte boundary, and keeps its own bits outside the run.</summary>
+        private static void CombineRow(byte[] src, int srcOff, int srcRowBytes, int sx0,
+            byte[] dst, int dstOff, int dx0, int count, int combOp)
+        {
+            var dxEnd = dx0 + count;
+            for (var bi = dx0 >> 3; bi <= (dxEnd - 1) >> 3; bi++)
+            {
+                var bitStart = bi << 3;
+                var mask = 0xFF;
+                if (bitStart < dx0) mask &= 0xFF >> (dx0 - bitStart);
+                if (bitStart + 8 > dxEnd) mask &= 0xFF << (bitStart + 8 - dxEnd);
+                var s = SourceByte(src, srcOff, srcRowBytes, sx0 + (bitStart - dx0));
+                var d = dst[dstOff + bi];
+                var r = combOp switch
+                {
+                    0 => s | d,
+                    1 => s & d,
+                    2 => s ^ d,
+                    3 => ~(s ^ d),
+                    _ => s,
+                };
+                dst[dstOff + bi] = (byte)((d & ~mask) | (r & mask));
+            }
+        }
+
+        /// <summary>Eight bits of a packed row from bit <paramref name="s"/>, most significant
+        /// first; bits before the row or past its bytes read 0.</summary>
+        private static int SourceByte(byte[] src, int rowOff, int rowBytes, int s)
+        {
+            if (s < 0) return SourceByte(src, rowOff, rowBytes, 0) >> -s;
+            var b0 = s >> 3;
+            var hi = b0 < rowBytes ? src[rowOff + b0] : 0;
+            var lo = b0 + 1 < rowBytes ? src[rowOff + b0 + 1] : 0;
+            return ((hi << 8) | lo) >> (8 - (s & 7)) & 0xFF;
         }
     }
 
@@ -506,15 +510,16 @@ internal static partial class Jbig2Decoder
             _ad = ad;
             _bits = symCodeLen;
             _ctx = new ArithmeticContext[1 << (symCodeLen + 1)];
-            for (var i = 0; i < _ctx.Length; i++) _ctx[i] = new ArithmeticContext();
         }
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         public int Decode()
+#pragma warning restore S3218
         {
             var prev = 1;
             for (var i = 0; i < _bits; i++)
             {
-                var b = _ad.DecodeBit(_ctx[prev]) ? 1 : 0;
+                var b = _ad.DecodeBit(ref _ctx[prev]) ? 1 : 0;
                 prev = (prev << 1) | b;
             }
             return prev - (1 << _bits);
@@ -543,8 +548,6 @@ internal static partial class Jbig2Decoder
 
         /// <summary>Byte offset of the next unread byte after aligning.</summary>
         public int BytePos => _bitPos == 0 ? _pos : _pos + 1;
-
-        public bool AtEnd => _pos >= _end && _bitPos == 0;
 
         public int ReadBit()
         {
@@ -601,9 +604,9 @@ internal static partial class Jbig2Decoder
             // Canonical assignment: count codes per length, derive each length's
             // first code, then hand codes out in line order.
             var maxLen = 0;
-            foreach (var l in lines) if (l.PrefLen > maxLen) maxLen = l.PrefLen;
+            foreach (var prefLen in lines.Select(l => l.PrefLen).Where(prefLen => prefLen > maxLen)) maxLen = prefLen;
             var lenCount = new int[maxLen + 1];
-            foreach (var l in lines) if (l.PrefLen > 0) lenCount[l.PrefLen]++;
+            foreach (var lPrefLen in lines.Select(l => l.PrefLen).Where(lPrefLen => lPrefLen > 0)) lenCount[lPrefLen]++;
             var firstCode = new int[maxLen + 2];
             lenCount[0] = 0;
             for (var len = 1; len <= maxLen; len++)
@@ -616,9 +619,11 @@ internal static partial class Jbig2Decoder
             }
         }
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         /// <summary>Decode one value. Returns null for the OOB symbol (or on a
         /// code that matches no line — treated as end-of-data).</summary>
         public int? Decode(HuffBitReader r)
+#pragma warning restore S3218
         {
             var code = 0;
             for (var len = 1; len <= 32; len++)
@@ -687,7 +692,9 @@ internal static partial class Jbig2Decoder
     // ────────────────────────────────────────────────────────────────────────
 
     /// <summary>QM arithmetic decoder context cell — state index + MPS bit.</summary>
-    private sealed class ArithmeticContext
+    // A struct, held in arrays and passed by reference: a context is read and written on every
+    // decoded bit, and a class a reference away for each of them was the decoder's overhead.
+    private struct ArithmeticContext
     {
         public int Index;
         public bool Mps;

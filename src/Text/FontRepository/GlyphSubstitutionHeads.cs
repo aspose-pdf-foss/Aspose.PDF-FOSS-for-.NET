@@ -30,20 +30,49 @@ public partial class FontRepository
 
         // Broad-coverage host faces for the remaining scripts (Thai, Hebrew,
         // Georgian, …) that neither Arial nor the CJK faces carry. Tahoma and
-        // Segoe UI ship wide script coverage on Windows; the trailing names are
-        // legacy super-fonts kept for older installs.
+        // Segoe UI ship wide script coverage on Windows; the legacy super-fonts follow
+        // for older installs, then the faces of what none of them carries: the
+        // southern Indic scripts (Sinhala), symbols and emoji.
         foreach (var candidate in new[]
-                 { "Tahoma", "Segoe UI", "Leelawadee UI", "Microsoft Sans Serif", "Arial Unicode MS" })
+                 { "Tahoma", "Segoe UI", "Leelawadee UI", "Microsoft Sans Serif", "Arial Unicode MS",
+                   "Nirmala UI", "Segoe UI Symbol", "Segoe UI Emoji" })
         {
-            var face = SystemFontResolver.Resolve(candidate);
+            // A face shipped only inside a collection (Nirmala UI) is not a file of its
+            // own: the repository's lookup unpacks it.
+            var resolved = SystemFontResolver.Resolve(candidate);
+            var face = resolved ?? FindFontData(candidate)?.TtfData;
             if (face is { Length: > 0 } && Covers(face, probe))
                 return MakeSubstituteFontData(face);
+            // The resolver answers a family it maps to no file with a stand-in - Arial for an
+            // Arial Unicode MS installed for all users: the installed face itself, by its name table.
+            if (resolved is not null && InstalledFace(candidate) is { Length: > 0 } installed
+                && !ReferenceEquals(installed, resolved) && Covers(installed, probe))
+                return MakeSubstituteFontData(installed);
         }
+
+        // Last, every installed CJK face: the text's own script's first face lacks a rare
+        // ideograph another one carries (MS Gothic has no 蟗, SimSun has).
+        if (CjkFallbackFont.ResolveCoveringBytes(text, ttf => Covers(ttf, probe)) is { } covering)
+            return MakeSubstituteFontData(covering);
         return null;
     }
 
+    /// <summary>The program of the system face a family names, matched by file or name table and
+    /// read once per process (the coverage scan asks about the same faces for every run it
+    /// substitutes); null when no such face is installed.</summary>
+    private static byte[]? InstalledFace(string family)
+    {
+        lock (InstalledFaces)
+            if (InstalledFaces.TryGetValue(family, out var known)) return known;
+        var ttf = SystemFontSource.FindFont(family, ignoreCase: true, nameTableScan: true)?.TtfData;
+        lock (InstalledFaces) InstalledFaces[family] = ttf;
+        return ttf;
+    }
+
+    private static readonly Dictionary<string, byte[]?> InstalledFaces = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary></summary>
-    private static FontData? SubstituteFromSources(HashSet<int> probe, string text)
+    private static FontData? SubstituteFromSources(HashSet<int> probe, string text, bool fixedPitchCurrent)
     {
         // Registered sources (folder/file/memory) — first covering face wins. The
         // sources the CALLER registered come before the default per-user fonts
@@ -51,16 +80,19 @@ public partial class FontRepository
         // MS the user happens to have installed. Name-resolution-only sources (a
         // harness pre-registering data folders so faces resolve BY NAME) are not
         // caller intent and stay out of coverage scans entirely.
+        // A fixed-pitch face never stands in for a proportional font: a registered
+        // Courier New covering Romanian text set in Arial Unicode MS is passed over
+        // (measured on the reference, which leaves such a face alone and draws the
+        // text in its serif host face; the symbol template renders in DejaVu).
+        bool Usable(byte[]? ttf) => ttf is { Length: > 0 } && Covers(ttf, probe)
+            && (fixedPitchCurrent || !IsFixedPitchFace(ttf));
         foreach (var source in _sources)
         {
             if (source.NameResolutionOnly) continue;
             if (source is FolderFontSource { IsDefaultUserFolder: true }) continue;
             foreach (var face in source.EnumerateFaces())
-            {
-                var ttf = face.TtfData;
-                if (ttf is { Length: > 0 } && Covers(ttf, probe))
+                if (Usable(face.TtfData))
                     return face;
-            }
         }
 
         // Han text prefers the platform's named CJK face over any broad-coverage
@@ -85,11 +117,8 @@ public partial class FontRepository
         {
             if (!source.NameResolutionOnly) continue;
             foreach (var face in source.EnumerateFaces())
-            {
-                var ttf = face.TtfData;
-                if (ttf is { Length: > 0 } && Covers(ttf, probe))
+                if (Usable(face.TtfData))
                     return face;
-            }
         }
 
         // The default per-user fonts folder ranks after all registered sources.
@@ -98,11 +127,8 @@ public partial class FontRepository
             if (source.NameResolutionOnly) continue;
             if (source is not FolderFontSource { IsDefaultUserFolder: true }) continue;
             foreach (var face in source.EnumerateFaces())
-            {
-                var ttf = face.TtfData;
-                if (ttf is { Length: > 0 } && Covers(ttf, probe))
+                if (Usable(face.TtfData))
                     return face;
-            }
         }
         return null;
     }

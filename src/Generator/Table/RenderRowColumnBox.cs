@@ -43,7 +43,7 @@ public partial class Table
             rc.slice.Plan.EffRowSpan[rc.origIdx] > 1)
         { rc.cellX += rc.cellWidth + CellSpacingH; return false; }
         rc.padding = EffectivePad(rc.cell, rc.row);
-        rc.dp = DefaultPad(rc.cell, rc.row);
+        rc.dp = DefaultPad;
         rc.padLeft = rc.padding?.Left ?? rc.dp;
         rc.padTop = rc.padding?.Top ?? 0;
         // (a UA-boxed cell's continuation slice carries no top padding: the box was padded on its first page)

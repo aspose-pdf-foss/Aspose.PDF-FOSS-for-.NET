@@ -4,9 +4,9 @@ namespace Aspose.Pdf.Text;
 public partial class TextFragment
 {
     /// <summary>Styled cascade stages: head resolution, run collection, unit grouping, piece placement and the write.</summary>
-    private void WriteStyledLines(StyledCascadeState sc)
+    private static void WriteStyledLines(StyledCascadeState sc)
     {
-        sc.tb = new TextBuilder(sc.page);
+        sc.tb = new TextBuilder(sc.page) { SeatsInPageSpace = true };
         for (int i = 0; i < sc.headIdx; i++)
         {
             var s = sc.headSegs[i];
@@ -20,7 +20,7 @@ public partial class TextFragment
         foreach (var p in sc.merged)
         {
             var st = sc.runs[p.r];
-            Emit(sc, p.text, st.font, st.fs, st.fg, p.x, p.tmY - DescentOf(sc, st.font, st.fs));
+            Emit(sc, p.text, st.font, st.fs, st.fg, p.x, p.tmY - DescentOf(st.font, st.fs));
         }
         sc.page.ResetContentsCache();
     }
@@ -28,25 +28,27 @@ public partial class TextFragment
     /// <summary></summary>
     private void PlacePieces(StyledCascadeState sc)
     {
-        sc.matchTm = sc.paraLines[sc.matchLine].y;
+        // The new lines step down from the run that holds the match, as its own text reads them: a line whose runs
+        // differ in face reads its first run's place, which sits elsewhere for a face of other metrics.
+        sc.matchTm = sc.headSeg.Position!.YIndent;
         sc.tmY = sc.matchTm - sc.newFs;
         sc.x = sc.pLeft; bool lineHas = false;
         sc.pieces = new System.Collections.Generic.List<(string text, int r, double x, double tmY)>();
         for (int u = 0; u < sc.units.Count; u++)
         {
             double unitW = 0;
-            foreach (var (t, r) in sc.units[u]) unitW += W(sc, sc.runs[r].font, sc.runs[r].fs, t);
+            foreach (var (t, r) in sc.units[u]) unitW += W(sc.runs[r].font, sc.runs[r].fs, t);
             int gapR = lineHas ? sc.unitGap[u] : -1;
-            double gapW = gapR >= 0 ? W(sc, sc.runs[gapR].font, sc.runs[gapR].fs, " ") : 0;
+            double gapW = gapR >= 0 ? W(sc.runs[gapR].font, sc.runs[gapR].fs, " ") : 0;
             if (lineHas && sc.x + gapW + unitW > sc.rightMargin + 0.25)
             {
-                sc.tmY -= sc.newFs; sc.x = sc.pLeft; lineHas = false; gapR = -1; gapW = 0;
+                sc.tmY -= sc.newFs; sc.x = sc.pLeft; gapR = -1; gapW = 0;
             }
             if (gapR >= 0) { sc.pieces.Add((" ", gapR, sc.x, sc.tmY)); sc.x += gapW; }
             foreach (var (t, r) in sc.units[u])
             {
                 sc.pieces.Add((t, r, sc.x, sc.tmY));
-                sc.x += W(sc, sc.runs[r].font, sc.runs[r].fs, t);
+                sc.x += W(sc.runs[r].font, sc.runs[r].fs, t);
             }
             lineHas = true;
         }
@@ -75,7 +77,7 @@ public partial class TextFragment
     }
 
     /// <summary></summary>
-    private bool GroupUnits(StyledCascadeState sc)
+    private static bool GroupUnits(StyledCascadeState sc)
     {
         sc.units = new System.Collections.Generic.List<System.Collections.Generic.List<(string t, int r)>>();
         sc.unitGap = new System.Collections.Generic.List<int>();
@@ -117,12 +119,12 @@ public partial class TextFragment
                 var last = sc.runs[^1];
                 sc.runs.Add((" ", last.font, last.fs, last.fg));
             }
-            foreach (var s in LineSegs(sc, sc.paraLines[li].f)) AddStyledSplit(sc, s.Text, s);
+            foreach (var s in LineSegs(sc.paraLines[li].f)) AddStyledSplit(sc, s.Text, s);
         }
         if (sc.runs.Count == 0) return false;
 
         sc.pLeft = sc.headSegs[0].Position!.XIndent;
-        sc.maxRx = 0; foreach (var l in sc.paraLines) if (l.rx > sc.maxRx) sc.maxRx = l.rx;
+        sc.maxRx = 0; foreach (var lrx in sc.paraLines.Select(l => l.rx)) if (lrx > sc.maxRx) sc.maxRx = lrx;
         sc.mediaW = sc.page.MediaBox is { } mb ? mb.URX - mb.LLX : 0;
         sc.rightMargin = System.Math.Max(sc.mediaW - sc.pLeft, sc.maxRx);
         if (sc.rightMargin <= sc.pLeft + 20) return false;
@@ -136,7 +138,7 @@ public partial class TextFragment
         sc.newFs = TextState.FontSize;
         if (sc.newFont is null || sc.newFs <= 0 || string.IsNullOrEmpty(sc.oldText)) return false;
 
-        sc.headSegs = LineSegs(sc, sc.paraLines[sc.matchLine].f);
+        sc.headSegs = LineSegs(sc.paraLines[sc.matchLine].f);
         if (sc.headSegs.Count == 0) return false;
         sc.headIdx = -1;
         for (int i = 0; i < sc.headSegs.Count; i++)
@@ -146,9 +148,14 @@ public partial class TextFragment
         sc.headFont = sc.headSeg.TextState.Font;
         sc.headFs = sc.headSeg.TextState.FontSize > 0 ? sc.headSeg.TextState.FontSize : sc.newFs;
 
-        sc.restyled = System.Math.Abs(sc.newFs - sc.headFs) > 0.1
-            || (Family(sc, sc.newFont.FontName).Length > 0 && Family(sc, sc.headFont?.FontName).Length > 0
-                && !string.Equals(Family(sc, sc.newFont.FontName), Family(sc, sc.headFont?.FontName),
+        // A face set on the fragment alone split its run: the fragment is a run of its own, already in the new style,
+        // and the style it departs from is the line's, in the run before it.
+        var styleSeg = sc.headSeg.Text == sc.oldText && sc.headIdx > 0 ? sc.headSegs[sc.headIdx - 1] : sc.headSeg;
+        var styleFont = styleSeg.TextState.Font;
+        var styleFs = styleSeg.TextState.FontSize > 0 ? styleSeg.TextState.FontSize : sc.newFs;
+        sc.restyled = System.Math.Abs(sc.newFs - styleFs) > 0.1
+            || (Family(sc.newFont.FontName).Length > 0 && Family(styleFont?.FontName).Length > 0
+                && !string.Equals(Family(sc.newFont.FontName), Family(styleFont?.FontName),
                     System.StringComparison.OrdinalIgnoreCase));
         if (!sc.restyled) return false;
 
@@ -158,7 +165,7 @@ public partial class TextFragment
              i = i + 1 <= sc.headSeg.Text.Length - 1
                 ? sc.headSeg.Text.IndexOf(sc.oldText, i + 1, System.StringComparison.Ordinal) : -1)
         {
-            double d = System.Math.Abs(sc.headX + W(sc, sc.headFont, sc.headFs, sc.headSeg.Text[..i]) - sc.myLLX);
+            double d = System.Math.Abs(sc.headX + W(sc.headFont, sc.headFs, sc.headSeg.Text[..i]) - sc.myLLX);
             if (d < bestD) { bestD = d; sc.occ = i; }
         }
         if (sc.occ < 0 || bestD > System.Math.Max(2.0, sc.headFs)) return false;

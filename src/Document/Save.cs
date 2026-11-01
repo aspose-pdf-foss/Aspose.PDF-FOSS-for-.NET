@@ -28,10 +28,10 @@ public sealed partial class Document : IDisposable
 
         if (_sourceStream is not null && _sourceStream.CanWrite && !MustRewriteWhole)
         {
-            SaveIncremental(_sourceStream);
-            _sourceStream.Seek(0, SeekOrigin.Begin);
+            // The bytes are the caller's answer; the stream the document was opened from is
+            // the caller's too and is left as it was.
             using var copy = new MemoryStream();
-            _sourceStream.CopyTo(copy);
+            SaveIncremental(copy);
             return copy.ToArray();
         }
 
@@ -96,18 +96,6 @@ public sealed partial class Document : IDisposable
         => EncryptWithCustomHandler(userPassword, ownerPassword,
             (int)permissions, customHandler);
 
-    private void EncryptWithCustomHandler(string userPassword, string ownerPassword,
-        int permissions, Security.ICustomSecurityHandler customHandler)
-    {
-        if (customHandler is null) throw new System.ArgumentNullException(nameof(customHandler));
-        if (HasCertificationSignature())
-            throw new System.InvalidOperationException(
-                "Cannot encrypt a document carrying a certification signature.");
-        CustomSecurityHandler = customHandler;
-        _encryptor = Security.PdfEncryptor.CreateWithCustomHandler(
-            customHandler, userPassword, ownerPassword, permissions);
-    }
-
     /// <summary>Encrypt with a list of recipient public certificates
     /// (Public-Key /Filter security handler). Not implemented; throws
     /// NotSupportedException to make the gap explicit.</summary>
@@ -118,6 +106,18 @@ public sealed partial class Document : IDisposable
         // enveloped to each recipient certificate; object encryption reuses the
         // Standard handler's RC4/AES pass through the built encryptor.
         _encryptor = Security.PubSecHandler.CreateEncryptor(permissions, cryptoAlgorithm, publicCertificates);
+    }
+
+    private void EncryptWithCustomHandler(string userPassword, string ownerPassword,
+        int permissions, Security.ICustomSecurityHandler customHandler)
+    {
+        if (customHandler is null) throw new System.ArgumentNullException(nameof(customHandler));
+        if (HasCertificationSignature())
+            throw new System.InvalidOperationException(
+                "Cannot encrypt a document carrying a certification signature.");
+        CustomSecurityHandler = customHandler;
+        _encryptor = Security.PdfEncryptor.CreateWithCustomHandler(
+            customHandler, userPassword, ownerPassword, permissions);
     }
 
     /// <summary>
@@ -275,8 +275,10 @@ public sealed partial class Document : IDisposable
     /// <summary>Update the /Info /Title entry.</summary>
     public void SetTitle(string title) { if (Info is { } info) info.Title = title; }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Rebuild the page tree so each subtree has <paramref name="nodesNumInSubtrees"/> children. Stored only.</summary>
     public void PageNodesToBalancedTree(byte nodesNumInSubtrees) { _ = nodesNumInSubtrees; }
+#pragma warning restore S2325
 
     /// <summary>Remove all metadata: the document information and every XMP packet - the
     /// document's, and those of its pages, images, fonts and forms.</summary>
@@ -301,7 +303,7 @@ public sealed partial class Document : IDisposable
     }
 
     /// <summary>Flatten transparency to opaque graphics. Stored only — no-op in FOSS.</summary>
-    public void FlattenTransparency() { }
+    public void FlattenTransparency() { /* stored only */ }
 
     /// <summary>
     /// Give each of the passed pages a private copy of the image XObjects they
@@ -369,8 +371,12 @@ public sealed partial class Document : IDisposable
         }
     }
 
-    /// <summary>Apply the requested repair pass. Stored only.</summary>
-    public void Repair(RepairOptions options) { _ = options; }
+    /// <summary>Apply the repair pass: the same as <see cref="Repair()"/>, whatever issues the options name.</summary>
+    public void Repair(RepairOptions options)
+    {
+        _ = options;
+        Repair();
+    }
 
     /// <summary>Export every annotation in the document to an XFDF stream.</summary>
     public void ExportAnnotationsToXfdf(Stream stream)
@@ -402,8 +408,10 @@ public sealed partial class Document : IDisposable
     /// so arbitrary XMP byte content round-trips exactly).</summary>
     private byte[]? _rawXmpOverride;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Convert one page to a PNG memory stream.</summary>
     public MemoryStream ConvertPageToPNGMemoryStream(Page page)
+#pragma warning restore S2325
     {
         var ms = new MemoryStream();
         new Aspose.Pdf.Devices.PngDevice().Process(page, ms);
@@ -426,8 +434,20 @@ public sealed partial class Document : IDisposable
     /// <summary>Write the generator DOM as template XML to a stream.</summary>
     public void SaveXml(Stream stream) => XmlSerialization.Save(this, stream);
 
-    /// <summary>Validate / repair the document. Always returns true (FOSS doesn't run validation).</summary>
-    public bool Check(bool doRepair) { _ = doRepair; return true; }
+    /// <summary>
+    /// Check the document: false when its structure is damaged (what <see cref="IsRepairNeeded"/> finds:
+    /// a cross-reference table that does not lead to its objects, a damaged page tree) or a page's
+    /// graphics-state operators are unbalanced. When <paramref name="doRepair"/> is set the damage is
+    /// repaired as <see cref="Repair()"/> does and the operators balanced; the result still reports what
+    /// was found.
+    /// </summary>
+    public bool Check(bool doRepair)
+    {
+        var damaged = IsRepairNeeded(out _);
+        if (damaged && doRepair) Repair();
+        var balanced = CheckGraphicsStateBalance(doRepair).Count == 0;
+        return !damaged && balanced;
+    }
 
     /// <summary>
     /// Validate the document's page content streams and write an XML report of any
@@ -438,6 +458,26 @@ public sealed partial class Document : IDisposable
     /// corrected in place. Returns true when the document is valid (no problems).
     /// </summary>
     public bool Check(bool doRepair, System.IO.Stream output)
+    {
+        var issues = CheckGraphicsStateBalance(doRepair);
+        if (output is not null)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<report>\n");
+            foreach (var issue in issues)
+                sb.Append("  <item>\n    <description>")
+                  .Append(System.Security.SecurityElement.Escape(issue))
+                  .Append("</description>\n  </item>\n");
+            sb.Append("</report>\n");
+            var bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+            output.Write(bytes, 0, bytes.Length);
+            output.Flush();
+        }
+        return issues.Count == 0;
+    }
+
+    /// <summary>The pages whose q/Q operators do not balance, described; balanced in place on repair.</summary>
+    private List<string> CheckGraphicsStateBalance(bool doRepair)
     {
         var issues = new List<string>();
         foreach (Page page in Pages)
@@ -465,21 +505,7 @@ public sealed partial class Document : IDisposable
                         string.Concat(Enumerable.Repeat("q\n", -depth))));
             }
         }
-
-        if (output is not null)
-        {
-            var sb = new System.Text.StringBuilder();
-            sb.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<report>\n");
-            foreach (var issue in issues)
-                sb.Append("  <item>\n    <description>")
-                  .Append(System.Security.SecurityElement.Escape(issue))
-                  .Append("</description>\n  </item>\n");
-            sb.Append("</report>\n");
-            var bytes = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
-            output.Write(bytes, 0, bytes.Length);
-            output.Flush();
-        }
-        return issues.Count == 0;
+        return issues;
     }
 
     /// <summary>Async file load wrapper (currently synchronous).</summary>
@@ -533,14 +559,6 @@ public sealed partial class Document : IDisposable
         _reader.OwnerDocument = this;
     }
 
-    private static byte[] ReadAll(Stream input)
-    {
-        using var ms = new MemoryStream();
-        if (input.CanSeek) input.Position = 0;
-        input.CopyTo(ms);
-        return ms.ToArray();
-    }
-
     /// <summary>Stream ctor with LoadOptions. Dispatches on the RUNTIME options type:
     /// callers that hold their typed options in a <see cref="LoadOptions"/> variable bind
     /// this overload, and without dispatch an HTML/SVG/text/Markdown source would be
@@ -554,6 +572,14 @@ public sealed partial class Document : IDisposable
     {
         if (options is not (HtmlLoadOptions or SvgLoadOptions or TxtLoadOptions or MdLoadOptions or PsLoadOptions))
             FileName = filename;
+    }
+
+    private static byte[] ReadAll(Stream input)
+    {
+        using var ms = new MemoryStream();
+        if (input.CanSeek) input.Position = 0;
+        input.CopyTo(ms);
+        return ms.ToArray();
     }
 
     private static byte[] SourceToPdfBytes(string path, LoadOptions options) => options switch
@@ -594,6 +620,14 @@ public sealed partial class Document : IDisposable
     /// the page's object number is decided, before the catalog is serialized.
     /// </summary>
     internal List<(PdfDictionary Element, Page Page)> PendingStructPgFixups { get; } = new();
+
+    /// <summary>
+    /// Local destinations whose page is still written as its index (see
+    /// <see cref="Annotations.ExplicitDestination.ToLocalPdfArray"/>). Each save puts the
+    /// page's reference in the array for as long as it writes, then puts the index back,
+    /// so the document reads its own destinations the same before and after.
+    /// </summary>
+    internal List<(PdfArray Destination, Page Page)> PendingDestinationPages { get; } = new();
 
     private (int Count, PdfDictionary? Last, Dictionary<PdfDictionary, Page> ByElement, Dictionary<PdfDictionary, Page> ByPage)? _pendingStructPgMap;
 
@@ -639,7 +673,7 @@ public sealed partial class Document : IDisposable
 
     internal (PdfDictionary dict, int objNum) EnsureInfoDict()
     {
-        var infoRef = _reader.Trailer.Get("Info");
+        var infoRef = InfoEntryOfItsOwn();
         if (infoRef is PdfIndirectRef iref)
         {
             var dict = _reader.ResolveDict(infoRef);
@@ -670,8 +704,8 @@ public sealed partial class Document : IDisposable
         _pages?.FreeMemory();
     }
 
-    // FreeMemory keeps the document usable (caches rebuild lazily from the reader);
-    // Dispose additionally drops the source buffer, so the file bytes stop being
+    // FreeMemory keeps the document usable (caches rebuild lazily from the reader); Dispose
+    // additionally drops the source buffer, so the file bytes stop being
     // reachable even while the disposed instance itself is still referenced.
     public void Dispose()
     {

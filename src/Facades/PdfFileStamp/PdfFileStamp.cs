@@ -20,10 +20,8 @@ public sealed partial class PdfFileStamp : System.IDisposable
     public const int PosBottomRight = 8;
 
     private Document? _document;
-    private string? _outputPath;
     private byte[]? _inputData;
     private Stream? _inputStream;
-    private Stream? _outputStream;
 
     /// <summary>
     /// Default constructor for stateless mode.
@@ -46,7 +44,7 @@ public sealed partial class PdfFileStamp : System.IDisposable
     public PdfFileStamp(Document document, Stream outputStream)
     {
         _document = document;
-        _outputStream = outputStream;
+        OutputStream = outputStream;
     }
 
     /// <summary>
@@ -55,7 +53,7 @@ public sealed partial class PdfFileStamp : System.IDisposable
     public PdfFileStamp(Document document, string outputFile)
     {
         _document = document;
-        _outputPath = outputFile;
+        OutputFile = outputFile;
     }
 
     /// <summary>
@@ -73,7 +71,7 @@ public sealed partial class PdfFileStamp : System.IDisposable
     public PdfFileStamp(Stream inputStream, Stream outputStream, bool keepSecurity)
     {
         _inputStream = inputStream;
-        _outputStream = outputStream;
+        OutputStream = outputStream;
         KeepSecurity = keepSecurity;
         _inputData = ReadAll(inputStream);
         _document = Document.Open(_inputData);
@@ -94,7 +92,7 @@ public sealed partial class PdfFileStamp : System.IDisposable
     public PdfFileStamp(string inputFile, string outputFile, bool keepSecurity)
     {
         _inputFile = inputFile;
-        _outputPath = outputFile;
+        OutputFile = outputFile;
         KeepSecurity = keepSecurity;
         _inputData = File.ReadAllBytes(inputFile);
         _document = Document.Open(_inputData);
@@ -107,7 +105,7 @@ public sealed partial class PdfFileStamp : System.IDisposable
     {
         _inputData = inputData;
         _document = Document.Open(inputData);
-        _outputPath = outputPath;
+        OutputFile = outputPath;
     }
 
     /// <summary>
@@ -156,21 +154,6 @@ public sealed partial class PdfFileStamp : System.IDisposable
         _document.Save(destFile);
     }
 
-    // Stamping replaces a page's /Contents with a combined stream (existing + stamp),
-    // leaving the original content stream orphaned in the xref. The default save serialises
-    // every in-use entry, so the output keeps growing by the old content size on each stamp.
-    // This pure reachability prune (RemoveUnusedObjects only) drops the orphans without
-    // rewriting or recompressing live content; the shared stamp form stays reachable.
-    private void PruneOrphans()
-    {
-        _document?.OptimizeResources(new Aspose.Pdf.Optimization.OptimizationOptions
-        {
-            RemoveUnusedObjects = true,
-            RemoveUnusedStreams = false,
-            LinkDuplicateStreams = false,
-        });
-    }
-
     /// <summary>
     /// Save the modified document to a stream.
     /// </summary>
@@ -192,6 +175,21 @@ public sealed partial class PdfFileStamp : System.IDisposable
         ApplyConvertTo();
         PruneOrphans();
         return _document.ToArray();
+    }
+
+    // Stamping replaces a page's /Contents with a combined stream (existing + stamp),
+    // leaving the original content stream orphaned in the xref. The default save serialises
+    // every in-use entry, so the output keeps growing by the old content size on each stamp.
+    // This pure reachability prune (RemoveUnusedObjects only) drops the orphans without
+    // rewriting or recompressing live content; the shared stamp form stays reachable.
+    private void PruneOrphans()
+    {
+        _document?.OptimizeResources(new Aspose.Pdf.Optimization.OptimizationOptions
+        {
+            RemoveUnusedObjects = true,
+            RemoveUnusedStreams = false,
+            LinkDuplicateStreams = false,
+        });
     }
 
     /// <summary>Applies the requested <see cref="ConvertTo"/> target to the bound
@@ -226,11 +224,7 @@ public sealed partial class PdfFileStamp : System.IDisposable
     /// <summary>
     /// Output file path. Save targets this when the parameterless Save is later wired up.
     /// </summary>
-    public string? OutputFile
-    {
-        get => _outputPath;
-        set => _outputPath = value;
-    }
+    public string? OutputFile { get; set; }
 
     /// <summary>
     /// Width of the first page in the bound document. Defaults to A4 (595)
@@ -270,11 +264,7 @@ public sealed partial class PdfFileStamp : System.IDisposable
     /// <summary>
     /// Output stream — Save() writes here when no explicit destination is passed.
     /// </summary>
-    public Stream? OutputStream
-    {
-        get => _outputStream;
-        set => _outputStream = value;
-    }
+    public Stream? OutputStream { get; set; }
 
     /// <summary>
     /// If true, the source document's security (encryption, permissions) should be preserved on Save.
@@ -307,11 +297,13 @@ public sealed partial class PdfFileStamp : System.IDisposable
     /// </summary>
     public int StartingNumber { get; set; } = 1;
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>
     /// PDF/A or PDF version target for the saved output. Stored for callers to inspect; the current
     /// Save path emits plain PDF regardless of this value.
     /// </summary>
     public PdfFormat ConvertTo { set => _convertTo = value; }
+#pragma warning restore S2376
     private PdfFormat? _convertTo;
 
     /// <summary>
@@ -322,18 +314,18 @@ public sealed partial class PdfFileStamp : System.IDisposable
         if (_document is null) return;
         ApplyConvertTo();
         PruneOrphans();
-        if (_outputPath is not null)
+        if (OutputFile is not null)
         {
-            _document.Save(_outputPath);
+            _document.Save(OutputFile);
         }
-        else if (_outputStream is not null)
+        else if (OutputStream is not null)
         {
             // Stream-bound stamp (e.g. PdfFileStamp(inputStream, outputStream)):
             // flush the stamped document to the configured output stream, mirroring
             // Save(Stream). Without this the output stream stays empty and any
             // subsequent reader rejects it as a headerless file.
             var data = _document.ToArray();
-            _outputStream.Write(data, 0, data.Length);
+            OutputStream.Write(data, 0, data.Length);
         }
         _document.Dispose();
         _document = null;

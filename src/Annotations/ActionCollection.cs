@@ -12,12 +12,10 @@ public sealed class ActionCollection : IEnumerable<PdfAction>
 {
     private readonly List<PdfAction> _actions = new();
     private readonly PdfDictionary _annotDict;
-    private readonly PdfReader _reader;
 
     internal ActionCollection(PdfDictionary annotDict, PdfReader reader)
     {
         _annotDict = annotDict;
-        _reader = reader;
 
         var aObj = reader.Resolve(annotDict.Get("A"));
         if (aObj is PdfDictionary actionDict)
@@ -41,7 +39,6 @@ public sealed class ActionCollection : IEnumerable<PdfAction>
     internal ActionCollection()
     {
         _annotDict = new PdfDictionary();
-        _reader = PdfReader.Empty;
     }
 
     /// <summary>Bind the collection to an ACTION's /Next chain: mutations rebuild the
@@ -51,7 +48,6 @@ public sealed class ActionCollection : IEnumerable<PdfAction>
     private ActionCollection(PdfDictionary ownerActionDict, PdfReader reader, bool asNextChain)
     {
         _annotDict = ownerActionDict;
-        _reader = reader;
         _ownerIsAction = asNextChain;
 
         var nextObj = reader.Resolve(ownerActionDict.Get("Next"));
@@ -102,8 +98,12 @@ public sealed class ActionCollection : IEnumerable<PdfAction>
     /// <summary>Number of actions in the collection.</summary>
     public int Count => _actions.Count;
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => false;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>Get an action by 1-based index (the public API indexes actions

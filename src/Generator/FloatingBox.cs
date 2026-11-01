@@ -55,9 +55,6 @@ public partial class FloatingBox : BaseParagraph
     /// when <see cref="Left"/> is set, that absolute position takes precedence.</summary>
     public new HorizontalAlignment HorizontalAlignment { get; set; } = HorizontalAlignment.Left;
 
-    /// <summary>Z-index for layering; higher draws on top.</summary>
-    public new int ZIndex { get; set; }
-
     /// <summary>Gets or sets the column layout. With two or more columns and explicit <c>ColumnWidths</c>, the box's text flows from column to column down to the page's bottom margin.</summary>
     public ColumnInfo ColumnInfo { get; set; } = new ColumnInfo();
 
@@ -226,16 +223,93 @@ public partial class FloatingBox : BaseParagraph
     /// <returns>PDF content stream bytes ready to be appended to the page.</returns>
     public byte[] Build(Page page)
     {
+        // A box given no height takes the height of the text it holds: built 0 pt high,
+        // every line fell outside it and was dropped, its chrome collapsed to a line.
+        var declared = Height;
+        var contentHeight = declared > 0 ? null : ContentHeight();
+        try
+        {
+            if (contentHeight is { } measured) Height = measured;
+            return BuildSized(page);
+        }
+        finally { Height = declared; _measuredHtml = null; }
+    }
+
+    /// <summary>The HTML-engine lines of the box's HTML fragments, wrapped once while the box
+    /// measures itself and drawn by the build; null while the box is not measuring.</summary>
+    private Dictionary<HtmlFragment, Table.HtmlEngineLines>? _measuredHtml;
+
+    /// <summary>The height a box of text and HTML fragments takes: its vertical padding plus, per
+    /// text fragment, its lines at its font size and the spacing after it, and per HTML fragment
+    /// its engine lines wrapped at the box's content width - the steps the box writer takes. Null
+    /// when the box holds anything else, an HTML fragment outside the engine family, or columns.</summary>
+    private double? ContentHeight()
+    {
+        _measuredHtml = null;
+        if (Paragraphs.Count == 0 || ColumnInfo is { ColumnCount: > 1 }) return null;
+        var height = (Padding?.Top ?? 0) + (Padding?.Bottom ?? 0);
+        foreach (var paragraph in Paragraphs)
+        {
+            if (paragraph is HtmlFragment html)
+            {
+                if (Table.HtmlEngineLines.Measure(html.HtmlContent, ContentWidth()) is not { } measured) return null;
+                (_measuredHtml ??= new Dictionary<HtmlFragment, Table.HtmlEngineLines>())[html] = measured;
+                height += measured.Height;
+                continue;
+            }
+            if (paragraph is not TextFragment tf || tf.TextState.Rotation % FullTurn != 0) return null;
+            var fontSize = tf.TextState.FontSize;
+            var lines = TextLines(tf).Count;
+            height += lines * fontSize + (tf.TextState.LineSpacing > 0 ? tf.TextState.LineSpacing : fontSize * DefaultParagraphSpacingEm);
+        }
+        return height;
+    }
+
+    /// <summary>The spacing after a box text fragment that sets none, in em of its size.</summary>
+    private const double DefaultParagraphSpacingEm = 0.2;
+
+    /// <summary>The face a box text fragment that names none is drawn in.</summary>
+    private const string DefaultTextFace = "Helvetica";
+
+    /// <summary>The width the box's text and HTML wrap at: the box width inside its side padding; 0 for a box
+    /// given no width, whose text is drawn as written.</summary>
+    private double ContentWidth()
+    {
+        var w = Width - (Padding?.Left ?? 0) - (Padding?.Right ?? 0);
+        return w > 0 ? w : 0;
+    }
+
+    /// <summary>The lines an upright text fragment of the box draws: its hard breaks, each wrapped at the
+    /// box's content width in the fragment's face when the box has a width. A line was drawn as written
+    /// however long, out through the box's border and off the page.</summary>
+    private List<string> TextLines(TextFragment fragment)
+    {
+        var lines = new List<string>();
+        var width = ContentWidth();
+        var fontSize = fragment.TextState.FontSize;
+        var measure = width > 0 && fontSize > 0
+            ? Aspose.Pdf.Text.TextPaginator.CreateMeasurer(fragment.TextState.FontName ?? DefaultTextFace, fontSize, null)
+            : null;
+        foreach (var hardLine in (fragment.Text ?? string.Empty).Split((char)10))
+        {
+            var line = hardLine.TrimEnd((char)13);
+            if (measure is null) lines.Add(line);
+            else lines.AddRange(Table.WrapText(line, fontSize, width, measure));
+        }
+        return lines;
+    }
+
+    /// <summary>Builds the box at its declared (or text-sized) height.</summary>
+    private byte[] BuildSized(Page page)
+    {
         var bx = new FloatingBoxBuildState();
         bx.page = page;
         LastOverflowPages.Clear();
-        bx.pageHeight = bx.page.Height;
+        bx.pageHeight = bx.page.LayoutFrameHeight;
         bx.builder = new ContentStreamBuilder();
 
         bx.marginLeft = Margin?.Left ?? 0;
         bx.marginTop = Margin?.Top ?? 0;
-        bx.marginRight = Margin?.Right ?? 0;
-        bx.marginBottom = Margin?.Bottom ?? 0;
 
         bx.boxX = Left + bx.marginLeft;
 
@@ -289,13 +363,8 @@ public partial class FloatingBox : BaseParagraph
 
         bx.builder.SaveState();
 
-        // Draw background
         if (BackgroundColor is not null)
-        {
-            bx.builder.SetFillColor(BackgroundColor);
-            bx.builder.Rectangle(bx.boxX, bx.boxY, Width, Height);
-            bx.builder.Fill();
-        }
+            FillBackground(bx.builder, bx.page, BackgroundColor, bx.boxX, bx.boxY, Width, Height);
 
         // Draw border
         if (Border is not null && Border.HasAnySide)
@@ -306,7 +375,9 @@ public partial class FloatingBox : BaseParagraph
         bx.overflowLines = new List<(string Text, double FontSize, string FontRes, Color? Fill)>();
 
         bx.boxCentreCursor = bx.boxY + Height / 2;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var paragraph in Paragraphs)
+#pragma warning restore S3267
         {
             if (!BuildParagraph(bx, paragraph)) break;
         }
@@ -331,7 +402,7 @@ public partial class FloatingBox : BaseParagraph
     {
         var topMargin = page.PageInfo?.Margin?.Top ?? 0;
         if (topMargin <= 0) topMargin = Margin?.Top ?? 0;
-        var contBoxY = page.Height - topMargin - Height;
+        var contBoxY = page.LayoutFrameHeight - topMargin - Height;
         var idx = 0;
         var guard = 0;
         while (idx < lines.Count && guard++ < 512)
@@ -339,11 +410,7 @@ public partial class FloatingBox : BaseParagraph
             var b = new ContentStreamBuilder();
             b.SaveState();
             if (BackgroundColor is not null)
-            {
-                b.SetFillColor(BackgroundColor);
-                b.Rectangle(boxX, contBoxY, Width, Height);
-                b.Fill();
-            }
+                FillBackground(b, page, BackgroundColor, boxX, contBoxY, Width, Height);
             if (Border is not null && Border.HasAnySide)
                 StrokeBorder(b, Border, boxX, contBoxY, Width, Height);
             var y = contBoxY + Height - padTop;
@@ -375,6 +442,22 @@ public partial class FloatingBox : BaseParagraph
     {
         var d = Aspose.Pdf.Text.Standard14Fonts.GetDescent(faceName);
         return d < 0 ? -d / 1000.0 : d / 1000.0;
+    }
+
+    /// <summary>Fill the box's background over (x, y, w, h), in its own graphics state so
+    /// neither the colour nor its alpha reaches the content drawn after it. A colour with
+    /// alpha paints through a fill-alpha state of the page; it used to paint opaque, the
+    /// alpha a caller gave through a System.Drawing colour dropped on the way.</summary>
+    internal static void FillBackground(ContentStreamBuilder builder, Page page, Color color,
+        double x, double y, double w, double h)
+    {
+        builder.SaveState();
+        if (TextParagraph.EnsureFillAlphaExtGState(page, color.AByte) is { } alphaState)
+            builder.SetExtGState(alphaState);
+        builder.SetFillColor(color);
+        builder.Rectangle(x, y, w, h);
+        builder.Fill();
+        builder.RestoreState();
     }
 
     /// <summary>Stroke a box border around (x, y, w, h). A full box (all four
@@ -416,14 +499,11 @@ public partial class FloatingBox : BaseParagraph
 
     private static string EnsureFontResource(Page page, string baseFontName)
     {
-        var resources = page.Dict.Get("Resources") as PdfDictionary;
-        if (resources is null)
-        {
-            resources = new PdfDictionary();
-            page.Dict.Set("Resources", resources);
-        }
+        // Resolved, and the page's own: a bare cast misses an indirect or inherited dictionary
+        // and a fresh one in its place hides the page's existing fonts and images.
+        var resources = Aspose.Pdf.Forms.Form.EnsureOwnPageResources(page.Dict, page.Reader);
 
-        var fontDict = resources.Get("Font") as PdfDictionary;
+        var fontDict = page.Reader.ResolveDict(resources.Get("Font"));
         if (fontDict is null)
         {
             fontDict = new PdfDictionary();

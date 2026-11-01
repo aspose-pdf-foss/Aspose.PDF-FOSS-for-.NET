@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.Functions;
 using Aspose.Pdf.IO;
 
@@ -35,16 +35,42 @@ public class DefaultAppearance
 
     /// <summary>Create with default values (Helvetica 12pt black).</summary>
     public DefaultAppearance()
-        : this("Helvetica", 12, System.Drawing.Color.Black) { }
+        : this("Helvetica", 12, System.Drawing.Color.Black)
+    {
+        FontChosen = false;
+    }
 
     /// <summary>Font name (e.g. "Arial", "Helvetica").</summary>
-    public string FontName { get; set; }
+    public string FontName
+    {
+        get => _fontName;
+        set { if (_fontName == value) return; _fontName = value; FontChosen = true; Changed?.Invoke(); }
+    }
+    private string _fontName = "Helvetica";
+
+    /// <summary>False for an appearance made without a font (the parameterless constructor) until a font
+    /// name is set: its Helvetica is a placeholder, and a form gets no font resource for it.</summary>
+    internal bool FontChosen { get; private set; } = true;
 
     /// <summary>Font size in points.</summary>
-    public double FontSize { get; set; }
+    public double FontSize
+    {
+        get => _fontSize;
+        set { if (_fontSize.Equals(value)) return; _fontSize = value; Changed?.Invoke(); }
+    }
+    private double _fontSize;
 
     /// <summary>Text color.</summary>
-    public System.Drawing.Color TextColor { get; set; }
+    public System.Drawing.Color TextColor
+    {
+        get => _textColor;
+        set { if (_textColor == value) return; _textColor = value; Changed?.Invoke(); }
+    }
+    private System.Drawing.Color _textColor;
+
+    /// <summary>Told when a property changes, so the owner that handed this object out
+    /// can write the change to what it describes.</summary>
+    internal Action? Changed { get; set; }
 
     /// <summary>PDF resource name used to reference this font in /DA. Defaults to
     /// the font name with spaces stripped; once the font is embedded into the form
@@ -74,6 +100,7 @@ public class DefaultAppearance
         var b = TextColor.B / 255.0;
         // Use a resource name derived from the font name (strip spaces, prefix with /)
         var resName = "/" + FontName.Replace(" ", "");
-        return $"{resName} {FontSize:G} Tf {r:F3} {g:F3} {b:F3} rg";
+        return Compat.Format(System.Globalization.CultureInfo.InvariantCulture,
+            $"{resName} {FontSize:G} Tf {r:F3} {g:F3} {b:F3} rg");
     }
 }

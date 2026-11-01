@@ -128,8 +128,7 @@ public class FontInfo
             var name = BaseFont;
             if (string.IsNullOrEmpty(name)) return FontName;
             var hasHigh = false;
-            foreach (var c in name)
-                if (c > 0x7F) { hasHigh = true; break; }
+            if (name.Any(c => c > 0x7F)) { hasHigh = true; }
             if (!hasHigh) return FontName;
 
             // Codepage: the Type0 /Encoding CMap name is authoritative (ETen-B5-H →
@@ -148,12 +147,14 @@ public class FontInfo
                 body = name[7..];
             }
             var sb = new System.Text.StringBuilder(prefix);
-            for (var i = 0; i < body.Length; i++)
+            var i = 0;
+            while (i < body.Length)
             {
                 var c = body[i];
                 if (c <= 0x7F || i + 1 >= body.Length)
                 {
                     sb.Append(c);
+                    i++;
                     continue;
                 }
                 var code = (c << 8) | (body[i + 1] & 0xFF);
@@ -166,6 +167,7 @@ public class FontInfo
                 {
                     sb.Append(c);
                 }
+                i++;
             }
             return sb.ToString();
         }
@@ -181,8 +183,7 @@ public class FontInfo
         var cidFont = _reader.ResolveDict(desc[0]);
         var csi = cidFont is null ? null : _reader.ResolveDict(cidFont.Get("CIDSystemInfo"));
         var orderingObj = csi?.Get("Ordering");
-        var ordering = orderingObj is PdfString os ? os.ToText()
-            : (orderingObj is PdfName on ? on.Value : null);
+        var ordering = orderingObj switch { PdfString os => os.ToText(), PdfName on => on.Value, _ => null };
         return ordering switch
         {
             "CNS1" => 950,
@@ -201,6 +202,9 @@ public class FontInfo
     /// <summary>The underlying PDF font dictionary — the identity the absorber
     /// dedupes on (one instance per resolved indirect object).</summary>
     internal PdfDictionary FontDict => _fontDict;
+
+    /// <summary>The reader of the document the font was read from; null for a font opened from a host program.</summary>
+    internal PdfReader? SourceReader => _reader;
 
     /// <summary>The name this font was registered under in a page's resources,
     /// set when it is added to a page and used when text is shown against it.</summary>
@@ -236,7 +240,7 @@ public class FontInfo
                 }
             }
         }
-        catch { }
+        catch { /* a font program stream that does not decode - no program */ }
         return null;
     }
 
@@ -255,6 +259,13 @@ public class FontInfo
         set
         {
             var was = _isEmbedded;
+            // A composite font whose CIDs are its own program's keeps that program: no installed face
+            // numbers its glyphs that way, so without it the font's text could not be drawn at all.
+            if (!value && was && CodesNeedTheirProgram())
+            {
+                _isEmbeddedExplicit = true;
+                return;
+            }
             _isEmbedded = value;
             _isEmbeddedExplicit = true;
             // A font that is not embedded cannot carry a subset — keep the two
@@ -274,6 +285,7 @@ public class FontInfo
                 // document as a replacement resource, and detaches the program of a font
                 // read out of the document.
                 UnembedMaterialised();
+                _reader?.OwnerDocument?.CancelFontEmbed(_fontDict);
                 if (was) UnembedInPlace();
             }
         }
@@ -322,15 +334,31 @@ public class FontInfo
                     {
                         var tag = new string(Enumerable.Range(0, 6).Select(_ => (char)('A' + Compat.SharedRandom.Next(26))).ToArray());
                         _fontDict.Set("BaseFont", new PdfName($"{tag}+{BaseFont}"));
+                        TagDescriptorName(tag);
                     }
+                    // A subset name on a font read from the document needs a program behind it: the
+                    // save embeds the face as a subset, or takes the tag off again when none resolves.
+                    if (DocumentOfReadFont is { } doc && GetEmbeddedProgramBytes() is not { Length: > 0 })
+                        doc.RequestFontEmbed(_fontDict, subset: true, taggedName: BaseFont);
                 }
             }
             else
             {
                 _isSubset = false;
+                var tagged = BaseFont.Length > SubsetPrefixLength && BaseFont[SubsetPrefixLength - 1] == '+';
+                var embeddedProgram = DocumentOfReadFont is not null && GetEmbeddedProgramBytes() is { Length: > 0 };
+                // A subset becomes the whole face at save - for a composite font only a face whose glyph
+                // numbering the subset kept, the program the caller opened or the installed face - and
+                // its tag comes back there when no such face is found.
+                if (tagged && embeddedProgram)
+                    DocumentOfReadFont!.RequestFontEmbed(_fontDict, subset: false, taggedName: BaseFont, replaceProgram: true);
+                else if (!embeddedProgram) DocumentOfReadFont?.CancelSubsetRequest(_fontDict);
                 // Remove subset prefix
-                if (BaseFont.Length > 7 && BaseFont[6] == '+')
+                if (tagged)
+                {
                     _fontDict.Set("BaseFont", new PdfName(BaseFont[7..]));
+                    TagDescriptorName(null);
+                }
                 // Record the explicit "do not subset" intent so the save-time embed pass
                 // (EmbedNonEmbeddedFonts) embeds the full program instead of subsetting and
                 // adding a tag — which would make the reloaded font read as a subset again.
@@ -348,33 +376,59 @@ public class FontInfo
     private bool _isSubset;
     private bool _isSubsetExplicit;
 
+    /// <summary>The document a font read from it belongs to; null for a font from the repository.</summary>
+    private Document? DocumentOfReadFont => SourceFontData is null ? _reader?.OwnerDocument : null;
+
+    /// <summary>The length of a subset tag with its plus sign: six letters and the sign.</summary>
+    private const int SubsetPrefixLength = 7;
+
+    /// <summary>A simple font's descriptor names the font as its /BaseFont does: the subset tag goes onto
+    /// /FontName, or comes off it, with the tag of the font dictionary (null takes it off).</summary>
+    private void TagDescriptorName(string? tag)
+    {
+        if (_reader?.ResolveDict(_fontDict.Get("FontDescriptor")) is not { } descriptor) return;
+        if (descriptor.GetName("FontName") is not { Length: > 0 } name) return;
+        var tagged = name.Length > SubsetPrefixLength && name[SubsetPrefixLength - 1] == '+';
+        var bare = tagged ? name[SubsetPrefixLength..] : name;
+        descriptor.Set("FontName", new PdfName(tag is null ? bare : $"{tag}+{bare}"));
+    }
+
     /// <summary>Font resources the text pipeline created in a document to render this
     /// font, along with the objects that carry the embedded program. A font is assigned
     /// to a <see cref="TextState"/> first and configured afterwards, so a later
     /// IsEmbedded/IsSubset change has to reach back into what was already written.</summary>
     private List<(Document doc, PdfDictionary fontDict, string bareName,
-        int descriptorObjNum, int fontFileObjNum)>? _materialised;
+        PdfDictionary? descriptor, int fontFileObjNum)>? _materialised;
 
     /// <summary>Record a font resource created from this font, so cancelling the
     /// embedding later can rewrite it.</summary>
     internal void TrackMaterialised(Document doc, PdfDictionary fontDict, string bareName,
-        int descriptorObjNum, int fontFileObjNum)
+        PdfDictionary? descriptor, int fontFileObjNum)
     {
         _materialised ??= [];
-        _materialised.Add((doc, fontDict, bareName, descriptorObjNum, fontFileObjNum));
+        _materialised.Add((doc, fontDict, bareName, descriptor, fontFileObjNum));
     }
 
     /// <summary>Turn every font resource created from this font into a by-name reference:
-    /// drop the subset tag, detach the embedded program, and free the now-stranded
-    /// descriptor and font-file objects so they don't bloat the output.</summary>
+    /// drop the subset tag, detach the embedded program from the descriptor, and free the
+    /// now-stranded font-file object so it doesn't bloat the output.</summary>
     private void UnembedMaterialised()
     {
         if (_materialised is null) return;
-        foreach (var (doc, fontDict, bareName, descriptorObjNum, fontFileObjNum) in _materialised)
+        foreach (var (doc, fontDict, bareName, descriptor, fontFileObjNum) in _materialised)
         {
             fontDict.Set("BaseFont", new PdfName(bareName));
-            fontDict.Remove("FontDescriptor");
-            doc.RemoveNewObject(descriptorObjNum);
+            // The font keeps its descriptor - a font other than the standard 14 must have one - with
+            // only the program taken off, and named as the font is.
+            if (descriptor is not null)
+            {
+                descriptor.Remove("FontFile2");
+                descriptor.Set("FontName", new PdfName(bareName));
+            }
+            else
+            {
+                fontDict.Remove("FontDescriptor");
+            }
             doc.RemoveNewObject(fontFileObjNum);
         }
         _materialised.Clear();
@@ -401,9 +455,31 @@ public class FontInfo
                         doc.RemoveNewObject(fileRef.ObjectNumber);
                     descriptor.Remove(key);
                 }
+                // The glyph sets of the program went with it.
+                descriptor.Remove("CharSet");
+                descriptor.Remove("CIDSet");
+            }
+            // A font with no program is no subset: the tag comes off its name, or a conversion that
+            // cannot embed the face again leaves a subset name with nothing behind it.
+            if (BaseFont.Length > SubsetPrefixLength && BaseFont[SubsetPrefixLength - 1] == '+')
+            {
+                _fontDict.Set("BaseFont", new PdfName(BaseFont[SubsetPrefixLength..]));
+                TagDescriptorName(null);
             }
         }
         catch { /* best-effort: a font that can't be detached stays embedded */ }
+    }
+
+    /// <summary>True for a composite font with a program whose CIDs are that program's own (the Identity
+    /// ordering): its codes reach their glyphs through nothing else.</summary>
+    private bool CodesNeedTheirProgram()
+    {
+        if (_reader is null || !IsCid) return false;
+        if (_reader.Resolve(_fontDict.Get("DescendantFonts")) is not PdfArray { Count: > 0 } descendants) return false;
+        var cidFont = _reader.ResolveDict(descendants[0]);
+        var info = _reader.ResolveDict(cidFont?.Get("CIDSystemInfo"));
+        if (_reader.Resolve(info?.Get("Ordering")) is not PdfString { } ordering || ordering.ToText() != "Identity") return false;
+        return Descriptors().Any(d => d.ContainsKey("FontFile") || d.ContainsKey("FontFile2") || d.ContainsKey("FontFile3"));
     }
 
     /// <summary>This font's FontDescriptor dictionaries — its own, plus every descendant
@@ -426,27 +502,37 @@ public class FontInfo
     {
         var doc = _reader?.OwnerDocument;
         if (doc is null) return;
-        // EmbedIntoFontDict rewrites the dictionary as a simple WinAnsi TrueType. Doing
-        // that to a composite (Type0/CID) font would orphan its DescendantFonts and
-        // rewrite Subtype, so the 2-byte codes decode one byte at a time and the
-        // ToUnicode CMap no longer matches — text extraction turns to mojibake. A
-        // non-embedded composite is embedded through the CID path at save time
-        // (EmbedNonEmbeddedCidFont); leave it by-name here.
-        if (IsCid) return;
         // A font that already carries a program, or one assigned from FontRepository
         // (embedded through the text pipeline when it reaches a TextState), is not this
         // case.
         if (SourceFontData is not null) return;
         if (GetEmbeddedProgramBytes() is { Length: > 0 }) return;
+        // EmbedIntoFontDict rewrites the dictionary as a simple WinAnsi TrueType. Doing
+        // that to a composite (Type0/CID) font would orphan its DescendantFonts and
+        // rewrite Subtype, so the 2-byte codes decode one byte at a time and the
+        // ToUnicode CMap no longer matches — text extraction turns to mojibake. A
+        // non-embedded composite is embedded through the CID path when the document is saved.
+        if (IsCid)
+        {
+            doc.RequestFontEmbed(_fontDict, subset: _isSubset, taggedName: _isSubset ? BaseFont : null);
+            return;
+        }
         try
         {
             var ttf = SystemFontResolver.Resolve(FontName);
-            if (ttf is null || ttf.Length == 0) return;
+            // A face no installed family resolves is substituted at save, as the embedding pass does: the
+            // stand-in is not the face the font names, so it is cut to the glyphs shown rather than embedded
+            // whole once per font.
+            if (ttf is null || ttf.Length == 0)
+            {
+                doc.RequestFontEmbed(_fontDict, subset: true);
+                return;
+            }
             FontEmbedder.EmbedIntoFontDict(doc, ttf, _fontDict, FontName, subset: false);
             _isSubset = false;
             // The face that got embedded is a host substitute whenever its family
-            // differs from the requested one (Helvetica→Arial, Courier→Courier New);
-            // report that replacement through the document's substitution event.
+            // differs from the requested one (Helvetica→Arial, Courier→Courier New); report
+            // that replacement through the document's substitution event.
             var reported = SubstitutedFaceDisplayName(FontName, ttf);
             if (reported is not null)
                 doc.RaiseFontSubstitution(new Font(FontName, Subtype ?? "Type1"),
@@ -502,6 +588,71 @@ public class FontInfo
     /// <summary>Get the font metrics (ascent, descent, glyph widths). May return null for detached fonts.</summary>
     internal FontMetrics? GetMetrics() => _reader is not null ? Metrics : null;
 
+    /// <summary>True for a font read out of a document that carries its program there: text
+    /// written in it is shown through its own dictionary, as there is no program to embed afresh.</summary>
+    internal bool IsDocumentEmbeddedFont => IsDocumentFont && IsEmbedded;
+
+    /// <summary>True for a font read out of a document, embedded there or not, rather than one
+    /// opened from a host program.</summary>
+    internal bool IsDocumentFont => _reader is not null && SourceFontData is null;
+
+    private Dictionary<char, int>? _codesByChar;
+    private bool _codesByCharTried;
+
+    /// <summary>The show string for <paramref name="text"/> in this font's own codes, found by
+    /// reversing its /ToUnicode map, or null when the font has no map or the map lacks a character.
+    /// A code is two bytes for a composite font and one for a simple one.</summary>
+    internal byte[]? TryEncode(string text)
+    {
+        if (!_codesByCharTried)
+        {
+            _codesByCharTried = true;
+            if (_reader is not null && TextAbsorber.ParseToUnicodeFromDict(_fontDict, _reader) is { } toUnicode)
+            {
+                _codesByChar = new Dictionary<char, int>();
+                foreach (var (code, unicode) in toUnicode)
+                {
+                    if (unicode.Length == 1 && !_codesByChar.ContainsKey(unicode[0])) _codesByChar[unicode[0]] = code;
+                }
+            }
+            else if (_reader is not null && !IsCid)
+                _codesByChar = CodesByEncoding();
+        }
+        if (_codesByChar is null) return null;
+        var bytes = new byte[IsCid ? text.Length * 2 : text.Length];
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (!_codesByChar.TryGetValue(text[i], out var code)) return null;
+            if (IsCid)
+            {
+                bytes[2 * i] = (byte)(code >> 8);
+                bytes[2 * i + 1] = (byte)code;
+            }
+            else if (code <= byte.MaxValue) bytes[i] = (byte)code;
+            else return null;
+        }
+        return bytes;
+    }
+
+    /// <summary>The codes of a simple font with no /ToUnicode, read through its /Encoding as the text
+    /// is extracted - a Word subset in WinAnsi carries none - and only those its /Widths gives an
+    /// advance: a subset states zero for every code whose glyph it left out.</summary>
+    private Dictionary<char, int>? CodesByEncoding()
+    {
+        if (_reader!.Resolve(_fontDict.Get("Widths")) is not PdfArray widths) return null;
+        var first = (int)_fontDict.GetInt("FirstChar");
+        var codes = new Dictionary<char, int>();
+        for (var i = 0; i < widths.Count && first + i <= byte.MaxValue; i++)
+        {
+            var code = first + i;
+            var advance = _reader.Resolve(widths[i]) switch { PdfInteger n => n.Value, PdfReal r => r.Value, _ => 0d };
+            if (code < 0 || advance <= 0) continue;
+            var text = TextAbsorber.DecodeStringPublic([(byte)code], null, _fontDict, _reader);
+            if (text.Length == 1 && !codes.ContainsKey(text[0])) codes[text[0]] = code;
+        }
+        return codes;
+    }
+
     /// <summary>
     /// Create a FontInfo from a FontData (system font found via FontRepository.FindFont).
     /// This allows assigning FontData to TextState.Font directly.
@@ -555,8 +706,9 @@ public class FontInfo
     /// answer the default width for every glyph (1 em — Liberation Sans, the Linux Arial, measured
     /// "A" and "z" alike). The program it was opened from holds the real advances.</summary>
     private bool MeasuresByOwnProgram =>
-        SourceFontData?.TtfData is { Length: > 12 } && !_fontDict.ContainsKey("Widths")
-        && !_fontDict.ContainsKey("DescendantFonts") && !Metrics.IsStandard14;
+        SourceFontData?.PredefinedCid is not null
+        || ((SourceFontData?.TtfData is { Length: > 12 } || SourceFontData?.Type1 is not null) && !_fontDict.ContainsKey("Widths")
+            && !_fontDict.ContainsKey("DescendantFonts") && !Metrics.IsStandard14);
 
     private IGlyphOutlineSource? _outlineSource;
     private bool _outlineSourceTried;
@@ -686,8 +838,8 @@ public class FontInfo
             {
                 var data = _reader.DecodeStream(tt);
                 if (data.Length > 0)
-                    foreach (var cp in new GlyphOutlineParser(data).CMap.Keys)
-                        if (cp is >= 0 and <= 0xFFFF) set.Add((char)cp);
+                    foreach (var cp in new GlyphOutlineParser(data).CMap.Keys.Where(cp => cp is >= 0 and <= 0xFFFF))
+                        set.Add((char)cp);
             }
             // CFF / OpenType-CFF (/FontFile3): the cmap's Unicode keys.
             else if (_reader.ResolveStream(descriptor.Get("FontFile3")) is { } cff)
@@ -695,8 +847,8 @@ public class FontInfo
                 var data = _reader.DecodeStream(cff);
                 var src = data.Length > 0 ? CffGlyphSource.TryLoad(data) : null;
                 if (src is not null)
-                    foreach (var cp in src.CMap.Keys)
-                        if (cp is >= 0 and <= 0xFFFF) set.Add((char)cp);
+                    foreach (var cp in src.CMap.Keys.Where(cp => cp is >= 0 and <= 0xFFFF))
+                        set.Add((char)cp);
             }
         }
         catch { return null; }

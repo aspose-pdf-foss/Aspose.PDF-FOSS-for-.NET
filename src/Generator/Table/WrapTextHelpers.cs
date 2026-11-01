@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
@@ -28,12 +29,14 @@ public partial class Table
         // A column auto-fit to exactly this word's width must accept it — the
         // width comparison tolerates the last-bit error the pad add/subtract
         // round-trip introduces.
-        if (wordW <= wt.availWidth + 1e-6) { wt.currentLine = word; wt.currentWidth = wordW; return; }
+        if (wordW <= wt.availWidth + 1e-6) { wt.currentLine.Clear().Append(word); wt.currentWidth = wordW; return; }
         // HTML layout: a word too wide for its column spills past the cell edge —
         // the column was sized knowing that, and breaking it would show a split
         // a browser never shows.
-        if (wt.overflowLongWords) { wt.currentLine = word; wt.currentWidth = wordW; return; }
+        if (wt.overflowLongWords) { wt.currentLine.Clear().Append(word); wt.currentWidth = wordW; return; }
+#pragma warning disable S2692 // a match at index 0 is deliberately excluded here
         if (word.IndexOf('-') > 0 || word.IndexOf('–') > 0)
+#pragma warning restore S2692
         {
             var segs = new List<string>();
             var start = 0;
@@ -45,37 +48,36 @@ public partial class Table
                 }
             if (segs.Count > 1)
             {
-                wt.currentLine = ""; wt.currentWidth = 0;
+                wt.currentLine.Clear(); wt.currentWidth = 0;
                 foreach (var seg in segs)
                 {
                     var segW = WrapMeasureWidth(wt, seg, wt.fontSize);
                     if (wt.currentLine.Length == 0) { StartWithWord(wt, seg, segW); continue; }
                     if (wt.currentWidth + segW <= wt.availWidth + 1e-6)
                     {
-                        wt.currentLine += seg;
+                        wt.currentLine.Append(seg);
                         wt.currentWidth += segW;
                     }
                     else
                     {
-                        wt.lines.Add(wt.currentLine);
+                        wt.lines.Add(wt.currentLine.ToString());
                         StartWithWord(wt, seg, segW);
                     }
                 }
                 return;
             }
         }
-        var cur = ""; double cw = 0;
+        var cur = wt.currentLine.Clear(); double cw = 0;
         foreach (var ch in word)
         {
             var chW = WrapMeasureWidth(wt, ch.ToString(), wt.fontSize);
             if (cur.Length > 0 && cw + chW > wt.availWidth + 1e-6)
             {
-                wt.lines.Add(cur);
-                cur = ""; cw = 0;
+                wt.lines.Add(cur.ToString());
+                cur.Clear(); cw = 0;
             }
-            cur += ch; cw += chW;
+            cur.Append(ch); cw += chW;
         }
-        wt.currentLine = cur;
         wt.currentWidth = cw;
     }
 
@@ -101,7 +103,7 @@ public partial class Table
             // no box: breaking AT a zero-width space must not leave an empty line.
             if (seg.Trim(ZeroWidthSpace).Length == 0)
             {
-                if (wt.currentLine.Length > 0) wt.currentLine += seg;
+                if (wt.currentLine.Length > 0) wt.currentLine.Append(seg);
                 continue;
             }
             var segW = WrapMeasureWidth(wt, seg, wt.fontSize);
@@ -109,13 +111,13 @@ public partial class Table
             var add = (needSpace ? wt.spaceW : 0) + segW;
             if (wt.currentWidth + add <= wt.availWidth + 1e-6)
             {
-                wt.currentLine += (needSpace ? " " : "") + seg;
+                wt.currentLine.Append(needSpace ? " " : "").Append(seg);
                 wt.currentWidth += add;
             }
             else
             {
-                wt.lines.Add(wt.currentLine);
-                wt.currentLine = ""; wt.currentWidth = 0;
+                wt.lines.Add(wt.currentLine.ToString());
+                wt.currentLine.Clear(); wt.currentWidth = 0;
                 StartWithWord(wt, seg, segW);
             }
             needSpace = false;

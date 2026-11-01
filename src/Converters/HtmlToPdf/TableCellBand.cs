@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -57,7 +58,7 @@ internal static partial class HtmlToPdfConverter
         var top = topY - borderPt / 2;
         var w = widthPt + borderPt;
         var h = heightPt + borderPt;
-        var rect = FormattableString.Invariant(
+        var rect = Compat.Format(CultureInfo.InvariantCulture,
             $"q {borderPt:0.###} w {strokeG} {x:0.###} {top - h:0.###} {w:0.###} {h:0.###} re S Q\n");
         cv.flow.page.AddContentStream(System.Text.Encoding.ASCII.GetBytes(rect));
     }
@@ -120,13 +121,13 @@ internal static partial class HtmlToPdfConverter
     private static List<string> ReadTableCellDivs(string html)
     {
         var cells = new List<string>();
-        var divRx = new Regex(@"<div\b[^>]*>", RegexOptions.IgnoreCase);
+        var divRx = new Regex(@"<div\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var pos = 0;
-        for (var m = divRx.Match(html, pos); m.Success; m = divRx.Match(html, pos))
+        for (var m = SafeRegex.Match(divRx, html, pos); m.Success; m = SafeRegex.Match(divRx, html, pos))
         {
             var (end, contentEnd) = FindDivEnd(html, m.Index + m.Length);
             if (end < 0) break;
-            if (Regex.IsMatch(DivStyleOf(m.Value), @"display\s*:\s*table-cell", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(DivStyleOf(m.Value), @"display\s*:\s*table-cell", RegexOptions.IgnoreCase))
             {
                 cells.Add(html[(m.Index + m.Length)..contentEnd]);
                 pos = end;
@@ -142,7 +143,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The text a cell draws, with its markup and entity spellings resolved and
     /// its whitespace collapsed the way the flow collapses it.</summary>
     private static string DomPlainText(string html)
-        => Regex.Replace(DecodeEntities(Regex.Replace(html, @"<[^>]*>", " ")), @"\s+", " ").Trim();
+        => SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(html, @"<[^>]*>", " ")), @"\s+", " ").Trim();
 
     /// <summary>Width of a cell run in the UA serif at the body size, pair-kerned as the
     /// engine draws it (an unkerned measure sizes the column a quarter point wide).</summary>

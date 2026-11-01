@@ -112,7 +112,7 @@ public sealed partial class PdfFileEditor
         var clone = new PdfDictionary();
         foreach (var key in src.Keys)
         {
-            if (key is "Parent" or "Kids" or "P") continue;
+            if (key is "Parent" or "Kids" or "P" || Forms.SignatureField.IsSignatureValue(src, key)) continue;
             var v = src.Get(key);
             if (v is not null) clone.Set(key, RemapObject(v, reader, remap, writer));
         }
@@ -157,13 +157,13 @@ public sealed partial class PdfFileEditor
         var clone = new PdfDictionary();
         foreach (var key in src.Keys)
         {
-            if (key is "Parent" or "Kids" or "P") continue;
+            if (key is "Parent" or "Kids" or "P" || Forms.SignatureField.IsSignatureValue(src, key)) continue;
             if (key == "T" && overrideName is not null) continue;
             var v = src.Get(key);
             if (v is not null) clone.Set(key, RemapObject(v, reader, remap, writer));
         }
         if (overrideName is not null)
-            clone.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes(overrideName)));
+            clone.Set("T", Aspose.Pdf.Forms.Field.EncodePdfTextString(overrideName));
         var root = new HashSet<int>();
         if (srcObjNum is { } sn) root.Add(sn);
         CloneFieldKids(src, clone, reader, remap, writer, myNum, root);
@@ -228,6 +228,18 @@ public sealed partial class PdfFileEditor
             xm.arr.Add(new PdfStream(new PdfDictionary(), Encoding.UTF8.GetBytes(xm.mergedDatasetsXml)));
         }
         return xm.arr;
+    }
+
+    /// <summary>True when every input that carries an XFA packet asks a viewer to build its pages from it:
+    /// their stored pages are only the viewer notice, so the merged packet is where the forms are.</summary>
+    private static bool XfaInputsAllNeedRendering(List<PdfReader> readers)
+    {
+        foreach (var r in readers)
+        {
+            if (r.ResolveDict(r.Catalog.Get("AcroForm"))?.Get("XFA") is null) continue;
+            if (r.Resolve(r.Catalog.Get("NeedsRendering")) is not PdfBoolean { Value: true }) return false;
+        }
+        return true;
     }
 
     /// <summary>Read the template / datasets XML from an input's /XFA (array of

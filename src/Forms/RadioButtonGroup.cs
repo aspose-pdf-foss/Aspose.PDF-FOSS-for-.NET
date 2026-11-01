@@ -58,9 +58,9 @@ public sealed class RadioButtonGroup
     {
         get
         {
-            foreach (var f in Fields)
+            foreach (var value in Fields.Select(f => f.Value))
             {
-                var v = f.Value;
+                var v = value;
                 if (v is not null && v != "Off") return v;
             }
             return null;
@@ -82,7 +82,9 @@ public sealed class RadioButtonGroup
         {
             var selected = SelectedValue;
             var values = CollectOptionValues();
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
             return values.Select(v => new RadioButtonOption(v, v == selected)).ToList();
+#pragma warning restore S2365
         }
     }
 

@@ -40,14 +40,19 @@ internal sealed class PdfEncryptor
     // Standard handler's key derivation and RC4/AES ciphers.
     private readonly ICustomSecurityHandler? _custom;
 
+    // When set, objects are encrypted the way the document's source handler decrypts
+    // them (its crypt filters included): the save keeps the encryption it was opened with.
+    private readonly PdfDecryptor? _source;
+
     private PdfEncryptor(byte[] encryptionKey, CryptoAlgorithm algorithm,
         int version, int revision, byte[] oValue, byte[] uValue,
         int permissions, byte[] fileId,
         byte[]? oeValue = null, byte[]? ueValue = null, byte[]? permsValue = null,
         PdfDictionary? prebuiltDict = null,
-        ICustomSecurityHandler? custom = null)
+        ICustomSecurityHandler? custom = null, PdfDecryptor? source = null)
     {
         _custom = custom;
+        _source = source;
         _encryptionKey = encryptionKey;
         _algorithm = algorithm;
         _version = version;
@@ -71,6 +76,22 @@ internal sealed class PdfEncryptor
         => new(fileKey, algorithm, version, revision,
             System.Array.Empty<byte>(), System.Array.Empty<byte>(), 0,
             Compat.RandomBytes(16), prebuiltDict: encryptDict);
+
+    /// <summary>Create an encryptor that writes a document under the encryption it was opened
+    /// with: the source's /Encrypt dictionary verbatim, its file identifier (which the
+    /// revision 2-4 keys are derived with) and every object encrypted as the source's
+    /// handler decrypts it. <see cref="Algorithm"/> is the nearest name for that handler.</summary>
+    public static PdfEncryptor CreateFromSource(PdfDecryptor source, PdfDictionary encryptDict, byte[] fileId)
+    {
+        var version = (int)encryptDict.GetInt("V");
+        var algorithm = version >= 5 ? CryptoAlgorithm.AESx256 : CryptoAlgorithm.RC4x128;
+        return new PdfEncryptor(source.FileKey, algorithm, version, (int)encryptDict.GetInt("R"),
+            System.Array.Empty<byte>(), System.Array.Empty<byte>(), (int)encryptDict.GetInt("P"), fileId,
+            prebuiltDict: encryptDict, source: source)
+        {
+            EncryptMetadata = source.EncryptMetadata,
+        };
+    }
 
     /// <summary>Create an encryptor driven by a custom security handler. The handler
     /// supplies the /O and /U values, the /Perms string and the file key; the /Encrypt
@@ -309,16 +330,6 @@ internal sealed class PdfEncryptor
     /// <summary>The /Perms value of an AES-256 encryptor; null below revision 5.</summary>
     internal byte[]? PermsValue => _permsValue;
 
-    /// <summary>A password padded or cut to 32 bytes with the standard padding (algorithm 2 step a).</summary>
-    private static byte[] PadPassword(byte[] password)
-    {
-        var result = new byte[32];
-        var len = Math.Min(password.Length, 32);
-        password.AsSpan(0, len).CopyTo(result);
-        PasswordPadding.AsSpan(0, 32 - len).CopyTo(result.AsSpan(len));
-        return result;
-    }
-
     private static PdfEncryptor Create(CryptoAlgorithm algorithm, int version, int revision,
         int keyLength, string userPassword, string ownerPassword, int permissions, byte[]? fileId,
         bool encryptMetadata = true)
@@ -415,6 +426,7 @@ internal sealed class PdfEncryptor
     /// </summary>
     public byte[] EncryptString(byte[] data, int objectNumber, int generation)
     {
+        if (_source is not null) return _source.EncryptString(data, objectNumber, generation);
         if (_custom is not null) return _custom.Encrypt(data, objectNumber, generation, _encryptionKey);
         var key = DeriveObjectKey(objectNumber, generation);
         return EncryptData(data, key);
@@ -424,11 +436,9 @@ internal sealed class PdfEncryptor
     /// Encrypt stream data for the given object.
     /// </summary>
     public byte[] EncryptStream(byte[] data, int objectNumber, int generation)
-    {
-        if (_custom is not null) return _custom.Encrypt(data, objectNumber, generation, _encryptionKey);
-        var key = DeriveObjectKey(objectNumber, generation);
-        return EncryptData(data, key);
-    }
+        => _source is not null
+            ? _source.EncryptStream(data, objectNumber, generation)
+            : EncryptString(data, objectNumber, generation);
 
     private byte[] DeriveObjectKey(int objectNumber, int generation)
     {
@@ -494,6 +504,16 @@ internal sealed class PdfEncryptor
         var pwBytes = Compat.Latin1.GetBytes(password);
         var len = Math.Min(pwBytes.Length, 32);
         pwBytes.AsSpan(0, len).CopyTo(result);
+        PasswordPadding.AsSpan(0, 32 - len).CopyTo(result.AsSpan(len));
+        return result;
+    }
+
+    /// <summary>A password padded or cut to 32 bytes with the standard padding (algorithm 2 step a).</summary>
+    private static byte[] PadPassword(byte[] password)
+    {
+        var result = new byte[32];
+        var len = Math.Min(password.Length, 32);
+        password.AsSpan(0, len).CopyTo(result);
         PasswordPadding.AsSpan(0, 32 - len).CopyTo(result.AsSpan(len));
         return result;
     }

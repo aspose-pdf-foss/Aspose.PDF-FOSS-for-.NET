@@ -22,5 +22,7 @@ private sealed class XfaNodeFindState
     public XmlDocument doc = default!;
     public string path = default!;
     public bool strict = false;
+    public bool exact;   // a lookup that does not guess: an index beyond the nodes of its name, or a path that leads nowhere, finds nothing
+    public XfaDataNames? names;   // the document's elements by name, when the document is one nothing changes
 }
 }

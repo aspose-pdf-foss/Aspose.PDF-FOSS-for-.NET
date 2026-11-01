@@ -68,12 +68,18 @@ public sealed partial class TextParagraph
             // Standard-14 alias dict — an explicitly set FontRepository font
             // is embedded even for pure-Latin text, and the absorber
             // needs the descriptor descent to seat the read-back rectangle.
-            var needsCid = rl.ensureCidFont is not null &&
+            // A font taken from a run of the document shows the text through its own dictionary.
+            var inDocumentFont = TextBuilder.TryShowInDocumentFont(rl.page, ts, text, fontSize);
+            var needsCid = inDocumentFont is null && rl.ensureCidFont is not null &&
                            fd is { TtfData: not null };
             string fontResName;
             byte[]? hexGlyphs = null;
-            if (needsCid)
+            if (inDocumentFont is { } shown)
+                (fontResName, hexGlyphs, _) = shown;
+            else if (needsCid)
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
                 (fontResName, hexGlyphs) = rl.ensureCidFont!(fd!, text);
+#pragma warning restore S8969
             else
                 fontResName = rl.ensureFont(fontName);
 
@@ -94,9 +100,14 @@ public sealed partial class TextParagraph
                 rl.builder.ShowTextHex(hexGlyphs);
             else
                 rl.builder.ShowText(text);
+            // Tc and Tw outlive ET: the runs after this one start again from none.
+            if (ts.CharacterSpacing != 0)
+                rl.builder.SetCharSpacing(0);
+            if (ts.WordSpacing != 0)
+                rl.builder.SetWordSpacing(0);
             rl.builder.EndText();
 
-            penX += MeasureLineWidth(text, ts);
+            penX += inDocumentFont?.width ?? MeasureLineWidth(text, ts);
         }
     }
 }

@@ -70,12 +70,7 @@ internal static class BidiReorderer
     /// </summary>
     public static bool ContainsRtl(string text)
     {
-        foreach (var c in text)
-        {
-            if (IsRtlChar(c))
-                return true;
-        }
-        return false;
+        return text.Any(c => IsRtlChar(c));
     }
 
     /// <summary>
@@ -170,9 +165,7 @@ internal static class BidiReorderer
     {
         int[]? perm = default;
         var len = text.Length;
-        var initialTypes = new sbyte[len];
-        for (var i = 0; i < len; i++)
-            initialTypes[i] = GetBidiType(text[i]);
+        var initialTypes = InitialTypes(text);
 
         // P2/P3: paragraph embedding level from the first strong character - unless the
         // caller fixes the paragraph as left-to-right.
@@ -184,30 +177,7 @@ internal static class BidiReorderer
             if (t == R || t == AL) { para = 1; break; }
         }
 
-        var types = (sbyte[])initialTypes.Clone();
-        var levels = new sbyte[len];
-        for (var i = 0; i < len; i++) levels[i] = para;
-
-        // The whole line is one level run (no explicit embedding codes are honoured
-        // during extraction); sor/eor take the paragraph direction.
-        var sor = (sbyte)((para & 1) == 1 ? R : L);
-        var eor = sor;
-
-        ResolveWeakTypes(types, 0, len, sor);
-        ResolveNeutralTypes(types, levels, 0, len, para, sor, eor);
-        ResolveImplicitLevels(types, levels, 0, len);
-
-        // L1: segment separators and trailing whitespace reset to the paragraph level.
-        for (var i = 0; i < len; i++)
-        {
-            var t = initialTypes[i];
-            if (t != S) continue;
-            levels[i] = para;
-            for (var j = i - 1; j >= 0 && IsWhitespaceType(initialTypes[j]); j--)
-                levels[j] = para;
-        }
-        for (var j = len - 1; j >= 0 && IsWhitespaceType(initialTypes[j]); j--)
-            levels[j] = para;
+        var levels = ResolveLevels(initialTypes, para);
 
         // L2: from the highest level down to the lowest odd level, flip maximal runs.
         sbyte highest = 0, lowestOdd = 63;
@@ -254,6 +224,84 @@ internal static class BidiReorderer
         }
         perm = pos == len ? outPerm : outPerm[..pos];
         return (new string(outChars, 0, pos), perm);
+    }
+
+    /// <summary>
+    /// The logical text of a line of a RIGHT-TO-LEFT paragraph given in visual (drawn) order.
+    /// Read right to left, the line is already logical except that each left-to-right run (Latin
+    /// words, numbers) comes back reversed; so the levels are resolved on that reading - where the
+    /// weak and neutral rules see each character's logical neighbours, not its visual ones (a
+    /// number at the line's right end belongs to the start of the line, not to a Latin word drawn
+    /// to its left) - and every run above the paragraph level is turned back.
+    /// </summary>
+    public static string VisualToLogicalOnRtlParagraph(string visual)
+    {
+        if (string.IsNullOrEmpty(visual) || !ContainsRtl(visual)) return visual;
+        var read = new char[visual.Length];
+        for (var i = 0; i < visual.Length; i++) read[i] = visual[visual.Length - 1 - i];
+        const sbyte para = 1;
+        var levels = ResolveLevels(InitialTypes(new string(read)), para);
+        var sb = new System.Text.StringBuilder(read.Length);
+        var k = 0;
+        while (k < read.Length)
+        {
+            var end = k + 1;
+            if (levels[k] > para)
+            {
+                while (end < read.Length && levels[end] > para) end++;
+                for (var j = end - 1; j >= k; j--) AppendLogical(sb, read[j], levels[j]);
+            }
+            else AppendLogical(sb, read[k], levels[k]);
+            k = end;
+        }
+        return sb.ToString();
+    }
+
+    private static void AppendLogical(System.Text.StringBuilder sb, char c, sbyte level)
+    {
+        if (IsFormatChar(c)) return;
+        sb.Append((level & 1) == 1 ? MirrorChar(c) : c);
+    }
+
+    private static sbyte[] InitialTypes(string text)
+    {
+        var types = new sbyte[text.Length];
+        for (var i = 0; i < text.Length; i++)
+            types[i] = GetBidiType(text[i]);
+        return types;
+    }
+
+    /// <summary>The resolved embedding level of every character of one line (rules W1-W7, N1-N2,
+    /// I1-I2 and L1) on a paragraph of level <paramref name="para"/>.</summary>
+    private static sbyte[] ResolveLevels(sbyte[] initialTypes, sbyte para)
+    {
+        var len = initialTypes.Length;
+        var types = (sbyte[])initialTypes.Clone();
+        var levels = new sbyte[len];
+        for (var i = 0; i < len; i++) levels[i] = para;
+
+        // The whole line is one level run (no explicit embedding codes are honoured
+        // during extraction); sor/eor take the paragraph direction.
+        var sor = ((para & 1) == 1 ? R : L);
+        var eor = sor;
+
+        ResolveWeakTypes(types, 0, len, sor);
+        ResolveNeutralTypes(types, 0, len, para, sor, eor);
+        ResolveImplicitLevels(types, levels, 0, len);
+
+        // L1: segment separators and trailing whitespace reset to the paragraph level.
+        for (var i = 0; i < len; i++)
+        {
+            var t = initialTypes[i];
+            if (t != S) continue;
+            levels[i] = para;
+            for (var j = i - 1; j >= 0 && IsWhitespaceType(initialTypes[j]); j--)
+                levels[j] = para;
+        }
+        for (var j = len - 1; j >= 0 && IsWhitespaceType(initialTypes[j]); j--)
+            levels[j] = para;
+
+        return levels;
     }
 
     private static bool IsWhitespaceType(sbyte t) => t == WS || t == BN;
@@ -307,7 +355,9 @@ internal static class BidiReorderer
             var after = runLimit < limit ? types[runLimit] : sor;
             if (before == EN || after == EN)
                 for (var j = runStart; j < runLimit; j++) types[j] = EN;
+#pragma warning disable S127 // a neutral run just resolved - the scan steps past the run
             i = runLimit - 1;
+#pragma warning restore S127
         }
 
         // W6: remaining separators/terminators → ON.
@@ -330,13 +380,14 @@ internal static class BidiReorderer
 
     // N1–N2: neutrals take the surrounding direction when both sides agree
     // (numbers count as R), otherwise the embedding direction.
-    private static void ResolveNeutralTypes(sbyte[] types, sbyte[] levels, int start, int limit,
+    private static void ResolveNeutralTypes(sbyte[] types, int start, int limit,
         sbyte para, sbyte sor, sbyte eor)
     {
-        for (var i = start; i < limit; i++)
+        var i = start;
+        while (i < limit)
         {
             var t = types[i];
-            if (t != WS && t != ON && t != S && t != BN) continue;
+            if (t != WS && t != ON && t != S && t != BN) { i++; continue; }
             var runStart = i;
             var runLimit = i;
             while (runLimit < limit)
@@ -351,9 +402,11 @@ internal static class BidiReorderer
             var trailing = runLimit == limit ? eor : types[runLimit];
             if (trailing == EN || trailing == AN) trailing = R;
 
-            var resolved = leading == trailing ? leading : (sbyte)((para & 1) == 1 ? R : L);
+            sbyte resolved;
+            if (leading == trailing) resolved = leading;
+            else resolved = (para & 1) == 1 ? R : L;
             for (var j = runStart; j < runLimit; j++) types[j] = resolved;
-            i = runLimit - 1;
+            i = runLimit;
         }
     }
 

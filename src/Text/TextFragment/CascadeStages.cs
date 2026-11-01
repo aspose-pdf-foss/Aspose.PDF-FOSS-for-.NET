@@ -39,7 +39,7 @@ public partial class TextFragment
             del.Replace(cf.page, string.Empty, string.Empty);
         }
 
-        cf.tb = new TextBuilder(cf.page);
+        cf.tb = new TextBuilder(cf.page) { SeatsInPageSpace = true };
         for (int i = 0; i < cf.packed.Count; i++)
         {
             double by = i < cf.baselines.Count ? cf.baselines[i] : cf.baselines[^1] - (i - cf.baselines.Count + 1) * cf.pitch;
@@ -55,14 +55,14 @@ public partial class TextFragment
     }
 
     /// <summary></summary>
-    private void PackWords(CascadeState cf)
+    private static void PackWords(CascadeState cf)
     {
         cf.degenerateMetrics = false;
         try
         {
             cf.degenerateMetrics = cf.font!.SourceFontData is not null;
         }
-        catch { }
+        catch { /* a font whose source data cannot be read is not degenerate */ }
         cf.packFamily = cf.font!.FontName ?? string.Empty;
         cf.subsetPlusP = cf.packFamily.IndexOf('+');
         if (cf.subsetPlusP >= 0 && cf.subsetPlusP + 1 < cf.packFamily.Length)
@@ -107,28 +107,26 @@ public partial class TextFragment
     }
 
     /// <summary></summary>
-    private bool TokeniseSource(CascadeState cf)
+    private static bool TokeniseSource(CascadeState cf)
     {
         cf.srcJoined = cf.sb.ToString();
         cf.toks = new System.Collections.Generic.List<(string w, int sp)>();
+        var iT = 0;
+        while (iT < cf.srcJoined.Length)
         {
-            var iT = 0;
-            while (iT < cf.srcJoined.Length)
+            if (cf.srcJoined[iT] == ' ')
             {
-                if (cf.srcJoined[iT] == ' ')
+                if (cf.toks.Count > 0)
                 {
-                    if (cf.toks.Count > 0)
-                    {
-                        var lastT = cf.toks[^1];
-                        cf.toks[^1] = (lastT.w, lastT.sp + 1);
-                    }
-                    iT++;
-                    continue;
+                    var lastT = cf.toks[^1];
+                    cf.toks[^1] = (lastT.w, lastT.sp + 1);
                 }
-                var stT = iT;
-                while (iT < cf.srcJoined.Length && cf.srcJoined[iT] != ' ') iT++;
-                cf.toks.Add((cf.srcJoined[stT..iT], 0));
+                iT++;
+                continue;
             }
+            var stT = iT;
+            while (iT < cf.srcJoined.Length && cf.srcJoined[iT] != ' ') iT++;
+            cf.toks.Add((cf.srcJoined[stT..iT], 0));
         }
         cf.words = new string[cf.toks.Count];
         for (var wi2 = 0; wi2 < cf.toks.Count; wi2++) cf.words[wi2] = cf.toks[wi2].w;
@@ -140,8 +138,8 @@ public partial class TextFragment
     private bool ResolveDominantFont(CascadeState cf)
     {
         cf.domSeg = cf.moved[0].seg;
-        foreach (var m in cf.moved)
-            if (m.seg.Text.Trim().Length > cf.domSeg.Text.Trim().Length) cf.domSeg = m.seg;
+        foreach (var mseg in cf.moved.Select(m => m.seg))
+            if (mseg.Text.Trim().Length > cf.domSeg.Text.Trim().Length) cf.domSeg = mseg;
         cf.font = cf.domSeg.TextState.Font ?? TextState.Font;
         cf.rawFs = cf.domSeg.TextState.FontSize > 0 ? cf.domSeg.TextState.FontSize : TextState.FontSize;
         cf.effFs = cf.rawFs * cf.ctmScale;
@@ -163,6 +161,10 @@ public partial class TextFragment
             if (cf.paraLines[li].lx < cf.leftX) cf.leftX = cf.paraLines[li].lx;
             if (cf.paraLines[li].rx > cf.rightX) cf.rightX = cf.paraLines[li].rx;
         }
+        // A lone line has no column of its own: it packs out to the page's, as the exact mover does, instead of
+        // breaking at its own old extent as soon as the replacement is wider than the word it stands for.
+        if (System.Math.Max(cf.paraLines.Count, cf.bandPara.Count) < 2 && cf.pageRightMargin > cf.rightX)
+            cf.rightX = cf.pageRightMargin;
         // Never past the sheet: a paragraph an earlier reflow already pushed off the page
         // would otherwise be read as a column that wide and pushed further.
         if (cf.page.MediaBox is { } mbFb && mbFb.URX > 0) cf.rightX = System.Math.Min(cf.rightX, mbFb.URX);
@@ -192,18 +194,24 @@ public partial class TextFragment
             }
         }
         if (cf.moved.Count == 0) return false;
+#pragma warning disable S1244 // sort key tie-break - exact equality keeps the comparison consistent
         cf.moved.Sort((a, b) => b.y != a.y ? b.y.CompareTo(a.y) : a.x.CompareTo(b.x));
+#pragma warning restore S1244
 
         cf.head = cf.moved[0].seg.Text;
         cf.occ = cf.head.IndexOf(cf.oldText, System.StringComparison.Ordinal);
         if (cf.occ < 0) return false;
 
+        // The runs part at a line break and where their line reads a gap between them: joined as they are, a
+        // line drawn word by word would run its words together.
+        var gaps = new System.Collections.Generic.HashSet<TextSegment>(ReferenceEqualityComparer.Instance);
+        for (int li = cf.matchLine; li < cf.paraLines.Count; li++) gaps.UnionWith(GapsBefore(cf.paraLines[li].f));
         cf.sb = new System.Text.StringBuilder();
         cf.sb.Append(cf.head.Replace(cf.oldText, cf.newText, System.StringComparison.Ordinal));
         for (int i = 1; i < cf.moved.Count; i++)
         {
-            bool lineBreak = System.Math.Abs(cf.moved[i].y - cf.moved[i - 1].y) > 0.75;
-            if (lineBreak && cf.sb.Length > 0 && cf.sb[^1] != ' ' && !cf.moved[i].seg.Text.StartsWith(" "))
+            bool parts = System.Math.Abs(cf.moved[i].y - cf.moved[i - 1].y) > 0.75 || gaps.Contains(cf.moved[i].seg);
+            if (parts && cf.sb.Length > 0 && cf.sb[^1] != ' ' && !cf.moved[i].seg.Text.StartsWith(' '))
                 cf.sb.Append(' ');
             cf.sb.Append(cf.moved[i].seg.Text);
         }
@@ -263,9 +271,10 @@ public partial class TextFragment
         // Only a LONE line carries no column of its own; that one reads the page's (see
         // PageTextRightMargin).
         double rightAdj = _replaceOptions?.RightAdjustment ?? 0;
-        double rMargin = rightAdj > 0
-            ? maxRx + rightAdj
-            : paraLineCount >= 2 ? maxRx : System.Math.Max(cf.pageRightMargin, maxRx);
+        double rMargin;
+        if (rightAdj > 0) rMargin = maxRx + rightAdj;
+        else if (paraLineCount >= 2) rMargin = maxRx;
+        else rMargin = System.Math.Max(cf.pageRightMargin, maxRx);
         // Never past the sheet. The column is read from the page's own text, and once one
         // reflow has pushed a line off the page every later one reads that inflated extent
         // as the column and pushes further — a page whose widest line was 580 ran out to

@@ -10,7 +10,7 @@ namespace Aspose.Pdf.Forms;
 /// content via /RV and exposes <see cref="Value"/> as the plain-text representation
 /// from /V. Mirrors the public type.
 /// </summary>
-public sealed class RichTextBoxField : TextBoxField
+public sealed partial class RichTextBoxField : TextBoxField
 {
     internal RichTextBoxField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
@@ -22,126 +22,70 @@ public sealed class RichTextBoxField : TextBoxField
     }
 
     /// <summary>The rich-text representation of the field value (PDF /RV entry). Setting it also
-    /// derives the plain-text /V and regenerates the /AP: the XHTML runs (bold spans, <c>&lt;br/&gt;</c>
-    /// line breaks) are laid out with a font per style (regular vs bold) so the appearance shows the
-    /// styled text.</summary>
+    /// derives the plain-text /V and regenerates the /AP: the markup's blocks, breaks and list items
+    /// are laid out as lines wrapped to the box, each run in the face, size and colour its elements
+    /// and styles name (see RichTextAppearance.cs).</summary>
     public string? RichTextValue
     {
         get => Reader.Resolve(Dict.Get("RV")) is PdfString s ? s.ToText() : null;
         set
         {
             Dict.Set("RV", value is null ? null! : EncodePdfTextString(value));
-            if (!string.IsNullOrEmpty(value)) ApplyRichText(value!);
+            _richValueDerived = false;
+            if (!string.IsNullOrEmpty(value)) ApplyRichMarkup(value);
             if (OwnerDocument is not null && ObjectNumber >= 0)
                 OwnerDocument.MarkDirty(ObjectNumber, Dict);
         }
     }
 
-    /// <summary>One styled run of the rich text: a piece of literal text (with its bold flag)
-    /// or a hard line break.</summary>
-    private sealed class RtRun { public string Text = ""; public bool Bold; public bool Break; }
-
-    /// <summary>Parse the /RV XHTML, set the plain-text /V, and regenerate the /AP so the styled
-    /// runs render with a regular / bold font and honour <c>&lt;br/&gt;</c> breaks.</summary>
-    private void ApplyRichText(string rv)
+    /// <summary>A field whose text is held in its rich value alone - no /V, as a viewer saves a rich field it
+    /// lays out itself - is drawn from that value, the source of a rich field's appearance; any other field
+    /// is drawn as a text field is.</summary>
+    internal override void GenerateAppearance()
     {
-        var runs = new System.Collections.Generic.List<RtRun>();
-        // Unstyled rich text lays out in the viewer default face — Helvetica; an
-        // explicit font-family style (the styled-span producers write one) overrides.
-        string family = "Helvetica";
-        double size = 12;
-        try
+        if (string.IsNullOrEmpty(Value) && Reader.ResolveDict(Dict.Get("AP")) is null
+            && RichTextValue is { Length: > 0 } rich && ParseRichLines(rich) is { Count: > 0 } lines)
         {
-            // Tolerate HTML-style void tags (<br>, <hr>) that aren't well-formed XML by
-            // self-closing them before parsing — viewers accept them in /RV. A PAIRED
-            // closer (<br></br>) must lose its closer first, or self-closing the opener
-            // leaves an orphan </br> that breaks the whole parse.
-            var xml = System.Text.RegularExpressions.Regex.Replace(
-                rv, @"</\s*(br|hr)\s*>", "",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            xml = System.Text.RegularExpressions.Regex.Replace(
-                xml, @"<(br|hr)(\s[^>/]*)?>", "<$1$2/>",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            var xdoc = System.Xml.Linq.XDocument.Parse(xml);
-            System.Xml.Linq.XElement? p = null;
-            foreach (var e in xdoc.Descendants())
-                if (e.Name.LocalName == "p") { p = e; break; }
-            p ??= xdoc.Root;
-            if (p is not null)
-            {
-                var style = (string?)p.Attribute("style") ?? "";
-                var fm = System.Text.RegularExpressions.Regex.Match(style, @"font-family:\s*'?([^;']+)'?");
-                if (fm.Success) family = fm.Groups[1].Value.Trim();
-                var sm = System.Text.RegularExpressions.Regex.Match(style, @"font-size:\s*([\d.]+)\s*pt");
-                if (sm.Success) double.TryParse(sm.Groups[1].Value,
-                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out size);
-                WalkRichText(p, false, runs);
-            }
+            RegenerateMarkupAppearance(lines);
+            return;
         }
-        catch { return; } // malformed /RV — leave the field value/appearance untouched
-
-        var plain = new System.Text.StringBuilder();
-        foreach (var r in runs) plain.Append(r.Break ? "\n" : r.Text);
-        Dict.Set("V", EncodePdfTextString(plain.ToString()));
-
-        RegenerateRichAppearance(runs, family, size <= 0 ? 12 : size);
+        base.GenerateAppearance();
     }
 
-    /// <summary>Recursively collect styled text runs: a bold-weighted <c>&lt;span&gt;</c> marks its
-    /// content bold; <c>&lt;br/&gt;</c> is a line break; other decorations (e.g. underline) don't
-    /// change the font, so their text merges with the surrounding run.</summary>
-    private static void WalkRichText(System.Xml.Linq.XElement el, bool bold, System.Collections.Generic.List<RtRun> runs)
-    {
-        foreach (var node in el.Nodes())
-        {
-            if (node is System.Xml.Linq.XText t)
-                runs.Add(new RtRun { Text = t.Value, Bold = bold });
-            else if (node is System.Xml.Linq.XElement ce)
-            {
-                if (ce.Name.LocalName == "br") { runs.Add(new RtRun { Break = true }); continue; }
-                var childBold = bold
-                    || ce.Name.LocalName == "b"
-                    || ((string?)ce.Attribute("style") ?? "").Replace(" ", "").Contains("font-weight:bold");
-                WalkRichText(ce, childBold, runs);
-            }
-        }
-    }
+    /// <summary>One styled run of a plain value's rich appearance: a piece of literal text or a hard line break.</summary>
+    private sealed class RtRun { public string Text = ""; public bool Break; }
 
-    /// <summary>Build the /AP/N stream for a list of styled runs: a regular and a bold font resource
-    /// (only those actually used), one <c>Tf</c> per font change (so consecutive same-font runs merge
-    /// into a single fragment), and a negative-Y <c>Td</c> for each line break.</summary>
+    /// <summary>Build the /AP/N stream of a plain value's lines in the field's one face: one <c>Tf</c>
+    /// before the first run, and a negative-Y <c>Td</c> for each line break.</summary>
     private void RegenerateRichAppearance(System.Collections.Generic.List<RtRun> runs, string family, double size)
     {
         var rectArr = Reader.Resolve(Dict.Get("Rect")) as PdfArray;
         double w = 100, h = 20;
         if (rectArr is { Count: >= 4 })
         {
-            var r = Rectangle.FromPdfArray(rectArr);
+            var r = Rectangle.FromPdfArray(rectArr, Reader);
             w = r.URX - r.LLX; h = r.URY - r.LLY;
         }
 
-        const string regRes = "FR", boldRes = "FB";
-        var lineHeight = size * 1.15;
-        var firstY = h - lineHeight + 0.207 * size;
+        const string regRes = "FR";
+        var lineHeight = size * RichLinePitchEm;
+        var firstY = h - lineHeight + RichDescentEm * size;
 
         // The value paints in the field's /DA colour (a rich-text field's /DA carries
         // the authored colour, e.g. "0.25 0.333 1 rg"); black stays the fallback.
         var sb = new System.Text.StringBuilder();
         sb.Append("/Tx BMC\nq\nBT\n").Append(ExtractDaColor(ResolveInheritedDa() ?? "", "0 0 0 rg")).Append('\n');
-        sb.Append($"2 {Format(firstY)} Td\n");
-        string? curFont = null;
-        bool usedReg = false, usedBold = false;
+        sb.Append($"{Format(RichSideInset)} {Format(firstY)} Td\n");
+        var usedReg = false;
         foreach (var run in runs)
         {
             if (run.Break) { sb.Append($"0 {Format(-lineHeight)} Td\n"); continue; }
             if (run.Text.Length == 0) continue;
-            var res = run.Bold ? boldRes : regRes;
-            if (res != curFont) { sb.Append($"/{res} {Format(size)} Tf\n"); curFont = res; }
-            if (run.Bold) usedBold = true; else usedReg = true;
+            if (!usedReg) { sb.Append($"/{regRes} {Format(size)} Tf\n"); usedReg = true; }
             // One Tj per word (trailing whitespace kept with its word) — text
             // extractors then report the appearance as per-word fragments.
             foreach (System.Text.RegularExpressions.Match word in
-                     System.Text.RegularExpressions.Regex.Matches(run.Text, @"\S+\s*|\s+"))
+                     SafeRegex.Matches(run.Text, @"\S+\s*|\s+"))
             {
                 var esc = word.Value.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
                 sb.Append($"({esc}) Tj\n");
@@ -158,15 +102,6 @@ public sealed class RichTextBoxField : TextBoxField
 
         var fonts = new PdfDictionary();
         if (usedReg) fonts.Set(regRes, MakeRichFont(family));
-        // The styled variant's name carries a style comma ("Arial,Bold"). A BARE
-        // /BaseFont's comma is a separator that FontInfo.FontName normalises away
-        // ("ArialBold"), while a subset-tagged one is genuine and kept verbatim —
-        // readers must report the styled family exactly, so tag the styled variant
-        // (a rich-text /AP reports "Arial,Bold"). The Standard-14 default family
-        // instead takes its dash-styled sibling name verbatim ("Helvetica-Bold").
-        if (usedBold) fonts.Set(boldRes, MakeRichFont(
-            family == "Helvetica" ? "Helvetica-Bold"
-                                  : RichSubsetTag() + "+" + family + ",Bold"));
         var res2 = new PdfDictionary();
         res2.Set("Font", fonts);
         apStream.Dict.Set("Resources", res2);
@@ -180,7 +115,9 @@ public sealed class RichTextBoxField : TextBoxField
     /// appearance font.</summary>
     private static string RichSubsetTag()
     {
+#pragma warning disable S2245 // a font subset tag (ISO 32000-1 9.6.4) needs uniqueness, not unpredictability
         var random = new System.Random();
+#pragma warning restore S2245
         var chars = new char[6];
         for (int i = 0; i < 6; i++)
             chars[i] = (char)('A' + random.Next(26));
@@ -206,8 +143,8 @@ public sealed class RichTextBoxField : TextBoxField
         set => RichTextValue = value;
     }
 
-    /// <summary>Plain-text value rendered by this field (/V entry). Assigning a rich-text
-    /// body (an XHTML <c>&lt;body&gt;</c> fragment) routes through <see cref="RichTextValue"/>
+    /// <summary>Plain-text value rendered by this field (/V entry). Assigning rich-text markup
+    /// (an XHTML <c>&lt;body&gt;</c>, or a fragment of its elements) routes through <see cref="RichTextValue"/>
     /// — /RV keeps the markup verbatim and /V gets the derived plain text. Assigning plain
     /// text keeps /RV in sync by wrapping the text in a default-styled body (the field's
     /// /DA font and size), so the formatted and plain representations never diverge.
@@ -218,27 +155,30 @@ public sealed class RichTextBoxField : TextBoxField
         get => Reader.Resolve(Dict.Get("V")) is PdfString s ? s.ToText() : null;
         set
         {
-            if (!string.IsNullOrEmpty(value) && LooksLikeRichBody(value!))
+            if (!string.IsNullOrEmpty(value) && LooksLikeRichMarkup(value))
             {
                 RichTextValue = value;
                 return;
             }
             // Plain text keeps /V text-exact (values are round-tripped verbatim by
-            // export paths — no newline or escaping normalisation may leak in);
-            // /RV and the styled appearance are derived as side-effects.
+            // export paths — no newline or escaping normalisation may leak in); /RV
+            // and the styled appearance are derived as side-effects.
             // EncodePdfTextString, not raw UTF-8: BOM-less bytes read back as
             // PDFDocEncoding, so a non-Latin1 value (e.g. CJK) would corrupt on
             // the save→reopen round-trip.
             Dict.Set("V", EncodePdfTextString(value ?? string.Empty));
             if (!string.IsNullOrEmpty(value))
             {
-                Dict.Set("RV", EncodePdfTextString(SynthesizeRichBody(value!)));
+                Dict.Set("RV", EncodePdfTextString(SynthesizeRichBody(value)));
+                _richValueDerived = true;
                 var da = DefaultAppearance;
                 var family = ResolveDaFamily(da.FontName);
                 var size = da.FontSize > 0 ? da.FontSize : 12;
                 var runs = new System.Collections.Generic.List<RtRun>();
                 var first = true;
-                foreach (var line in value!.Replace("\r\n", "\n").Split('\n', '\r'))
+#pragma warning disable S3878 // the explicit array keeps the call off Split(char, int, options)
+                foreach (var line in value.Replace("\r\n", "\n").Split(new[] { '\n', '\r' }))
+#pragma warning restore S3878
                 {
                     if (!first) runs.Add(new RtRun { Break = true });
                     runs.Add(new RtRun { Text = line });
@@ -249,15 +189,6 @@ public sealed class RichTextBoxField : TextBoxField
             if (OwnerDocument is not null && ObjectNumber >= 0)
                 OwnerDocument.MarkDirty(ObjectNumber, Dict);
         }
-    }
-
-    /// <summary>A value that already is rich-text markup (an XHTML body or a full XML
-    /// document) rather than literal text.</summary>
-    private static bool LooksLikeRichBody(string value)
-    {
-        var t = value.TrimStart();
-        return t.StartsWith("<body", System.StringComparison.OrdinalIgnoreCase)
-            || t.StartsWith("<?xml", System.StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Wrap plain text in the /RV XHTML shape Acrobat writes, styled with the
@@ -317,8 +248,20 @@ public sealed class RichTextBoxField : TextBoxField
     public string Style
     {
         get => _style;
-        set { _style = value ?? string.Empty; ApplyStyleToDefaultAppearance(_style); }
+        set
+        {
+            _style = value ?? string.Empty;
+            ApplyStyleToDefaultAppearance(_style);
+            // A rich value this field wrote for a plain one carries the font it was
+            // written with; it is written again, or it would go on showing the old style.
+            if (_richValueDerived && Value is { Length: > 0 } plain)
+                Dict.Set("RV", EncodePdfTextString(SynthesizeRichBody(plain)));
+        }
     }
+
+    /// <summary>True while /RV is the body this field synthesised for a plain value, as
+    /// opposed to markup the caller supplied.</summary>
+    private bool _richValueDerived;
 
     /// <summary>Parse the style string and write the matching /DA (font + size). Two syntaxes
     /// are accepted: the shorthand <c>font: 'Family' [bold] [italic] Npt</c> and longhand CSS
@@ -331,7 +274,7 @@ public sealed class RichTextBoxField : TextBoxField
         if (string.IsNullOrEmpty(style)) return;
         string? family = null;
         double size = 0;
-        var m = System.Text.RegularExpressions.Regex.Match(style,
+        var m = SafeRegex.Match(style,
             @"font\s*:\s*'([^']*)'(.*?)([\d.]+)\s*pt",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (m.Success)
@@ -342,16 +285,16 @@ public sealed class RichTextBoxField : TextBoxField
         }
         else
         {
-            var fm = System.Text.RegularExpressions.Regex.Match(style,
+            var fm = SafeRegex.Match(style,
                 @"font-family\s*:\s*'?([^;'}]+)'?", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (fm.Success) family = fm.Groups[1].Value.Trim();
-            var sm = System.Text.RegularExpressions.Regex.Match(style,
+            var sm = SafeRegex.Match(style,
                 @"font-size\s*:\s*([\d.]+)\s*pt", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (sm.Success)
                 double.TryParse(sm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out size);
         }
-        var lm = System.Text.RegularExpressions.Regex.Match(style,
+        var lm = SafeRegex.Match(style,
             @"line-height\s*:\s*([\d.]+)\s*pt", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (lm.Success && double.TryParse(lm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var lh) && lh > 0)

@@ -31,7 +31,7 @@ internal sealed class RsaKey
         var seq = r.ReadSequence();
         seq.ReadInteger(); // version (0)
         var algoSeq = seq.ReadSequence();
-        var oid = algoSeq.ReadOid();
+        algoSeq.ReadOid();
         // 1.2.840.113549.1.1.1 = rsaEncryption
         var keyData = seq.ReadOctetString();
         return FromPkcs1(keyData);

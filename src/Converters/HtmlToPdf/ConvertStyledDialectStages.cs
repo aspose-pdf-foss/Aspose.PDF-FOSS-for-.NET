@@ -60,7 +60,7 @@ internal static partial class HtmlToPdfConverter
             return msoFormDoc;
 
         if (!cv.marginsExplicit
-            && TryRenderPositionedForm(cv.html, options, cv.pageHeight) is { } pfDoc)
+            && TryRenderPositionedForm(cv.html, cv.pageHeight) is { } pfDoc)
             return pfDoc;
         return null;
     }

@@ -21,25 +21,21 @@ internal static partial class HtmlToPdfConverter
         public string Css(string name) => Style.TryGetValue(name, out var v) ? v : "";
         public bool HasClass(string cls)
         {
-            foreach (var c in Attr("class").Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                if (c.Equals(cls, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
+            return Attr("class").Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(c => c.Equals(cls, StringComparison.OrdinalIgnoreCase));
         }
         public IEnumerable<IpNode> Elements(string tag)
         {
-            foreach (var c in Children)
-                if (c.Tag.Equals(tag, StringComparison.OrdinalIgnoreCase)) yield return c;
+            foreach (var c in Children.Where(c => c.Tag.Equals(tag, StringComparison.OrdinalIgnoreCase)))
+                yield return c;
         }
         public IpNode? First(string tag)
         {
-            foreach (var c in Children)
-                if (c.Tag.Equals(tag, StringComparison.OrdinalIgnoreCase)) return c;
-            return null;
+            return Children.FirstOrDefault(c => c.Tag.Equals(tag, StringComparison.OrdinalIgnoreCase));
         }
     }
 
-    private static readonly Regex IpTagRx = new("<!--[\\s\\S]*?-->|<(/?)([a-zA-Z][a-zA-Z0-9:]*)((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>", RegexOptions.Compiled);
-    private static readonly Regex IpAttrRx = new("([a-zA-Z_:][-a-zA-Z0-9_:.]*)\\s*(?:=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\"'>]+)))?", RegexOptions.Compiled);
+    private static readonly Regex IpTagRx = new("<!--[\\s\\S]*?-->|<(/?)([a-zA-Z][a-zA-Z0-9:]*)((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>", RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex IpAttrRx = new("([a-zA-Z_:][-a-zA-Z0-9_:.]*)\\s*(?:=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\"'>]+)))?", RegexOptions.Compiled, RegexLimits.Timeout);
     private static readonly HashSet<string> IpVoidTags = new(StringComparer.OrdinalIgnoreCase) { "input", "img", "br", "col", "meta", "link", "hr" };
     private static readonly HashSet<string> IpDroppedTags = new(StringComparer.OrdinalIgnoreCase) { "script", "style", "head", "title", "xml" };
 
@@ -52,7 +48,7 @@ internal static partial class HtmlToPdfConverter
         var root = new IpNode { Tag = "body" };
         var stack = new List<IpNode> { root };
         var skipUntil = "";
-        foreach (Match m in IpTagRx.Matches(html))
+        foreach (Match m in SafeRegex.Matches(IpTagRx, html))
         {
             if (m.Value.StartsWith("<!--", StringComparison.Ordinal)) continue;
             var close = m.Groups[1].Value.Length > 0;
@@ -99,11 +95,14 @@ internal static partial class HtmlToPdfConverter
 
     private static void IpReadAttrs(IpNode node, string attrs)
     {
-        foreach (Match a in IpAttrRx.Matches(attrs))
+        foreach (var groups in SafeRegex.Matches(IpAttrRx, attrs).Select(a => a.Groups))
         {
-            var name = a.Groups[1].Value;
+            var name = groups[1].Value;
             if (name == "/") continue;
-            var value = a.Groups[2].Success ? a.Groups[2].Value : a.Groups[3].Success ? a.Groups[3].Value : a.Groups[4].Value;
+            string value;
+            if (groups[2].Success) value = groups[2].Value;
+            else if (groups[3].Success) value = groups[3].Value;
+            else value = groups[4].Value;
             node.Attrs[name] = DecodeEntities(value);
         }
         if (!node.Attrs.TryGetValue("style", out var style)) return;
@@ -124,7 +123,7 @@ internal static partial class HtmlToPdfConverter
         var pos = 0;
         var skipUntil = "";
         var cursor = new Dictionary<IpNode, int>();                // next child index to descend into
-        foreach (Match m in IpTagRx.Matches(html))
+        foreach (Match m in SafeRegex.Matches(IpTagRx, html))
         {
             if (m.Index > pos && skipUntil.Length == 0) IpInsertText(stack[^1], html[pos..m.Index], cursor);
             pos = m.Index + m.Length;
@@ -158,7 +157,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A text node in document order: before the parent's next element child.</summary>
     private static void IpInsertText(IpNode parent, string raw, Dictionary<IpNode, int> cursor)
     {
-        var text = Regex.Replace(DecodeEntities(raw), "[ \\t\\r\\n]+", " ");
+        var text = SafeRegex.Replace(DecodeEntities(raw), "[ \\t\\r\\n]+", " ");
         if (text.Length == 0) return;
         cursor.TryGetValue(parent, out var ci);
         parent.Children.Insert(Math.Min(ci, parent.Children.Count), new IpNode { Text = text, Parent = parent });

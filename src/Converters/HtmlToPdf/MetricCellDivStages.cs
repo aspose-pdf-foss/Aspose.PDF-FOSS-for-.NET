@@ -14,7 +14,7 @@ internal static partial class HtmlToPdfConverter
         // paragraphs below it wrap at the image's width (measured:
         // the report paragraphs break at the 612 pt photo, not the
         // 504 pt column)
-        if (mc.ImgBytes is not null && mc.ImgWPt > effW)
+        if (mc.ImgBytes is not null && mc.ImgWPt > effW && mc.ImgWFrac <= 0)
             effW = mc.ImgWPt;
         var m = new DivSegMeasure();
         foreach (var sg in dsegs)
@@ -78,8 +78,10 @@ internal static partial class HtmlToPdfConverter
     {
         // a nested grid keeps the margin of the block above it (collapsed with its
         // own top margin) and stands its own bottom margin under it
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
         var (gridMt, gridMb) = NestedGridMarginsPt(mt.mps.nestedTables![sg.NestedTable]);
-        m.Height += Math.Max(m.PrevMarginBottom, gridMt) + MetricGridHeightPt(mt, mt.mps.nestedTables![sg.NestedTable], mc, effW);
+#pragma warning restore S8969
+        m.Height += Math.Max(m.PrevMarginBottom, gridMt) + MetricGridHeightPt(mt, mt.mps.nestedTables[sg.NestedTable], mc, effW);
         m.PrevMarginBottom = gridMb;
         m.FirstBlock = false;
     }
@@ -90,7 +92,7 @@ internal static partial class HtmlToPdfConverter
         m.FirstBlock = false;
     }
     m.Height += (UaFirstBlockMarginDropped(m.FirstBlock, mt.p, sg) ? sg.PadTopPt : Math.Max(sg.MarginTopPt, m.PrevMarginBottom))
-        + UaBlockBandHeight(mt, mc, sg, (m.BoxContentW > 0 ? m.BoxContentW : effW) - sg.PadLeft);
+        + UaBlockBandHeight(mt, sg, (m.BoxContentW > 0 ? m.BoxContentW : effW) - sg.PadLeft);
     m.PrevMarginBottom = sg.MarginBottomPt;
         m.FirstBlock = false;
     }
@@ -103,11 +105,11 @@ internal static partial class HtmlToPdfConverter
         double effW, DivSegMeasure m)
     {
         var sgFs = sg.FontSize ?? mt.mps.fontSize;
-        // newsletter segments pace on the cell line model (hhea);
-        // the calibrated div-seg dialects keep their win metrics
+        // newsletter segments pace on the cell line model (hhea); the
+        // calibrated div-seg dialects keep their win metrics
         double sgLineH;
         if (mt.paragraphCells)
-            sgLineH = CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.fm, new MetricCell
+            sgLineH = CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.face, mt.fm, new MetricCell
             { Face = sg.Face, Bold = sg.Bold, FontSize = sg.FontSize }, sgFs);
         else
         {
@@ -115,18 +117,22 @@ internal static partial class HtmlToPdfConverter
             var sgSum = sgFmv.sum <= 1.0 ? 1.2 : sgFmv.sum;
             sgLineH = MetricLineHeight(sgFs, sgSum);
         }
-        var sgFaceN = sg.Face is { } f2
-            ? f2 + (sg.Bold ? " Bold" : "")
-            : (sg.Bold ? mt.boldFace : mt.face);
-        var nLines = sg.Text.Length == 0 ? 0
-            : sg.Runs is not null
-                ? MeasuredWordWrapStyled(sg.Text, effW - sg.PadLeft - sg.PadRight, mt.face, mt.boldFace,
-                    new MetricCell { Face = sg.Face, Bold = sg.Bold, FontSize = sg.FontSize, Italic = sg.Italic }, sgFs, sg.Runs).Length
-                : MeasuredWordWrap(sg.Text, effW - sg.PadLeft - sg.PadRight, sgFaceN, sgFs).Length;
+        string sgFaceN;
+        if (sg.Face is { } f2) sgFaceN = f2 + (sg.Bold ? " Bold" : "");
+        else sgFaceN = sg.Bold ? mt.boldFace : mt.face;
+        int nLines;
+        if (sg.Text.Length == 0) nLines = 0;
+        else if (sg.Runs is not null)
+            nLines = MeasuredWordWrapStyled(sg.Text, effW - sg.PadLeft - sg.PadRight, mt.face, mt.boldFace,
+                new MetricCell { Face = sg.Face, Bold = sg.Bold, FontSize = sg.FontSize, Italic = sg.Italic }, sgFs, sg.Runs).Length;
+        else nLines = MeasuredWordWrap(sg.Text, effW - sg.PadLeft - sg.PadRight, sgFaceN, sgFs).Length;
         // paragraph segments carry the UA block margins, adjacent margins collapsing to
         // the larger one (a negative stated margin adds to the positive one, as CSS has it)
-        m.Height += (m.FirstBlock && QuirksDropsCellBlockMargins && sg.DirectChild && (sg.IsParagraph || sg.IsHeading) ? sg.PadTopPt
-                : sg.MarginTopPt < 0 ? sg.MarginTopPt + m.PrevMarginBottom : Math.Max(sg.MarginTopPt, m.PrevMarginBottom))
+        double topGap;
+        if (m.FirstBlock && QuirksDropsCellBlockMargins && sg.DirectChild && (sg.IsParagraph || sg.IsHeading)) topGap = sg.PadTopPt;
+        else if (sg.MarginTopPt < 0) topGap = sg.MarginTopPt + m.PrevMarginBottom;
+        else topGap = Math.Max(sg.MarginTopPt, m.PrevMarginBottom);
+        m.Height += topGap
               + (sg.LineBoxExact ? sg.LineBoxPt : Math.Max(sg.LineBoxPt, nLines * sgLineH)) + sg.BorderBottomPt;
         m.PrevMarginBottom = sg.MarginBottomPt;
         m.FirstBlock = false;

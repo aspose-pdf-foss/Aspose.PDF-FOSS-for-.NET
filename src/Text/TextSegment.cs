@@ -58,9 +58,13 @@ public sealed class TextSegment
         var sweeps = oldText.Trim().Length > 0
             ? new (double? x, bool wholeOp)[] { (segX, true), (segX, false), (null, false) }
             : new (double? x, bool wholeOp)[] { (segX, true), (null, true) };
+        // The segment follows its fragment's adjustment: under a reflowing mode the tail
+        // of the run and the runs after it on the line move by the width the text gained.
+        var reflow = Owner?.ReplaceOptions.ReplaceAdjustmentAction is not (TextReplaceOptions.ReplaceAdjustment.None
+            or TextReplaceOptions.ReplaceAdjustment.AdjustSpaceWidth);
         foreach (var (mx, mo) in sweeps)
         {
-            var replacer = new TextReplacer { TargetY = segY, TargetX = mx, MatchWholeOperator = mo };
+            var replacer = new TextReplacer { TargetY = segY, TargetX = mx, MatchWholeOperator = mo, ReflowLineOnReplace = reflow };
             replacer.Replace(page, oldText, emit);
             if (replacer.ReplacementCount > 0) break;
             if (segY is null) break; // no geometry at all: single unscoped try
@@ -161,9 +165,11 @@ public sealed class TextSegment
     /// paragraph whose segments flow as runs (<see cref="TextFormattingOptions.SegmentsFlowAsRuns"/>).</summary>
     public bool IsTab { get; set; }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>HTML-encode a string by replacing &amp;, &lt;, &gt;, &quot;, and &apos;
     /// with their entity references. Helper used during HTML emission.</summary>
     public string MyHtmlEncode(string value)
+#pragma warning restore S2325
     {
         if (string.IsNullOrEmpty(value)) return value ?? string.Empty;
         var sb = new System.Text.StringBuilder(value.Length);
@@ -279,8 +285,12 @@ public sealed class CharInfoCollection : System.Collections.Generic.IEnumerable<
 
     /// <summary>Gets the number of characters in the collection.</summary>
     public int Count => _items.Count;
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => false;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>1-based accessor for the character at the given position.</summary>
@@ -324,7 +334,9 @@ public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerab
         get
         {
             if (index < 1 || index > _segments.Count)
+#pragma warning disable S112 // public API: the exception type callers catch
                 throw new IndexOutOfRangeException($"Index {index} out of range [1, {_segments.Count}].");
+#pragma warning restore S112
             return _segments[index - 1];
         }
     }
@@ -332,8 +344,12 @@ public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerab
     /// <summary>Back-reference to the owning TextFragment.</summary>
     internal TextFragment? Owner { get; set; }
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => false;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>Adds a segment to the end of the collection and refreshes the owning fragment's text; throws when <c>segment</c> is <c>null</c>.</summary>
@@ -380,7 +396,9 @@ public sealed class TextSegmentCollection : System.Collections.Generic.IEnumerab
     public void Delete(int index)
     {
         if (index < 1 || index > _segments.Count)
+#pragma warning disable S112 // public API: the exception type callers catch
             throw new IndexOutOfRangeException($"Index {index} out of range [1, {_segments.Count}].");
+#pragma warning restore S112
         var seg = _segments[index - 1];
         _segments.RemoveAt(index - 1);
         seg.Owner = null;

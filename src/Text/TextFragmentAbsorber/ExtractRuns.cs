@@ -149,12 +149,11 @@ public sealed partial class TextFragmentAbsorber
     }
 
     private static string DecodeBytes(byte[] bytes, Dictionary<int, string>? toUnicode,
-        PdfDictionary? fontDict, PdfReader reader, bool useFontEngineEncoding = false)
+        PdfDictionary? fontDict, PdfReader reader)
     {
         // Delegate to TextAbsorber for consistent encoding handling. Fragments keep
         // U+00A0 verbatim (it is folded only in plain-text extraction).
-        return TextAbsorber.DecodeStringPublic(bytes, toUnicode, fontDict, reader, useFontEngineEncoding,
-            foldNbsp: false);
+        return TextAbsorber.DecodeStringPublic(bytes, toUnicode, fontDict, reader, foldNbsp: false);
     }
 
     private static Dictionary<string, PdfDictionary> ResolveFonts(PdfDictionary pageDict, PdfReader reader)
@@ -280,8 +279,8 @@ public sealed partial class TextFragmentAbsorber
                 var idx = _order[k];
                 if (idx > best && match(_rects[idx])) best = idx;
             }
-            foreach (var idx in _tall)
-                if (idx > best && match(_rects[idx])) best = idx;
+            foreach (var idx in _tall.Where(idx => idx > best && match(_rects[idx])))
+                best = idx;
             return best >= 0 ? _rects[best] : null;
         }
 
@@ -448,71 +447,67 @@ public sealed partial class TextFragmentAbsorber
         return xDist < 500; // generous threshold for same-line proximity
     }
 
-    /// <summary>
-    /// Normalize Arabic Presentation Forms (U+FB50–U+FDFF, U+FE70–U+FEFF) to their
-    /// base Unicode Arabic characters using NFKD decomposition.
-    /// This allows text search to match regardless of whether the PDF uses
-    /// presentation forms or standard Arabic codepoints.
-    /// </summary>
-    private static string NormalizeArabicPresentationForms(string text)
-    {
-        // Fast path: check if text contains any Arabic presentation form characters
-        bool hasPresentationForms = false;
-        foreach (var ch in text)
-        {
-            if ((ch >= '\uFB50' && ch <= '\uFDFF') || (ch >= '\uFE70' && ch <= '\uFEFF'))
-            {
-                hasPresentationForms = true;
-                break;
-            }
-        }
-        if (!hasPresentationForms) return text;
+    /// <summary>The characters search reads as the letters they stand for, on the page and in the
+    /// phrase alike, so one text matches however either side spells it: the Arabic presentation
+    /// forms and the Latin f-ligatures (compatibility forms of their letters), the Arabic letters
+    /// carrying a hamza or madda (canonically the letter plus the combining mark) and the Greek
+    /// question mark and ano teleia (canonically the semicolon and the middle dot).</summary>
+    private static bool IsSearchFolded(char c) =>
+        IsArabicSearchFolded(c) || c is >= 'ﬀ' and <= 'ﬆ' or ';' or '·';
 
-        // NFKD decomposition maps presentation forms to base characters
-        return text.Normalize(System.Text.NormalizationForm.FormKD);
+    private static bool IsArabicSearchFolded(char c) =>
+        c is >= 'ﭐ' and <= '﷿' or >= 'ﹰ' and <= '﻿'
+            or >= 'آ' and <= 'ئ' or 'ۀ' or 'ۂ' or 'ۓ';
+
+    /// <summary>The phrase with its <see cref="IsSearchFolded"/> characters read as their letters.</summary>
+    private static string FoldForSearch(string text)
+    {
+        var at = 0;
+        while (at < text.Length && !IsSearchFolded(text[at])) at++;
+        if (at == text.Length) return text;
+        var sb = new StringBuilder(text, 0, at, text.Length + 8);
+        for (; at < text.Length; at++)
+        {
+            var c = text[at];
+            if (IsSearchFolded(c)) sb.Append(c.ToString().Normalize(NormalizationForm.FormKD));
+            else sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     /// <summary>
-    /// Index-preserving variant of <see cref="NormalizeArabicPresentationForms"/>:
-    /// decomposes ONLY presentation-form chars (per char, NFKD) and reports, for
+    /// Index-preserving page-text variant of <see cref="FoldForSearch"/>: reports, for
     /// every output char, the input index it came from (<c>newToOld</c>,
     /// null when nothing changed). Decompositions change the string length, so any
     /// char-index map built on the input (charToRun / runStartChar) MUST be
     /// re-projected through this mapping before matching on the output.
     /// </summary>
-    private static (string result, int[]? newToOld) NormalizeArabicPresentationFormsWithMap(string text)
+    private static (string result, int[]? newToOld) FoldForSearchWithMap(string text)
     {
-        int[]? newToOld = default;
-        newToOld = null;
-        bool has = false;
-        foreach (var ch in text)
-            if ((ch >= 'ﭐ' && ch <= '﷿') || (ch >= 'ﹰ' && ch <= '﻿')) { has = true; break; }
-        if (!has) return (text, newToOld);
+        var first = 0;
+        while (first < text.Length && !IsSearchFolded(text[first])) first++;
+        if (first == text.Length) return (text, null);
 
         var sb = new StringBuilder(text.Length + 16);
         var map = new List<int>(text.Length + 16);
         for (var i = 0; i < text.Length; i++)
         {
             var c = text[i];
-            if ((c >= 'ﭐ' && c <= '﷿') || (c >= 'ﹰ' && c <= '﻿'))
-            {
-                var piece = c.ToString().Normalize(System.Text.NormalizationForm.FormKD);
-                // The page text is in VISUAL (drawn) order; NFKD hands back a ligature's
-                // parts in LOGICAL order (lam, alef, hamza for U+FEF7), so they go in
-                // reversed - the bidi pass that turns the line around then reads them
-                // back as lam-alef-hamza, the order the caller's pattern normalises to.
-                if (piece.Length > 1)
-                    for (var k = piece.Length - 1; k >= 0; k--) { sb.Append(piece[k]); map.Add(i); }
-                else
-                    foreach (var pc in piece) { sb.Append(pc); map.Add(i); }
-            }
+            var piece = IsSearchFolded(c) ? c.ToString().Normalize(NormalizationForm.FormKD) : null;
+            // The page text is in VISUAL (drawn) order; NFKD hands back an Arabic
+            // character's parts in LOGICAL order (lam, alef, hamza for U+FEF7), so they go
+            // in reversed - the bidi pass that turns the line around then reads them back
+            // in the order the caller's pattern folds to. Latin parts keep their order.
+            if (piece is { Length: > 1 } && IsArabicSearchFolded(c))
+                for (var k = piece.Length - 1; k >= 0; k--) { sb.Append(piece[k]); map.Add(i); }
+            else if (piece is not null)
+                foreach (var pc in piece) { sb.Append(pc); map.Add(i); }
             else
             {
                 sb.Append(c); map.Add(i);
             }
         }
-        newToOld = map.ToArray();
-        return (sb.ToString(), newToOld);
+        return (sb.ToString(), map.ToArray());
     }
 
     // ── API-surface additions ────────────────────────────────────
@@ -521,9 +516,9 @@ public sealed partial class TextFragmentAbsorber
     public void ApplyForAllFragments(Font font)
     {
         if (font is null) return;
-        foreach (var frag in _fragments)
+        foreach (var frag in _fragments.Where(frag => frag.TextState is not null))
         {
-            if (frag.TextState is not null) frag.TextState.Font = font;
+            frag.TextState.Font = font;
         }
     }
 
@@ -531,22 +526,19 @@ public sealed partial class TextFragmentAbsorber
     public void ApplyForAllFragments(Font font, float fontSize)
     {
         if (font is null) return;
-        foreach (var frag in _fragments)
+        foreach (var textState in _fragments.Where(frag => frag.TextState is not null).Select(frag => frag.TextState))
         {
-            if (frag.TextState is not null)
-            {
-                frag.TextState.Font = font;
-                frag.TextState.FontSize = fontSize;
-            }
+            textState.Font = font;
+            textState.FontSize = fontSize;
         }
     }
 
     /// <summary>Apply the supplied font size to every absorbed fragment.</summary>
     public void ApplyForAllFragments(float fontSize)
     {
-        foreach (var frag in _fragments)
+        foreach (var frag in _fragments.Where(frag => frag.TextState is not null))
         {
-            if (frag.TextState is not null) frag.TextState.FontSize = fontSize;
+            frag.TextState.FontSize = fontSize;
         }
     }
 

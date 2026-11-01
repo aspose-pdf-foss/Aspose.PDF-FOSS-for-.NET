@@ -108,7 +108,7 @@ public partial class Table
             var tableXVb = FlowLeftOffset + Left + marginLeftVb;
             var pageRightMarginVb = mp.page.PageInfo?.Margin?.Right ?? 0;
             if (pageRightMarginVb <= 0) pageRightMarginVb = 36;
-            var usableVb = mp.page.Width - tableXVb - pageRightMarginVb;
+            var usableVb = mp.page.LayoutFrameWidth - tableXVb - pageRightMarginVb;
             double totalWVb = 0;
             foreach (var w in mp.colWidths) totalWVb += w;
             // With repeating columns the repeat block leads every band, so a

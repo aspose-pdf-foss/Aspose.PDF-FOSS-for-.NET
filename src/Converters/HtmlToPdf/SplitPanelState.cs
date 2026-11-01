@@ -14,7 +14,6 @@ private sealed class SplitPanelState
     // Gate: a closed table followed by a stray td rowspan wrapper holding a
     // width:100% two-column table — the orphan-rowspan recovery shape.
     public System.Text.RegularExpressions.Match orphan = null!;
-    public System.Text.RegularExpressions.Match headM = null!;
     public System.Text.RegularExpressions.Match innerM = null!;
     public Document doc = null!;
     public Aspose.Pdf.Core.PdfDictionary docFontDict = null!;
@@ -39,8 +38,6 @@ private sealed class SplitPanelState
     public double sbX1;
     public double mainX0;
     public double mainX1;
-    // sidebar + main content flows
-    public System.Text.RegularExpressions.MatchCollection tdSplit = null!;
     // sidebar cell = the inner table's first td; main = the 84% td after it
     public string seg2 = null!;
     public System.Text.RegularExpressions.Match sbM = null!;

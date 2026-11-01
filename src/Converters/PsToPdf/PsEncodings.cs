@@ -61,7 +61,7 @@ internal static class PsEncodings
     public static int StandardCodeOf(string? name)
     {
         if (string.IsNullOrEmpty(name)) return -1;
-        return StandardCodes.TryGetValue(name!, out var code) ? code : -1;
+        return StandardCodes.TryGetValue(name, out var code) ? code : -1;
     }
 
     private static readonly Dictionary<string, int> StandardCodes = BuildStandardCodes();
@@ -72,8 +72,8 @@ internal static class PsEncodings
         for (var code = 0; code < CodeCount; code++)
         {
             var name = Type1StandardEncoding.GetName(code);
-            if (!string.IsNullOrEmpty(name) && name != NotDefined && !codes.ContainsKey(name!))
-                codes[name!] = code;
+            if (!string.IsNullOrEmpty(name) && name != NotDefined && !codes.ContainsKey(name))
+                codes[name] = code;
         }
 
         return codes;

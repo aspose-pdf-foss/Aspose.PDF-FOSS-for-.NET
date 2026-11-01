@@ -142,12 +142,13 @@ public partial class Table
     /// as its padding and rules.</summary>
     /// <summary>The widest picture among a cell's paragraphs, its own left and
     /// right margins included: its fixed width, else its own pixel width; zero
-    /// when it holds none.</summary>
-    private static double WidestPicture(Cell cell)
+    /// when it holds none. A picture sized as a fraction of its cell shrinks with
+    /// the column: it counts in the widest box only, never in the narrowest.</summary>
+    private static double WidestPicture(Cell cell, bool forNarrowest)
     {
         double widest = 0;
         foreach (var paragraph in cell.Paragraphs)
-            if (paragraph is Image image)
+            if (paragraph is Image image && !(forNarrowest && (image.BoxWidthFraction > 0 || image.BoxMaxWidthFraction > 0)))
                 widest = Math.Max(widest, (image.FixWidth > 0 ? image.FixWidth : image.BitmapSize.Width)
                     + (image.Margin?.Left ?? 0) + (image.Margin?.Right ?? 0));
             // A reserved block is as wide as its caller says it can be at most.
@@ -182,10 +183,10 @@ public partial class Table
                 // cell beside 0.5 pt ones measures text + padding + 6).
                 var (ruleL, ruleR) = RulesInsideColumnWidth ? CellRuleWidths(cell, row) : (pitchL, pitchR);
                 var chrome = (pad?.Left ?? 0) + (pad?.Right ?? 0) + ruleL + ruleR + AutoFitMeasureGuardPt;
-                // A picture does not wrap: it floors the narrowest box as much as the widest.
-                var picture = WidestPicture(cell);
-                var narrowest = Math.Max(MaxWordWidth(cell, row, exact: true), picture) + chrome;
-                var widest = Math.Max(MaxLineWidth(cell, row, exact: true), picture) + chrome;
+                // A picture does not wrap: it floors the narrowest box as much as the widest
+                // (one sized as a fraction of its cell only the widest).
+                var narrowest = Math.Max(MaxWordWidth(cell, row, exact: true), WidestPicture(cell, forNarrowest: true)) + chrome;
+                var widest = Math.Max(MaxLineWidth(cell, row, exact: true), WidestPicture(cell, forNarrowest: false)) + chrome;
                 if (span == 1)
                 {
                     min[col] = Math.Max(min[col], narrowest);
@@ -262,7 +263,7 @@ public partial class Table
     private double?[] DeclaredPointWidths()
     {
         if (string.IsNullOrWhiteSpace(ColumnWidths)) return Array.Empty<double?>();
-        var tokens = ColumnWidths!.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        var tokens = ColumnWidths.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
         var widths = new double?[tokens.Length];
         for (var i = 0; i < tokens.Length; i++)
             widths[i] = tokens[i].EndsWith("%", StringComparison.Ordinal) ? null : TryParseWidthToken(tokens[i]);

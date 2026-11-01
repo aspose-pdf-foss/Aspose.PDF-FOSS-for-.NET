@@ -37,7 +37,7 @@ internal static partial class Jbig2Decoder
     /// context array are only seeded when SBREFINE is set.</summary>
     private sealed class TextRegionDecoders
     {
-        public TextRegionDecoders(ArithmeticDecoder ad, int symCodeLen, bool sbRefine)
+        public TextRegionDecoders(ArithmeticDecoder ad, int symCodeLen)
         {
             Ad = ad;
             Dt = new IntegerDecoder(ad);
@@ -53,8 +53,6 @@ internal static partial class Jbig2Decoder
             Rdx = new IntegerDecoder(ad);
             Rdy = new IntegerDecoder(ad);
             GrCtx = new ArithmeticContext[8192];
-            if (sbRefine)
-                for (var i = 0; i < GrCtx.Length; i++) GrCtx[i] = new ArithmeticContext();
         }
 
         public ArithmeticDecoder Ad { get; }
@@ -79,7 +77,7 @@ internal static partial class Jbig2Decoder
         /// (§6.5.8.2.2). All arithmetic/integer decoders and contexts are supplied by
         /// the caller so state persists across invocations.
         /// </summary>
-        private Jbig2Bitmap DecodeTextRegionBitmap(
+        private static Jbig2Bitmap DecodeTextRegionBitmap(
             ArithmeticDecoder ad, IReadOnlyList<Jbig2Bitmap> symbols,
             IntegerDecoder iaDt, IntegerDecoder iaFs, IntegerDecoder iaDs, IntegerDecoder iaIt,
             IntegerDecoder iaRi, IaidDecoder iaId, IntegerDecoder iaRdw, IntegerDecoder iaRdh,
@@ -258,7 +256,7 @@ internal static partial class Jbig2Decoder
         private void DecodeTextRegionArithmetic(TextRegionHeader trh, List<Jbig2Bitmap> symbols)
         {
             var dec = new TextRegionDecoders(new ArithmeticDecoder(_data, trh.DataStart),
-                SymCodeLength(symbols.Count), trh.SbRefine);
+                SymCodeLength(symbols.Count));
 
             // Region bitmap accumulator
             var region = new Jbig2Bitmap(trh.RegionW, trh.RegionH, trh.SbDefPixel);
@@ -348,7 +346,7 @@ internal static partial class Jbig2Decoder
         /// refinement region with the original symbol as reference. The symbol comes back
         /// unrefined when the deltas put it outside the bitmap limits; null means the stream ran
         /// out mid-instance.</summary>
-        private Jbig2Bitmap? RefineInstance(TextRegionHeader trh, TextRegionDecoders dec, Jbig2Bitmap symBitmap)
+        private static Jbig2Bitmap? RefineInstance(TextRegionHeader trh, TextRegionDecoders dec, Jbig2Bitmap symBitmap)
         {
             if (dec.Rdw.Decode() is not { } rdw) return null;
             if (dec.Rdh.Decode() is not { } rdh) return null;
@@ -404,21 +402,21 @@ internal static partial class Jbig2Decoder
                 {
                     if (first)
                     {
-                        if (tFs.Decode(reader) is not { } dfs) goto endStrip;
+                        if (tFs.Decode(reader) is not { } dfs) break;
                         firstS += dfs;
                         curS = firstS;
                         first = false;
                     }
                     else
                     {
-                        if (tDs.Decode(reader) is not { } dsVal) goto endStrip; // OOB → end of strip
+                        if (tDs.Decode(reader) is not { } dsVal) break; // OOB → end of strip
                         curS += dsVal + trh.SbDsOffset;
                     }
 
                     // CURT is raw bits (⌈log2 SBSTRIPS⌉) in the Huffman variant.
                     var curT = trh.Strips > 1 ? reader.ReadBits(trh.Log2Strips) : 0;
 
-                    if (tId.Decode(reader) is not { } idVal) goto endStrip;
+                    if (tId.Decode(reader) is not { } idVal) break;
                     if (idVal < 0 || idVal >= symbols.Count) idVal = 0;
                     var symBitmap = symbols[idVal];
                     if (symBitmap is null) { decoded++; continue; }
@@ -437,7 +435,6 @@ internal static partial class Jbig2Decoder
 
                     decoded++;
                 }
-            endStrip:
                 if (decoded == beforeStrip) break; // strip made no progress — bail out
             }
 

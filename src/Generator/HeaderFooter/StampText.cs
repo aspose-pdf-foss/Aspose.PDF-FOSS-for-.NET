@@ -24,6 +24,7 @@ public sealed partial class HeaderFooter
             // its first sized segment carries (generator-style fragments hold
             // their size and face on the segment).
             var (tfFs, tfFace) = FragmentSizeAndFace(tf);
+            (tfFs, tfFace) = WithPageDefaults(hf, tf, tfFs, tfFace);
             // The fragment's FontStyle picks the face's variant (probed: Arial with
             // FontStyles.Bold draws the band line in Arial Bold).
             if (tfFace is not null && tf.TextState.FontStyle is var fstyle && fstyle != FontStyles.Regular)
@@ -48,7 +49,7 @@ public sealed partial class HeaderFooter
             // fragment does (measured: the plain header line draws Times 12).
             if (TextState.FontName is null && htmlFrag.TextState?.Font is null
                 && string.IsNullOrEmpty(htmlFrag.TextState?.FontName) && ts.embedFont is null
-                && !System.Text.RegularExpressions.Regex.IsMatch(ts.hc,
+                && !SafeRegex.IsMatch(ts.hc,
                     @"font-family|font-size|<font\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             {
                 ts.fn = "Times-Roman";
@@ -57,6 +58,7 @@ public sealed partial class HeaderFooter
         }
 
         if (string.IsNullOrWhiteSpace(ts.text)) return;
+        ts.extraLines = HardLines(ts.text).Length - 1;
 
         PlaceStampText(hf, ts, para);
         // Probed footer band, text member: the fragment WRAPS at the band width,
@@ -69,8 +71,30 @@ public sealed partial class HeaderFooter
         DrawStampText(hf, ts, para);
         hf.lastTextY = ts.drawY;
         hf.lastTextEndX = ts.drawX + ts.textW;
-        if (!ts.inline) hf.y -= ts.fs * 1.2;
+        // The lines drawn beyond the first stack the band (a header's stack, and the cursor); a
+        // one-paragraph HTML member stacks its own line too, as its first line seats on the stack.
+        if (hf.isHeader && !ts.inline && para is TextFragment) hf.headerStackH += ts.extraLines * ts.fs;
+        if (hf.isHeader && !ts.inline && para is HtmlFragment stackedFrag)
+            hf.headerStackH += (stackedFrag.Margin.TopTouched ? stackedFrag.Margin.Top : 0)
+                + hf.fontSize * BandLinePitch + ts.extraLines * ts.fs;
+        if (!ts.inline) hf.y -= ts.fs * 1.2 + ts.extraLines * ts.fs;
         hf.firstParagraph = false;
+    }
+
+    /// <summary>The page's default text state (else the document's) gives a band fragment the face and
+    /// size neither it nor the band names, as it does the page's own paragraphs; the band's lines used to
+    /// keep the built-in face and size whatever the page asked for.</summary>
+    private (double fs, Aspose.Pdf.Text.Font? face) WithPageDefaults(StampParagraphsState hf, TextFragment tf,
+        double fs, Aspose.Pdf.Text.Font? face)
+    {
+        var defaults = hf.page.PageInfo?.AssignedDefaultTextState ?? hf.document?.PageInfo?.AssignedDefaultTextState;
+        if (defaults is null) return (fs, face);
+        if (fs <= 0 && !TextState.FontSizeTouched && defaults.FontSizeTouched) fs = defaults.FontSize;
+        if (face is null && !tf.TextState.FontTouched && !TextState.FontTouched
+            && (TextState.FontName is null || TextState.FontName == DefaultBandFace)
+            && defaults.FontTouched && defaults.Font is { } defaultFace)
+            face = defaultFace;
+        return (fs, face);
     }
 
     /// <summary>The advance of the spaces a line ends with, in the line's face and size.</summary>
@@ -99,47 +123,109 @@ public sealed partial class HeaderFooter
         // enclosing q…Q, exactly as the body writer scopes it.
         if (para is TextFragment colorTf && FragmentForeground(colorTf) is { } headerFore)
             ts.builder.SetFillColor(headerFore);
-        if (ts.embedFont?.SourceFontData?.TtfData is { Length: > 0 } embedTtf)
+        // Each of the fragment's own lines is a show of its own, one font size under the
+        // previous; the whole text used to go out as one show, its line breaks run together
+        // off the page's right edge. A text member that starts its own line also wraps at
+        // the band's right edge, as the plain footer band wraps it; so does a one-paragraph
+        // HTML member, which used to run off the page as one line.
+        var lines = HardLines(ts.text!);
+        var bandRight = hf.page.Width - (Margin.RightTouched ? Margin.Right : hf.mLeft);
+        var aligned = ts.alignment is HorizontalAlignment.Center or HorizontalAlignment.Right;
+        if (!ts.inline && para is (TextFragment or HtmlFragment))
         {
-            // Embedded face: register (or reuse) the Type0/CID font on the page and
-            // show the run as hex glyph ids. The Type0 embedder presents the program
-            // under a subset-tagged BaseFont, so the saved document's fonts read
-            // back as embedded subsets (FontUtilities.SubsetFonts semantics).
-            var pageFontDict = ResolvePageFontDict(hf.page);
-            var (embedRes, hex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
-                pageFontDict, embedTtf, ts.embedFont.FontName ?? "Embedded", ts.text!,
-                stripSpacesInBaseFont: true);
-            ts.builder.BeginText()
-                .SetFont(embedRes, ts.fs)
-                .MoveTextPosition(ts.drawX, ts.drawY)
-                .ShowTextHex(hex)
-                .EndText()
-                .RestoreState();
+            var wrapped = WrapBandLines(ts.text!, ts.fn, ts.fs, bandRight - (aligned ? hf.mLeft : ts.drawX)).ToArray();
+            if (wrapped.Length > lines.Length) lines = wrapped;
+            else aligned = false;
         }
-        else
+        else aligned = false;
+        var embedTtf = ts.embedFont?.SourceFontData?.TtfData;
+        var pageFontDict = embedTtf is { Length: > 0 } ? ResolvePageFontDict(hf.page) : null;
+        var fontRes = pageFontDict is null ? EnsureFontResource(hf.page, ts.fn) : null;
+        var bodyTop = PageTopMarginPt(hf);
+        var drawn = 0;
+        for (var li = 0; li < lines.Length; li++)
         {
-            var fontRes = EnsureFontResource(hf.page, ts.fn);
-            ts.builder.BeginText()
-                .SetFont(fontRes, ts.fs)
-                .MoveTextPosition(ts.drawX, ts.drawY)
-                .ShowText(ts.text!)
-                .EndText()
-                .RestoreState();
+            var lineY = ts.drawY - li * ts.fs;
+            // A clipping header band stops at the line that would touch the body's first
+            // line under the page's top margin (the HTML band path's rule, measured from the
+            // page margin: the band's own top margin seats the lines, it does not bound them).
+            if (hf.isHeader && IsClipExtraContent && (hf.pageHeight - lineY) + ts.fs * 0.2 > bodyTop - ts.fs * 0.72) break;
+            drawn++;
+            // A wrapped aligned member seats each of its lines on its own width.
+            if (aligned) ts.drawX = AlignedBandLineX(hf, ts, lines[li], bandRight);
+            if (pageFontDict is not null)
+            {
+                // Embedded face: register (or reuse) the Type0/CID font on the page and
+                // show the run as hex glyph ids. The Type0 embedder presents the program
+                // under a subset-tagged BaseFont, so the saved document's fonts read
+                // back as embedded subsets (FontUtilities.SubsetFonts semantics).
+                var (embedRes, hex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
+                    pageFontDict, embedTtf!, ts.embedFont!.FontName ?? "Embedded", lines[li],
+                    stripSpacesInBaseFont: true, document: hf.page.Reader);
+                ts.builder.BeginText().SetFont(embedRes, ts.fs).MoveTextPosition(ts.drawX, lineY).ShowTextHex(hex).EndText();
+            }
+            else
+                ts.builder.BeginText().SetFont(fontRes!, ts.fs).MoveTextPosition(ts.drawX, lineY).ShowText(lines[li]).EndText();
         }
+        ts.builder.RestoreState();
         hf.page.AddContentStream(ts.builder.Build());
-
+        // The seat and advance the band records are the LAST line's drawn.
+        ts.extraLines = Math.Max(0, drawn - 1);
+        ts.drawY -= ts.extraLines * ts.fs;
+        var lastLine = lines[ts.extraLines];
         try
         {
-            var mw = FontRepository.TryFindFont(ts.fn)?.MeasureString(ts.text!, ts.fs) ?? 0;
-            ts.textW = mw > 0 ? mw : EstimateWidth(ts.text, ts.fs);
+            var mw = FontRepository.TryFindFont(ts.fn)?.MeasureString(lastLine, ts.fs) ?? 0;
+            ts.textW = mw > 0 ? mw : EstimateWidth(lastLine, ts.fs);
         }
-        catch { ts.textW = EstimateWidth(ts.text, ts.fs); }
+        catch { ts.textW = EstimateWidth(lastLine, ts.fs); }
     }
+
+    /// <summary>The x a centred or right-aligned band line starts at, measured in the line's face.</summary>
+    private static double AlignedBandLineX(StampParagraphsState hf, StampTextState ts, string line, double bandRight)
+    {
+        double w;
+        try
+        {
+            var mw = FontRepository.TryFindFont(ts.fn)?.MeasureString(line, ts.fs) ?? 0;
+            w = mw > 0 ? mw : EstimateWidth(line, ts.fs);
+        }
+        catch { w = EstimateWidth(line, ts.fs); }
+        return ts.alignment == HorizontalAlignment.Center ? hf.mLeft + (bandRight - hf.mLeft - w) / 2 : bandRight - w;
+    }
+
+    /// <summary>Where the body's content begins under the page top: the band's own top margin
+    /// when it names one, else the page's, else the document's, else the layout default.</summary>
+    private double BodyTopMarginPt(StampParagraphsState hf)
+    {
+        if (Margin.TopTouched && Margin.Top > 0) return Margin.Top;
+        if (hf.page.PageInfo?.Margin is { TopTouched: true } ptm) return ptm.Top;
+        if (hf.document?.PageInfo?.Margin is { TopTouched: true } dtm) return dtm.Top;
+        return DefaultBodyTopMarginPt;
+    }
+
+    private const double DefaultBodyTopMarginPt = 90;
+
+    /// <summary>The page's top content margin: the page's when it names one, else the
+    /// document's, else the layout's default.</summary>
+    private static double PageTopMarginPt(StampParagraphsState hf)
+    {
+        if (hf.page.PageInfo?.Margin is { TopTouched: true } ptm) return ptm.Top;
+        if (hf.document?.PageInfo?.Margin is { TopTouched: true } dtm) return dtm.Top;
+        return DefaultLayoutTopMarginPt;
+    }
+
+    private const double DefaultLayoutTopMarginPt = 72;
+
+    /// <summary>The text's own lines, split at its hard breaks.</summary>
+    private static string[] HardLines(string text) =>
+        text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
 
     /// <summary>Fits the line into the footer band and aligns it; false when the band has no room for it.</summary>
     private bool FitStampTextToBand(StampParagraphsState hf, StampTextState ts, BaseParagraph para)
     {
-        if (hf.probedFooterBand && para is TextFragment && !ts.inline)
+        // A one-paragraph HTML member of the stacked footer band is one more text member of it.
+        if (hf.probedFooterBand && para is (TextFragment or HtmlFragment) && !ts.inline)
         {
             var bandRightMargin = Margin.RightTouched ? Margin.Right : hf.mLeft;
             var bandWidth = hf.page.Width - hf.mLeft - bandRightMargin;
@@ -152,7 +238,12 @@ public sealed partial class HeaderFooter
             // The member's own margins: its top margin hangs it further below the band
             // top, its left margin indents it (probed: Margin.Top 20 / Left 30 seat the
             // footer line 20 pt lower at x 120; Margin.Bottom moves nothing).
-            var memberTop = para is TextFragment mtTf && mtTf.Margin.TopTouched ? mtTf.Margin.Top : 0.0;
+            var memberTop = para switch
+            {
+                TextFragment mtTf when mtTf.Margin.TopTouched => mtTf.Margin.Top,
+                HtmlFragment mtHf when mtHf.Margin.TopTouched => mtHf.Margin.Top,
+                _ => 0.0,
+            };
             var memberLeft = para is TextFragment mlTf && mlTf.Margin.LeftTouched ? mlTf.Margin.Left : 0.0;
             hf.y -= memberTop;
             double lastBase = hf.y, lastEnd = hf.x + ts.cssLeftIndent + memberLeft;
@@ -183,7 +274,7 @@ public sealed partial class HeaderFooter
                     var bandFontDict = ResolvePageFontDict(hf.page);
                     var (bandRes, bandHex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
                         bandFontDict, bandTtf, ts.embedFont.FontName ?? "Embedded", lnText,
-                        stripSpacesInBaseFont: true);
+                        stripSpacesInBaseFont: true, document: hf.page.Reader);
                     lineB.BeginText().SetFont(bandRes, ts.fs)
                         .MoveTextPosition(lnX, baseline).ShowTextHex(bandHex).EndText();
                 }
@@ -204,23 +295,20 @@ public sealed partial class HeaderFooter
             return false;
         }
         // A centred / right member sets its own x even when it shares the line.
-        if (!ts.inline || ts.alignment is HorizontalAlignment.Center or HorizontalAlignment.Right)
+        if ((!ts.inline || ts.alignment is HorizontalAlignment.Center or HorizontalAlignment.Right) && ts.alignment is HorizontalAlignment.Center or HorizontalAlignment.Right)
         {
-            if (ts.alignment is HorizontalAlignment.Center or HorizontalAlignment.Right)
+            double alignW;
+            try
             {
-                double alignW;
-                try
-                {
-                    alignW = FontRepository.TryFindFont(ts.fn)?.MeasureString(ts.text!, ts.fs)
-                             ?? EstimateWidth(ts.text, ts.fs);
-                }
-                catch { alignW = EstimateWidth(ts.text, ts.fs); }
-                var mRight = Margin.RightTouched ? Margin.Right : hf.mLeft;
-                var bandRight = hf.page.Width - mRight;
-                ts.drawX = ts.alignment == HorizontalAlignment.Center
-                    ? hf.mLeft + (bandRight - hf.mLeft - alignW) / 2
-                    : bandRight - alignW;
+                alignW = FontRepository.TryFindFont(ts.fn)?.MeasureString(ts.text!, ts.fs)
+                         ?? EstimateWidth(ts.text, ts.fs);
             }
+            catch { alignW = EstimateWidth(ts.text, ts.fs); }
+            var mRight = Margin.RightTouched ? Margin.Right : hf.mLeft;
+            var bandRight = hf.page.Width - mRight;
+            ts.drawX = ts.alignment == HorizontalAlignment.Center
+                ? hf.mLeft + (bandRight - hf.mLeft - alignW) / 2
+                : bandRight - alignW;
         }
         return true;
     }
@@ -242,10 +330,12 @@ public sealed partial class HeaderFooter
             ts.drawY = hf.pageHeight - hf.mTop - hf.headerStackH - box + FaceDescentEm(ts.fn, ts.embedFont) * ts.fs;
             hf.headerStackH += box;
         }
-        // A header fragment's own top margin hangs it that much further below the
-        // band top (measured: a 20 pt Margin.Top seats the header line 20 pt lower).
-        if (hf.isHeader && !ts.inline && para is HtmlFragment marginFrag && marginFrag.Margin.TopTouched)
-            ts.drawY -= marginFrag.Margin.Top;
+        // A one-paragraph HTML member seats one band size under the header's stack top (the
+        // band top for a first member, as before; under the members before it otherwise, where
+        // it used to seat from the band top over them), its own top margin hanging it that much
+        // further down (measured: a 20 pt Margin.Top seats the header line 20 pt lower).
+        if (hf.isHeader && !ts.inline && para is HtmlFragment marginFrag)
+            ts.drawY = hf.HeaderStackTop - (marginFrag.Margin.TopTouched ? marginFrag.Margin.Top : 0) - hf.fontSize;
         // A text member's own margins move it in both bands (probed: a header fragment
         // with Margin.Top 50 / Left 8 seats at x 98, 50 pt lower; a footer fragment with
         // Margin.Top 20 / Left 30 at x 120, 20 pt lower; Margin.Bottom moves nothing).
@@ -285,11 +375,11 @@ public sealed partial class HeaderFooter
             var ls1 = FragmentLeading(footInlineTf);
             ts.drawY = hf.footerLineTop - (ts.fs + ls1) + FaceDescentEm(ts.fn, ts.embedFont) * ts.fs;
         }
-        ts.alignment = para is TextFragment alignTf
-            ? alignTf.HorizontalAlignment != HorizontalAlignment.None
+        if (para is TextFragment alignTf)
+            ts.alignment = alignTf.HorizontalAlignment != HorizontalAlignment.None
                     && alignTf.HorizontalAlignment != HorizontalAlignment.Left
                 ? alignTf.HorizontalAlignment
-                : alignTf.TextState.HorizontalAlignment
-            : ts.cssAlign;
+                : alignTf.TextState.HorizontalAlignment;
+        else ts.alignment = ts.cssAlign;
     }
 }

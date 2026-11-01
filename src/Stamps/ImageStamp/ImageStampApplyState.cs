@@ -58,8 +58,8 @@ private sealed class ImageStampApplyState
     public string resetCm = null!;
     public string stampBody = null!;
     // A foreground image stamp is a pagination artifact: wrap it in an
-    // /Artifact BDC … EMC marked-content block.
-    // The BDC/EMC sit outside the q…Q draw block, so GetStamps still recognises
+    // /Artifact BMC … EMC marked-content block (a tag with no property list is BMC; BDC takes both).
+    // The BMC/EMC sit outside the q…Q draw block, so GetStamps still recognises
     // the clean q gs cm /Im Do Q shape inside. Background stamps stay bare.
     public string contentOps = null!;
     public byte[] contentBytes = null!;

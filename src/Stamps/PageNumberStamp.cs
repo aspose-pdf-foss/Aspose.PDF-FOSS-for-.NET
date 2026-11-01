@@ -31,22 +31,15 @@ public sealed class PageNumberStamp : Stamp
     /// <summary>Text color as RGB (0-1 range).</summary>
     public (double R, double G, double B) Color { get; set; } = (0, 0, 0);
 
-    /// <summary>Total number of pages (set before stamping).</summary>
-    internal int TotalPages { get; set; }
-
-    /// <summary>Current page number (set before stamping).</summary>
-    internal int CurrentPage { get; set; }
-
     internal override byte[] BuildContentStream(Page page) => BuildContentStream(page, "F1");
 
     internal override byte[] BuildContentStream(Page page, string fontResourceName)
     {
-        // A stamp added straight to a page (rather than through ApplyToAll) carries no
-        // page number of its own: it numbers the page it lands on, counted from
-        // StartingNumber.
-        if (CurrentPage <= 0) CurrentPage = StartingNumber + page.Number - 1;
-        if (TotalPages <= 0) TotalPages = page.Number;
-        var text = FormatNumber();
+        // One stamp is added to many pages: it numbers the page it lands on, counted from
+        // StartingNumber, out of the pages its document has at that moment.
+        var current = StartingNumber + page.Number - 1;
+        var total = page.OwnerDocument?.Pages.Count ?? page.Number;
+        var text = FormatNumber(current, total);
         var size = EffectiveFontSize;
         // The stamp's own TextState names the face it must be drawn in (with its
         // bold/italic flags), so the page-registered Helvetica the caller passed in
@@ -61,7 +54,11 @@ public sealed class PageNumberStamp : Stamp
             : Color;
 
         var builder = new ContentStreamBuilder();
-        builder.SaveState()
+        builder.SaveState();
+        // Placed in the page as shown: a turned page's frame is the stamp's one matrix.
+        if (page.ShownToMediaMatrix() is { } frame)
+            builder.SetMatrix(frame.A, frame.B, frame.C, frame.D, frame.E, frame.F);
+        builder
             .BeginText()
             .SetFillColor(color.Item1, color.Item2, color.Item3)
             .SetFont(resName, size)
@@ -75,13 +72,13 @@ public sealed class PageNumberStamp : Stamp
 
     /// <summary>The stamp's rendered text. <c>#</c> is the page-number placeholder
     /// ("Page # of 3"); the positional <c>{0}</c>/<c>{1}</c> form is also honoured.</summary>
-    private string FormatNumber()
+    private string FormatNumber(int current, int total)
     {
         var fmt = Format ?? string.Empty;
         var text = fmt.Contains('{')
-            ? string.Format(fmt, CurrentPage, TotalPages)
+            ? string.Format(fmt, current, total)
             : fmt;
-        return text.Replace("#", CurrentPage.ToString(
+        return text.Replace("#", current.ToString(
             System.Globalization.CultureInfo.InvariantCulture));
     }
 
@@ -110,10 +107,8 @@ public sealed class PageNumberStamp : Stamp
     /// </summary>
     public void ApplyToAll(Document document)
     {
-        TotalPages = document.PageCount;
         for (var i = 1; i <= document.PageCount; i++)
         {
-            CurrentPage = StartingNumber + i - 1;
             document.Pages[i].AddStamp(this);
         }
     }

@@ -7,13 +7,13 @@ namespace Aspose.Pdf.Annotations;
 public partial class FreeTextAnnotation : MarkupAnnotation
 {
 // The stages of the styled free-text appearance: the font dictionary, metrics, variant, character width and word flush helpers, and one output line.
-    private PdfDictionary FtFontDict(StyledAppearanceState ra, string v)
+    private static PdfDictionary FtFontDict(StyledAppearanceState ra, string v)
     { if (!ra.fontDicts.TryGetValue(v, out var d)) { d = MakeFreeTextFontDict(v); ra.fontDicts[v] = d; } return d; }
 
     private double FtCharW(StyledAppearanceState ra, char c, RichTextFontStyles s)
     => FtMetrics(ra, FtVarOf(ra, s)).MeasureString(c.ToString(), ra.size);
 
-    private void FtFlushWord(StyledAppearanceState ra)
+    private static void FtFlushWord(StyledAppearanceState ra)
     {
         if (ra.word.Count == 0) return;
         if (ra.lineW > 0 && ra.lineW + ra.wordW > ra.avail) { ra.outLines.Add(ra.line); ra.line = new(); ra.lineW = 0; }
@@ -21,7 +21,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         ra.lineW += ra.wordW; ra.word.Clear(); ra.wordW = 0;
     }
     private Aspose.Pdf.Text.FontMetrics FtMetrics(StyledAppearanceState ra, string v) { if (!ra.metricsCache.TryGetValue(v, out var m)) { m = Aspose.Pdf.Text.FontMetrics.FromFontDict(FtFontDict(ra, v), InternalReader); ra.metricsCache[v] = m; } return m; }
-    private string FtVarOf(StyledAppearanceState ra, RichTextFontStyles s) => VariantFontName(ra.baseFont,
+    private static string FtVarOf(StyledAppearanceState ra, RichTextFontStyles s) => VariantFontName(ra.baseFont,
         (s & RichTextFontStyles.Bold) != 0, (s & RichTextFontStyles.Italic) != 0);
 
     /// <summary></summary>

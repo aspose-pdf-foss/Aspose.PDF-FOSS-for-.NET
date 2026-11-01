@@ -35,7 +35,7 @@ public sealed partial class TextFragmentAbsorber
         }
 
         xp.concatenated = xp.fullText.ToString();
-        (xp.concatenated, var xNewToOld) = NormalizeArabicPresentationFormsWithMap(xp.concatenated);
+        (xp.concatenated, var xNewToOld) = FoldForSearchWithMap(xp.concatenated);
         if (xNewToOld is not null)
         {
             var expanded = new List<(int pageIdx, int runIdx)>(xNewToOld.Length);
@@ -55,7 +55,9 @@ public sealed partial class TextFragmentAbsorber
 
         xp.matches = BuildMatches(xp.concatenated);
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (Match match in xp.matches)
+#pragma warning restore S3267
         {
             if (!EmitCrossPageMatch(xp, match)) break;
         }
@@ -82,7 +84,7 @@ public sealed partial class TextFragmentAbsorber
         // every spanned run is hidden, same as full extraction.
         (sf.laterInk, sf.clippedAway, sf.runBoxArea) = ComputeLaterInkOcclusion(sf.rawFragments);
         // Phase 1: Build the concatenated text and character-to-run mapping
-        (sf.concatenated, sf.charToRun, sf.runStartChar, sf.bidiPerm) = BuildConcatenatedText(sf.rawFragments);
+        (sf.concatenated, sf.charToRun, sf.runStartChar, sf.bidiPerm, sf.foldMap) = BuildConcatenatedText(sf.rawFragments);
         if (SearchDebug)
             Console.Error.WriteLine($"[searchtext:page{sf.pageIndex}]<<<{sf.concatenated}>>>");
 
@@ -107,8 +109,6 @@ public sealed partial class TextFragmentAbsorber
             return;
         }
         EmitMatches(sf, BuildMatches(sf.concatenated), sf.preCountAll);
-        return;
-
     }
 
     /// <summary>
@@ -148,7 +148,11 @@ public sealed partial class TextFragmentAbsorber
         // between lines) must not balloon the rect onto a neighbouring line; sentinels
         // INSIDE the band (back-jump splices within one visual line) keep contributing
         // as they always have. Union the real runs first, then band-test the sentinels.
-        List<(double x1, double y1, double x2, double y2)>? sentinels = null;
+        // A sentinel at either END of the match is the break before or after its glyphs, seated at
+        // the next line's origin: on closely set lines it would pass the band test and stretch the
+        // box back to that line's start. Only the sentinels between glyph runs are band-tested.
+        List<(double x1, double y1, double x2, double y2, int ri)>? sentinels = null;
+        int firstGlyphRun = -1, lastGlyphRun = -1;
 
         for (var ri = firstRunIdx; ri <= lastRunIdx; ri++)
         {
@@ -187,9 +191,11 @@ public sealed partial class TextFragmentAbsorber
             if (run.Text == "\r\n")
             {
                 (sentinels ??= new()).Add((Math.Min(px, px2), Math.Min(py, py2),
-                    Math.Max(px, px2), Math.Max(py, py2)));
+                    Math.Max(px, px2), Math.Max(py, py2), ri));
                 continue;
             }
+            if (firstGlyphRun < 0) firstGlyphRun = ri;
+            lastGlyphRun = ri;
             minX = Math.Min(minX, Math.Min(px, px2));
             minY = Math.Min(minY, Math.Min(py, py2));
             maxX = Math.Max(maxX, Math.Max(px, px2));
@@ -198,7 +204,7 @@ public sealed partial class TextFragmentAbsorber
 
         if (sentinels is not null && minY <= maxY)
             foreach (var s in sentinels)
-                if (s.y1 <= maxY + 0.5 && s.y2 >= minY - 0.5)
+                if (s.ri > firstGlyphRun && s.ri < lastGlyphRun && s.y1 <= maxY + 0.5 && s.y2 >= minY - 0.5)
                 {
                     minX = Math.Min(minX, s.x1);
                     minY = Math.Min(minY, s.y1);
@@ -290,7 +296,7 @@ public sealed partial class TextFragmentAbsorber
     private static MatchCollection BuildMatchesCore(string text, string searchPhrase,
         bool isRegex, bool caseSensitive, bool wholeWord)
     {
-        var phrase = NormalizeArabicPresentationForms(searchPhrase);
+        var phrase = FoldForSearch(searchPhrase);
         // For non-regex search, strip trailing \r that may come from splitting \r\n text by \n.
         // Newline sentinels are excluded from concatenated text in phrase mode, so trailing
         // \r would cause a false mismatch.
@@ -312,7 +318,7 @@ public sealed partial class TextFragmentAbsorber
             // in the haystack: depending on the extraction path the line boundary
             // surfaces as a bare "\r\n" sentinel, a single joining space, or a
             // trailing-space + break combination.
-            pattern = Regex.Replace(pattern, @"(?:\\ |\u00A0|\\r|\\n)+", m =>
+            pattern = SafeRegex.Replace(pattern, @"(?:\\ |\u00A0|\\r|\\n)+", m =>
             {
                 var raw = m.Value.Replace("\\ ", " ").Replace("\\r", "\r").Replace("\\n", "\n");
                 if (raw.IndexOf('\r') < 0 && raw.IndexOf('\n') < 0)
@@ -329,12 +335,66 @@ public sealed partial class TextFragmentAbsorber
         // Enable multiline so ^ and $ match at line boundaries, not just string start/end.
         // This matches the .NET the public API behavior for regex text search.
         if (isRegex)
+        {
             options |= RegexOptions.Multiline;
+            // The linear-time engine takes no lookahead; it keeps the plain line feed anchor.
+            if (!RegexManager.NonBacktracking) pattern = LineEndsBeforeSentinel(pattern);
+        }
         // Apply the global RegexManager settings: NonBacktracking guarantees linear-time
         // matching, and MatchTimeout bounds runaway (catastrophic-backtracking) patterns.
         if (RegexManager.NonBacktracking)
             options |= Compat.NonBacktracking;
-        return new Regex(pattern, options, RegexManager.MatchTimeout).Matches(text);
+        try
+        {
+            return new Regex(pattern, options, RegexManager.MatchTimeout).Matches(text);
+        }
+        catch (ArgumentException) when (isRegex)
+        {
+            // A phrase that does not parse as a pattern matches nothing; the search goes on.
+            return NeverMatches.Matches(string.Empty);
+        }
+    }
+
+    private static readonly Regex NeverMatches = new("(?!)");
+
+    /// <summary>A multiline <c>$</c> matches only before a line feed, and the search text ends each
+    /// line with the "\r\n" sentinel, so a line end anchored right after its last character ("95 $")
+    /// would match on the last line alone. Each <c>$</c> outside a character class also matches before
+    /// the sentinel's carriage return.</summary>
+    private static string LineEndsBeforeSentinel(string pattern)
+    {
+        if (pattern.IndexOf('$') < 0) return pattern;
+        var sb = new StringBuilder(pattern.Length + 8);
+        var inClass = false;
+        for (var i = 0; i < pattern.Length; i++)
+        {
+            var c = pattern[i];
+            if (c == '\\' && i + 1 < pattern.Length)
+            {
+                sb.Append(c).Append(pattern[++i]);
+                continue;
+            }
+            if (inClass)
+            {
+                if (c == ']') inClass = false;
+            }
+            else if (c == '[')
+            {
+                inClass = true;
+                sb.Append(c);
+                // A ']' first in the class (after an optional '^') is a member, not its end.
+                if (i + 1 < pattern.Length && pattern[i + 1] == '^') sb.Append(pattern[++i]);
+                if (i + 1 < pattern.Length && pattern[i + 1] == ']') sb.Append(pattern[++i]);
+                continue;
+            }
+            else if (c == '$')
+            {
+                sb.Append(@"(?=\r?$)");
+                continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     /// <summary>Keep a fragment under a <c>TextSearchOptions.Rectangle</c> filter when its
@@ -375,13 +435,8 @@ public sealed partial class TextFragmentAbsorber
 
         var (charPageX, charPageEnd) = RunCharPageSpans(run, text);
 
-        // Use tight tolerance for left clip (include chars AT or after rect.LLX)
-        // and loose tolerance for right clip.
-        var rightTol = 0.5;
-
-        // Find first character that starts within or near the rect left edge.
-        // Include characters whose midpoint is within the rect (more than half
-        // of the glyph is visible).
+        // A character belongs to the rectangle when its midpoint does (more than half of
+        // the glyph is inside), at either edge alike.
         int clipStart = 0;
         for (int i = 0; i < text.Length; i++)
         {
@@ -394,13 +449,13 @@ public sealed partial class TextFragmentAbsorber
             clipStart = i + 1;
         }
 
-        // Find last character whose END position is within the rect right edge.
-        // When even the first candidate character ends past the right edge, nothing
-        // fits — clipEnd must collapse to clipStart (empty), not keep the whole tail.
+        // The last character whose midpoint is within the rect right edge. When even the
+        // first candidate lies past the right edge, nothing fits — clipEnd must collapse to
+        // clipStart (empty), not keep the whole tail.
         int clipEnd = clipStart;
         for (int i = text.Length - 1; i >= clipStart; i--)
         {
-            if (charPageEnd[i] <= searchRect.URX + rightTol)
+            if ((charPageX[i] + charPageEnd[i]) * 0.5 <= searchRect.URX)
             {
                 clipEnd = i + 1;
                 break;

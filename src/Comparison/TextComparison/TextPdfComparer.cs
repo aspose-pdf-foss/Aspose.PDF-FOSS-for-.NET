@@ -68,8 +68,8 @@ namespace Aspose.Pdf.Comparison
         {
             var stats = new TextItemComparisonStatistics();
             if (diffs is not null)
-                foreach (var d in diffs)
-                    if (d is not null) stats.Count(d);
+                foreach (var d in diffs.Where(d => d is not null))
+                    stats.Count(d);
             return stats;
         }
 
@@ -201,9 +201,7 @@ namespace Aspose.Pdf.Comparison
         {
             var cx = (r.LLX + r.URX) / 2;
             var cy = (r.LLY + r.URY) / 2;
-            foreach (var a in areas)
-                if (a is not null && a.ContainsPoint(cx, cy)) return true;
-            return false;
+            return areas.Any(a => a is not null && a.ContainsPoint(cx, cy));
         }
 
         /// <summary>Top-to-bottom, then left-to-right; two fragments within half a line height

@@ -22,8 +22,7 @@ public sealed partial class Page
         parser.OnTextShown += (text, _, state) =>
         {
             if (bk.hard || state.RenderingMode == 3) return;
-            foreach (var ch in text)
-                if (!char.IsWhiteSpace(ch) && ch != '\0') { bk.hard = true; return; }
+            if (text.Any(ch => !char.IsWhiteSpace(ch) && ch != '\0')) bk.hard = true;
         };
 
         parser.OnPathPainted += (op, state, segments) =>
@@ -79,8 +78,8 @@ public sealed partial class Page
             // Once the summed coverage exceeds the caller's tolerance the verdict
             // can't change (coverage only grows) — skip further image decodes.
             if (bk.hard || bk.sum > bk.tolerance) return;
-            try { bk.sum += NonWhiteImageFraction(dict, IO.Filters.StreamFilter.Decode(raw, dict), inline: true); }
-            catch { }
+            try { bk.sum += NonWhiteImageFraction(dict, IO.Filters.StreamFilter.Decode(raw, dict)); }
+            catch { /* a stream that does not decode is skipped, as if absent */ }
         };
 
         parser.OnImageDrawn += (name, _) =>
@@ -99,13 +98,8 @@ public sealed partial class Page
             }
             // Distinct image resources sum; the same name drawn twice counts once.
             if (!bk.counted.Add(depth + ":" + name)) return;
-            try
-            {
-                byte[] decoded;
-                try { decoded = _reader.DecodeStream(xobj); } catch { return; }
-                bk.sum += NonWhiteImageFraction(xobj.Dict, decoded, inline: false);
-            }
-            catch { }
+            try { bk.sum += ImageInkFraction(xobj, bk.tolerance - bk.sum); }
+            catch { /* a stream that does not decode is skipped, as if absent */ }
         };
 
         parser.Parse(content, null, null, null, null, null, null);

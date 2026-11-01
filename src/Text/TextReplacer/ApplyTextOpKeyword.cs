@@ -33,12 +33,12 @@ public sealed partial class TextReplacer
             {
                 Text = decoded, Bytes = s.Value, IsHex = s.IsHex,
                 OpStart = ct.ops2[0].startPos, OpEnd = ep,
-                TmA = ct.tmA, TmB = ct.tmB, TmC = ct.tmC, TmD = ct.tmD, TmTx = ct.tmTx, TmTy = ct.tmTy,
+                TmA = ct.tmA, TmB = ct.tmB, TmC = ct.tmC, TmD = ct.tmD, TmTx = ct.tmTx, TmTy = ct.tmTy, TlmTx = ct.tlmTx,
                 CtmA = ct.ctmA, CtmB = ct.ctmB, CtmC = ct.ctmC, CtmD = ct.ctmD, CtmTx = ct.ctmTx, CtmTy = ct.ctmTy,
                 FontDict = ct.curFontDict, FontName = ct.curFontName, ToUnicode = ct.curToUnicode,
-                FontSize = ct.curFontSize, Tc = ct.curTc, BtStart = ct.curBtStart,
+                FontSize = ct.curFontSize, Tc = ct.curTc, Tw = ct.curTw, Clip = ct.clip, BtStart = ct.curBtStart,
                 TmPositioned = ct.pendingTm.has, TmXTokStart = ct.pendingTm.xStart,
-                TmXTokEnd = ct.pendingTm.xEnd, TmXVal = ct.pendingTm.xVal,
+                TmXTokEnd = ct.pendingTm.xEnd, TmXVal = ct.pendingTm.xVal, TmYTok = ct.pendingTmY,
                 TdPositioned = ct.pendingTd.has, TdXTokStart = ct.pendingTd.xStart,
                 TdXTokEnd = ct.pendingTd.xEnd, TdXVal = ct.pendingTd.xVal,
             });
@@ -68,6 +68,7 @@ public sealed partial class TextReplacer
             ct.tmTx = ToDouble(ct.ops2[4].obj); ct.tmTy = ToDouble(ct.ops2[5].obj);
             ct.tlmTx = ct.tmTx; ct.tlmTy = ct.tmTy;
             ct.pendingTm = (true, ct.ops2[4].startPos, ct.ops2[4].endPos, ct.tmTx);
+            ct.pendingTmY = (ct.ops2[5].startPos, ct.ops2[5].endPos);
             ct.pendingTd.has = false;
         }
         else if (op == "TL" && ct.ops2.Count >= 1) ct.tlLeading = ToDouble(ct.ops2[0].obj);

@@ -370,9 +370,11 @@ public partial class ImageStamp
         // Photoshop/libjpeg convention for standalone .jpg files), which the PDF
         // image dictionary expresses as /Decode [1 0 1 0 1 0 1 0]. PDF-embedded CMYK
         // DCT images use direct values, so only the file-import path needs this.
+        // A one-component (greyscale) JPEG is DeviceGray: under DeviceRGB a viewer reads
+        // each sample as a third of a pixel.
         var (comps, hasAdobe) = ParseJpegColorInfo(jpegData);
-        var stamp = new ImageStamp(jpegData, width, height,
-            comps == 4 ? "DeviceCMYK" : "DeviceRGB", "DCTDecode", 8)
+        var colorSpace = comps switch { 4 => "DeviceCMYK", 1 => "DeviceGray", _ => "DeviceRGB" };
+        var stamp = new ImageStamp(jpegData, width, height, colorSpace, "DCTDecode", 8)
         {
             DisplayWidth = width,
             DisplayHeight = height
@@ -442,6 +444,13 @@ public partial class ImageStamp
     /// collection all reach a BMP by a different route.
     /// </summary>
     internal static ImageStamp FromBmp(byte[] bmp)
+    {
+        var (rgb, width, height) = DecodeBmp(bmp);
+        return FromRgb(rgb, width, height);
+    }
+
+    /// <summary>A BMP's pixels as 8-bit RGB rows, top row first (see <see cref="FromBmp"/>).</summary>
+    internal static (byte[] rgb, int width, int height) DecodeBmp(byte[] bmp)
     {
         if (bmp.Length < 54) throw new ArgumentException("BMP too small.");
         // File header: 'BM' (2) + size (4) + reserved (4) + offBits (4) = 14 bytes
@@ -519,7 +528,7 @@ public partial class ImageStamp
                 rgb[dstRowOff + col * 3 + 2] = palette[p + 2];
             }
         }
-        return FromRgb(rgb, width, height);
+        return (rgb, width, height);
     }
 
     /// <summary>Decode a raster the JPEG/PNG branches did not claim using the library's own
@@ -537,8 +546,7 @@ public partial class ImageStamp
             if (IO.GifDecoder.TryDecode(imageData) is (var gifRgb, var gifAlpha, var gw, var gh))
             {
                 var stamp = FromRgb(gifRgb, gw, gh);
-                foreach (var a in gifAlpha)
-                    if (a != 255) { stamp._smaskData = CompressFlate(gifAlpha); break; }
+                if (gifAlpha.Any(a => a != 255)) { stamp._smaskData = CompressFlate(gifAlpha); }
                 return stamp;
             }
             if (IO.TiffDecoder.IsTiff(imageData)
@@ -612,9 +620,34 @@ public partial class ImageStamp
     /// <summary>
     /// Create an image stamp from PNG file data. Decodes PNG to raw RGB pixels.
     /// </summary>
+    /// <summary>A stamp from 8-bit RGBA samples, as <see cref="FromPngData"/> makes one from a
+    /// decoded PNG: the alpha becomes a mask only when some sample is not opaque.</summary>
+    internal static ImageStamp FromRgba(byte[] rgba, int width, int height)
+    {
+        var rgb = new byte[width * height * 3];
+        var alpha = new byte[width * height];
+        var anyTransparent = false;
+        for (int px = 0, i = 0, o = 0; px < alpha.Length; px++, i += 4, o += 3)
+        {
+            rgb[o] = rgba[i];
+            rgb[o + 1] = rgba[i + 1];
+            rgb[o + 2] = rgba[i + 2];
+            alpha[px] = rgba[i + 3];
+            if (alpha[px] != 255) anyTransparent = true;
+        }
+        var stamp = FromRgb(rgb, width, height);
+        if (anyTransparent) stamp.SetAlphaMask(alpha);
+        return stamp;
+    }
+
     public static ImageStamp FromPngData(byte[] pngData)
     {
+        if (FromPngRows(pngData) is { } rows) return rows;
         var pn = DecodePngPixels(pngData);
+        // Embedded, the colour under a transparent pixel reaches viewers that resample; decoded for compositing
+        // (DecodeRaster) it travels with its alpha and is left as the PNG has it.
+        if (pn.anyTransparent && pn.alpha is not null)
+            FillTransparentFromNearestOpaque(pn.rgb, pn.alpha, pn.width, pn.height);
         pn.stamp = FromRgb(pn.rgb, pn.width, pn.height);
         if (pn.alpha is not null && pn.anyTransparent)
             pn.stamp.SetAlphaMask(pn.alpha);
@@ -635,6 +668,7 @@ public partial class ImageStamp
         pn.height = ReadInt32BE(pn.pngData, 20);
         pn.bitDepth = pn.pngData[24];
         pn.colorType = pn.pngData[25];
+        var interlaced = pn.pngData.Length > IhdrInterlaceOffset && pn.pngData[IhdrInterlaceOffset] == 1;
 
         pn.idatData = new MemoryStream();
         pn.palette = null;
@@ -649,15 +683,15 @@ public partial class ImageStamp
         // The zlib header is skipped unchecked and the check value never read: raw deflate.
         pn.rawScanlines = IO.Filters.ManagedInflater.InflateToEnd(pn.compressed, 2, pn.compressed.Length - 2, zlibWrapper: false);
 
-        pn.channels = pn.colorType switch
-        {
-            0 => 1,  // Grayscale
-            2 => 3,  // RGB
-            3 => 1,  // Indexed (palette) — one index sample per pixel; PNG filter bpp is 1
-            4 => 2,  // Grayscale + Alpha
-            6 => 4,  // RGBA
-            _ => 3
-        };
+        pn.channels = IO.PngSamples.Channels(pn.colorType);
+
+        // 16-bit, sub-byte grey and Adam7-interlaced data first become plain rows of one byte per
+        // sample, which the row conversion below reads as an 8-bit image.
+        var plainRows = IO.PngSamples.ReadersTakeAsIs(pn.bitDepth, pn.colorType, interlaced)
+            ? null
+            : IO.PngSamples.ToBytePerSample(pn.rawScanlines, pn.width, pn.height, pn.bitDepth, pn.colorType, interlaced);
+        if (plainRows is not null)
+            pn.bitDepth = 8;
 
         pn.stride = pn.colorType == 3
             ? (pn.width * pn.bitDepth + 7) / 8
@@ -675,8 +709,12 @@ public partial class ImageStamp
 
         for (var y = 0; y < pn.height; y++)
         {
-            if (pn.scanPos >= pn.rawScanlines.Length) break;
-            UnfilterPngRow(pn);
+            if (plainRows is not null)
+                Array.Copy(plainRows, y * pn.stride, pn.curRow, 0, pn.stride);
+            else if (pn.scanPos >= pn.rawScanlines.Length)
+                break;
+            else
+                UnfilterPngRow(pn);
 
             ConvertPngRowToRgb(pn, y);
 
@@ -687,7 +725,7 @@ public partial class ImageStamp
     }
 
     /// <summary>An encoded raster's pixels as 8-bit RGB (and its alpha, when it has any), read by the
-    /// library's own decoders - PNG, JPEG, GIF and the first frame of a TIFF - so it works wherever the
+    /// library's own decoders - PNG, JPEG, GIF, BMP and the first frame of a TIFF - so it works wherever the
     /// library runs, GDI+ or not. Null when none of them recognises the bytes.</summary>
     internal static (byte[] rgb, byte[]? alpha, int width, int height)? DecodeRaster(byte[] data)
     {
@@ -710,8 +748,20 @@ public partial class ImageStamp
             return (gifRgb, gifAlpha, gw, gh);
         if (IO.TiffDecoder.IsTiff(data) && IO.TiffDecoder.DecodeFramesAsPng(data) is { Count: > 0 } frames)
             return DecodeRaster(frames[0]);
+        if (data[0] == (byte)'B' && data[1] == (byte)'M')
+        {
+            try
+            {
+                var (bmpRgb, bw, bh) = DecodeBmp(data);
+                return (bmpRgb, null, bw, bh);
+            }
+            catch (ArgumentException) { return null; }   // a BMP variant the decoder does not read
+        }
         return null;
     }
+
+    // The interlace method byte of the IHDR chunk: signature (8) + chunk header (8) + 12 bytes in.
+    private const int IhdrInterlaceOffset = 28;
 
     /// <summary>Big-endian 32-bit read, the byte order of every PNG length and IHDR field.</summary>
     private static int ReadInt32BE(byte[] d, int offset) =>
@@ -723,7 +773,9 @@ public partial class ImageStamp
         var pa = Math.Abs(p - a);
         var pb = Math.Abs(p - b);
         var pc = Math.Abs(p - c);
-        return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+        if (pa <= pb && pa <= pc) return a;
+        if (pb <= pc) return b;
+        return c;
     }
 
     private static bool IsJpeg(byte[] data) =>

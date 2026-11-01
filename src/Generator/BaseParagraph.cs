@@ -44,7 +44,8 @@ public class BaseParagraph
     /// <summary>Typed hyperlink decoration applied to the paragraph.</summary>
     public Hyperlink? Hyperlink { get; set; }
 
-    /// <summary>Z-order index used by the DOM renderer.</summary>
+    /// <summary>Z-order of the paragraph on its page: a page's paragraphs are laid out and painted in ascending
+    /// order (added order among equals), so a higher index draws on top.</summary>
     public int ZIndex { get; set; }
 
     /// <summary>Identifier assigned via the XML template's <c>id</c> attribute;

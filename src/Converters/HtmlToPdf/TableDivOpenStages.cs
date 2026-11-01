@@ -13,23 +13,23 @@ internal static partial class HtmlToPdfConverter
         {
             // A pre/pre-wrap box keeps the source newline that follows its
             // opening tag, which costs it a leading empty line box.
-            if (dv.uaCellBoxes && Regex.IsMatch(dvSt,
+            if (dv.uaCellBoxes && SafeRegex.IsMatch(dvSt,
                     @"white-space\s*:\s*(?:-\w+-)?pre(?:-wrap|-line)?\b", RegexOptions.IgnoreCase))
                 dv.ps.preWrapPending = true;
             var dvW = dv.uaCellBoxes
-                ? Regex.Match(dvSt, @"width\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase)
+                ? SafeRegex.Match(dvSt, @"width\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase)
                 : Match.Empty;
             if (dvW.Success && double.TryParse(dvW.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var dvPx) && dvPx > 0)
             {
                 // Content-box: the div's own padding widens its box.
-                foreach (Match dpm in Regex.Matches(dvSt,
+                foreach (Match dpm in SafeRegex.Matches(dvSt,
                     @"padding-(left|right)\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase))
                     dvPx += double.Parse(dpm.Groups[2].Value,
                         System.Globalization.CultureInfo.InvariantCulture);
                 var mlPct = 0.0;
-                var dvMl = Regex.Match(dvSt,
+                var dvMl = SafeRegex.Match(dvSt,
                     @"margin\s*:\s*[\d.]+%?\s+[\d.]+%?\s+[\d.]+%?\s+(\d+(?:\.\d+)?)%|margin-left\s*:\s*(\d+(?:\.\d+)?)%",
                     RegexOptions.IgnoreCase);
                 if (dvMl.Success)
@@ -44,13 +44,13 @@ internal static partial class HtmlToPdfConverter
             // floors the row the way a cell height does — plus its own top
             // margin, whose percent form resolves against the width of the
             // cell that contains it.
-            if (Regex.Match(dvSt, @"(?<!\w-)height\s*:\s*([\d.]+\s*(?:px|pt|cm|mm|in))",
+            if (SafeRegex.Match(dvSt, @"(?<!\w-)height\s*:\s*([\d.]+\s*(?:px|pt|cm|mm|in))",
                     RegexOptions.IgnoreCase) is { Success: true } dvHm
                 && TryParseLength(dvHm.Groups[1].Value.Replace(" ", "")) is { } dvHPt
                 && dvHPt > 0)
             {
                 var dvMt = 0.0;
-                var dvMtm = Regex.Match(dvSt,
+                var dvMtm = SafeRegex.Match(dvSt,
                     @"margin\s*:\s*(\d+(?:\.\d+)?)%|margin-top\s*:\s*(\d+(?:\.\d+)?)%",
                     RegexOptions.IgnoreCase);
                 // A percent margin resolves against the containing block's
@@ -66,7 +66,7 @@ internal static partial class HtmlToPdfConverter
                 // The box's own horizontal rule sits under its content, so a
                 // bottom border adds to the height it claims in the row.
                 var dvBb = 0.0;
-                if (dv.uaCellBoxes && Regex.Match(dvSt,
+                if (dv.uaCellBoxes && SafeRegex.Match(dvSt,
                         @"border-bottom\s*:\s*(\d+(?:\.\d+)?)\s*px",
                         RegexOptions.IgnoreCase) is { Success: true } dvBbm)
                     dvBb = double.Parse(dvBbm.Groups[1].Value,
@@ -92,7 +92,7 @@ internal static partial class HtmlToPdfConverter
             // block boundary instead of becoming a phantom box.
             if (IsAllWhitespace(dv.ps.line)) dv.ps.line.Clear();
             else if (dv.ps.line.Length > 0
-                && !Regex.IsMatch(dv.ps.line.ToString(), @"^\s*(?:\d+\.|•)\s*$"))
+                && !SafeRegex.IsMatch(dv.ps.line.ToString(), @"^\s*(?:\d+\.|•)\s*$"))
                 PushLine(dv.ps, dv.redlineCells, dv.dwFormCells, dv.widenProbe);
             // …and a block box inside a paragraph is RE-PARENTED out of it:
             // `<p><span style="font-weight:bold"><div>…` closes the p, and
@@ -117,7 +117,7 @@ internal static partial class HtmlToPdfConverter
         // stacked a restore frame; without one the div stacks its own.
         if (dv.liftNestedTables && dv.ps.cell is not null && dv.tok.Attributes is not null
             && dv.tok.Attributes.TryGetValue("style", out var dvFontSt) && dvFontSt is not null
-            && Regex.Match(dvFontSt, @"(?<![-\w])font-size\s*:\s*([^;""']+)",
+            && SafeRegex.Match(dvFontSt, @"(?<![-\w])font-size\s*:\s*([^;""']+)",
                 RegexOptions.IgnoreCase) is { Success: true } dvFsm
             && TryParseLength(dvFsm.Groups[1].Value.Trim()) is { } dvFsp && dvFsp > 0)
         {
@@ -143,9 +143,11 @@ internal static partial class HtmlToPdfConverter
                     chDivElem.Display = ddisp.Trim().ToLowerInvariant();
                 if (dvd.TryGetValue("font-size", out var dfs2))
                 {
-                    var dBase = dv.ps.curFontPt > 0 ? dv.ps.curFontPt
-                        : dv.ps.cellClassPt > 0 ? dv.ps.cellClassPt : dv.cellFontSize;
-                    var dpm2 = Regex.Match(dfs2.Trim(), @"^([\d.]+)\s*%$");
+                    double dBase;
+                    if (dv.ps.curFontPt > 0) dBase = dv.ps.curFontPt;
+                    else if (dv.ps.cellClassPt > 0) dBase = dv.ps.cellClassPt;
+                    else dBase = dv.cellFontSize;
+                    var dpm2 = SafeRegex.Match(dfs2.Trim(), @"^([\d.]+)\s*%$");
                     if (dpm2.Success && double.TryParse(dpm2.Groups[1].Value,
                             System.Globalization.NumberStyles.Float,
                             System.Globalization.CultureInfo.InvariantCulture, out var dPct)
@@ -155,7 +157,7 @@ internal static partial class HtmlToPdfConverter
                         dv.ps.curFontPt = dAbs;
                 }
                 if (dvd.TryGetValue("font-weight", out var dfw)
-                    && Regex.IsMatch(dfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
+                    && SafeRegex.IsMatch(dfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
                 {
                     dvBold = true;
                     dv.ps.boldDepth++;
@@ -181,8 +183,10 @@ internal static partial class HtmlToPdfConverter
                         || dvd.TryGetValue("background", out capBg))
                     && ParseCssColor(capBg) is { } capFill)
                 {
-                    var capBase = dv.ps.curFontPt > 0 ? dv.ps.curFontPt
-                        : dv.ps.cellClassPt > 0 ? dv.ps.cellClassPt : dv.cellFontSize;
+                    double capBase;
+                    if (dv.ps.curFontPt > 0) capBase = dv.ps.curFontPt;
+                    else if (dv.ps.cellClassPt > 0) capBase = dv.ps.cellClassPt;
+                    else capBase = dv.cellFontSize;
                     var (cpT2, cpR2, _, cpL2) = dvd.TryGetValue("padding", out var capPad)
                         ? ChainPadPt(capPad, capBase) : (0, 0, 0, 0);
                     // The capsule div's MARGIN is white space outside the
@@ -205,8 +209,10 @@ internal static partial class HtmlToPdfConverter
                 if ((chDivElem.Display ?? "") != "inline-block" && !divIsCapsule
                     && dvd.TryGetValue("padding", out var dvPad2))
                 {
-                    var dvBase = dv.ps.curFontPt > 0 ? dv.ps.curFontPt
-                        : dv.ps.cellClassPt > 0 ? dv.ps.cellClassPt : dv.cellFontSize;
+                    double dvBase;
+                    if (dv.ps.curFontPt > 0) dvBase = dv.ps.curFontPt;
+                    else if (dv.ps.cellClassPt > 0) dvBase = dv.ps.cellClassPt;
+                    else dvBase = dv.cellFontSize;
                     var (dpT, dpR, dpB, dpL) = ChainPadPt(dvPad2, dvBase);
                     if (dpL + dpR > 0)
                     {

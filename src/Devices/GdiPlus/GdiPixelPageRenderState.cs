@@ -20,7 +20,6 @@ public sealed partial class GdiPlusPageRenderer
 /// invocation; never shared.</summary>
 private sealed class GdiPixelPageRenderState
 {
-    public Rectangle rawMb = null!;
     // Visible region = crop box clipped to media box; content is sized and offset
     // to it so anything outside the crop area is excluded.
     public Rectangle crop = null!;

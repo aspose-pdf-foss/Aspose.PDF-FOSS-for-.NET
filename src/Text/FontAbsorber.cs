@@ -62,7 +62,9 @@ public sealed class FontAbsorber
 
     private void VisitPage(Page page)
     {
+#pragma warning disable S3267 // the test registers the item (a HashSet add) - a side effect a LINQ predicate would hide
         foreach (var font in page.Fonts)
+#pragma warning restore S3267
         {
             // Dedupe by the underlying font DICTIONARY object: the reader resolves an
             // indirect object to one instance, so a font shared across pages registers

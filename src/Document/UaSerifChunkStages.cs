@@ -39,9 +39,9 @@ public sealed partial class Document
         TokenizeUaSerifRuns(uc);
         if (uc.uaRuns.Count == 0)
         {
-            // a <p> holding only <br> keeps one blank line box;
-            // a truly empty <p> takes nothing
-            if (System.Text.RegularExpressions.Regex.IsMatch(uc.inner, @"<br\b",
+            // a <p> holding only <br> keeps one blank line box; a
+            // truly empty <p> takes nothing
+            if (SafeRegex.IsMatch(uc.inner, @"<br\b",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             {
                 uc.flow.AdvanceY(UaSerifPitchPt);
@@ -64,15 +64,15 @@ public sealed partial class Document
     }
 
     /// <summary>Writes the wrapped lines: each run at its pen in the serif face (bold where marked), the block advancing by the line pitch.</summary>
-    private void EmitUaSerifLines(UaSerifChunkState uc)
+    private static void EmitUaSerifLines(UaSerifChunkState uc)
     {
         foreach (var line2 in uc.uaLines)
         {
-            var drop = uc.uaAtBoxEdge ? UaSerifSeatPt
-                : uc.isHead && uc.firstOfElement ? UaSerifH2BeforePt
-                : uc.uaAfterHead ? UaSerifH2AfterPt
-                : uc.firstOfElement && uc.uaLineStyled ? UaSerifMixedPitchPt
-                : UaSerifPitchPt;
+            double drop = UaSerifPitchPt;
+            if (uc.uaAtBoxEdge) drop = UaSerifSeatPt;
+            else if (uc.isHead && uc.firstOfElement) drop = UaSerifH2BeforePt;
+            else if (uc.uaAfterHead) drop = UaSerifH2AfterPt;
+            else if (uc.firstOfElement && uc.uaLineStyled) drop = UaSerifMixedPitchPt;
             uc.flow.AdvanceY(drop);
             var baseY = uc.flow.CurrentY;
             foreach (var (lx, lt, lc, lb) in line2)
@@ -91,7 +91,7 @@ public sealed partial class Document
     }
 
     /// <summary>Wraps the element's runs into lines at the UA width, measuring word by word, keeping a run's leading and trailing spaces as marked.</summary>
-    private void WrapUaSerifRuns(UaSerifChunkState uc)
+    private static void WrapUaSerifRuns(UaSerifChunkState uc)
     {
         for (var ri = 0; ri < uc.uaRuns.Count; ri++)
         {
@@ -128,7 +128,7 @@ public sealed partial class Document
         {
             if (raw.Length == 0) return;
             var lead = uc.uaForceLead || char.IsWhiteSpace(raw[0]);
-            var t = System.Text.RegularExpressions.Regex.Replace(
+            var t = SafeRegex.Replace(
                 HtmlFragment.StripHtmlTags(raw), @"\s+", " ").Trim();
             if (t.Length == 0) { uc.uaForceLead = true; return; }
             uc.uaRuns.Add((t, uc.uaC, uc.uaBold > 0, uc.uaStyled, lead,
@@ -136,24 +136,24 @@ public sealed partial class Document
             uc.uaForceLead = false;
         }
         foreach (System.Text.RegularExpressions.Match tg in
-            System.Text.RegularExpressions.Regex.Matches(uc.inner, @"<[^>]*>"))
+            SafeRegex.Matches(uc.inner, @"<[^>]*>"))
         {
             EmitRun(uc.inner[uc.rp..tg.Index]);
             uc.rp = tg.Index + tg.Length;
             var tag2 = tg.Value;
-            if (System.Text.RegularExpressions.Regex.IsMatch(tag2, @"^<\s*/\s*span",
+            if (SafeRegex.IsMatch(tag2, @"^<\s*/\s*span",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             { if (uc.uaStack.Count > 0) (uc.uaC, uc.uaStyled) = uc.uaStack.Pop(); }
-            else if (System.Text.RegularExpressions.Regex.IsMatch(tag2, @"^<\s*span",
+            else if (SafeRegex.IsMatch(tag2, @"^<\s*span",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             {
                 uc.uaStack.Push((uc.uaC, uc.uaStyled));
-                var st = System.Text.RegularExpressions.Regex.Match(tag2,
+                var st = SafeRegex.Match(tag2,
                     @"style\s*=\s*(['""])(?<s>[^'""]*)\1",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (st.Success)
                 {
-                    var cm2 = System.Text.RegularExpressions.Regex.Match(
+                    var cm2 = SafeRegex.Match(
                         st.Groups["s"].Value, @"(?<![-\w])color\s*:\s*([^;]+)",
                         System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                     if (cm2.Success && Converters.HtmlToPdfConverter
@@ -161,10 +161,10 @@ public sealed partial class Document
                     { uc.uaC = cc2; uc.uaStyled = true; }
                 }
             }
-            else if (System.Text.RegularExpressions.Regex.IsMatch(tag2,
+            else if (SafeRegex.IsMatch(tag2,
                 @"^<\s*(strong|b)[\s>]",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase)) uc.uaBold++;
-            else if (System.Text.RegularExpressions.Regex.IsMatch(tag2,
+            else if (SafeRegex.IsMatch(tag2,
                 @"^<\s*/\s*(strong|b)[\s>]",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase)) uc.uaBold--;
         }

@@ -68,7 +68,7 @@ public partial class CaretAnnotation : MarkupAnnotation
         }
     }
 
-    private static double G(PdfObject o) => o is PdfReal r ? r.Value : o is PdfInteger i ? i.Value : 0;
+    private static double G(PdfObject o) => o switch { PdfReal r => r.Value, PdfInteger i => i.Value, _ => 0 };
 }
 
 /// <summary>A sound annotation: an icon on the page that plays embedded audio when activated.</summary>
@@ -128,7 +128,7 @@ public partial class SoundAnnotation : MarkupAnnotation
         }
     }
 
-    private SoundData _soundData;
+    private readonly SoundData _soundData;
     public SoundData SoundData => _soundData;
 
     // ── Wire to /Sound stream (PDF 32000-1 §12.5.6.16, Table 175) ──
@@ -166,7 +166,7 @@ public partial class SoundAnnotation : MarkupAnnotation
         Dict.Set("Sound", stream);
     }
 
-    private SoundData ParseSoundData(PdfDictionary dict, PdfReader reader)
+    private static SoundData ParseSoundData(PdfDictionary dict, PdfReader reader)
     {
         var sd = new SoundData();
         var soundObj = reader.Resolve(dict.Get("Sound"));
@@ -209,7 +209,7 @@ public partial class SoundAnnotation : MarkupAnnotation
             {
                 sd.SetContents(System.IO.File.ReadAllBytes(soundFile));
             }
-            catch { }
+            catch { /* a sound file that cannot be read leaves the sound data empty */ }
         }
         return sd;
     }
@@ -221,11 +221,6 @@ public partial class SoundAnnotation : MarkupAnnotation
         s.CopyTo(ms);
         return ms.ToArray();
     }
-
-    /// <summary>Sound annotations have no typed Visit overload on
-    /// <see cref="AnnotationSelector"/>, so Accept here is a no-op kept for reflection
-    /// compatibility.</summary>
-    public override void Accept(AnnotationSelector visitor) { _ = visitor; }
 }
 
 /// <summary>A movie annotation: plays a movie file in a rectangle on the page.</summary>
@@ -372,7 +367,7 @@ public partial class ScreenAnnotation : Annotation
         set
         {
             if (value is null) Dict.Remove("T");
-            else Dict.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else Dict.Set("T", Forms.Field.EncodePdfTextString(value));
         }
     }
 }

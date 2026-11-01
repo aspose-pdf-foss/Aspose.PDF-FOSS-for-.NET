@@ -29,6 +29,11 @@ internal sealed class PdfStream : PdfObject
     /// examined; cleared whenever the data changes.</summary>
     internal bool? ShowsNoText { get; set; }
 
+    /// <summary>True once the data of a loaded stream was replaced: what it holds is no longer the
+    /// file's bytes (under an encrypted trailer, no longer ciphertext), so a save that keeps the
+    /// trailer must encrypt it as it would a new stream.</summary>
+    internal bool DataReplaced { get; private set; }
+
     /// <summary>Replace the raw stream data (used by optimization).</summary>
-    internal void ReplaceData(byte[] newData) { RawData = newData; ShowsNoText = null; }
+    internal void ReplaceData(byte[] newData) { RawData = newData; ShowsNoText = null; DataReplaced = true; }
 }

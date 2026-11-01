@@ -137,7 +137,7 @@ internal sealed class Asn1Reader
     {
         ExpectTag(0x03);
         var len = ReadLength();
-        var unusedBits = _data[_pos++]; // usually 0
+        _ = _data[_pos++]; // usually 0
         var val = new byte[len - 1];
         Array.Copy(_data, _pos, val, 0, len - 1);
         _pos += len - 1;
@@ -236,7 +236,7 @@ internal sealed class Asn1Reader
     {
         _pos++; // tag
         if ((_data[_pos - 1] & 0x1F) == 0x1F) // multi-byte tag
-            while ((_data[_pos++] & 0x80) != 0) { }
+            while ((_data[_pos++] & 0x80) != 0) { /* the condition reads the multi-byte tag - nothing more to do */ }
         var len = ReadLength();
         _pos += len;
         ConsumeEoc();
@@ -300,7 +300,7 @@ internal sealed class Asn1Reader
                 // Read tag
                 scanPos++;
                 if ((_data[scanPos - 1] & 0x1F) == 0x1F)
-                    while (scanPos < _end && (_data[scanPos++] & 0x80) != 0) { }
+                    while (scanPos < _end && (_data[scanPos++] & 0x80) != 0) { /* the condition reads the multi-byte tag - nothing more to do */ }
 
                 // Read length
                 if (scanPos >= _end) break;

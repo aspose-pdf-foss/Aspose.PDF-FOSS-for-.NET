@@ -25,7 +25,7 @@ public sealed partial class PdfContentEditor
         var contentBytes = GetPageContentBytes(page, doc);
         if (contentBytes.Length == 0) return [];
 
-        var contentText = Encoding.ASCII.GetString(contentBytes);
+        var contentText = Compat.Latin1.GetString(contentBytes);
         return ParseStamps(contentText, page, doc);
     }
 
@@ -43,7 +43,7 @@ public sealed partial class PdfContentEditor
         var contentBytes = GetPageContentBytes(page, doc);
         if (contentBytes.Length == 0) return;
 
-        var contentText = Encoding.ASCII.GetString(contentBytes);
+        var contentText = Compat.Latin1.GetString(contentBytes);
         var stampBlocks = FindStampBlocks(contentText, page, doc);
 
         var indicesToRemove = new HashSet<int>(stampIndices.Where(i => i >= 0 && i < stampBlocks.Count));
@@ -77,7 +77,7 @@ public sealed partial class PdfContentEditor
         sb.Append(contentText, lastEnd, contentText.Length - lastEnd);
 
         var newContent = sb.ToString();
-        page.SetContentStream(Encoding.ASCII.GetBytes(newContent));
+        page.SetContentStream(Compat.Latin1.GetBytes(newContent));
 
         // Drop each deleted stamp's XObject from the page resources when the
         // rewritten content no longer draws it (a `/Name Do`). Leaving the
@@ -91,7 +91,7 @@ public sealed partial class PdfContentEditor
             {
                 foreach (var name in removedXNames.Distinct())
                 {
-                    if (Regex.IsMatch(newContent, $@"/{Regex.Escape(name)}\s+Do\b")) continue;
+                    if (SafeRegex.IsMatch(newContent, $@"/{Regex.Escape(name)}\s+Do\b")) continue;
                     xobjects.Remove(name);
                 }
             }
@@ -112,6 +112,14 @@ public sealed partial class PdfContentEditor
             DeleteStamp(pageNumber, indices);
     }
 
+    /// <summary>Delete all stamps with the given <paramref name="stampId"/> across every page.</summary>
+    public void DeleteStampById(int stampId)
+    {
+        if (_document is null) return;
+        for (int p = 1; p <= _document.PageCount; p++)
+            DeleteStampById(p, stampId);
+    }
+
     /// <summary>
     /// Delete stamps by their stamp IDs.
     /// </summary>
@@ -125,6 +133,14 @@ public sealed partial class PdfContentEditor
             .ToArray();
         if (indices.Length > 0)
             DeleteStamp(pageNumber, indices);
+    }
+
+    /// <summary>Delete all stamps whose ID is in <paramref name="stampIds"/> across every page.</summary>
+    public void DeleteStampByIds(int[] stampIds)
+    {
+        if (_document is null) return;
+        for (int p = 1; p <= _document.PageCount; p++)
+            DeleteStampByIds(p, stampIds);
     }
 
     /// <summary>
@@ -194,9 +210,12 @@ public sealed partial class PdfContentEditor
             {
                 IndexOnPage = idx,
                 StampId = sb.StampId,
-                StampType = sb.IsImage ? StampType.Image
-                    : isFormStamp ? StampType.Form
-                    : DetermineStampType(blockContent),
+                StampType = (sb.IsImage, isFormStamp) switch
+                {
+                    (true, _) => StampType.Image,
+                    (_, true) => StampType.Form,
+                    _ => DetermineStampType(blockContent),
+                },
                 Visible = !sb.Hidden,
             };
 
@@ -206,7 +225,7 @@ public sealed partial class PdfContentEditor
             }
             else if (info.StampType == StampType.Text)
             {
-                var textMatch = Regex.Match(blockContent, @"\(([^)]*)\)\s*Tj");
+                var textMatch = SafeRegex.Match(blockContent, @"\(([^)]*)\)\s*Tj");
                 if (textMatch.Success)
                     info.Text = textMatch.Groups[1].Value;
             }
@@ -225,14 +244,16 @@ public sealed partial class PdfContentEditor
             else if (TryParseStampMatrix(blockContent) is { } matrix)
             {
                 var box = page.MediaBox;
-                info.Rect = ComputeStampRect(matrix, page.RotateDegrees, box.Width, box.Height);
+                // A form covers its /BBox (through its /Matrix), an image the unit square.
+                var corners = isFormStamp ? FormCorners(doc, sb.XObject!) : null;
+                info.Rect = ComputeStampRect(matrix, page.RotateDegrees, box.Width, box.Height, corners);
             }
             else if (isFormStamp && doc.Reader.Resolve(sb.XObject!.Dict.Get("BBox")) is PdfArray bb && bb.Count >= 4)
             {
                 // A plain form stamp carries no %StampRect and no page-level matrix (the
                 // transform lives inside the form); fall back to the form's /BBox so callers
                 // that read StampInfo.Rectangle don't hit a null.
-                double N(int i) => bb[i] is PdfReal r ? r.Value : bb[i] is PdfInteger n ? n.Value : 0;
+                double N(int i) => bb[i] switch { PdfReal r => r.Value, PdfInteger n => n.Value, _ => 0 };
                 info.Rect = new Rectangle(N(0), N(1), N(2), N(3));
             }
 
@@ -250,9 +271,9 @@ public sealed partial class PdfContentEditor
     private static double[]? TryParseStampMatrix(string block)
     {
         double[] matrix = [1, 0, 0, 1, 0, 0];
-        var doMatch = Regex.Match(block, @"/[\w.\-]+\s+Do\b");
+        var doMatch = SafeRegex.Match(block, @"/[\w.\-]+\s+Do\b");
         var prefix = doMatch.Success ? block.Substring(0, doMatch.Index) : block;
-        var cms = Regex.Matches(prefix,
+        var cms = SafeRegex.Matches(prefix,
             @"(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+cm\b");
         if (cms.Count == 0) return null;
         var ci = System.Globalization.CultureInfo.InvariantCulture;
@@ -280,22 +301,18 @@ public sealed partial class PdfContentEditor
     ];
 
     /// <summary>
-    /// Bounding box of the unit square transformed by <paramref name="m"/>, then mapped
-    /// through the page rotation so the result is in displayed coordinates.
+    /// Bounding box of the drawn shape - the unit square an image is painted in, or the
+    /// corners a form covers (<paramref name="shape"/>) - transformed by <paramref name="m"/>,
+    /// then mapped through the page rotation so the result is in displayed coordinates.
     /// </summary>
-    private static Rectangle ComputeStampRect(double[] m, int rotate, double pageW, double pageH)
+    private static Rectangle ComputeStampRect(double[] m, int rotate, double pageW, double pageH,
+        (double x, double y)[]? shape = null)
     {
-        Span<(double x, double y)> corners =
-        [
-            (m[4], m[5]),
-            (m[0] + m[4], m[1] + m[5]),
-            (m[2] + m[4], m[3] + m[5]),
-            (m[0] + m[2] + m[4], m[1] + m[3] + m[5]),
-        ];
+        shape ??= UnitSquare;
         double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
-        foreach (var c in corners)
+        foreach (var (px, py) in shape)
         {
-            var (rx, ry) = RotatePoint(c.x, c.y, rotate, pageW, pageH);
+            var (rx, ry) = RotatePoint(px * m[0] + py * m[2] + m[4], px * m[1] + py * m[3] + m[5], rotate, pageW, pageH);
             minX = Math.Min(minX, rx); minY = Math.Min(minY, ry);
             maxX = Math.Max(maxX, rx); maxY = Math.Max(maxY, ry);
         }
@@ -321,18 +338,6 @@ public sealed partial class PdfContentEditor
         return null;
     }
 
-    private static bool IsStampBlockContent(string blockContent)
-    {
-        // A stamp block contains:
-        if (Regex.IsMatch(blockContent, @"/\w+\s+Do\b"))
-            return true;
-        if (blockContent.Contains("BT") && blockContent.Contains("ET"))
-            return true;
-        if (blockContent.Contains("%StampId="))
-            return true;
-        return false;
-    }
-
     /// <summary>
     /// True when a q/Q block is the canonical image-stamp shape —
     /// <c>q /GSx gs cm /Imx Do Q</c>: its only operators are <c>q</c>/<c>Q</c>/<c>gs</c>/<c>cm</c>
@@ -352,7 +357,7 @@ public sealed partial class PdfContentEditor
             char ch = blockContent[i];
             if (char.IsWhiteSpace(ch)) { i++; continue; }
             if (ch == '%') { int nl = blockContent.IndexOf('\n', i); i = nl < 0 ? n : nl + 1; continue; }
-            if (ch == '/') { i++; while (i < n && !IsPdfDelimiterOrWhitespace(blockContent[i])) i++; continue; }
+            if (ch == '/') { i++; while (i < n && !IsPdfDelimiterOrWhitespace(blockContent[i])) { i++; } continue; }
             if (ch == '(') { i = SkipParenString(blockContent, i); continue; }
             if (ch == '<') { int gt = blockContent.IndexOf('>', i); i = gt < 0 ? n : gt + 1; continue; }
             if (ch == '[' || ch == ']') { i++; continue; }
@@ -380,22 +385,38 @@ public sealed partial class PdfContentEditor
 
     /// <summary>Pull the caption out of a text-stamp Form XObject's content: the concatenated
     /// operands of its text-showing operators. Handles literal <c>(..)Tj</c>, hex
-    /// <c>&lt;..&gt;Tj</c> and <c>[..]TJ</c> arrays (hex decoded as WinAnsi) so a rotated stamp
+    /// <c>&lt;..&gt;Tj</c> and <c>[..]TJ</c> arrays, each read through its font, so a rotated stamp
     /// drawn with hex glyphs still reports its text.</summary>
     private static string ExtractFormStampText(Document doc, PdfStream form)
     {
         string content;
         try { content = Compat.Latin1.GetString(doc.Reader.DecodeStream(form)); }
         catch { return ""; }
+        // Each shown string is read through the font selected for it - its /ToUnicode, its
+        // encoding, its two-byte codes - as the page's own text is; one with no font selected
+        // reads its bytes as WinAnsi.
+        var fonts = doc.Reader.ResolveDict(doc.Reader.ResolveDict(form.Dict.Get("Resources"))?.Get("Font"));
+        PdfDictionary? font = null;
         var sb = new StringBuilder();
-        foreach (Match m in Regex.Matches(content,
-            @"(\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>)\s*Tj|\[((?:[^\]])*)\]\s*TJ"))
+        foreach (var groups in SafeRegex.Matches(content,
+            @"/([^\s/\[\]()<>]+)\s+[-\d.]+\s+Tf|(\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>)\s*Tj|\[((?:[^\]])*)\]\s*TJ").Select(m => m.Groups))
         {
-            if (m.Groups[1].Success) sb.Append(DecodePdfStringToken(m.Groups[1].Value));
-            else foreach (Match t in Regex.Matches(m.Groups[2].Value, @"\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>"))
-                sb.Append(DecodePdfStringToken(t.Value));
+            if (groups[1].Success) font = doc.Reader.ResolveDict(fonts?.Get(groups[1].Value));
+            else if (groups[2].Success) sb.Append(DecodeShownString(doc, font, groups[2].Value));
+            else foreach (Match t in SafeRegex.Matches(groups[3].Value, @"\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>"))
+                    sb.Append(DecodeShownString(doc, font, t.Value));
         }
         return sb.ToString();
+    }
+
+    /// <summary>A shown string token read through <paramref name="font"/>, or as WinAnsi without one.</summary>
+    private static string DecodeShownString(Document doc, PdfDictionary? font, string token)
+    {
+        if (font is null) return DecodePdfStringToken(token);
+        var bytes = token[0] == '<'
+            ? Aspose.Pdf.Text.Cp1252.GetBytes(DecodePdfStringToken(token))
+            : Compat.Latin1.GetBytes(DecodePdfStringToken(token));
+        return TextAbsorber.DecodeStringPublic(bytes, TextAbsorber.ParseToUnicodeFromDict(font, doc.Reader), font, doc.Reader, foldNbsp: false);
     }
 
     /// <summary>Decode a single PDF string token — literal <c>(..)</c> (with escapes) or hex
@@ -405,7 +426,7 @@ public sealed partial class PdfContentEditor
         if (token.Length >= 2 && token[0] == '<')
         {
             var hex = new StringBuilder();
-            foreach (var c in token) if (Uri.IsHexDigit(c)) hex.Append(c);
+            foreach (var c in token.Where(c => Uri.IsHexDigit(c))) hex.Append(c);
             if (hex.Length % 2 == 1) hex.Append('0');
             var bytes = new byte[hex.Length / 2];
             for (var i = 0; i < bytes.Length; i++)
@@ -413,7 +434,7 @@ public sealed partial class PdfContentEditor
             return Aspose.Pdf.Text.Cp1252.GetString(bytes);
         }
         var inner = token.Substring(1, token.Length - 2);
-        return Regex.Replace(inner, @"\\([nrtbf()\\]|[0-7]{1,3})", mm =>
+        return SafeRegex.Replace(inner, @"\\([nrtbf()\\]|[0-7]{1,3})", mm =>
         {
             var e = mm.Groups[1].Value;
             return e switch
@@ -425,13 +446,30 @@ public sealed partial class PdfContentEditor
         });
     }
 
+    private static readonly (double x, double y)[] UnitSquare = [(0, 0), (1, 0), (0, 1), (1, 1)];
+
+    /// <summary>The corners of a form's /BBox mapped through its /Matrix: the area the form covers in the
+    /// space it is drawn in. Null when it has no readable box.</summary>
+    private static (double x, double y)[]? FormCorners(Document doc, PdfStream form)
+    {
+        static double N(PdfObject? o) => o switch { PdfReal r => r.Value, PdfInteger i => i.Value, _ => 0 };
+        if (doc.Reader.Resolve(form.Dict.Get("BBox")) is not PdfArray { Count: >= 4 } bb) return null;
+        double[] fm = doc.Reader.Resolve(form.Dict.Get("Matrix")) is PdfArray { Count: >= 6 } ma
+            ? [N(ma[0]), N(ma[1]), N(ma[2]), N(ma[3]), N(ma[4]), N(ma[5])]
+            : [1, 0, 0, 1, 0, 0];
+        double x0 = N(bb[0]), y0 = N(bb[1]), x1 = N(bb[2]), y1 = N(bb[3]);
+        return new[] { (x0, y0), (x1, y0), (x0, y1), (x1, y1) }
+            .Select(p => (p.Item1 * fm[0] + p.Item2 * fm[2] + fm[4], p.Item1 * fm[1] + p.Item2 * fm[3] + fm[5]))
+            .ToArray();
+    }
+
     private static StampType DetermineStampType(string blockContent)
     {
         // Check for Do operator (XObject invocation)
-        if (Regex.IsMatch(blockContent, @"/\w+\s+Do\b"))
+        if (SafeRegex.IsMatch(blockContent, @"/\w+\s+Do\b"))
         {
             // If the content has a cm matrix + Do, it's likely an image or form stamp
-            if (Regex.IsMatch(blockContent, @"\bcm\b"))
+            if (SafeRegex.IsMatch(blockContent, @"\bcm\b"))
                 return StampType.Image;
             return StampType.Form;
         }
@@ -557,7 +595,7 @@ public sealed partial class PdfContentEditor
         var contentBytes = GetPageContentBytes(page, doc);
         if (contentBytes.Length == 0) return;
 
-        var content = Encoding.ASCII.GetString(contentBytes);
+        var content = Compat.Latin1.GetString(contentBytes);
         var blocks = FindStampBlocks(content, page, doc);
 
         // Rewrite matching blocks back-to-front so each edit leaves earlier blocks' offsets valid.
@@ -578,7 +616,7 @@ public sealed partial class PdfContentEditor
         }
 
         if (changed)
-            page.SetContentStream(Encoding.ASCII.GetBytes(content));
+            page.SetContentStream(Compat.Latin1.GetBytes(content));
     }
 
     /// <summary>Add the hidden marker and an empty-clip prologue to a stamp block. Idempotent.</summary>
@@ -630,22 +668,6 @@ public sealed partial class PdfContentEditor
         return -1;
     }
 
-    /// <summary>Delete all stamps with the given <paramref name="stampId"/> across every page.</summary>
-    public void DeleteStampById(int stampId)
-    {
-        if (_document is null) return;
-        for (int p = 1; p <= _document.PageCount; p++)
-            DeleteStampById(p, stampId);
-    }
-
-    /// <summary>Delete all stamps whose ID is in <paramref name="stampIds"/> across every page.</summary>
-    public void DeleteStampByIds(int[] stampIds)
-    {
-        if (_document is null) return;
-        for (int p = 1; p <= _document.PageCount; p++)
-            DeleteStampByIds(p, stampIds);
-    }
-
     /// <summary>Moves the stamp at the given 0-based index on the page so that its lower-left corner lands on (<c>x</c>, <c>y</c>) in points. Does nothing when no such stamp exists.</summary>
     public void MoveStamp(int pageNumber, int stampIndex, double x, double y)
     {
@@ -669,7 +691,7 @@ public sealed partial class PdfContentEditor
         var page = doc.Pages.At(pageNumber);
         var bytes = GetPageContentBytes(page, doc);
         if (bytes.Length == 0) return;
-        var text = Encoding.ASCII.GetString(bytes);
+        var text = Compat.Latin1.GetString(bytes);
         var stamps = ParseStamps(text, page, doc);
         var idx = pickIndex(stamps);
         if (idx < 0 || idx >= stamps.Length) return;
@@ -695,16 +717,16 @@ public sealed partial class PdfContentEditor
         var moved = RewriteMatrixTranslation(block, ne, nf);
         if (moved is null) return;
         var newText = text.Substring(0, sb.Start) + moved + text.Substring(sb.End);
-        page.SetContentStream(Encoding.ASCII.GetBytes(newText));
+        page.SetContentStream(Compat.Latin1.GetBytes(newText));
     }
 
     /// <summary>Rewrite the translation (e,f) of the stamp's positioning cm, leaving its scale/rotation intact.</summary>
     private static string? RewriteMatrixTranslation(string block, double e, double f)
     {
-        var doMatch = Regex.Match(block, @"/[\w.\-]+\s+Do\b");
+        var doMatch = SafeRegex.Match(block, @"/[\w.\-]+\s+Do\b");
         var prefixEnd = doMatch.Success ? doMatch.Index : block.Length;
         var prefix = block.Substring(0, prefixEnd);
-        var cms = Regex.Matches(prefix,
+        var cms = SafeRegex.Matches(prefix,
             @"(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+cm\b");
         if (cms.Count == 0) return null;
         var last = cms[cms.Count - 1];

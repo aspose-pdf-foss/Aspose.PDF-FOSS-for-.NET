@@ -13,7 +13,7 @@ private sealed class PositionedSpansState
     // Two source dialects: the older pdf-page shape (inline pt styles) and the
     // stl_ class scheme (page_N containers, left/top in em, 1 em = 12 pt,
     // appearance via stylesheet classes). Both reflow identically from here on.
-    public System.Text.RegularExpressions.MatchCollection pageDivs = null!;
+    public SafeMatchCollection pageDivs = null!;
     public bool stlDialect;
     public Dictionary<string, double>? stlFontSizes;
     // Two stl_ shapes with distinct behaviour: a raster-background

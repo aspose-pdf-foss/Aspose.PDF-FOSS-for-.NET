@@ -38,6 +38,29 @@ public sealed class XmpValue
     /// <summary>Create an XmpValue from a string.</summary>
     public XmpValue(string value) { _value = value ?? throw new ArgumentNullException(nameof(value)); }
 
+    /// <summary>Create an XmpValue from an array of XmpValues.</summary>
+    public XmpValue(XmpValue[] array) { _value = array ?? throw new ArgumentNullException(nameof(array)); }
+
+    /// <summary>An array read from a packet, with the RDF container it was stated in (Seq, Bag or Alt).</summary>
+    internal XmpValue(XmpValue[] array, string arrayKind) : this(array) { _arrayKind = arrayKind; }
+
+    private readonly string? _arrayKind;
+
+    /// <summary>The RDF container an array is written in: the one it was read from, else an ordered rdf:Seq.</summary>
+    internal string ArrayKind => _arrayKind ?? "Seq";
+
+    // ── FOSS-internal: composite-kind constructors used by XmpField, XMP
+    //                  parser, and Metadata.this[].
+    internal XmpValue(Dictionary<string, XmpValue> structure) { _value = structure ?? throw new ArgumentNullException(nameof(structure)); }
+
+    internal XmpValue(XmpField field) { _value = field ?? throw new ArgumentNullException(nameof(field)); }
+
+    internal XmpValue(KeyValuePair<string, XmpValue> namedValue) { _value = namedValue; }
+
+    internal XmpValue(KeyValuePair<string, XmpValue>[] namedValues) { _value = namedValues ?? throw new ArgumentNullException(nameof(namedValues)); }
+
+    internal XmpValue(XmlNode raw) { _value = raw ?? throw new ArgumentNullException(nameof(raw)); }
+
     /// <summary>Implicit promotion from string for natural assignment
     /// syntax (<c>doc.Metadata[key] = "literal"</c>).</summary>
     public static implicit operator XmpValue(string value) => new XmpValue(value);
@@ -52,17 +75,6 @@ public sealed class XmpValue
     /// supporting the <c>(string)metadata[key]</c> cast used to read an XMP entry
     /// back as text.</summary>
     public static explicit operator string(XmpValue value) => value?.ToString() ?? string.Empty;
-
-    /// <summary>Create an XmpValue from an array of XmpValues.</summary>
-    public XmpValue(XmpValue[] array) { _value = array ?? throw new ArgumentNullException(nameof(array)); }
-
-    // ── FOSS-internal: composite-kind constructors used by XmpField, XMP
-    //                  parser, and Metadata.this[].
-    internal XmpValue(Dictionary<string, XmpValue> structure) { _value = structure ?? throw new ArgumentNullException(nameof(structure)); }
-    internal XmpValue(XmpField field) { _value = field ?? throw new ArgumentNullException(nameof(field)); }
-    internal XmpValue(KeyValuePair<string, XmpValue> namedValue) { _value = namedValue; }
-    internal XmpValue(KeyValuePair<string, XmpValue>[] namedValues) { _value = namedValues ?? throw new ArgumentNullException(nameof(namedValues)); }
-    internal XmpValue(XmlNode raw) { _value = raw ?? throw new ArgumentNullException(nameof(raw)); }
 
     // ── Type-check predicates ───────────────────────────────────────────────
 
@@ -208,6 +220,18 @@ public sealed class XmpValue
     /// <inheritdoc />
     public override string ToString() => ToStringValue();
 
+    /// <summary>Format with a culture-specific provider. Numeric and
+    /// DateTime values honour <paramref name="formatProvider"/>; all other
+    /// kinds fall back to <see cref="ToStringValue"/>.</summary>
+    public string ToString(IFormatProvider formatProvider) => _value switch
+    {
+        int i => i.ToString(formatProvider),
+        double d => d.ToString(formatProvider),
+        DateTime dt => dt.ToString(formatProvider),
+        IFormattable f => f.ToString(null, formatProvider),
+        _ => ToStringValue(),
+    };
+
     /// <summary>Extended string form: a structured / named-values property
     /// renders EVERY field as <c>key=value</c> lines (nested structs indent
     /// recursively), an array joins its items, and a scalar is its plain
@@ -248,18 +272,6 @@ public sealed class XmpValue
             }
         }
     }
-
-    /// <summary>Format with a culture-specific provider. Numeric and
-    /// DateTime values honour <paramref name="formatProvider"/>; all other
-    /// kinds fall back to <see cref="ToStringValue"/>.</summary>
-    public string ToString(IFormatProvider formatProvider) => _value switch
-    {
-        int i => i.ToString(formatProvider),
-        double d => d.ToString(formatProvider),
-        DateTime dt => dt.ToString(formatProvider),
-        IFormattable f => f.ToString(null, formatProvider),
-        _ => ToStringValue(),
-    };
 
     /// <summary>The raw underlying value.</summary>
     internal object RawValue => _value;

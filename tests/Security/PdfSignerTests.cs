@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Tests.Security;
 
 public class PdfSignerTests
 {
-    private static PdfCertificate CreateTestCertificate()
+    internal static PdfCertificate CreateTestCertificate()
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest(
@@ -39,6 +39,26 @@ public class PdfSignerTests
 
         using var doc = Document.Open(signed);
         Assert.True(Signature.HasAny(doc));
+    }
+
+    // An ECDSA key is beyond the hand-rolled PKCS#12 reader, so the PFX goes through the
+    // platform loader, whose key storage has to be one the running OS accepts.
+    [Fact]
+    public void Sign_WithAnEcdsaPfx_LoadsThroughThePlatformAndVerifies()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=ECDSA Signer, O=FOSS Test", key, HashAlgorithmName.SHA256);
+        using var x509 = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(1));
+        var cert = PdfCertificate.FromPfx(x509.Export(X509ContentType.Pfx, "test"), "test");
+        Assert.Equal(SignatureKeyKind.Ecdsa, cert.KeyKind);
+
+        var signed = PdfSigner.Sign(PdfBuilder.BuildMinimal(), cert);
+
+        using var facade = new Aspose.Pdf.Facades.PdfFileSignature();
+        facade.BindPdf(signed);
+        var names = facade.GetSignNames();
+        Assert.Single(names);
+        Assert.True(facade.VerifySignature(names[0]));
     }
 
     [Fact]

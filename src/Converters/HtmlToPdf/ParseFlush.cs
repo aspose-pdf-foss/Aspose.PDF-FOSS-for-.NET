@@ -7,7 +7,7 @@ internal static partial class HtmlToPdfConverter
 {
 // The block parser's Flush, lifted out of ParseBlocks: it closes the block
 // under construction from the parse state and the rhythm flags. Body is verbatim.
-    private static void Flush(ParseBlocksState pb, bool controlBoxes, bool uaBlockRhythm, bool articleRhythm, bool spanPtTypography, bool _unused, BlockStyle styleUsed)
+    private static void Flush(ParseBlocksState pb, bool controlBoxes, bool uaBlockRhythm, bool articleRhythm, bool spanPtTypography, BlockStyle styleUsed)
     {
         // An <a> still open at the flush boundary covers text up to here in THIS block.
         CloseInlineRuns(pb);
@@ -21,8 +21,8 @@ internal static partial class HtmlToPdfConverter
         var (collapsed, rawOf) = CollapseWhitespaceWithMap(raw);
         // The spaces inside an isolated span's run are non-breaking: the run wraps as one unit.
         collapsed = ApplyIsolatesAndRunEdges(pb, collapsed, rawOf, raw, controlBoxes);
-        // font-size:0 spacer (the float-terminator "clear:both;height:0;
-        // font-size:0" idiom): its &nbsp; occupies a zero-height line box —
+        // font-size:0 spacer (the float-terminator "clear:both;height:0; font-size:0"
+        // idiom): its &nbsp; occupies a zero-height line box —
         // emit nothing rather than a default-size blank line.
         if (styleUsed.ZeroFontSize && collapsed.Trim(' ', ' ').Length == 0)
         {

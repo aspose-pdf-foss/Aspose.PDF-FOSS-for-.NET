@@ -40,8 +40,8 @@ internal static partial class HtmlToPdfConverter
                 }
                 // report cells account bold per RUN (boldDepth); the
                 // whole-cell flag stays a legacy-flow behaviour
-                // (a UA cell keeps the RUN - its bold ends where the tag closes, see the run marks;
-                // the other flows keep the whole-cell flag)
+                // (a UA cell keeps the RUN - its bold ends where the tag closes, see the run marks; the
+                // other flows keep the whole-cell flag)
                 if (mt.mps.cell is not null && !mt.reportCells && !mt.stdSerif) mt.mps.cell.Bold = true;
                 break;
             case "hr":

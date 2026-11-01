@@ -52,8 +52,8 @@ internal static partial class HtmlToPdfConverter
     /// radio grids keep their calibrated face and empty-cell heights.</summary>
     private static bool CheckboxGridControls(string markup)
         => RadioGridableControls(markup, checkboxesToo: true)
-            && Regex.IsMatch(markup, @"<\s*input\b[^>]*type\s*=\s*[""']?checkbox", RegexOptions.IgnoreCase)
-            && !Regex.IsMatch(markup, @"<\s*input\b[^>]*type\s*=\s*[""']?radio", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(markup, @"<\s*input\b[^>]*type\s*=\s*[""']?checkbox", RegexOptions.IgnoreCase)
+            && !SafeRegex.IsMatch(markup, @"<\s*input\b[^>]*type\s*=\s*[""']?radio", RegexOptions.IgnoreCase);
 
     /// <summary>Every visible form control of the table lies inside a table NESTED in one of
     /// its cells: the outer table's own cells carry none.</summary>
@@ -66,7 +66,7 @@ internal static partial class HtmlToPdfConverter
         var sb = new StringBuilder();
         var depth = 0;
         var last = 0;
-        foreach (Match m in TableOpenCloseRx.Matches(markup))
+        foreach (Match m in SafeRegex.Matches(TableOpenCloseRx, markup))
         {
             if (m.Groups[1].Length == 0)
             {
@@ -86,27 +86,27 @@ internal static partial class HtmlToPdfConverter
     }
 
     private static readonly Regex TableOpenCloseRx = new Regex(@"<(/?)table\b[^>]*>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The table states its own column grid as percentages of the box
     /// (<c>&lt;colgroup&gt;&lt;col style="width:12.5%"&gt;</c>). Such a grid belongs to the
     /// column solver that reads a colgroup — the control arm below sizes its columns from
     /// their content alone and would draw every run in them left of its declared share.</summary>
     private static bool ColGroupPercentGrid(string markup)
-        => Regex.IsMatch(markup,
+        => SafeRegex.IsMatch(markup,
             @"<col\b[^>]*style\s*=\s*[""'][^""']*(?<![-\w])width\s*:\s*\d*\.?\d+\s*%",
             RegexOptions.IgnoreCase);
 
     private static bool RadioGridableControls(string markup, bool checkboxesToo = false)
     {
         var hasRadio = false;
-        foreach (Match fim in Regex.Matches(markup, @"<\s*(input|select|textarea)\b[^>]*>",
+        foreach (Match fim in SafeRegex.Matches(markup, @"<\s*(input|select|textarea)\b[^>]*>",
                      RegexOptions.IgnoreCase))
         {
-            if (HiddenInlineRx.IsMatch(fim.Value)) continue;
+            if (SafeRegex.IsMatch(HiddenInlineRx, fim.Value)) continue;
             if (!fim.Groups[1].Value.Equals("input", StringComparison.OrdinalIgnoreCase))
                 return false;
-            var tyM = Regex.Match(fim.Value, @"type\s*=\s*[""']?([A-Za-z]+)",
+            var tyM = SafeRegex.Match(fim.Value, @"type\s*=\s*[""']?([A-Za-z]+)",
                 RegexOptions.IgnoreCase);
             var ty = tyM.Success ? tyM.Groups[1].Value.ToLowerInvariant() : "text";
             if (ty == "radio" || (checkboxesToo && ty == "checkbox")) hasRadio = true;
@@ -129,7 +129,7 @@ internal static partial class HtmlToPdfConverter
         PrepareTableRow(tb, block, flow, profile, css);
         MeasureTableBox(tb, flow, profile, marginLeft, pageWidth);
         var controls = new GridControlFactory(tb, flow, profile, doc);
-        BuildGridTable(tb, block, flow, profile, controls, css, options, inlineSvgs, bodyCssFace, dwFormDoc);
+        BuildGridTable(tb, block, profile, controls, css, options, inlineSvgs, bodyCssFace, dwFormDoc);
         RebuildOnDeclaredBox(tb, block, profile, controls, css, options, inlineSvgs, bodyCssFace, dwFormDoc, marginLeft, pageWidth);
         if (tb.table is not null)
         {
@@ -150,28 +150,31 @@ internal static partial class HtmlToPdfConverter
         tb.certTableW = profile.floatBothSidesDoc
             && CertDeclaredTableWidthPt(tb.fhTableHtml) is { } certDw
             && certDw > flow.contentWidth ? certDw : 0;
-        tb.tableAvailW = profile.overDeclaredGridDoc
-            ? flow.contentWidth - UaBodyMarginPt - OverDeclaredHostChromePt
-            : tb.certTableW > 0 ? tb.certTableW
-            // inside a UA fieldset the frame's content box is the table's box
-            : flow.fsIndentLive > 0 && profile.uaFieldsetContent && profile.fsBoxW > 0
-                ? profile.fsBoxW - 2 * (FsPadLeftPt - UaFieldsetSideInsetPt)
-            // A UA-grid document's tables lay out in the browser's symmetric body box (measured on the
-            // resume and the royalty statement: every 100% grid spans 96..499 on the 595 sheet).
-            : profile.uaGridSheet && flow.contentWidth > pageWidth - 2 * marginLeft
-                ? pageWidth - 2 * marginLeft
-            : flow.contentWidth;
+        if (profile.overDeclaredGridDoc) tb.tableAvailW = flow.contentWidth - UaBodyMarginPt - OverDeclaredHostChromePt;
+        else if (tb.certTableW > 0) tb.tableAvailW = tb.certTableW;
+        // inside a UA fieldset the frame's content box is the table's box
+        else if (flow.fsIndentLive > 0 && profile.uaFieldsetContent && profile.fsBoxW > 0)
+            tb.tableAvailW = profile.fsBoxW - 2 * (FsPadLeftPt - UaFieldsetSideInsetPt);
+        // A UA-grid document's tables lay out in the browser's symmetric body box (measured on the
+        // resume and the royalty statement: every 100% grid spans 96..499 on the 595 sheet).
+        else if (profile.uaGridSheet && flow.contentWidth > pageWidth - 2 * marginLeft) tb.tableAvailW = pageWidth - 2 * marginLeft;
+        else tb.tableAvailW = flow.contentWidth;
     }
 
     /// <summary>The form controls a UA grid seats: a checkbox per box cell, and radio options
     /// grouped by name across the document. Both builds of the grid draw from the same
-    /// factory, so a group keeps its options across a rebuild.</summary>
+    /// factory, so a group keeps its options across a rebuild, and the rebuild seats the
+    /// checkboxes and fields the first build made.</summary>
     private sealed class GridControlFactory
     {
         private readonly TableBlockState _tb;
         private readonly HtmlFlowCursor _flow;
         private readonly HtmlDocProfile _profile;
         private readonly Document _doc;
+        // The checkboxes and fields the grid's first build put on the form, in the order its walk met them,
+        // and how many of them a rebuild has taken back (-1: no rebuild).
+        private readonly List<Aspose.Pdf.Forms.Field> _made = new();
+        private int _retaken = -1;
 
         public GridControlFactory(TableBlockState tb, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc)
         {
@@ -181,62 +184,135 @@ internal static partial class HtmlToPdfConverter
             _doc = doc;
         }
 
+        /// <summary>The grid is built again on another box: its controls are the ones the first build made,
+        /// not a second set on the form.</summary>
+        public void Rebuild() => _retaken = 0;
+
+        private Aspose.Pdf.Forms.Field? Retake() => _retaken >= 0 && _retaken < _made.Count ? _made[_retaken++] : null;
+
+        private T Keep<T>(T control) where T : Aspose.Pdf.Forms.Field
+        {
+            _made.Add(control);
+            if (_retaken >= 0) _retaken = _made.Count;
+            return control;
+        }
+
         /// <summary>A UA checkbox grid's box: a form checkbox the row plan seats and the render pass places.</summary>
         public Aspose.Pdf.Forms.CheckboxField MakeCheckbox(bool chk)
         {
+            if (Retake() is Aspose.Pdf.Forms.CheckboxField again) return again;
             var cb = new Aspose.Pdf.Forms.CheckboxField(_tb.tablePage, new Rectangle(0, 0, Table.UaCheckboxWidgetPt, Table.UaCheckboxWidgetPt)) { Checked = chk };
             _doc.Form.Add(cb, _tb.tablePage.Number);
-            return cb;
+            return Keep(cb);
         }
 
-        public Aspose.Pdf.Forms.RadioButtonOptionField MakeRadio(string group, bool chk)
+        /// <summary>A field-cell grid's control: a push button for a button, a combo box for a select, else a text
+        /// field, on the form with the black frame the flow draws round a control box; the row plan seats it in its cell.</summary>
+        public Aspose.Pdf.Forms.Field MakeField(GridFieldSpec spec)
+        {
+            if (Retake() is { } again and not Aspose.Pdf.Forms.CheckboxField) return again;
+            var rect = new Rectangle(0, 0, spec.WidthPt, spec.HeightPt);
+            Aspose.Pdf.Forms.Field field;
+            if (spec.Tag == "button")
+            {
+                var button = NewPushButton(_tb.tablePage, rect, spec.Name);
+                button.NormalCaption = spec.Value;
+                field = button;
+            }
+            else if (spec.Options is { } options) field = NewComboBox(_tb.tablePage, rect, options, spec.Name);
+            else
+            {
+                var box = new Aspose.Pdf.Forms.TextBoxField(_tb.tablePage, rect)
+                {
+                    Multiline = spec.Tag == "textarea",
+                    DefaultAppearance = new Annotations.DefaultAppearance(spec.Tag == "textarea" ? "Courier" : "Helvetica", GridFieldValuePt),
+                };
+                box.Characteristics.Border = System.Drawing.Color.Black;
+                box.Border = new Annotations.Border(box) { Width = 1 };
+                if (spec.Name is not null) box.PartialName = spec.Name;
+                box.Width = spec.WidthPt;
+                box.Height = spec.HeightPt;
+                field = box;
+            }
+            // (a push button's value is its caption)
+            if (spec.Value.Length > 0 && spec.Tag != "button") field.Value = spec.Value;
+            field.ReadOnly = spec.ReadOnly;
+            field.CellWidthFraction = spec.WidthFraction;
+            _doc.Form.Add(field, _tb.tablePage.Number);
+            return Keep(field);
+        }
+
+        /// <summary>An option of a grid table's radio group, as a radio outside a grid is made: the group answers to
+        /// the name its buttons share, an option is named by its button's value (else by the group name and its
+        /// place), and the last button marked checked is the group's choice.</summary>
+        public Aspose.Pdf.Forms.RadioButtonOptionField MakeRadio(string group, string value, bool chk)
         {
             var key = string.IsNullOrEmpty(group) ? "__gridradio" + _flow.gridRadioAnon++ : group;
             if (!_profile.gridRadioGroups.TryGetValue(key, out var rbf))
             {
                 rbf = new Aspose.Pdf.Forms.RadioButtonField(_tb.tablePage);
+                if (!string.IsNullOrEmpty(group)) rbf.PartialName = group;
                 _profile.gridRadioGroups[key] = rbf;
                 _profile.gridRadioPages.Add((rbf, _tb.tablePage));
+                _profile.gridRadioValues[key] = new HashSet<string>(StringComparer.Ordinal) { RadioOffState };
             }
             _profile.gridRadioCounts.TryGetValue(key, out var optIdx);
             _profile.gridRadioCounts[key] = optIdx + 1;
             var ropt = new Aspose.Pdf.Forms.RadioButtonOptionField
             {
                 Style = Aspose.Pdf.Forms.BoxStyle.Circle,
-                OptionName = key + "_" + optIdx,
+                OptionName = value.Length > 0 && _profile.gridRadioValues[key].Add(value) ? value : key + "_" + optIdx,
             };
             ropt.Characteristics.Border = System.Drawing.Color.Black;
             rbf.Add(ropt);
+            if (chk) rbf.Selected = optIdx + 1;
             return ropt;
         }
     }
 
+    /// <summary>The line box a built grid's cell lines pitch on (0: each line on its own size's normal box).</summary>
+    private static double GridCellLineHeightPt(TableBlockState tb, HtmlDocProfile profile)
+    {
+        if (tb.radioGridTable) return Table.CssLineBoxPt(tb.radioGridFontPt);
+        // Sectioned-report rhythm: cell lines pitch on the browser's own
+        // line box too, not the flow's legacy em multiple.
+        if (profile.sectionedReport && profile.formBodyFontPt > 0) return NormalLineHeightPt(profile.formBodyFontPt);
+        // a scaled layout paces cells on the UA 18px line
+        if (profile.scaleToPageWidth) return NormalLineHeightPt(DefaultBodyFontPt);
+        // …but a quirks grid inherits no more of the sheet's line-height than of its font:
+        // its lines pitch on their OWN size's normal box, and one document-wide pitch
+        // oversizes every row a small class sets.
+        if (SheetDeclaresCellBox(profile.docChainRules)) return 0;
+        return profile.bodyLineHeightPt;
+    }
+
+    /// <summary>A checkbox grid of the UA serif flow: its builds seat its checkboxes as fields, in the flow's face.</summary>
+    private static bool UaCheckboxGrid(TableBlockState tb, HtmlDocProfile profile)
+        => tb.radioGridTable && profile.uaStdSerif && CheckboxGridControls(tb.fhTableHtml);
+
     /// <summary>Builds the grid on the measured box, in the dialect the document profile asks
     /// for.</summary>
-    private static void BuildGridTable(TableBlockState tb, Block block, HtmlFlowCursor flow,
+    private static void BuildGridTable(TableBlockState tb, Block block,
         HtmlDocProfile profile, GridControlFactory controls,
         Dictionary<string, Dictionary<string, string>> css, HtmlLoadOptions? options,
         List<byte[]> inlineSvgs, string? bodyCssFace, bool dwFormDoc)
     {
-        (tb.table, tb.renderNatW) = BuildTableFromHtml(tb.fhTableHtml, tb.tableAvailW, options, inlineSvgs, css, bandDialect: profile.floatBandDoc, makeRadio: controls.MakeRadio, makeCheckbox: tb.radioGridTable && profile.uaStdSerif && CheckboxGridControls(tb.fhTableHtml) ? controls.MakeCheckbox : null, // Sectioned-report rhythm: cell lines pitch on the browser's own
-            // line box too, not the flow's legacy em multiple.
-            cellLineHeightPt: tb.radioGridTable ? Table.CssLineBoxPt(tb.radioGridFontPt)
-                : profile.sectionedReport && profile.formBodyFontPt > 0
-                ? NormalLineHeightPt(profile.formBodyFontPt)
-                // a scaled layout paces cells on the UA 18px line
-                : profile.scaleToPageWidth ? NormalLineHeightPt(DefaultBodyFontPt)
-                // …but a quirks grid inherits no more of the sheet's line-height than of its font:
-                // its lines pitch on their OWN size's normal box, and one document-wide pitch
-                // oversizes every row a small class sets.
-                : SheetDeclaresCellBox(profile.docChainRules) ? 0
-                : profile.bodyLineHeightPt,
-            // The page stylesheet's own base size seeds the grid (see bodyCssFontPt);
-            // the probe above must measure the same cells this render builds.
-            defaultCellFontPt: dwFormDoc ? 12.0
-                : tb.radioGridTable ? tb.radioGridFontPt
-                : profile.scaleToPageWidth ? DefaultBodyFontPt : profile.bodyCssFontPt,
+        var checkboxGrid = UaCheckboxGrid(tb, profile);
+        (tb.table, tb.renderNatW) = BuildTableFromHtml(tb.fhTableHtml, tb.tableAvailW, options, inlineSvgs, css, bandDialect: profile.floatBandDoc, makeRadio: controls.MakeRadio,
+            makeCheckbox: checkboxGrid || tb.fieldGrid ? controls.MakeCheckbox : null,
+            makeField: tb.fieldGrid ? controls.MakeField : null,
+            cellLineHeightPt: GridCellLineHeightPt(tb, profile),
+            // The page stylesheet's own base size seeds the grid (see bodyCssFontPt); the
+            // probe above must measure the same cells this render builds.
+            defaultCellFontPt: (dwFormDoc, tb.radioGridTable, profile.scaleToPageWidth) switch
+            {
+                (true, _, _) => 12.0,
+                (_, true, _) => tb.radioGridFontPt,
+                (_, _, true) => DefaultBodyFontPt,
+                _ => profile.bodyCssFontPt,
+            },
             // the UA serif flow's control grid draws in the flow's own face
-            defaultCellFace: dwFormDoc ? "Times New Roman" : tb.radioGridTable && profile.uaStdSerif && CheckboxGridControls(tb.fhTableHtml) ? profile.metricFace : null,
+            defaultCellFace: (dwFormDoc, checkboxGrid) switch { (true, _) => "Times New Roman", (_, true) => profile.metricFace, _ => null },
             cssRunFace: bodyCssFace, bodyTextColor: profile.bodyCssColor,
             // Sectioned reports lay their grids out on the browser's own cell
             // box: the UA's 1px vertical cell padding and pre-wrap line boxes.
@@ -259,7 +335,9 @@ internal static partial class HtmlToPdfConverter
             fullWidthCjkMin: profile.overDeclaredGridDoc,
             overDeclaredDraw: profile.overDeclaredGridDoc,
             chainRules: profile.docChainRules,
-            cssAncestors: block.CssAncestors);
+            cssAncestors: block.CssAncestors, hostChain: block.CssAncestors is null ? block.HostChain : null,
+            // (a grid no rule faces takes the body face only where the flow sets the prose in it)
+            bodyFaceGrid: profile.sheetTypographyDoc);
     }
 
     /// <summary>A UA-grid document's grid declaring an ABSOLUTE box wider than the flow, but no
@@ -277,13 +355,15 @@ internal static partial class HtmlToPdfConverter
             && uaDeclTable.HtmlDeclaredBoxPt <= pageWidth - marginLeft - UaPageMarginPt + 1e-3)
         {
             tb.tableAvailW = uaDeclTable.HtmlDeclaredBoxPt;
-            (tb.table, tb.renderNatW) = BuildTableFromHtml(tb.fhTableHtml, tb.tableAvailW, options, inlineSvgs, css, bandDialect: profile.floatBandDoc, makeRadio: controls.MakeRadio, makeCheckbox: null,
+            controls.Rebuild();
+            (tb.table, tb.renderNatW) = BuildTableFromHtml(tb.fhTableHtml, tb.tableAvailW, options, inlineSvgs, css, bandDialect: profile.floatBandDoc, makeRadio: controls.MakeRadio,
+                makeCheckbox: UaCheckboxGrid(tb, profile) || tb.fieldGrid ? controls.MakeCheckbox : null, makeField: tb.fieldGrid ? controls.MakeField : null,
                 cellLineHeightPt: profile.sectionedReport && profile.formBodyFontPt > 0 ? NormalLineHeightPt(profile.formBodyFontPt) : profile.bodyLineHeightPt,
                 defaultCellFontPt: dwFormDoc ? 12.0 : profile.bodyCssFontPt, defaultCellFace: dwFormDoc ? "Times New Roman" : null,
                 cssRunFace: bodyCssFace, bodyTextColor: profile.bodyCssColor, uaCellBoxes: true, liftNestedTables: true, uaLineFactor: profile.bodyLineHeightFactor, uaSheetGrid: profile.uaGridSheet,
                 ptCellWidths: profile.ptStyledFragment, redlineCells: profile.redlineDiffDoc, dwFormCells: dwFormDoc, wordMailCells: profile.wordMailDoc,
                 docElementGrid: profile.elementGridDoc, pinnedBodyGrid: profile.bodyPinnedW > 0, fullWidthCjkMin: profile.overDeclaredGridDoc,
-                overDeclaredDraw: profile.overDeclaredGridDoc, chainRules: profile.docChainRules, cssAncestors: block.CssAncestors);
+                overDeclaredDraw: profile.overDeclaredGridDoc, chainRules: profile.docChainRules, cssAncestors: block.CssAncestors, hostChain: block.CssAncestors is null ? block.HostChain : null);
         }
     }
 
@@ -304,13 +384,13 @@ internal static partial class HtmlToPdfConverter
             double pbMtPx = 0;
             if (css.TryGetValue("table", out var pbtR)
                 && pbtR.TryGetValue("margin-top", out var pbtV)
-                && Regex.Match(pbtV, @"([\d.]+)\s*px") is { Success: true } pbtM)
+                && SafeRegex.Match(pbtV, @"([\d.]+)\s*px") is { Success: true } pbtM)
                 double.TryParse(pbtM.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out pbMtPx);
-            if (Regex.Match(tb.fhTableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase)
+            if (SafeRegex.Match(tb.fhTableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase)
                     is { Success: true } pbTag
-                && Regex.Match(DivStyleOf(pbTag.Value),
+                && SafeRegex.Match(DivStyleOf(pbTag.Value),
                     @"(?<![-\w])margin-top\s*:\s*([\d.]+)\s*px",
                     RegexOptions.IgnoreCase) is { Success: true } pbMt
                 && double.TryParse(pbMt.Groups[1].Value,
@@ -322,7 +402,7 @@ internal static partial class HtmlToPdfConverter
             // The grid's FIRST border-spacing band sits above row one —
             // the declared `cellspacing="1px"` the generator's rows carry
             // only between and below themselves.
-            if (Regex.Match(tb.fhTableHtml, @"cellspacing\s*=\s*[""']?(\d+(?:\.\d+)?)",
+            if (SafeRegex.Match(tb.fhTableHtml, @"cellspacing\s*=\s*[""']?(\d+(?:\.\d+)?)",
                     RegexOptions.IgnoreCase) is { Success: true } pbCs
                 && double.TryParse(pbCs.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -332,6 +412,7 @@ internal static partial class HtmlToPdfConverter
         }
         tb.radioGridTable = profile.metricFlow && RadioGridableControls(tb.fhTableHtml, profile.uaStdSerif);
         tb.radioGridFontPt = profile.uaStdSerif ? 12.0 : 11.0;
+        tb.fieldGrid = block.FieldGrid;
         tb.tablePage = flow.page;
     }
 
@@ -340,12 +421,12 @@ internal static partial class HtmlToPdfConverter
     private static double FramedTableOffsetPt(HtmlFlowCursor flow, string tableHtml)
     {
         if (!flow.frameCentred) return 0;
-        var tag = Regex.Match(tableHtml, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(tableHtml, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
         if (!tag.Success) return 0;
         double declared = 0;
-        var wa = Regex.Match(tag.Groups[1].Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)(?:px)?[""'\s>]", RegexOptions.IgnoreCase);
+        var wa = SafeRegex.Match(tag.Groups[1].Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)(?:px)?[""'\s>]", RegexOptions.IgnoreCase);
         if (wa.Success) declared = DtpNum(wa.Groups[1].Value) * PxPt;
-        else if (Regex.Match(DivStyleOf(tag.Value), @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } sw
+        else if (SafeRegex.Match(DivStyleOf(tag.Value), @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } sw
             && TryParseLength(sw.Groups[1].Value.Trim()) is { } swPt) declared = swPt;
         return declared > 0 && declared < flow.frameContentW ? (flow.frameContentW - declared) / 2 : 0;
     }
@@ -354,7 +435,9 @@ internal static partial class HtmlToPdfConverter
     private static bool TryLayoutMetricTable(TableBlockState tb, Block block, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, Dictionary<string, Dictionary<string, string>> css, HtmlLoadOptions? options, string? bodyCssFace, double marginBottom, double marginLeft, double marginTop, double pageHeight, double pageWidth, bool tableAfterSpacer, bool tableAfterText)
     {
         tb.quirksRunTable = !profile.metricFlow && profile.quirksCssRun;
-        tb.tableFace = profile.metricFlow ? profile.metricFace : tb.quirksRunTable ? bodyCssFace : null;
+        if (profile.metricFlow) tb.tableFace = profile.metricFace;
+        else if (tb.quirksRunTable) tb.tableFace = bodyCssFace;
+        else tb.tableFace = null;
         // ASPOSE_TRACE_SEAT=1: which layouter takes the table.
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_SEAT") == "1")
             Console.WriteLine($"[table] y={flow.y:0.##} ytop={pageHeight - flow.y:0.##} cw={flow.contentWidth:0.##} ml={marginLeft:0.##} pw={pageWidth:0.##} prevLh={flow.prevFlowLineHeight:0.##} prevMb={flow.prevFlowMarginBottom:0.##} metricFlow={profile.metricFlow} uaStdSerif={profile.uaStdSerif} quirksCssRun={profile.quirksCssRun} face={tb.tableFace} bodyBoxGrid={profile.bodyBoxGridDoc} overDeclared={profile.overDeclaredGridDoc} html={(block.TableHtml is { Length: > 0 } th ? th.Substring(0, Math.Min(60, th.Length)) : "")}");
@@ -382,7 +465,8 @@ internal static partial class HtmlToPdfConverter
             // grids drawn as GRIDS — the metric layouter flattens them.
             && !profile.overDeclaredGridDoc)
         {
-            { LayoutMetricTableBlock(tb, block, flow, profile, doc, docFontDict, css, options, marginLeft, marginTop, marginBottom, pageWidth, pageHeight, tableAfterText, tableAfterSpacer, tfm); return false; }
+            LayoutMetricTableBlock(tb, block, flow, profile, doc, docFontDict, css, options, marginLeft, marginTop, marginBottom, pageWidth, pageHeight, tableAfterText, tableAfterSpacer, tfm);
+            return false;
         }
         return true;
     }

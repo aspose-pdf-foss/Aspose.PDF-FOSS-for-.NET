@@ -27,7 +27,8 @@ private sealed class NotdefRewriteState
     // multi-byte codes — no verdict is possible from the font dict alone.
     public Dictionary<string, string?[]?> encodings = null!;
     public string text = null!;
-    public List<(int start, int end)> deletions = null!;
+    // A span of the content to take out, and what is written in its place (nothing when null).
+    public List<(int start, int end, string? instead)> deletions = null!;
     public bool inlineImage;   // an inline image makes the stream unsafe to rewrite: keep the original bytes
     public string? lastName;
     public string? currentFont;

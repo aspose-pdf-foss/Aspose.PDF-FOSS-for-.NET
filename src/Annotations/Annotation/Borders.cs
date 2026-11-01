@@ -31,7 +31,13 @@ public partial class Annotation
         var bs = _reader.ResolveDict(_dict.Get("BS")) ?? new PdfDictionary();
         bs.Set("W", new PdfInteger(width));
         _dict.Set("BS", bs);
+        OnBorderChanged();
     }
+
+    /// <summary>Hook invoked after the annotation's border width, style or dash is set. The
+    /// base is a no-op; FreeText overrides it to paint its appearance again, which draws the
+    /// border and seats the text inside it.</summary>
+    private protected virtual void OnBorderChanged() { }
 
     /// <summary>Read the border style (/BS /S) for the write-through
     /// <see cref="Border.Style"/> accessor. Defaults to Solid.</summary>
@@ -62,6 +68,7 @@ public partial class Annotation
             _ => "S",
         }));
         _dict.Set("BS", bs);
+        OnBorderChanged();
     }
 
     /// <summary>Read the border dash pattern (/BS /D) for the write-through
@@ -94,8 +101,11 @@ public partial class Annotation
             var d = new PdfArray();
             foreach (var seg in pattern) d.Add(new PdfInteger(seg));
             bs.Set("D", d);
+            // /D is read only under the dashed style; a solid (or unset) style becomes dashed
+            if (bs.GetName("S") is null or "S") bs.Set("S", new PdfName("D"));
         }
         else bs.Remove("D");
         _dict.Set("BS", bs);
+        OnBorderChanged();
     }
 }

@@ -32,8 +32,8 @@ private sealed class SaveDocumentState
     // result is then written to the real output.
     //
     // OptimizeSize wins over linearization: a linearized file repeats the first-page
-    // objects up front, carries a hint stream, and cannot pack objects into compressed
-    // object streams — so it is always LARGER than the plain object-stream save. When the
+    // objects up front, carries a hint stream, and keeps its pages, catalog and outlines out
+    // of compressed object streams — so it is always LARGER than the plain object-stream save. When the
     // caller asked to minimise size, skip linearization and keep the compact form
     // (a font-unembed + OptimizeSize save is 8.4 KB unlinearized vs 16 KB
     // linearized).
@@ -42,10 +42,20 @@ private sealed class SaveDocumentState
     public IO.PdfWriter writer = null!;
     public IO.XRefTable xref = null!;
     public Aspose.Pdf.Core.PdfDictionary trailer = null!;
+    // Local destinations given their page's reference for this save, each with the
+    // index it held, which goes back once the file is written.
+    public List<(Aspose.Pdf.Core.PdfArray Destination, Aspose.Pdf.Core.PdfObject Index)> destinationIndexes = new();
+    // New pages numbered early for those destinations: the number holds for this save
+    // only, as a writer-allocated page number always has, so the next save allocates
+    // afresh instead of claiming a number another new object may then be given.
+    public List<Page> destinationNumberedPages = new();
     // Enable object streams when the original PDF used them (reduces output size significantly).
     // Objects with inline PdfStream values are excluded from ObjStm packing by the writer.
-    // Linearization needs each object at a top-level file offset, so it stays off there.
+    // A linearized save writes its plain body without them, as the linearizer re-lays-out
+    // each object from its own file offset; the linearizer packs the objects instead
+    // (linearizedObjectStreams).
     public bool hasCompressedObjects;
+    public bool linearizedObjectStreams;
     // PDF/A-1 (ISO 19005-1 §6.1.4) prohibits cross-reference streams — and object
     // streams require one — so a document converted to PDF/A-1 saves with a
     // classic xref table even when the source used compressed objects.
@@ -72,5 +82,7 @@ private sealed class SaveDocumentState
     public Dictionary<int, Aspose.Pdf.Core.PdfDictionary> livePageDicts = null!;
     // Build trailer dict
     public Aspose.Pdf.Core.PdfDictionary newTrailer = null!;
+    // The encryption this save writes (see SaveEncryptor), or null for a plain file.
+    public Security.PdfEncryptor? encryptor;
 }
 }

@@ -76,27 +76,6 @@ public sealed partial class Document : IDisposable
         return (lefts, widths);
     }
 
-    /// <summary>Greedily word-wrap <paramref name="text"/> to lines that fit
-    /// <paramref name="availWidth"/> points, estimating glyph advance as
-    /// <paramref name="charWidth"/> per character. A word longer than the line is
-    /// hard-broken. Always returns at least one (possibly empty) line.</summary>
-    private static List<string> WrapToWidth(string text, double availWidth, double charWidth)
-    {
-        var lines = new List<string>();
-        if (charWidth <= 0) charWidth = 6;
-        var maxChars = System.Math.Max(4, (int)(availWidth / charWidth));
-        var remaining = text ?? string.Empty;
-        while (remaining.Length > maxChars)
-        {
-            var breakAt = remaining.LastIndexOf(' ', System.Math.Min(maxChars, remaining.Length - 1));
-            if (breakAt <= 0) breakAt = maxChars;
-            lines.Add(remaining[..breakAt]);
-            remaining = remaining[breakAt..].TrimStart();
-        }
-        lines.Add(remaining);
-        return lines;
-    }
-
     /// <summary>Parse a space/comma-separated length list (e.g. "105 105 105").</summary>
     private static List<double> ParseLengths(string? s)
     {
@@ -154,8 +133,8 @@ public sealed partial class Document : IDisposable
 
     private const double ackLabelPitch = 9.0;    // 6pt label box + padding-top 3px
 
-    // last label baseline → the cluster's own bottom edge (the 6pt label's descent);
-    // the inter-row paragraph gap is the row loop's own and must not be spent twice
+    // last label baseline → the cluster's own bottom edge (the 6pt label's descent); the
+    // inter-row paragraph gap is the row loop's own and must not be spent twice
     private const double ackAfter = 1.29;
 
     private const double ackBoolBoxW = 49.95;    // option box width (45% of the cell)
@@ -167,9 +146,6 @@ public sealed partial class Document : IDisposable
     private const double ackBoolBoxH = 13.5;     // option box border-box height
 
     private const double ackBoxStroke = 2.25;    // the picked option's 3px frame
-
-    // a fresh page's first step row keeps its top margin (15px), uncollapsed there
-    private const double ackRowPageTopMargin = 11.25;
 
     // the sheet's `.step-col-full .acw/asw-label:last-child { margin-bottom: 12px }`
     private const double ackChkSigLabelMargin = 9.0;
@@ -203,24 +179,24 @@ public sealed partial class Document : IDisposable
         var head = CellHtml(table.Rows.At(0));
         var body = CellHtml(table.Rows.At(1));
         if (head is null || body is null) return null;
-        if (!System.Text.RegularExpressions.Regex.IsMatch(head, @"<thead\b",
+        if (!SafeRegex.IsMatch(head, @"<thead\b",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            || !System.Text.RegularExpressions.Regex.IsMatch(body, @"<table\b",
+            || !SafeRegex.IsMatch(body, @"<table\b",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             return null;
 
-        static string Clean(string s) => System.Text.RegularExpressions.Regex.Replace(
+        static string Clean(string s) => SafeRegex.Replace(
             System.Net.WebUtility.HtmlDecode(HtmlFragment.StripHtmlTags(s)), @"\s+", " ").Trim();
 
         // Title lines: the text chunks of the band ABOVE the caption table, split at
         // block/break boundaries.
         var titles = new System.Collections.Generic.List<string>();
         var tableAt = head.IndexOf("<table", StringComparison.OrdinalIgnoreCase);
-        var titleHtml = System.Text.RegularExpressions.Regex.Replace(
+        var titleHtml = SafeRegex.Replace(
             tableAt > 0 ? head[..tableAt] : head,
             @"<style[^>]*>[\s\S]*?</style>|<head\b[^>]*>[\s\S]*?</head>|<title\b[^>]*>[\s\S]*?</title>", "",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        foreach (var piece in System.Text.RegularExpressions.Regex.Split(titleHtml,
+        foreach (var piece in SafeRegex.Split(titleHtml,
                      @"<br\s*/?>|</div>|</center>|</p>",
                      System.Text.RegularExpressions.RegexOptions.IgnoreCase))
         {
@@ -232,7 +208,7 @@ public sealed partial class Document : IDisposable
         // The caption: the header table's th texts, packed into one line.
         var caps = new System.Collections.Generic.List<string>();
         foreach (System.Text.RegularExpressions.Match th in
-                 System.Text.RegularExpressions.Regex.Matches(head[tableAt..],
+                 SafeRegex.Matches(head[tableAt..],
                      @"<th\b[^>]*>([\s\S]*?)</th>",
                      System.Text.RegularExpressions.RegexOptions.IgnoreCase))
         {
@@ -246,19 +222,19 @@ public sealed partial class Document : IDisposable
         var rows = new System.Collections.Generic.List<(string, System.Collections.Generic.List<string>, bool)>();
         var tableIdx = 0;
         foreach (System.Text.RegularExpressions.Match tbl in
-                 System.Text.RegularExpressions.Regex.Matches(body,
+                 SafeRegex.Matches(body,
                      @"<table\b[^>]*>([\s\S]*?)</table>",
                      System.Text.RegularExpressions.RegexOptions.IgnoreCase))
         {
             var firstOfTable = tableIdx++ > 0;
             foreach (System.Text.RegularExpressions.Match tr in
-                     System.Text.RegularExpressions.Regex.Matches(tbl.Groups[1].Value,
+                     SafeRegex.Matches(tbl.Groups[1].Value,
                          @"<tr\b[^>]*>([\s\S]*?)</tr>",
                          System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             {
                 var cells = new System.Collections.Generic.List<string>();
                 foreach (System.Text.RegularExpressions.Match td in
-                         System.Text.RegularExpressions.Regex.Matches(tr.Groups[1].Value,
+                         SafeRegex.Matches(tr.Groups[1].Value,
                              @"<td\b[^>]*>([\s\S]*?)</td>",
                              System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                     cells.Add(Clean(td.Groups[1].Value));
@@ -423,15 +399,15 @@ public sealed partial class Document : IDisposable
     /// cursor, scaled to its HTML width/height attributes (falling back to the intrinsic
     /// size and aspect ratio), and clamped to the content width.
     /// </summary>
-    private void RenderHtmlImages(string htmlContent, FlowLayout flow, double marginLeft, double marginRight,
+    private static void RenderHtmlImages(string htmlContent, FlowLayout flow, double marginLeft, double marginRight,
         System.Collections.Generic.List<byte[]>? inlineSvgs = null)
     {
         if (string.IsNullOrEmpty(htmlContent)) return;
-        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
-                     htmlContent, @"<img\b[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+        foreach (var value in SafeRegex.Matches(
+                     htmlContent, @"<img\b[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Select(m => m.Value))
         {
-            var tag = m.Value;
-            var srcM = System.Text.RegularExpressions.Regex.Match(tag,
+            var tag = value;
+            var srcM = SafeRegex.Match(tag,
                 @"\bsrc\s*=\s*['""]?([^'""\s>]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (!srcM.Success) continue;
             var src = srcM.Groups[1].Value;
@@ -475,7 +451,7 @@ public sealed partial class Document : IDisposable
             else if (h <= 0) h = (natW > 0 && natH > 0) ? w * natH / natW : w;
             else if (w <= 0) w = (natW > 0 && natH > 0) ? h * natW / natH : h;
 
-            var availW = flow.CurrentPage.Width - marginLeft - marginRight;
+            var availW = flow.CurrentPage.LayoutFrameWidth - marginLeft - marginRight;
             if (availW > 0 && w > availW) { h *= availW / w; w = availW; }
 
             var topY = flow.CurrentY;
@@ -501,7 +477,7 @@ public sealed partial class Document : IDisposable
                 flow.AdvanceY(h);
                 continue;
             }
-            flow.CurrentPage.AddImage(bytes, new Rectangle(marginLeft, topY - h, marginLeft + w, topY));
+            flow.CurrentPage.AddLayoutImage(bytes, new Rectangle(marginLeft, topY - h, marginLeft + w, topY));
             flow.AdvanceY(h);
         }
     }
@@ -516,8 +492,8 @@ public sealed partial class Document : IDisposable
     /// whole SVG down the rasterizer.
     private static readonly System.Text.RegularExpressions.Regex SvgNonTextInkRegex = new(
         @"<(rect|circle|ellipse|line|polyline|polygon|path|image|use|foreignObject)\b",
-        System.Text.RegularExpressions.RegexOptions.IgnoreCase
-        | System.Text.RegularExpressions.RegexOptions.Compiled);
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+        | System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The UA serif the HTML engine sets SVG text in (an SVG font-family naming
     /// a face that is not installed falls back to it).</summary>
@@ -553,12 +529,12 @@ public sealed partial class Document : IDisposable
         try { svg = System.Text.Encoding.UTF8.GetString(svgBytes); }
         catch { return null; }
         if (svg.IndexOf("<text", StringComparison.OrdinalIgnoreCase) < 0) return null;
-        if (SvgNonTextInkRegex.IsMatch(svg)) return null;
+        if (SafeRegex.IsMatch(SvgNonTextInkRegex, svg)) return null;
 
         var rootEnd = svg.IndexOf('>');
         var root = rootEnd > 0 ? svg[..(rootEnd + 1)] : svg;
         double scale = 1, tx = 0, ty = 0, vbX = 0, vbY = 0;
-        var vb = System.Text.RegularExpressions.Regex.Match(root,
+        var vb = SafeRegex.Match(root,
             @"viewBox\s*=\s*['""]\s*(-?[\d.]+)[,\s]+(-?[\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         var boxWpx = boxWpt / SvgPxToPt;
@@ -575,13 +551,13 @@ public sealed partial class Document : IDisposable
         }
 
         var runs = new System.Collections.Generic.List<(double, double, string, double, string)>();
-        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+        foreach (var groups in SafeRegex.Matches(
                      svg, @"<text\b(?<a>[^>]*)>(?<t>[\s\S]*?)</text\s*>",
-                     System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                     System.Text.RegularExpressions.RegexOptions.IgnoreCase).Select(m => m.Groups))
         {
-            var attrs = m.Groups["a"].Value;
-            var text = System.Text.RegularExpressions.Regex.Replace(
-                System.Text.RegularExpressions.Regex.Replace(m.Groups["t"].Value, @"<[^>]*>", ""),
+            var attrs = groups["a"].Value;
+            var text = SafeRegex.Replace(
+                SafeRegex.Replace(groups["t"].Value, @"<[^>]*>", ""),
                 @"\s+", " ").Trim();
             if (text.Length == 0) continue;
             var xv = SvgAttrNumber(attrs, "x") ?? 0;
@@ -602,7 +578,7 @@ public sealed partial class Document : IDisposable
     /// <summary>A presentation attribute's number (<c>x="130"</c>).</summary>
     private static double? SvgAttrNumber(string attrs, string name)
     {
-        var m = System.Text.RegularExpressions.Regex.Match(attrs,
+        var m = SafeRegex.Match(attrs,
             @"(?<![-\w])" + name + @"\s*=\s*['""]?\s*(-?[\d.]+)",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return m.Success ? SvgNum(m.Groups[1].Value) : null;
@@ -612,15 +588,15 @@ public sealed partial class Document : IDisposable
     /// same-named presentation attribute.</summary>
     private static string? SvgStyleValue(string attrs, string name)
     {
-        var st = System.Text.RegularExpressions.Regex.Match(attrs,
+        var st = SafeRegex.Match(attrs,
             @"style\s*=\s*['""]([^'""]*)['""]", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (st.Success)
         {
-            var p = System.Text.RegularExpressions.Regex.Match(st.Groups[1].Value,
+            var p = SafeRegex.Match(st.Groups[1].Value,
                 @"(?<![-\w])" + name + @"\s*:\s*([^;]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (p.Success) return p.Groups[1].Value.Trim();
         }
-        var a = System.Text.RegularExpressions.Regex.Match(attrs,
+        var a = SafeRegex.Match(attrs,
             @"(?<![-\w])" + name + @"\s*=\s*['""]([^'""]*)['""]",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return a.Success ? a.Groups[1].Value.Trim() : null;
@@ -632,7 +608,7 @@ public sealed partial class Document : IDisposable
     {
         var raw = SvgStyleValue(attrs, "font-size");
         if (raw is null) return null;
-        var m = System.Text.RegularExpressions.Regex.Match(raw, @"([\d.]+)\s*(px|pt)?",
+        var m = SafeRegex.Match(raw, @"([\d.]+)\s*(px|pt)?",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (!m.Success || SvgNum(m.Groups[1].Value) is not { } v) return null;
         return m.Groups[2].Value.Equals("pt", StringComparison.OrdinalIgnoreCase) ? v / SvgPxToPt : v;
@@ -646,19 +622,28 @@ public sealed partial class Document : IDisposable
         try
         {
             if (src.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-                || src.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
-                || src.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+                || src.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                 return null;
+            // A picture carried in the markup itself: the bytes follow the base64 marker.
+            if (IsDataUri(src))
+            {
+                var marker = src.IndexOf(Base64DataMarker, StringComparison.OrdinalIgnoreCase);
+                return marker < 0 ? null : System.Convert.FromBase64String(src.Substring(marker + Base64DataMarker.Length));
+            }
             var path = IO.CallerPaths.FileUriToPath(src);
             return File.Exists(path) ? File.ReadAllBytes(path) : null;
         }
         catch { return null; }
     }
 
+    private const string Base64DataMarker = ";base64,";
+
+    private static bool IsDataUri(string src) => src.StartsWith("data:", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Parse a numeric width/height attribute (px) from an &lt;img&gt; tag; 0 if absent.</summary>
     private static double ParseHtmlImgDimension(string tag, string name)
     {
-        var m = System.Text.RegularExpressions.Regex.Match(tag,
+        var m = SafeRegex.Match(tag,
             @"\b" + name + @"\s*=\s*['""]?(\d+(?:\.\d+)?)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return m.Success && double.TryParse(m.Groups[1].Value,
             System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v)
@@ -777,19 +762,47 @@ public sealed partial class Document : IDisposable
                         g.Clear(System.Drawing.Color.White);
                         g.DrawImage(img, 0, 0, img.Width, img.Height);
                     }
-                    using var outMs = new System.IO.MemoryStream();
-                    bmp.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);
-                    frames.Add(outMs.ToArray());
+                    frames.Add(StoredPngOf(bmp));
                 }
                 catch when (frameCount > 1)
                 {
+                    // a later frame that does not decode is dropped - the frames before it stand
                 }
             }
             return frames.Count > 0 ? frames : null;
         }
         catch { return null; }
-#pragma warning restore CA1416
     }
+
+    // The pixels per metre the platform codec writes for a bitmap's resolution (measured over
+    // sixteen resolutions, 72 to 1200 dpi, fractional ones among them).
+    private const float PlatformPixelsPerMetrePerDpi = 39.3701f;
+
+    /// <summary>A bitmap as a PNG of its own RGBA pixels and resolution, stored rather than deflated:
+    /// every taker decodes the frame straight away, so the platform's encode was work for nothing.</summary>
+    private static byte[] StoredPngOf(System.Drawing.Bitmap bmp)
+    {
+        int w = bmp.Width, h = bmp.Height, rowBytes = w * 4;
+        var rgba = new byte[rowBytes * h];
+        var bits = bmp.LockBits(new System.Drawing.Rectangle(0, 0, w, h), System.Drawing.Imaging.ImageLockMode.ReadOnly,
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            for (int y = 0; y < h; y++)
+            {
+                // the bitmap's rows are BGRA: copied as they are, blue and red then swapped in place
+                System.Runtime.InteropServices.Marshal.Copy(bits.Scan0 + y * bits.Stride, rgba, y * rowBytes, rowBytes);
+                var row = rgba.AsSpan(y * rowBytes, rowBytes);
+                for (int i = 0; i < rowBytes; i += 4)
+                    (row[i], row[i + 2]) = (row[i + 2], row[i]);
+            }
+        }
+        finally { bmp.UnlockBits(bits); }
+        var pixelsPerMetre = ((int)(bmp.HorizontalResolution * PlatformPixelsPerMetrePerDpi),
+            (int)(bmp.VerticalResolution * PlatformPixelsPerMetrePerDpi));
+        return IO.PngEncoder.Encode(rgba, w, h, colorType: 6, level: IO.Filters.DeflateLevel.Store, pixelsPerMetre: pixelsPerMetre);
+    }
+#pragma warning restore CA1416
 
     internal static (double widthPt, double heightPt)? TryGetImageNaturalSizePt(byte[] d)
         => TryGetImageNaturalSizePt(d, applyResolution: true);
@@ -827,8 +840,8 @@ public sealed partial class Document : IDisposable
             return null;
         }
 
-        // BMP: 'BM' signature; BITMAPINFOHEADER width@18, height@22 (both LE;
-        // height may be negative for top-down rows), biXPelsPerMeter@38.
+        // BMP: 'BM' signature; BITMAPINFOHEADER width@18, height@22 (both LE; height
+        // may be negative for top-down rows), biXPelsPerMeter@38.
         if (d[0] == 0x42 && d[1] == 0x4D && d.Length >= 30)
         {
             int LE32(int o) => d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | (d[o + 3] << 24);
@@ -844,16 +857,10 @@ public sealed partial class Document : IDisposable
         }
 
         // PNG: 8-byte signature, then IHDR (width@16, height@20). pHYs gives DPI.
-        if (d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47)
-        {
-            if (TryReadPngNaturalSize(d, applyResolution) is (var pngW, var pngH)) return (pngW, pngH);
-        }
+        if (d[0] == 0x89 && d[1] == 0x50 && d[2] == 0x4E && d[3] == 0x47 && TryReadPngNaturalSize(d, applyResolution) is (var pngW, var pngH)) return (pngW, pngH);
 
         // JPEG: scan markers for a Start-Of-Frame (dimensions) and JFIF APP0 (density).
-        if (d[0] == 0xFF && d[1] == 0xD8)
-        {
-            if (TryReadJpegNaturalSize(d, applyResolution) is (var jpegW, var jpegH)) return (jpegW, jpegH);
-        }
+        if (d[0] == 0xFF && d[1] == 0xD8 && TryReadJpegNaturalSize(d, applyResolution) is (var jpegW, var jpegH)) return (jpegW, jpegH);
 
         return null;
     }

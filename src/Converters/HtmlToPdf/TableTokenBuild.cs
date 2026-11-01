@@ -30,6 +30,7 @@ internal static partial class HtmlToPdfConverter
             }
             return true;
         }
+        if (ps.hidingChains.Count > 0 && HiddenUnderOpenAncestor(ps, ps.hidingChains, tok, tag)) return true;
         // Any structural tag cancels a pending htmlPage-container break; inline
         // style tags ride along inside the container.
         if (tag is not ("span" or "font" or "strong" or "b" or "em" or "i" or "u" or "a"))
@@ -44,7 +45,7 @@ internal static partial class HtmlToPdfConverter
             && tok.Attributes.TryGetValue("class", out var hpClass)
             && string.Equals(hpClass?.Trim(), "htmlPage", StringComparison.OrdinalIgnoreCase))
             ps.htmlPageBreakPending = true;
-        if (tok.IsClose) { HandleCloseTag(cfg, ps, colModel, table, tok, tag, cssRunFace); return true; }
+        if (tok.IsClose) { HandleCloseTag(cfg, ps, colModel, table, tag, cssRunFace); return true; }
         OpenTableTag(cfg, ps, colModel, table, tok, tag, cssRunFace);
         return true;
     }
@@ -66,6 +67,8 @@ internal static partial class HtmlToPdfConverter
             case "thead":
             case "tfoot":
                 if (ps.tableDepth <= 1 && _ancestorGridSheet) ps.sectionFontPt = RowGroupFontPt(tok);
+                // (a row's position counts from its own row group)
+                if (ps.tableDepth <= 1) ps.rowOrdinal = 0;
                 break;
             case "p":
             case "span":
@@ -73,7 +76,7 @@ internal static partial class HtmlToPdfConverter
             // A <label> is an ordinary inline box: the font-family/font-size it
             // declares style the run it wraps, exactly as a <span>'s would.
             case "label":
-                HandleInlineOpen(ps, colModel, table, tok, tag, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.widenProbe, cfg.redlineCells, cfg.breakAnywhereDoc, cfg.cellFontShorthand, cfg.chainBase, cfg.chainSpacingPt, cfg.chainUnbold, cfg.cssBaseFamily, cfg.cssBasePt, cfg.defaultCellFace, cfg.formGridStrutDropPt, cfg.hasBorder, cfg.inlineFaceRatio, cfg.overDeclaredDraw, cfg.padSide, cfg.uaDocGrid, cfg.uaSerifMin, cfg.ptCellWidths, cfg.bandDialect, cfg.cellLineHeightPt, cssRunFace, cfg.formGridDialect, cfg.formGridStrutPt, cfg.liftNestedTables, cfg.tightExtras, cfg.uaCellBoxes, cfg.borderWidth, cfg.pad, cfg.css, cfg.docCss, cfg.chainRules, cfg.cssAncestors, cfg.inlineSvgs, cfg.nestedHtml, cfg.makeRadio, cfg.availWidthPt, cfg.defaultCellFontPt, cfg.tblStyle, cfg.docElementGrid, cfg.pinnedBodyGrid, cfg.authoredCellChrome, cfg.chainBorderSeparate, cfg.elemRuleBorder);
+                HandleInlineOpen(ps, tok, tag, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.widenProbe, cfg.redlineCells, cfg.chainBase, cfg.chainUnbold, cfg.ptCellWidths, cfg.bandDialect, cssRunFace, cfg.formGridDialect, cfg.liftNestedTables, cfg.css, cfg.docCss, cfg.chainRules);
                 break;
             case "sup":
             case "sub":
@@ -94,11 +97,11 @@ internal static partial class HtmlToPdfConverter
                 if (cfg.uaCellBoxes && ps.cell is not null) OpenHeadingRun(cfg, ps, tok, tag);
                 break;
             case "div":
-                HandleDivOpen(ps, colModel, table, tok, tag, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.widenProbe, cfg.redlineCells, cfg.breakAnywhereDoc, cfg.cellFontShorthand, cfg.chainBase, cfg.chainSpacingPt, cfg.chainUnbold, cfg.cssBaseFamily, cfg.cssBasePt, cfg.defaultCellFace, cfg.formGridStrutDropPt, cfg.hasBorder, cfg.inlineFaceRatio, cfg.overDeclaredDraw, cfg.padSide, cfg.uaDocGrid, cfg.uaSerifMin, cfg.ptCellWidths, cfg.bandDialect, cfg.cellLineHeightPt, cssRunFace, cfg.formGridDialect, cfg.formGridStrutPt, cfg.liftNestedTables, cfg.tightExtras, cfg.uaCellBoxes, cfg.borderWidth, cfg.pad, cfg.css, cfg.docCss, cfg.chainRules, cfg.cssAncestors, cfg.inlineSvgs, cfg.nestedHtml, cfg.makeRadio, cfg.availWidthPt, cfg.defaultCellFontPt, cfg.tblStyle, cfg.docElementGrid, cfg.pinnedBodyGrid, cfg.authoredCellChrome, cfg.chainBorderSeparate, cfg.elemRuleBorder);
+                HandleDivOpen(ps, tok, tag, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.widenProbe, cfg.redlineCells, cfg.chainBase, cfg.liftNestedTables, cfg.uaCellBoxes, cfg.pad, cfg.docCss, cfg.chainRules, cfg.pinnedBodyGrid);
                 break;
             case "td":
             case "th":
-                HandleCellOpen(ps, colModel, table, tok, tag, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.widenProbe, cfg.redlineCells, cfg.breakAnywhereDoc, cfg.cellFontShorthand, cfg.chainBase, cfg.chainSpacingPt, cfg.chainUnbold, cfg.cssBaseFamily, cfg.cssBasePt, cfg.defaultCellFace, cfg.formGridStrutDropPt, cfg.hasBorder, cfg.inlineFaceRatio, cfg.overDeclaredDraw, cfg.padSide, cfg.uaDocGrid, cfg.uaSerifMin, cfg.ptCellWidths, cfg.bandDialect, cfg.cellLineHeightPt, cssRunFace, cfg.formGridDialect, cfg.formGridStrutPt, cfg.liftNestedTables, cfg.tightExtras, cfg.uaCellBoxes, cfg.borderWidth, cfg.pad, cfg.css, cfg.docCss, cfg.chainRules, cfg.cssAncestors, cfg.inlineSvgs, cfg.nestedHtml, cfg.makeRadio, cfg.availWidthPt, cfg.defaultCellFontPt, cfg.tblStyle, cfg.docElementGrid, cfg.pinnedBodyGrid, cfg.authoredCellChrome, cfg.chainBorderSeparate, cfg.elemRuleBorder);
+                HandleCellOpen(ps, colModel, table, tok, tag, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.widenProbe, cfg.redlineCells, cfg.breakAnywhereDoc, cfg.cellFontShorthand, cfg.chainBase, cfg.chainSpacingPt, cfg.chainUnbold, cfg.cssBaseFamily, cfg.cssBasePt, cfg.defaultCellFace, cfg.formGridStrutDropPt, cfg.hasBorder, cfg.inlineFaceRatio, cfg.overDeclaredDraw, cfg.padSide, cfg.uaDocGrid, cfg.uaSerifMin, cfg.ptCellWidths, cfg.bandDialect, cfg.cellLineHeightPt, cssRunFace, cfg.formGridDialect, cfg.formGridStrutPt, cfg.liftNestedTables, cfg.tightExtras, cfg.uaCellBoxes, cfg.borderWidth, cfg.pad, cfg.css, cfg.docCss, cfg.chainRules, cfg.cssAncestors, cfg.tblStyle, cfg.docElementGrid, cfg.pinnedBodyGrid, cfg.authoredCellChrome, cfg.chainBorderSeparate);
                 break;
             case "a":
                 OpenAnchorRun(cfg, ps, tok);
@@ -107,8 +110,7 @@ internal static partial class HtmlToPdfConverter
             case "b":
                 OpenBoldRun(cfg, ps);
                 break;
-            case "i":
-            default: OpenTableBlockTag(cfg, ps, colModel, table, tok, tag, cssRunFace); break;
+            default: OpenTableBlockTag(cfg, ps, colModel, table, tok, tag); break;
         }
     }
 }

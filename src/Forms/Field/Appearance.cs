@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -21,14 +21,14 @@ public partial class Field
         var da = FindInheritedDaString(_dict, 0);
         if (da is not null)
         {
-            var m = System.Text.RegularExpressions.Regex.Match(da,
+            var m = SafeRegex.Match(da,
                 @"/(\S+)\s+([\d.]+)\s+Tf");
             if (m.Success && double.TryParse(m.Groups[2].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var size))
             {
                 var color = System.Drawing.Color.Black;
-                var cm = System.Text.RegularExpressions.Regex.Match(da,
+                var cm = SafeRegex.Match(da,
                     @"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg");
                 if (cm.Success)
                     color = System.Drawing.Color.FromArgb(
@@ -41,6 +41,9 @@ public partial class Field
         }
         return new Aspose.Pdf.Annotations.DefaultAppearance();
     }
+
+    /// <summary>The field's /DA, else the nearest parent's; null when neither has one.</summary>
+    internal string? InheritedAppearanceString => FindInheritedDaString(_dict, 0);
 
     private string? FindInheritedDaString(PdfDictionary dict, int depth)
     {
@@ -79,15 +82,27 @@ public partial class Field
     /// on the page once.</summary>
     internal void PlaceGeneratorWidget(Page page, Rectangle rect)
     {
+#pragma warning disable S3060 // the type test is the rule itself; moving it into the subclasses would scatter it
         if (this is TextBoxField tb) tb.ApplyGeneratorDefaultAppearance();
+#pragma warning restore S3060
         Rect = rect;
         _dict.Remove("AP");
         GenerateAppearance();
         var annots = _reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
         if (annots is null) { annots = new PdfArray(); page.Dict.Set("Annots", annots); }
-        foreach (var a in annots)
-            if (ReferenceEquals(_reader.Resolve(a), _dict)) return;
+        if (annots.Any(a => ReferenceEquals(_reader.Resolve(a), _dict))) return;
         annots.Add(_dict);
+    }
+
+    /// <summary>Bind the widget of a control laid out in a table cell to the page the cell
+    /// landed on: a checkbox keeps the appearance its size already has, any other field
+    /// is rebuilt for the rectangle.</summary>
+    internal void PlaceCellWidget(Page page, Rectangle rect)
+    {
+#pragma warning disable S3060 // the type test is the rule itself; moving it into the subclasses would scatter it
+        if (this is CheckboxField checkbox) checkbox.PlaceWidget(page, rect);
+#pragma warning restore S3060
+        else PlaceGeneratorWidget(page, rect);
     }
 
     /// <summary>Resolve the widget rectangle's width/height. Null when
@@ -96,7 +111,7 @@ public partial class Field
     {
         if (Reader.Resolve(Dict.Get("Rect")) is not PdfArray rectArr || rectArr.Count < 4)
             return null;
-        var r = Rectangle.FromPdfArray(rectArr);
+        var r = Rectangle.FromPdfArray(rectArr, Reader);
         return r.Width > 0 && r.Height > 0 ? (r.Width, r.Height) : null;
     }
 
@@ -208,9 +223,8 @@ public partial class Field
         var res = new PdfDictionary();
         res.Set("Font", fonts);
         if (existingRes is not null)
-            foreach (var key in existingRes.Keys)
-                if (key != "Font")
-                    res.Set(key, existingRes.Get(key)!);
+            foreach (var key in existingRes.Keys.Where(key => key != "Font"))
+                res.Set(key, existingRes.Get(key)!);
         return res;
     }
 
@@ -221,7 +235,7 @@ public partial class Field
     /// round-trips that name; a name that resolves to nothing — typically a bare
     /// subset tag whose <c>/DA</c> font isn't a usable family — falls back to
     /// Helvetica so the value still renders instead of vanishing.</summary>
-    private static PdfDictionary MakeAppearanceFont(string fontName)
+    internal static PdfDictionary MakeAppearanceFont(string fontName)
     {
         string baseFont;
         if (StandardFontAliases.Contains(fontName))
@@ -302,49 +316,75 @@ public partial class Field
     /// FLOORED per value, which is what the appearance emits.</summary>
     private static void DescribeSimpleTrueType(PdfDictionary font, string baseFont, byte[] face)
     {
-        try
+        // The numbers come from the face alone, and the resolver hands the same program
+        // for the same name: a form of many fields describes each face once, not per field.
+        var metrics = DescribedFaces.GetValue(face, static f =>
         {
-            var ttf = new Aspose.Pdf.Text.TrueTypeParser(face);
-            ttf.Parse();
-            if (ttf.UnitsPerEm <= 0 || ttf.GlyphWidths.Length == 0) return;
-            double scale = 1000.0 / ttf.UnitsPerEm;
+            try { return ReadSimpleFaceMetrics(f); }
+            catch { return null; }
+        });
+        if (metrics is null) return; // a face that does not parse keeps the standard font dictionary
 
-            const int firstChar = 32, lastChar = 255;
-            var widths = new PdfArray();
-            for (var code = firstChar; code <= lastChar; code++)
-            {
-                var ch = Aspose.Pdf.Text.Cp1252.GetString(new[] { (byte)code });
-                var w = 0.0;
-                if (ch.Length == 1 && ttf.CMap.TryGetValue(ch[0], out var gid)
-                    && gid > 0 && gid < ttf.GlyphWidths.Length)
-                    w = System.Math.Round(ttf.GlyphWidths[gid] * scale);
-                widths.Add(new PdfInteger((long)w));
-            }
+        var widths = new PdfArray();
+        foreach (var w in metrics.Widths) widths.Add(new PdfInteger(w));
+        var bbox = new PdfArray();
+        foreach (var v in metrics.BBox) bbox.Add(new PdfInteger(v));
 
-            var bbox = new PdfArray();
-            foreach (var v in ttf.BBox) bbox.Add(new PdfInteger((long)System.Math.Floor(v * scale)));
+        var fd = new PdfDictionary();
+        fd.Set("Type", new PdfName("FontDescriptor"));
+        fd.Set("FontName", new PdfName(baseFont));
+        fd.Set("Flags", new PdfInteger(metrics.Flags));
+        fd.Set("FontBBox", bbox);
+        fd.Set("ItalicAngle", new PdfInteger(0));
+        fd.Set("Ascent", new PdfInteger(metrics.Ascent));
+        fd.Set("Descent", new PdfInteger(metrics.Descent));
+        fd.Set("CapHeight", new PdfInteger(metrics.CapHeight));
+        fd.Set("StemV", new PdfInteger(metrics.StemV));
 
-            var fd = new PdfDictionary();
-            fd.Set("Type", new PdfName("FontDescriptor"));
-            fd.Set("FontName", new PdfName(baseFont));
-            // Nonsymbolic (bit 3); italic (bit 7) from the head macStyle.
-            var flags = 32 | ((ttf.MacStyle & 2) != 0 ? 64 : 0);
-            fd.Set("Flags", new PdfInteger(flags));
-            fd.Set("FontBBox", bbox);
-            fd.Set("ItalicAngle", new PdfInteger(0));
-            fd.Set("Ascent", new PdfInteger((long)System.Math.Floor(ttf.Ascent * scale)));
-            fd.Set("Descent", new PdfInteger(-(long)System.Math.Floor(System.Math.Abs(ttf.Descent) * scale)));
-            fd.Set("CapHeight", new PdfInteger((long)System.Math.Floor(
-                (ttf.CapHeight > 0 ? ttf.CapHeight : ttf.Ascent) * scale)));
-            fd.Set("StemV", new PdfInteger((ttf.MacStyle & 1) != 0 ? 160 : 80));
+        font.Set("Subtype", new PdfName("TrueType"));
+        font.Set("FirstChar", new PdfInteger(DescribedFirstChar));
+        font.Set("LastChar", new PdfInteger(DescribedLastChar));
+        font.Set("Widths", widths);
+        font.Set("FontDescriptor", fd);
+    }
 
-            font.Set("Subtype", new PdfName("TrueType"));
-            font.Set("FirstChar", new PdfInteger(firstChar));
-            font.Set("LastChar", new PdfInteger(lastChar));
-            font.Set("Widths", widths);
-            font.Set("FontDescriptor", fd);
+    private const int DescribedFirstChar = 32;
+    private const int DescribedLastChar = 255;
+
+    /// <summary>What a described face's dictionary says about it: WinAnsi widths and the descriptor's metrics.</summary>
+    private sealed record SimpleFaceMetrics(long[] Widths, long[] BBox, int Flags, long Ascent, long Descent, long CapHeight, int StemV);
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], SimpleFaceMetrics?> DescribedFaces = new();
+
+    /// <summary>The metrics of <paramref name="face"/>, or null when it has none to describe.</summary>
+    private static SimpleFaceMetrics? ReadSimpleFaceMetrics(byte[] face)
+    {
+        var ttf = new Aspose.Pdf.Text.TrueTypeParser(face);
+        ttf.Parse();
+        if (ttf.UnitsPerEm <= 0 || ttf.GlyphWidths.Length == 0) return null;
+        double scale = 1000.0 / ttf.UnitsPerEm;
+
+        var widths = new long[DescribedLastChar - DescribedFirstChar + 1];
+        for (var code = DescribedFirstChar; code <= DescribedLastChar; code++)
+        {
+            var ch = Aspose.Pdf.Text.Cp1252.GetString(new[] { (byte)code });
+            var w = 0.0;
+            if (ch.Length == 1 && ttf.CMap.TryGetValue(ch[0], out var gid)
+                && gid > 0 && gid < ttf.GlyphWidths.Length)
+                w = System.Math.Round(ttf.GlyphWidths[gid] * scale);
+            widths[code - DescribedFirstChar] = (long)w;
         }
-        catch { }
+
+        var bbox = new long[ttf.BBox.Length];
+        for (var i = 0; i < bbox.Length; i++) bbox[i] = (long)System.Math.Floor(ttf.BBox[i] * scale);
+
+        // Nonsymbolic (bit 3); italic (bit 7) from the head macStyle.
+        var flags = 32 | ((ttf.MacStyle & 2) != 0 ? 64 : 0);
+        return new SimpleFaceMetrics(widths, bbox, flags,
+            (long)System.Math.Floor(ttf.Ascent * scale),
+            -(long)System.Math.Floor(System.Math.Abs(ttf.Descent) * scale),
+            (long)System.Math.Floor((ttf.CapHeight > 0 ? ttf.CapHeight : ttf.Ascent) * scale),
+            (ttf.MacStyle & 1) != 0 ? 160 : 80);
     }
 
     /// <summary>Resolve a /DA font name against the AcroForm /DR /Font dictionary.
@@ -352,14 +392,43 @@ public partial class Field
     /// keeps embedded composite faces working in regenerated appearances.</summary>
     private protected PdfDictionary? ResolveDrFontDict(string fontName)
     {
+        var fontDict = ResolveDrFonts();
+        return fontDict is null ? null : Reader.ResolveDict(fontDict.Get(fontName));
+    }
+
+    /// <summary>The AcroForm /DR /Font dictionary, or null when the form has none.</summary>
+    private protected PdfDictionary? ResolveDrFonts()
+    {
         try
         {
             var acro = Reader.ResolveDict(Reader.Catalog.Get("AcroForm"));
             var dr = acro is null ? null : Reader.ResolveDict(acro.Get("DR"));
-            var fontDict = dr is null ? null : Reader.ResolveDict(dr.Get("Font"));
-            return fontDict is null ? null : Reader.ResolveDict(fontDict.Get(fontName));
+            return dr is null ? null : Reader.ResolveDict(dr.Get("Font"));
         }
         catch { return null; }
+    }
+
+    /// <summary>The simple /DR font a regenerated appearance can reference as it stands, or null. A TrueType
+    /// font carries its own metrics; a Type 1 font that embeds no program and is WinAnsi-encoded draws the
+    /// Cp1252 appearance text as written, and names a face a viewer must find or substitute by its descriptor,
+    /// which a synthesized Helvetica stand-in would hide. Standard-14 faces and aliases keep the synthesized
+    /// dictionary, and so does an embedded Type 1 subset that may lack the value's glyphs.</summary>
+    private protected PdfDictionary? SimpleDrFontAsWritten(string fontName)
+    {
+        var dr = ResolveDrFontDict(fontName);
+        switch (dr?.GetName("Subtype"))
+        {
+            case "TrueType":
+                return dr;
+            case "Type1" when dr.GetName("Encoding") == "WinAnsiEncoding"
+                              && !StandardFontAliases.Contains(fontName)
+                              && dr.GetName("BaseFont") is { } baseFont && !IsStandardBaseFontName(baseFont)
+                              && Reader.ResolveDict(dr.Get("FontDescriptor")) is { } fd
+                              && !fd.ContainsKey("FontFile") && !fd.ContainsKey("FontFile3"):
+                return dr;
+            default:
+                return null;
+        }
     }
 
     /// <summary>For a composite (/Type0, Identity-H, CIDToGIDMap Identity) /DA font,
@@ -376,7 +445,8 @@ public partial class Field
             var desc = Reader.Resolve(type0.Get("DescendantFonts")) as PdfArray;
             var cid = desc is { Count: > 0 } ? Reader.ResolveDict(desc[0]) : null;
             var fd = cid is null ? null : Reader.ResolveDict(cid.Get("FontDescriptor"));
-            var ff = fd is null ? null : Reader.ResolveStream(fd.Get("FontFile2"));
+            var ff = fd is null ? null : Reader.ResolveStream(fd.Get("FontFile2"))
+                ?? (Reader.ResolveStream(fd.Get("FontFile3")) is { } ff3 && ff3.Dict.GetName("Subtype") == "OpenType" ? ff3 : null);
             if (ff is null) return null;
             var ttf = Reader.DecodeStream(ff);
             var parser = new Aspose.Pdf.Text.TrueTypeParser(ttf);
@@ -400,7 +470,7 @@ public partial class Field
         if (string.IsNullOrEmpty(family) || family == "Unknown") return dr;
         var clone = new PdfDictionary();
         foreach (var k in dr.Keys) clone.Set(k, dr.Get(k)!);
-        clone.Set("BaseFont", new PdfName(family!.Replace(" ", "")));
+        clone.Set("BaseFont", new PdfName(family.Replace(" ", "")));
         return clone;
     }
 
@@ -442,8 +512,11 @@ public partial class Field
         var sb = new System.Text.StringBuilder();
         if (MkColorOperator(mk.Get("BG"), fill: true) is { } bg)
             sb.Append($"{bg} 0 0 {FmtNum(w)} {FmtNum(h)} re f ");
+        // A border the /BS styles, widens or dashes is drawn as it asks; the plain one-point box stays as it was.
         if (MkColorOperator(mk.Get("BC"), fill: false) is { } bc)
-            sb.Append($"{bc} 1 w 0.5 0.5 {FmtNum(w - 1)} {FmtNum(h - 1)} re S ");
+            sb.Append(HasStyledBorder(Dict)
+                ? BuildBsBorder(Dict, w, h, bc, Reader.Resolve(mk.Get("BG")) is PdfArray face && face.Count > 0 ? MkColor(face) : System.Drawing.Color.Gray)
+                : $"{bc} 1 w 0.5 0.5 {FmtNum(w - 1)} {FmtNum(h - 1)} re S ");
         return sb.ToString();
     }
 

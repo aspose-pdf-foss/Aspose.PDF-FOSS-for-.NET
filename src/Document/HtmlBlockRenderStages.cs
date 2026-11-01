@@ -15,7 +15,7 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>HTML block stages: the special blocks, the text preparation and the text emit.</summary>
-    private void EmitBlockText(HtmlBlockRenderState hb, HtmlBlockState rb, Aspose.Pdf.Converters.HtmlToPdfConverter.Block b)
+    private static void EmitBlockText(HtmlBlockRenderState hb, HtmlBlockState rb, Aspose.Pdf.Converters.HtmlToPdfConverter.Block b)
     {
         if (rb.bandColor is not null)
         {
@@ -38,7 +38,7 @@ public sealed partial class Document
         if (!rb.wrote)
         {
             rb.bf.Position = new Text.Position(hb.marginLeft + b.LeftIndent,
-                hb.page.Height - hb.marginTop - rb.bf.TextState.FontSize);
+                hb.page.LayoutFrameHeight - hb.marginTop - rb.bf.TextState.FontSize);
             hb.tb.AppendTextInline(rb.bf);
         }
         if (rb.bandColor is not null)
@@ -51,9 +51,9 @@ public sealed partial class Document
     /// <summary></summary>
     private void PrepareBlockText(HtmlBlockRenderState hb, HtmlBlockState rb, Aspose.Pdf.Converters.HtmlToPdfConverter.Block b)
     {
-        rb.htmlBlockLead = rb.htmlCallerLs > 0
-            ? rb.htmlCallerLs
-            : hb.legacyDialect ? rb.legacyLead : rb.fontSize * 0.2;
+        if (rb.htmlCallerLs > 0) rb.htmlBlockLead = rb.htmlCallerLs;
+        else if (hb.legacyDialect) rb.htmlBlockLead = rb.legacyLead;
+        else rb.htmlBlockLead = rb.fontSize * 0.2;
         rb.bf.TextState.LineSpacing = (float)rb.htmlBlockLead;
         rb.bf.TextState.IsBold = b.FontRes == "F2";
         rb.bf.TextState.IsItalic = b.FontRes == "F3";
@@ -117,7 +117,7 @@ public sealed partial class Document
         // block (the first when the HTML splits into several).
         if (hb.html.Hyperlink is not null && !hb.htmlFragmentLinkEmitted)
         {
-            rb.bf.Hyperlink = hb.html.Hyperlink!;
+            rb.bf.Hyperlink = hb.html.Hyperlink;
             hb.htmlFragmentLinkEmitted = true;
         }
     }
@@ -127,7 +127,7 @@ public sealed partial class Document
     {
         if (b.IsImage
             && !(b.ImageSrc?.StartsWith("inline-svg:", StringComparison.Ordinal) ?? false)
-            && (b.ImageSrc is null || LoadHtmlImageBytes(b.ImageSrc) is null))
+            && (b.ImageSrc is null || (!IsDataUri(b.ImageSrc) && LoadHtmlImageBytes(b.ImageSrc) is null)))
         {
             // A broken/missing <img> still occupies the CSS default
             // replaced-element box (300x150 px, width capped by the
@@ -154,7 +154,7 @@ public sealed partial class Document
             // from the HTML name/id so callers can find it by FullName.
             var ifPage = hb.flow.CurrentPage;
             var ifLlx = hb.marginLeft + b.LeftIndent;
-            var ifContentW = ifPage.Width - hb.marginLeft - hb.marginRight - b.LeftIndent;
+            var ifContentW = ifPage.LayoutFrameWidth - hb.marginLeft - hb.marginRight - b.LeftIndent;
             var ifW = b.InputWidth > 0 ? System.Math.Min(b.InputWidth, ifContentW) : ifContentW;
             var ifH = b.InputHeight > 0 ? b.InputHeight : rb.fontSize * 1.3;
             var ifTop = hb.flow.CurrentY;
@@ -175,7 +175,7 @@ public sealed partial class Document
             // Draw the <hr> as a thin filled bar across the
             // content width in its CSS border colour.
             var hrPage = hb.flow.CurrentPage;
-            var lineW = hrPage.Width - hb.marginLeft - hb.marginRight;
+            var lineW = hrPage.LayoutFrameWidth - hb.marginLeft - hb.marginRight;
             var th = b.RuleWidth > 0 ? b.RuleWidth : 1.0;
             var hrY = hb.flow.CurrentY;
             var csb = new Content.ContentStreamBuilder();
@@ -194,9 +194,13 @@ public sealed partial class Document
             // row; a caller-set line spacing steps blank rows on the same
             // pitch as text rows.
             var blankLs = (double)(hb.html.TextState?.LineSpacing ?? 0f);
-            hb.flow.AdvanceLineBox(b.ExplicitHeight > 0 ? b.ExplicitHeight
-                : blankLs > 0 ? rb.fontSize + blankLs
-                : hb.legacyDialect ? rb.fontSize + rb.legacyLead : rb.fontSize);
+            hb.flow.AdvanceLineBox((b.ExplicitHeight, blankLs, hb.legacyDialect) switch
+            {
+                (> 0, _, _) => b.ExplicitHeight,
+                (_, > 0, _) => rb.fontSize + blankLs,
+                (_, _, true) => rb.fontSize + rb.legacyLead,
+                _ => rb.fontSize,
+            });
             return true;
         }
         return false;

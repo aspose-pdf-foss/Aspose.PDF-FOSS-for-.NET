@@ -54,7 +54,7 @@ public class AutoTagNoteTests
 
     /// <summary>Body lines of 12 pt from (72, <paramref name="top"/>) down at a 14 pt pitch.</summary>
     private static string Body(double top, params string[] lines)
-        => $"BT /F1 12 Tf 72 {top} Td " + string.Join(" 0 -14 Td ", lines.Select(l => $"({l}) Tj")) + " ET\n";
+        => FormattableString.Invariant($"BT /F1 12 Tf 72 {top} Td ") + string.Join(" 0 -14 Td ", lines.Select(l => $"({l}) Tj")) + " ET\n";
 
     private const string Footnote = "BT /F1 8 Tf 72 100 Td (1 The code and the models are available at the project page.) Tj ET\n";
     private const string NextPage = "then the road climbs again toward the pass and the huts above the tree line.";

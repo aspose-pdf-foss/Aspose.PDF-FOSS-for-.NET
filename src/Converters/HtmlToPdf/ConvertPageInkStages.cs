@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>An unassigned page width follows the sheet, edge-to-edge tables and chart cards.</summary>
-    private static void WidenPageForChartsAndEdges(ConvertState cv, HtmlLoadOptions? options)
+    private static void WidenPageForChartsAndEdges(ConvertState cv)
     {
         if (!(cv.pageInfo?.WidthAssigned ?? false))
             foreach (var b in cv.blocks)
@@ -95,7 +95,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The page's own top margin: the options' value, or the default.</summary>
     private static double PageMarginTopPt(ConvertState cv) => cv.pageInfo?.Margin?.Top ?? DefaultPageTopMarginPt;
 
-    private static void WidenPageForAbsoluteOverflow(ConvertState cv, HtmlLoadOptions? options)
+    private static void WidenPageForAbsoluteOverflow(ConvertState cv)
     {
         if (cv.pageInfo?.WidthAssigned ?? false) return;
         if (cv.absMaxResolvedRightPt <= 0) return;
@@ -140,12 +140,12 @@ internal static partial class HtmlToPdfConverter
     /// without one wraps every line inside the box and keeps the default sheet (MEASURED).</summary>
     private static bool MsoFilteredHasOverWideBox(ConvertState cv)
     {
-        foreach (Match m in Regex.Matches(cv.html,
-            @"(?<![-\w])width\s*[:=]\s*[""']?\s*(\d+(?:\.\d+)?)\s*(px|pt|in|cm|mm)?", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(cv.html,
+            @"(?<![-\w])width\s*[:=]\s*[""']?\s*(\d+(?:\.\d+)?)\s*(px|pt|in|cm|mm)?", RegexOptions.IgnoreCase).Select(m => m.Groups))
         {
-            if (!double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
+            if (!double.TryParse(groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var w)) continue;
-            w *= m.Groups[2].Value.ToLowerInvariant() switch
+            w *= groups[2].Value.ToLowerInvariant() switch
             {
                 "pt" => 1.0,
                 "in" => 72.0,
@@ -196,16 +196,17 @@ internal static partial class HtmlToPdfConverter
     /// the default A4 sheet: a painted 800px div widens it to 786, a 600px one to 636, a
     /// paragraph wrapped in an unpainted 800px box to its text's own extent, and a 500px box
     /// not at all). The height keeps the portrait long edge.</summary>
-    private static void WidenPageToInk(ConvertState cv, HtmlLoadOptions? options)
+    private static void WidenPageToInk(ConvertState cv)
     {
         // An authored sheet, a scale-to-page layout, a clipping float page and a
         // Word-filtered export keep their own width model.
         if (cv.marginsExplicit || (cv.pageInfo?.WidthAssigned ?? false)
             || cv.profile.scaleToPageWidth || cv.profile.floatBothSidesDoc || cv.profile.msoFilteredDoc)
             return;
-        var ink = MeasureWidestInk(cv, options);
+        var ink = MeasureWidestInk(cv);
         if (ink <= 0) return;
-        var bodyInset = cv.profile.bodyZeroMargin ? 0.0 : UaBodyMarginPt;
+        var authoredBox = AuthoredBodyBox(cv);
+        var bodyInset = authoredBox ? cv.bodyBox.Left : cv.profile.bodyZeroMargin ? 0.0 : UaBodyMarginPt;
         var needed = 90.0 + bodyInset + ink + 90.0;
         if (needed <= cv.pageWidth) return;
         cv.pageHeight = Math.Max(cv.pageWidth, cv.pageHeight);
@@ -214,25 +215,28 @@ internal static partial class HtmlToPdfConverter
         // body inset on both sides (probed: a paragraph outside the widened box wraps
         // to W - 96), which the standard-serif flow already charges on the right of
         // every text block, so only the other flows inset the margin itself.
+        // (an authored body box keeps its own right inset over the UA one the serif flow charges)
         cv.marginLeft = 90.0 + bodyInset;
         cv.marginRight = 90.0 + (cv.profile.uaStdSerif ? 0.0 : bodyInset);
+        if (authoredBox) cv.marginRight = 90.0 + cv.bodyBox.Right - (cv.profile.uaStdSerif ? UaBodyMarginPt : 0.0);
         cv.profile.inkWidenPt = ink;
     }
 
     /// <summary>The widest ink the flow blocks declare, measured from the content box's left
     /// edge: a declared-width image, a form control's box, a painted declared box, or the text
     /// inside an unpainted declared box as far as it runs. Tables keep their own width model.</summary>
-    private static double MeasureWidestInk(ConvertState cv, HtmlLoadOptions? options)
+    private static double MeasureWidestInk(ConvertState cv)
     {
         double widest = 0;
         var traceInk = Environment.GetEnvironmentVariable("ASPOSE_TRACE_PAGEW") == "1";
         foreach (var b in cv.blocks)
         {
             if (b.IsTable || b.IsHardBreak || b.IsHorizontalRule) continue;
-            var ink = b.Pre is { } pre ? pre.WidestPt
-                : b.IsImage ? ImageInk(b)
-                : b.IsInputField || b.IsSelectBox ? ControlInk(b)
-                : TextBoxInk(cv, b);
+            double ink;
+            if (b.Pre is { } pre) ink = pre.Clips ? 0 : pre.WidestPt;
+            else if (b.IsImage) ink = ImageInk(b);
+            else if (b.IsInputField || b.IsSelectBox) ink = ControlInk(b);
+            else ink = TextBoxInk(cv, b);
             if (ink > 0) widest = Math.Max(widest, ink + (b.IsImage ? b.ImageIndentPt : b.LeftIndent));
             if (ink > 0 && traceInk)
                 Console.Error.WriteLine($"[inkblock] ink={ink:0.##} indent={(b.IsImage ? b.ImageIndentPt : b.LeftIndent):0.##} pre={b.Pre is not null} img={b.IsImage} widthPx={b.WidthPx:0.#} bg={b.BgBoxWidthPt:0.#} border={b.BorderBoxWPt:0.#} text='{(b.Text is { Length: > 30 } t ? t[..30] : b.Text)}'");
@@ -248,9 +252,9 @@ internal static partial class HtmlToPdfConverter
         return b.ImageWidth * 0.75 + ImageInkAllowancePt;
     }
 
-    /// <summary>A form control's declared box plus its border ink.</summary>
+    /// <summary>A form control's declared box plus its border ink; the box is already in points.</summary>
     private static double ControlInk(Block b)
-        => b.InputWidth > 0 ? b.InputWidth * 0.75 + ControlBorderInkPt : 0;
+        => b.InputWidth > 0 ? b.InputWidth + ControlBorderInkPt : 0;
 
     /// <summary>A painted declared box inks its whole width plus its border; an unpainted one
     /// inks only as far as its text runs, which is the box itself once the text wraps in it.

@@ -23,8 +23,8 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         Action<double, double, double, double> emitLine, int depth = 0)
     {
         // Flatness check: if both control points lie close to the chord (x0,y0)→(x3,y3),
-        // treat the bezier as a straight segment. d = perpendicular distance to the chord;
-        // squared form avoids sqrt. Threshold 0.25·L² ≡ |d1|+|d2| ≤ 0.5·L which is the same
+        // treat the bezier as a straight segment. d = perpendicular distance to the chord; squared
+        // form avoids sqrt. Threshold 0.25·L² ≡ |d1|+|d2| ≤ 0.5·L which is the same
         // as EdgeTable.FlattenCubic uses for fills, keeping fill and stroke shapes consistent.
         var dx = x3 - x0;
         var dy = y3 - y0;
@@ -70,13 +70,21 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         if (state.ClipMask is null && IsViewportCoveringRectangle(segments, state.Ctm, ctx))
             return;
 
-        // A clip built from corrupt geometry would erase everything that follows it;
-        // GDI+ likewise treats a clip whose bounds dwarf the page as no clip at all.
-        if (!PathGeometrySane(segments, state.Ctm, ctx)) return;
+        // A clip reaching astronomically past the page - "everything but this box" drawn
+        // with a huge outer rectangle - is confined to a guard box round the device rather
+        // than dropped (see ClipGuardBox), as in GDI+; a clip of non-finite geometry comes
+        // from a damaged stream, would erase everything that follows it, and is skipped.
+        ClipGuardBox? guard = null;
+        if (!PathGeometrySane(segments, state.Ctm, ctx))
+        {
+            if (!PathGeometryFinite(segments, state.Ctm, ctx)) return;
+            guard = new ClipGuardBox(ctx.PixelW, ctx.PixelH);
+        }
 
-        var edgeTable = BuildPathEdgeTable(segments, state.Ctm, ctx);
+        var edgeTable = BuildPathEdgeTable(segments, state.Ctm, ctx, guard);
         var mask = new byte[ctx.PixelW * ctx.PixelH];
         ScanlineFiller.BuildMask(edgeTable, mask, ctx.PixelW, ctx.PixelH, evenOdd);
+        WidenThinClip(ctx, segments, state.Ctm, mask);
 
         // Intersect with any existing clip so nested W / W* keeps tightening rather
         // than replacing the outer clip wholesale.
@@ -117,7 +125,8 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
 
         if (starts != 1 || corners > RectangleCornerOps) return false;
         var (pxLo, pyLo, pxHi, pyHi) = PathDeviceBounds(segments, ctm, ctx);
-        if (!(pxLo <= 0 && pxHi >= ctx.PixelW && pyLo <= 0 && pyHi >= ctx.PixelH)) return false;
+        var o = DeviceOriginOffset;
+        if (!(pxLo <= o && pxHi >= ctx.PixelW + o && pyLo <= o && pyHi >= ctx.PixelH + o)) return false;
         return CornersOnBounds(segments, ctm, ctx, (pxLo, pyLo, pxHi, pyHi));
     }
 
@@ -167,8 +176,10 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
             var ty = ctm[1] * x + ctm[3] * y + ctm[5];
             var px = (tx - ctx.MediaBox.LLX) * ctx.Scale;
             var py = ctx.PixelH - (ty - ctx.MediaBox.LLY) * ctx.Scale;
-            if (px < lx) lx = px; if (px > hx) hx = px;
-            if (py < ly) ly = py; if (py > hy) hy = py;
+            if (px < lx) lx = px;
+            if (px > hx) hx = px;
+            if (py < ly) ly = py;
+            if (py > hy) hy = py;
         }
 
         foreach (var seg in segments)
@@ -212,15 +223,41 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
             && Math.Abs(hi0) <= sanity && Math.Abs(hi1) <= sanity;
     }
 
+    /// <summary>A cubic flattened in device pixels, as the edge table flattens one, and its
+    /// pieces confined to the guard box.</summary>
+    private static void AddConfinedCubic(EdgeTable et, ClipGuardBox box, RenderContext ctx,
+        double x0, double y0, double x1, double y1, double x2, double y2, double x3, double y3)
+        => StrokeCubic(ctx, x0, y0, x1, y1, x2, y2, x3, y3, (ax, ay, bx, by) => box.AddLine(ax, ay, bx, by, et.AddLine));
+
+    /// <summary>True when every point of the path maps to a finite device position.</summary>
+    private static bool PathGeometryFinite(IReadOnlyList<PathCommand> segments, double[] ctm, RenderContext ctx)
+    {
+        var (lo0, lo1, hi0, hi1) = PathDeviceBounds(segments, ctm, ctx);
+        return Compat.IsFinite(lo0) && Compat.IsFinite(lo1) && Compat.IsFinite(hi0) && Compat.IsFinite(hi1);
+    }
+
     /// <summary>
     /// Flatten a content-stream path into an <see cref="EdgeTable"/> in pixel coords.
     /// Shared between <see cref="DrawPath"/> and <see cref="InstallClipFromPath"/> so
-    /// clip-path geometry matches the painted-path geometry exactly.
+    /// clip-path geometry matches the painted-path geometry exactly. With a
+    /// <paramref name="guard"/> every edge, curves flattened first, is confined to it.
     /// </summary>
     private static EdgeTable BuildPathEdgeTable(IReadOnlyList<PathCommand> segments,
-        double[] ctm, RenderContext ctx)
+        double[] ctm, RenderContext ctx, ClipGuardBox? guard = null)
     {
         var et = new EdgeTable();
+        void Line(double x0, double y0, double x1, double y1)
+        {
+            if (guard is { } box) box.AddLine(x0, y0, x1, y1, et.AddLine);
+            else et.AddLine(x0, y0, x1, y1);
+        }
+
+        void Cubic(double x0, double y0, double x1, double y1, double x2, double y2, double x3, double y3)
+        {
+            if (guard is { } box) AddConfinedCubic(et, box, ctx, x0, y0, x1, y1, x2, y2, x3, y3);
+            else et.AddCubicBezier(x0, y0, x1, y1, x2, y2, x3, y3);
+        }
+
         double curX = 0, curY = 0, startX = 0, startY = 0;
         // PDF 32000 §8.5.3.1: f, f*, B, b and the W clip all close every open subpath
         // before applying the fill rule - `h` is only needed when the STROKE wants a join
@@ -232,7 +269,9 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         void CloseOpenSubpath()
         {
             if (!subpathOpen) return;
-            if (curX != startX || curY != startY) et.AddLine(curX, curY, startX, startY);
+#pragma warning disable S1244 // degenerate geometry (zero radius, coincident ends, horizontal edge) - only the exact case is degenerate
+            if (curX != startX || curY != startY) Line(curX, curY, startX, startY);
+#pragma warning restore S1244
             subpathOpen = false;
         }
 
@@ -254,26 +293,26 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
                     break;
                 case PathOp.LineTo:
                     var (lx, ly) = Transform(seg.X1, seg.Y1);
-                    et.AddLine(curX, curY, lx, ly);
+                    Line(curX, curY, lx, ly);
                     curX = lx; curY = ly; subpathOpen = true;
                     break;
                 case PathOp.CurveTo:
                     var (c1x, c1y) = Transform(seg.X1, seg.Y1);
                     var (c2x, c2y) = Transform(seg.X2, seg.Y2);
                     var (c3x, c3y) = Transform(seg.X3, seg.Y3);
-                    et.AddCubicBezier(curX, curY, c1x, c1y, c2x, c2y, c3x, c3y);
+                    Cubic(curX, curY, c1x, c1y, c2x, c2y, c3x, c3y);
                     curX = c3x; curY = c3y; subpathOpen = true;
                     break;
                 case PathOp.CurveToV:
                     var (v2x, v2y) = Transform(seg.X1, seg.Y1);
                     var (v3x, v3y) = Transform(seg.X2, seg.Y2);
-                    et.AddCubicBezier(curX, curY, curX, curY, v2x, v2y, v3x, v3y);
+                    Cubic(curX, curY, curX, curY, v2x, v2y, v3x, v3y);
                     curX = v3x; curY = v3y; subpathOpen = true;
                     break;
                 case PathOp.CurveToY: // the `y` operator stores its endpoint in X2/Y2
                     var (y1x, y1y) = Transform(seg.X1, seg.Y1);
                     var (y3x, y3y) = Transform(seg.X2, seg.Y2);
-                    et.AddCubicBezier(curX, curY, y1x, y1y, y3x, y3y, y3x, y3y);
+                    Cubic(curX, curY, y1x, y1y, y3x, y3y, y3x, y3y);
                     curX = y3x; curY = y3y; subpathOpen = true;
                     break;
                 case PathOp.Rect:
@@ -281,16 +320,16 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
                     var (rx2, ry2) = Transform(seg.X1 + seg.X2, seg.Y1);
                     var (rx3, ry3) = Transform(seg.X1 + seg.X2, seg.Y1 + seg.Y2);
                     var (rx4, ry4) = Transform(seg.X1, seg.Y1 + seg.Y2);
-                    et.AddLine(rx, ry, rx2, ry2);
-                    et.AddLine(rx2, ry2, rx3, ry3);
-                    et.AddLine(rx3, ry3, rx4, ry4);
-                    et.AddLine(rx4, ry4, rx, ry);
+                    Line(rx, ry, rx2, ry2);
+                    Line(rx2, ry2, rx3, ry3);
+                    Line(rx3, ry3, rx4, ry4);
+                    Line(rx4, ry4, rx, ry);
                     curX = rx; curY = ry;
                     startX = rx; startY = ry;
                     subpathOpen = false;   // re re-emits all four edges itself
                     break;
                 case PathOp.Close:
-                    et.AddLine(curX, curY, startX, startY);
+                    Line(curX, curY, startX, startY);
                     curX = startX; curY = startY;
                     subpathOpen = false;
                     break;

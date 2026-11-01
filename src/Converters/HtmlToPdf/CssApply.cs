@@ -94,7 +94,7 @@ internal static partial class HtmlToPdfConverter
             case "h6": s.FontSize = 10; s.FontRes = "F2"; s.MarginTop = 1; s.MarginBottom = 1; break;
             case "blockquote": s.MarginTop = 3; s.MarginBottom = 3; s.LeftIndent += 20; break;
             case "ul":
-            case "ol":         s.LeftIndent += s.InPageFragment ? InPageListIndentPt : 20; break;
+            case "ol":         s.LeftIndent += s.InPageFragment ? InPageListIndentPt : CalibratedListIndentPt; break;
             case "li":         s.IsListItem = true; break;
             case "pre":        s.FontRes = "F4"; break;
             // p, div, tr, td, th, table: inherit parent margins (0 by default).
@@ -113,13 +113,13 @@ internal static partial class HtmlToPdfConverter
     // (a `*prop` / `_prop` browser hack is an invalid name: the declaration is dropped, not read as `prop`)
     private static readonly Regex StyleDeclRx = new(
         @"(?<![*_\w-])([a-z-]+)\s*:\s*((?:url\([^)]*\)|[^;])+?)\s*(?:;|$)",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
     private static bool HasInlineIndentOverride(Dictionary<string, string>? attrs)
     {
         if (attrs is null || !attrs.TryGetValue("style", out var styleStr) || string.IsNullOrWhiteSpace(styleStr))
             return false;
-        return Regex.IsMatch(styleStr, @"(padding-left|margin-left)\s*:", RegexOptions.IgnoreCase);
+        return SafeRegex.IsMatch(styleStr, @"(padding-left|margin-left)\s*:", RegexOptions.IgnoreCase);
     }
 
     /// <summary>True when the text opens a single or double quote it never closes.</summary>
@@ -137,21 +137,23 @@ internal static partial class HtmlToPdfConverter
     /// <summary>An in-page fragment's list items start 30 pt inside the content edge
     /// (probed: "Alpha item" at x = 120 on a 90 pt margin, the bullet ending at 115.5).</summary>
     private const double InPageListIndentPt = 30.0;
+    /// <summary>The calibrated flow's list indent, where no sheet sets one.</summary>
+    private const double CalibratedListIndentPt = 20.0;
 
     private static void ApplyInlineStyle(Dictionary<string, string>? attrs, BlockStyle s, ParseBlocksState? pb = null)
     {
         if (attrs is null) return;
         if (!attrs.TryGetValue("style", out var styleStr) || string.IsNullOrWhiteSpace(styleStr)) return;
         // A style attribute whose value carries an unbalanced quote is not a declaration
-        // block at all: it applies nothing (probed: `style="style='font-family:Arial;
-        // font-size:13; "` leaves the text in the default serif at the default size).
+        // block at all: it applies nothing (probed: `style="style='font-family:Arial; font-size:13; "`
+        // leaves the text in the default serif at the default size).
         if (HasUnbalancedQuote(styleStr)) return;
         ApplyDeclarationString(styleStr, s);
         // An inline background over a declared width × height is a painted box, as it
         // is from a class rule (probed: a 900px × 100vh lightblue div fills that box).
         var decls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in StyleDeclRx.Matches(styleStr))
-            decls[m.Groups[1].Value.ToLowerInvariant()] = m.Groups[2].Value.Trim();
+        foreach (var groups in SafeRegex.Matches(StyleDeclRx, styleStr).Select(m => m.Groups))
+            decls[groups[1].Value.ToLowerInvariant()] = groups[2].Value.Trim();
         // An absolutely (or fixed) positioned element paints its background at its own
         // stacking position in real CSS, which a later, normally-flowing opaque sibling
         // routinely covers (an off-canvas drawer sat behind the page's real content is
@@ -180,8 +182,9 @@ internal static partial class HtmlToPdfConverter
         // reference's 376.5 / 90.75 exactly.)
         if (s.InAbsoluteChain)
         {
-            var border = decls.TryGetValue("border", out var bd) ? BoxChromeLen(bd)
-                : decls.TryGetValue("border-left-width", out var blw) ? BoxChromeLen(blw) : 0;
+            double border = 0;
+            if (decls.TryGetValue("border", out var bd)) border = BoxChromeLen(bd);
+            else if (decls.TryGetValue("border-left-width", out var blw)) border = BoxChromeLen(blw);
             s.AbsOriginLeftPt += border + PaddingLeftPt(decls);
             s.AbsOriginTopPt += border + PaddingTopPt(decls);
         }
@@ -296,14 +299,14 @@ internal static partial class HtmlToPdfConverter
     private static bool AbsoluteBoxPaints(Dictionary<string, string> decls)
     {
         static bool Transparent(string v) => v.Trim().Equals("transparent", StringComparison.OrdinalIgnoreCase)
-            || Regex.IsMatch(v, @"rgba\([^)]*,\s*0(?:\.0+)?\s*\)", RegexOptions.IgnoreCase);
+            || SafeRegex.IsMatch(v, @"rgba\([^)]*,\s*0(?:\.0+)?\s*\)", RegexOptions.IgnoreCase);
         if (decls.TryGetValue("border", out var bd) && BoxChromeLen(bd) > 0
             && bd.Contains("solid", StringComparison.OrdinalIgnoreCase))
             return true;
         if (decls.TryGetValue("background-color", out var bc) && ParseCssColor(bc) is not null && !Transparent(bc))
             return true;
         if (decls.TryGetValue("background", out var bg) && ParseCssColor(bg) is not null && !Transparent(bg)
-            && !Regex.IsMatch(bg, @"\b(padding|border|content)-box\b", RegexOptions.IgnoreCase))
+            && !SafeRegex.IsMatch(bg, @"\b(padding|border|content)-box\b", RegexOptions.IgnoreCase))
             return true;
         return false;
     }
@@ -313,13 +316,13 @@ internal static partial class HtmlToPdfConverter
     /// axis-aligned identity `matrix(1,0,0,1,tx,ty)`.</summary>
     private static double? TransformTranslateYPt(string transform)
     {
-        var m = Regex.Match(transform,
+        var m = SafeRegex.Match(transform,
             @"matrix\(\s*1\s*,\s*0\s*,\s*0\s*,\s*1\s*,\s*-?[\d.]+(?:px)?\s*,\s*(-?[\d.]+)(?:px)?\s*\)",
             RegexOptions.IgnoreCase);
         if (!m.Success)
-            m = Regex.Match(transform, @"translate\(\s*-?[\d.]+(?:px)?\s*,\s*(-?[\d.]+)(?:px)?", RegexOptions.IgnoreCase);
+            m = SafeRegex.Match(transform, @"translate\(\s*-?[\d.]+(?:px)?\s*,\s*(-?[\d.]+)(?:px)?", RegexOptions.IgnoreCase);
         if (!m.Success)
-            m = Regex.Match(transform, @"translateY\(\s*(-?[\d.]+)(?:px)?", RegexOptions.IgnoreCase);
+            m = SafeRegex.Match(transform, @"translateY\(\s*(-?[\d.]+)(?:px)?", RegexOptions.IgnoreCase);
         return m.Success
             ? double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * 0.75
             : null;
@@ -331,11 +334,11 @@ internal static partial class HtmlToPdfConverter
     /// matches neither form.</summary>
     private static double? TransformTranslateXPt(string transform)
     {
-        var m = Regex.Match(transform,
+        var m = SafeRegex.Match(transform,
             @"matrix\(\s*1\s*,\s*0\s*,\s*0\s*,\s*1\s*,\s*(-?[\d.]+)(?:px)?\s*,\s*-?[\d.]+(?:px)?\s*\)",
             RegexOptions.IgnoreCase);
         if (!m.Success)
-            m = Regex.Match(transform, @"translate(?:X)?\(\s*(-?[\d.]+)(?:px)?", RegexOptions.IgnoreCase);
+            m = SafeRegex.Match(transform, @"translate(?:X)?\(\s*(-?[\d.]+)(?:px)?", RegexOptions.IgnoreCase);
         return m.Success
             ? double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * 0.75
             : null;
@@ -347,14 +350,13 @@ internal static partial class HtmlToPdfConverter
     /// written in (`margin-bottom:1em; font-size:10pt` is a 10 pt margin).</summary>
     private static void ApplyDeclarationString(string styleStr, BlockStyle s)
     {
-        foreach (Match m in StyleDeclRx.Matches(styleStr))
-            if (m.Groups[1].Value.Equals("font-size", StringComparison.OrdinalIgnoreCase))
-                ApplyDeclaration("font-size", m.Groups[2].Value.Trim(), s);
-        foreach (Match m in StyleDeclRx.Matches(styleStr))
+        foreach (Match m in SafeRegex.Matches(StyleDeclRx, styleStr).Where(m => m.Groups[1].Value.Equals("font-size", StringComparison.OrdinalIgnoreCase)))
+            ApplyDeclaration("font-size", m.Groups[2].Value.Trim(), s);
+        foreach (var groups in SafeRegex.Matches(StyleDeclRx, styleStr).Select(m => m.Groups))
         {
-            var prop = m.Groups[1].Value.ToLowerInvariant();
+            var prop = groups[1].Value.ToLowerInvariant();
             if (prop == "font-size") continue;
-            ApplyDeclaration(prop, m.Groups[2].Value.Trim(), s);
+            ApplyDeclaration(prop, groups[2].Value.Trim(), s);
         }
     }
 
@@ -366,7 +368,12 @@ internal static partial class HtmlToPdfConverter
             var fam = FirstFontFamily(val);
             if (fam is not null) { s.FontFamily = fam; s.FontFamilyStack = val; }
         }
-        else if (prop == "line-height") ApplyLineHeightDecl(val, s);
+        else if (prop == "line-height")
+        {
+            // Disjoint readings of one declaration: a unitless factor, or a percentage.
+            ApplyLineHeightDecl(val, s);
+            ApplyLineHeightPercentDecl(val, s);
+        }
         else if (prop == "font") ApplyFontDecl(val, s);
         else if (prop == "font-weight") ApplyFontWeightDecl(val, s);
         else if (prop == "font-style")
@@ -375,10 +382,12 @@ internal static partial class HtmlToPdfConverter
                 s.FontRes = s.FontRes == "F2" ? "F2" : "F3";
         }
         else if (prop == "text-align") ApplyTextAlignDecl(val, s);
+        else if (prop == "text-indent") ApplyTextIndentDecl(val, s);
+        else if (prop == "direction") s.Rtl = val.Trim().Equals("rtl", StringComparison.OrdinalIgnoreCase);
+        else if (prop == "unicode-bidi") s.BidiOverride = val.Contains("bidi-override", StringComparison.OrdinalIgnoreCase);
         else if (prop == "float") ApplyFloatDecl(val, s);
         else if (prop == "margin-top") ApplyMarginTopDecl(val, s);
         else if (prop == "margin-bottom") ApplyMarginBottomDecl(val, s);
-        else if (prop == "line-height") ApplyLineHeight2Decl(val, s);
         else if (prop == "width") ApplyWidthDecl(val, s);
         else if (prop == "margin") ApplyMarginDecl(val, s);
         else if (prop == "padding") ApplyPaddingDecl(val, s);

@@ -45,11 +45,27 @@ internal static partial class SvgToPdfConverter
                 {
                     // Pick the first RENDERABLE alternative: skip foreignObject (Adobe
                     // Illustrator puts its private <i:pgf> payload there) and children
-                    // gated on unsupported required* attributes.
+                    // gated on unsupported required* attributes. A foreignObject holding a
+                    // plain-text label is what a browser shows, so when a <text> alternative
+                    // follows it - the position its author gave the label for a reader
+                    // without HTML - that text is drawn with the label's words; an empty
+                    // label is what the browser shows too, so the switch draws nothing.
                     foreach (XmlNode child in elem.ChildNodes)
                     {
                         if (child is not XmlElement cand) continue;
-                        if (cand.LocalName == "foreignObject") continue;
+                        if (cand.LocalName == "foreignObject")
+                        {
+                            // An extension the reader lacks gates the alternative off (an Illustrator
+                            // payload), whatever it holds.
+                            if (!string.IsNullOrEmpty(cand.GetAttribute("requiredExtensions"))) continue;
+                            if (PlainTextBlocks(cand) is { Count: > 0 } blocks && blocks[0].NamespaceURI is "" or XhtmlNamespace
+                                && CollapseWs(cand.InnerText).Length == 0) break;
+                            if (ForeignObjectText(cand) is not { } label || TextAlternativeAfter(cand) is not { } alt) continue;
+                            var labelled = (XmlElement)alt.CloneNode(false);
+                            labelled.InnerText = label;
+                            RenderText(labelled, ctx, ResolveStyle(alt, style, ctx), groupCtm);
+                            break;
+                        }
                         if (!string.IsNullOrEmpty(cand.GetAttribute("requiredExtensions"))) continue;
                         RenderElement(cand, ctx, style, groupCtm);
                         break;
@@ -84,12 +100,24 @@ internal static partial class SvgToPdfConverter
                 RenderImage(elem, ctx, style, ctm);
                 break;
 
+            case "foreignObject":
+                RenderForeignObjectText(elem, ctx, style, ctm);
+                break;
+
             default:
                 // Try to render children for unknown containers
                 if (elem.HasChildNodes)
                     RenderChildren(elem, ctx, style, ctm);
                 break;
         }
+    }
+
+    /// <summary>The first text alternative after a switch's foreignObject, or null.</summary>
+    private static XmlElement? TextAlternativeAfter(XmlElement foreignObject)
+    {
+        for (var next = foreignObject.NextSibling; next is not null; next = next.NextSibling)
+            if (next is XmlElement { LocalName: "text" } text) return text;
+        return null;
     }
 
     /// <summary>Emit a group prologue (transform, clip, mask, group opacity) and return
@@ -108,9 +136,11 @@ internal static partial class SvgToPdfConverter
                 ctx.Surface.Sb.Append($"1 0 0 1 {F(sx)} {F(sy)} cm\n");
                 newCtm = Mul(new[] { 1.0, 0, 0, 1, sx, sy }, newCtm);
             }
+            // Its viewBox maps onto its own width and height, as the root's onto the page.
+            newCtm = ApplyNestedViewport(elem, elem, ctx, newCtm);
         }
-        ApplyClipPath(style, ctx, newCtm);
-        ApplyMask(style, ctx, newCtm);
+        ApplyClipPath(style, ctx);
+        ApplyMask(style, ctx);
         var opacity = ParseOpacity(style.GetValueOrDefault("opacity"));
         if (opacity < 0.999)
         {
@@ -138,7 +168,17 @@ internal static partial class SvgToPdfConverter
             newCtm = Mul(new[] { 1.0, 0, 0, 1, x, y }, newCtm);
         }
         ctx.UseDepth++;
-        RenderElement(target, ctx, style, newCtm);
+        if (target.LocalName == "symbol")
+        {
+            // A symbol is painted only through a use: its viewBox fills the use's width and
+            // height, and its children are drawn as a group's.
+            newCtm = ApplyNestedViewport(target, elem, ctx, newCtm);
+            RenderChildren(target, ctx, ResolveStyle(target, style, ctx), newCtm);
+        }
+        else
+        {
+            RenderElement(target, ctx, style, newCtm);
+        }
         ctx.UseDepth--;
         sb.Append("Q\n");
     }
@@ -156,8 +196,8 @@ internal static partial class SvgToPdfConverter
         sr.sb = sr.ctx.Surface.Sb;
         sr.sb.Append("q\n");
         sr.newCtm = ApplyTransform(sr.elem, sr.sb, sr.ctm);
-        ApplyClipPath(sr.style, sr.ctx, sr.newCtm);
-        ApplyMask(sr.style, sr.ctx, sr.newCtm);
+        ApplyClipPath(sr.style, sr.ctx);
+        ApplyMask(sr.style, sr.ctx);
 
         sr.visible = Prop(sr.style, "visibility") != "hidden";
 
@@ -324,7 +364,7 @@ internal static partial class SvgToPdfConverter
         sb.Append("Q\n");
     }
 
-    private static void EmitStrokeState(Dictionary<string, string> style, StringBuilder sb, Ctx ctx)
+    private static void EmitStrokeState(Dictionary<string, string> style, StringBuilder sb)
     {
         var sw = Prop(style, "stroke-width");
         if (!string.IsNullOrEmpty(sw))
@@ -338,12 +378,22 @@ internal static partial class SvgToPdfConverter
         var dash = Prop(style, "stroke-dasharray");
         if (!string.IsNullOrEmpty(dash) && dash != "none")
         {
-            var nums = Regex.Matches(dash, @"[\d.]+").Cast<Match>()
+            var nums = SafeRegex.Matches(dash, @"[\d.]+").Cast<Match>()
                 .Select(m => double.Parse(m.Value, CultureInfo.InvariantCulture)).ToArray();
             if (nums.Length > 0)
-                sb.Append($"[{string.Join(" ", nums.Select(F))}] 0 d ");
+                sb.Append($"[{string.Join(" ", nums.Select(F))}] {F(DashPhase(Prop(style, "stroke-dashoffset"), nums))} d ");
         }
         sb.Append('\n');
+    }
+
+    /// <summary>The phase a stroke-dashoffset gives the dash pattern: the offset taken round the pattern's
+    /// length (an odd list repeats once to make the pattern), so a negative offset starts as far back.</summary>
+    private static double DashPhase(string offset, double[] dashes)
+    {
+        double length = dashes.Sum() * (dashes.Length % 2 == 1 ? 2 : 1);
+        if (length <= 0) return 0;
+        var phase = ParseLength(offset) % length;
+        return phase < 0 ? phase + length : phase;
     }
 
     private sealed class BboxAcc
@@ -365,7 +415,7 @@ internal static partial class SvgToPdfConverter
     private static double Diag(Ctx ctx) =>
         Math.Sqrt(ctx.VpW * ctx.VpW + ctx.VpH * ctx.VpH) / Math.Sqrt(2);
 
-    private static void ApplyClipPath(Dictionary<string, string> style, Ctx ctx, double[] ctm)
+    private static void ApplyClipPath(Dictionary<string, string> style, Ctx ctx)
     {
         var refId = ParseUrlRef(style.GetValueOrDefault("clip-path"));
         if (refId is null || !ctx.Defs.TryGetValue(refId, out var clipEl) || clipEl.LocalName != "clipPath")
@@ -398,7 +448,7 @@ internal static partial class SvgToPdfConverter
         if (any) sb.Append(evenOdd ? "W* n\n" : "W n\n");
     }
 
-    private static void ApplyMask(Dictionary<string, string> style, Ctx ctx, double[] ctm)
+    private static void ApplyMask(Dictionary<string, string> style, Ctx ctx)
     {
         var refId = ParseUrlRef(style.GetValueOrDefault("mask"));
         if (refId is null || !ctx.Defs.TryGetValue(refId, out var maskEl) || maskEl.LocalName != "mask")

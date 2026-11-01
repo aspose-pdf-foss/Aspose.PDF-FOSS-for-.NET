@@ -176,18 +176,17 @@ internal static partial class MarkdownRenderer
                     var gap = e.LLX - prev.Value.URX;
                     var em = Math.Max(Math.Max(prev.Value.FontSize, e.FontSize), 12.0);
                     var lastCh = sb.Length > 0 ? sb[sb.Length - 1] : '\0';
-                    var nextCh = e.IsImage ? ' ' : (e.Text.Length > 0 ? e.Text[0] : '\0');
+                    var nextCh = (e.IsImage, e.Text.Length) switch { (true, _) => ' ', (_, > 0) => e.Text[0], _ => '\0' };
                     // An image already carries its own delimiting spaces, so it only needs an
                     // extra word-boundary space when it sits in a wide gap (a word slot), not
                     // when it abuts the preceding text. Multi-column text uses the
                     // inter-fragment rule (gap > height·0.13636) so that a genuine
                     // column gap synthesizes a space even after a trailing space, while normal
                     // word spacing does not double.
-                    var wide = e.IsImage
-                        ? gap > em * 0.5
-                        : Columnar
-                            ? gap > prev.Value.Rect.Height * 0.13636
-                            : gap > em * SpaceGapRatio;
+                    bool wide;
+                    if (e.IsImage) wide = gap > em * 0.5;
+                    else if (Columnar) wide = gap > prev.Value.Rect.Height * 0.13636;
+                    else wide = gap > em * SpaceGapRatio;
                     // HTML image tags glue: no space between two tags, and text after a
                     // tag attaches directly (`/>ipsum`); only a text→tag word slot keeps
                     // its space.

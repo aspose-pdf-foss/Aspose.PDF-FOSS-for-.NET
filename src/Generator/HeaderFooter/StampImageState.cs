@@ -27,8 +27,8 @@ private sealed class StampImageState
     public double boxOffX;
     public double boxOffY;
     // An image honours its own horizontal alignment inside the band
-    // (the band's left margin, its right edge, or centred between them);
-    // the band's own x is the fallback.
+    // (the band's left margin, its right edge, or centred between them); the
+    // band's own x is the fallback.
     public double imgRight;
     public double boxX;
     public double imgX;

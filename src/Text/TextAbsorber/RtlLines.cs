@@ -15,20 +15,14 @@ public sealed partial class TextAbsorber
     /// <summary>True when some line of the page holds two or more tracked show
     /// runs and its letters are RTL-dominant — the case the geometric RTL row
     /// rebuild exists for, whether or not the page otherwise needs sorting.</summary>
-    private bool HasRtlMultiSpanLine(string[] lines, int textStartOffset)
+    private bool HasRtlMultiSpanLine(string[] lines, List<RunSpan>[] lineSpans)
     {
         if (_pageRunSpans.Count < 2) return false;
-        var off = textStartOffset;
-        foreach (var ln in lines)
+        for (var i = 0; i < lines.Length; i++)
         {
-            int lo = off, hi = off + ln.Length;
-            off += ln.Length + 1;
-            var spans = 0;
-            foreach (var s in _pageRunSpans)
-                if (s.Offset >= lo && s.Offset + s.Len <= hi && ++spans > 1) break;
-            if (spans < 2) continue;
+            if (lineSpans[i].Count < 2) continue;
             int rtl = 0, ltr = 0;
-            foreach (var ch in ln)
+            foreach (var ch in lines[i])
             {
                 if (BidiReorderer.IsRtlChar(ch)) rtl++;
                 else if (char.IsLetter(ch)) ltr++;
@@ -43,9 +37,7 @@ public sealed partial class TextAbsorber
     private static bool IsSpaceGlyphSegment(string s)
     {
         if (s.Length == 0) return false;
-        foreach (var c in s)
-            if (c != ' ' && c != EolShowSpaceSentinel && c != '\r') return false;
-        return true;
+        return !s.Any(c => c != ' ' && c != EolShowSpaceSentinel && c != '\r');
     }
 
     /// <summary>

@@ -42,4 +42,17 @@ public sealed class SignatureAppearance
     /// <summary>The metadata labels a caller-shaped appearance keeps even when their
     /// value is empty; null for the plain banner, which drops empty rows.</summary>
     internal BannerLabels? Labels { get; set; }
+
+    /// <summary>The banner text's colour; null keeps the banner blue.</summary>
+    internal Color? TextColor { get; set; }
+
+    /// <summary>The colour the box is filled with under the text; null leaves it unfilled.</summary>
+    internal Color? BackgroundColor { get; set; }
+
+    /// <summary>False draws the <see cref="ImageBytes"/> picture alone, with no banner text over it.</summary>
+    internal bool ShowText { get; set; } = true;
+
+    /// <summary>True draws the <see cref="ImageBytes"/> picture over the background fill, in the text
+    /// layer, instead of as a layer of its own under it.</summary>
+    internal bool ForegroundImage { get; set; }
 }

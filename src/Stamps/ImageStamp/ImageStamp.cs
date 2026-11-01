@@ -14,8 +14,8 @@ public partial class ImageStamp : BaseParagraph
     private string _filter;
     private int _bitsPerComponent;
     private byte[]? _originalImageBytes;
-    // FlateDecode'd DeviceGray alpha channel for a transparent source (GIF/PNG);
-    // emitted as the image's /SMask so transparent pixels show the page behind.
+    // FlateDecode'd DeviceGray alpha channel for a transparent source (GIF/PNG); emitted
+    // as the image's /SMask so transparent pixels show the page behind.
     private byte[]? _smaskData;
     // Optional /DecodeParms for filters that need them (e.g. CCITTFaxDecode K/Columns/Rows).
     private PdfDictionary? _decodeParms;
@@ -23,6 +23,8 @@ public partial class ImageStamp : BaseParagraph
     // inverted (255 = no ink); embedding it verbatim needs /Decode [1 0 ×4] so
     // conforming readers flip the values back to direct ink amounts.
     private double[]? _decodeArray;
+    // A colour space a name cannot say (a PNG palette's /Indexed array); _colorSpace names it otherwise.
+    private PdfObject? _colorSpaceObject;
 
     private ImageStamp(byte[] imageData, int width, int height,
         string colorSpace, string filter, int bitsPerComponent)
@@ -79,6 +81,8 @@ public partial class ImageStamp : BaseParagraph
         _filter = seeded._filter;
         _bitsPerComponent = seeded._bitsPerComponent;
         _smaskData = seeded._smaskData;
+        _decodeParms = seeded._decodeParms;
+        _colorSpaceObject = seeded._colorSpaceObject;
         DisplayWidth = seeded.DisplayWidth;
         DisplayHeight = seeded.DisplayHeight;
     }
@@ -208,90 +212,116 @@ public partial class ImageStamp : BaseParagraph
 
     /// <summary>Replay a content stream's graphics-state operators (q, Q, cm) to
     /// determine the CTM active at the end — the transform that appended content
-    /// inherits. Strings, inline images and other operators are skipped; only the
-    /// matrix-affecting operators are tracked.</summary>
-    private static (double a, double b, double c, double d, double e, double f) ComputeActiveCtm(byte[] data)
+    /// inherits — and how its saves and restores balance: <c>StrayRestores</c> is how many
+    /// levels below its start its restores reach at their deepest (a Q with no q of its
+    /// own), <c>OpenSaves</c> how many levels above that point it leaves open at its end.
+    /// Comments, strings and inline images are stepped over; every other byte is passed in one
+    /// tight run up to the next that could end an operator the scan reads (a turn baked into a
+    /// page scans the whole of its content), and a cm takes the six numbers standing before it -
+    /// unless <paramref name="readMatrices"/> is false, when the CTM stays the identity. With
+    /// <paramref name="toFirstSave"/> the scan ends at the first q, giving the CTM the content set before it.</summary>
+    internal static ((double a, double b, double c, double d, double e, double f) Ctm, int StrayRestores, int OpenSaves)
+        ScanGraphicsState(byte[] data, bool readMatrices = true, bool toFirstSave = false)
     {
         (double a, double b, double c, double d, double e, double f) ctm = (1, 0, 0, 1, 0, 0);
         var stack = new System.Collections.Generic.Stack<(double, double, double, double, double, double)>();
-        var nums = new System.Collections.Generic.List<double>();
+        int level = 0, lowest = 0;
         int i = 0, n = data.Length;
-        while (i < n)
+        while (true)
         {
-            byte ch = data[i];
-            // Whitespace
-            if (ch is (byte)' ' or (byte)'\n' or (byte)'\r' or (byte)'\t' or (byte)'\f' or 0) { i++; continue; }
-            // Comment to end of line
-            if (ch == (byte)'%') { while (i < n && data[i] != (byte)'\n' && data[i] != (byte)'\r') i++; continue; }
-            // Literal string ( ... ) with escapes and nested parens
-            if (ch == (byte)'(')
+            while (i < n && !ScanStops[data[i]]) i++;
+            if (i >= n) break;
+            switch (data[i])
             {
-                int depth = 1; i++;
-                while (i < n && depth > 0)
-                {
-                    if (data[i] == (byte)'\\') { i += 2; continue; }
-                    if (data[i] == (byte)'(') depth++;
-                    else if (data[i] == (byte)')') depth--;
+                case (byte)'%':
+                    // Comment to end of line
+                    while (i < n && data[i] != (byte)'\n' && data[i] != (byte)'\r') i++;
+                    continue;
+                case (byte)'(':
+                    i = SkipLiteralString(data, i);
+                    continue;
+                case (byte)'<':
+                    // Hex string < ... > or dict << >>
+                    if (i + 1 < n && data[i + 1] == (byte)'<') { i += 2; continue; } // dict open — ignore
+                    while (i < n && data[i] != (byte)'>') i++;
                     i++;
-                }
-                nums.Clear();
-                continue;
-            }
-            // Hex string < ... > or dict << >>
-            if (ch == (byte)'<')
-            {
-                if (i + 1 < n && data[i + 1] == (byte)'<') { i += 2; continue; } // dict open — ignore
-                while (i < n && data[i] != (byte)'>') i++;
-                i++;
-                nums.Clear();
-                continue;
-            }
-            if (ch == (byte)'>') { i++; continue; }
-            if (ch == (byte)'[' || ch == (byte)']' || ch == (byte)'{' || ch == (byte)'}') { i++; continue; }
-            // Name /Xxx
-            if (ch == (byte)'/')
-            {
-                i++;
-                while (i < n && !IsDelimOrWs(data[i])) i++;
-                continue;
-            }
-            // Number
-            if (ch is (>= (byte)'0' and <= (byte)'9') or (byte)'+' or (byte)'-' or (byte)'.')
-            {
-                int s = i; i++;
-                while (i < n && (data[i] is (>= (byte)'0' and <= (byte)'9') or (byte)'.' or (byte)'e' or (byte)'E' or (byte)'+' or (byte)'-')) i++;
-                if (double.TryParse(System.Text.Encoding.ASCII.GetString(data, s, i - s),
-                        System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v))
-                    nums.Add(v);
-                continue;
-            }
-            // Operator token (letters and a few symbols)
-            int os = i;
-            while (i < n && !IsDelimOrWs(data[i])) i++;
-            var op = System.Text.Encoding.ASCII.GetString(data, os, i - os);
-            switch (op)
-            {
-                case "q":
+                    continue;
+                case (byte)'q' when StandsAlone(data, i, 1):
+                    if (toFirstSave) return (ctm, 0, 0);
                     stack.Push(ctm);
+                    level++;
                     break;
-                case "Q":
+                case (byte)'Q' when StandsAlone(data, i, 1):
                     if (stack.Count > 0) ctm = stack.Pop();
+                    lowest = System.Math.Min(lowest, --level);
                     break;
-                case "cm":
-                    if (nums.Count >= 6)
-                    {
-                        var m = nums.GetRange(nums.Count - 6, 6);
+                case (byte)'m' when readMatrices && i > 0 && data[i - 1] == (byte)'c' && StandsAlone(data, i - 1, 2):
+                    if (MatrixOperandsBefore(data, i - 1) is { } m)
                         ctm = Multiply(m[0], m[1], m[2], m[3], m[4], m[5], ctm);
-                    }
                     break;
-                case "BI":
+                case (byte)'I' when i > 0 && data[i - 1] == (byte)'B' && StandsAlone(data, i - 1, 2):
                     // Inline image: skip to the EI terminator.
-                    i = SkipInlineImage(data, i);
-                    break;
+                    i = SkipInlineImage(data, i + 1);
+                    continue;
             }
-            nums.Clear();
+            i++;
         }
-        return ctm;
+        return (ctm, -lowest, level - lowest);
+    }
+
+    /// <summary>The bytes the content scan stops at: what opens a comment or a string, and the last
+    /// letter of each operator it reads (q, Q, cm, BI).</summary>
+    private static readonly bool[] ScanStops = ScanStopTable("%(<qQmI");
+
+    private static bool[] ScanStopTable(string stops)
+    {
+        var table = new bool[256];
+        foreach (var stop in stops) table[stop] = true;
+        return table;
+    }
+
+    /// <summary>Whether the token of <paramref name="length"/> bytes at <paramref name="start"/> is
+    /// one: whitespace or a delimiter other than a name's / before it, whitespace or a delimiter after.</summary>
+    private static bool StandsAlone(byte[] data, int start, int length)
+        => (start == 0 || (IsDelimOrWs(data[start - 1]) && data[start - 1] != (byte)'/'))
+            && (start + length >= data.Length || IsDelimOrWs(data[start + length]));
+
+    /// <summary>The six numbers standing before the operator at <paramref name="at"/>, each a token
+    /// of its own; null when fewer stand there.</summary>
+    private static double[]? MatrixOperandsBefore(byte[] data, int at)
+    {
+        const int MatrixOperands = 6;
+        var operands = new double[MatrixOperands];
+        var end = at;
+        for (var k = MatrixOperands - 1; k >= 0; k--)
+        {
+            while (end > 0 && data[end - 1] is (byte)' ' or (byte)'\n' or (byte)'\r' or (byte)'\t' or (byte)'\f' or 0) end--;
+            var start = end;
+            while (start > 0 && data[start - 1] is (>= (byte)'0' and <= (byte)'9') or (byte)'.' or (byte)'e' or (byte)'E' or (byte)'+' or (byte)'-')
+                start--;
+            if (start == end || !StandsAlone(data, start, end - start)
+                || !double.TryParse(System.Text.Encoding.ASCII.GetString(data, start, end - start),
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out operands[k]))
+                return null;
+            end = start;
+        }
+        return operands;
+    }
+
+    /// <summary>The index just past the literal string opening at <paramref name="i"/>: escapes
+    /// and nested parentheses are its own.</summary>
+    private static int SkipLiteralString(byte[] data, int i)
+    {
+        int depth = 1, n = data.Length;
+        i++;
+        while (i < n && depth > 0)
+        {
+            if (data[i] == (byte)'\\') { i += 2; continue; }
+            if (data[i] == (byte)'(') depth++;
+            else if (data[i] == (byte)')') depth--;
+            i++;
+        }
+        return i;
     }
 
     // Multiply matrix m (applied first) by ctm (applied second): result = m × ctm.
@@ -308,9 +338,10 @@ public partial class ImageStamp : BaseParagraph
     private static (int width, int height) ParseJpegDimensions(byte[] data)
     {
         // Scan for SOF0 (0xFF 0xC0) or SOF2 (0xFF 0xC2) marker
-        for (var i = 0; i < data.Length - 9; i++)
+        var i = 0;
+        while (i < data.Length - 9)
         {
-            if (data[i] != 0xFF) continue;
+            if (data[i] != 0xFF) { i++; continue; }
             var marker = data[i + 1];
             if (marker is 0xC0 or 0xC1 or 0xC2)
             {
@@ -320,14 +351,12 @@ public partial class ImageStamp : BaseParagraph
             }
             // Skip marker segment
             if (marker is >= 0xC0 and not 0xFF and not 0x00 and not 0xD8 and not 0xD9
-                and not (>= 0xD0 and <= 0xD7))
+                and not (>= 0xD0 and <= 0xD7) && i + 3 < data.Length)
             {
-                if (i + 3 < data.Length)
-                {
-                    var segLen = (data[i + 2] << 8) | data[i + 3];
-                    i += 1 + segLen;
-                }
+                var segLen = (data[i + 2] << 8) | data[i + 3];
+                i += 1 + segLen;
             }
+            i++;
         }
 
         return (0, 0); // couldn't determine

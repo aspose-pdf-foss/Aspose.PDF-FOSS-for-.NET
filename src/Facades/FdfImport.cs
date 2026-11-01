@@ -74,14 +74,34 @@ internal static class FdfImport
             if (src is null) continue;
             var pageIdx = (int)src.GetInt("Page"); // 0-based; absent reads 0
             if (pageIdx < 0 || pageIdx >= doc.Pages.Count) continue;
-            var clone = doc.ImportDict(src, reader, map);
-            // FDF-only addressing keys; a re-homed annotation must not carry them.
-            clone.Remove("Page");
-            clone.Remove("P");
-            doc.Pages[pageIdx + 1].Annotations.AddImportedDict(clone);
+            AddImported(doc, doc.Pages[pageIdx + 1], item, src, reader, map);
             count++;
         }
         return count;
+    }
+
+    /// <summary>Clone one FDF annotation onto <paramref name="page"/>. One held by reference is imported as that
+    /// object, so the partners that name it (a note's /Popup, a popup's /Parent) name the annotation on the page
+    /// rather than a second copy of it.</summary>
+    private static void AddImported(Document doc, Page page, PdfObject item, PdfDictionary src, PdfReader reader,
+        Dictionary<int, int> map)
+    {
+        PdfIndirectRef? reference = null;
+        PdfDictionary clone;
+        if (item is PdfIndirectRef source)
+        {
+            reference = (PdfIndirectRef)doc.ImportObject(source, reader, map);
+            clone = doc.Reader.ResolveDict(reference)!;
+        }
+        else
+        {
+            clone = doc.ImportDict(src, reader, map);
+        }
+        // FDF-only addressing keys; a re-homed annotation must not carry them.
+        clone.Remove("Page");
+        clone.Remove("P");
+        if (reference is null) page.Annotations.AddImportedDict(clone);
+        else page.Annotations.AddImportedObject(reference, clone);
     }
 
     /// <summary>Import an FDF /Fields array the way the annotation
@@ -105,10 +125,7 @@ internal static class FdfImport
             if (src.GetName("Subtype") is not null)
             {
                 if (doc.Pages.Count == 0) continue;
-                var clone = doc.ImportDict(src, reader, map);
-                clone.Remove("Page");
-                clone.Remove("P");
-                doc.Pages[1].Annotations.AddImportedDict(clone);
+                AddImported(doc, doc.Pages[1], item, src, reader, map);
                 annots++;
                 continue;
             }

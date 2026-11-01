@@ -25,9 +25,9 @@ public sealed partial class PdfContentEditor
             // %StampId, when present, sits immediately before the block or just
             // before an optional %StampRect line — anchor at the end so a previous
             // block's id inside the window is not picked up.
-            var idLineMatch = Regex.Match(preceding,
+            var idLineMatch = SafeRegex.Match(preceding,
                 @"%StampId=(\d+)\s*(?:%StampRect=[^\n]*)?\s*$");
-            var rectMatch = Regex.Match(preceding,
+            var rectMatch = SafeRegex.Match(preceding,
                 @"%StampRect=(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*$");
             if (idLineMatch.Success)
             {
@@ -56,9 +56,10 @@ public sealed partial class PdfContentEditor
         var isImage = false;
         string? xname = null;
         PdfStream? xobject = null;
+        var markerDrawAt = -1;
         if (sk.xobjects is not null)
         {
-            foreach (Match dm in Regex.Matches(blockContent, @"/([A-Za-z0-9_.\-]+)\s+Do\b"))
+            foreach (Match dm in SafeRegex.Matches(blockContent, @"/([A-Za-z0-9_.\-]+)\s+Do\b"))
             {
                 var name = dm.Groups[1].Value;
                 if (sk.doc.Reader.Resolve(sk.xobjects.Get(name)) is not PdfStream xs) continue;
@@ -68,8 +69,11 @@ public sealed partial class PdfContentEditor
                     xname = name;
                     isImage = xs.Dict.GetName("Subtype") == "Image";
                 }
-                if (xs.Dict.ContainsKey("StampId"))
+                // A stamp drawn inside a block nested in this one is that block's stamp: this block
+                // encloses it together with content that is not the stamp's.
+                if (xs.Dict.ContainsKey("StampId") && !sk.claimedDraws.Contains(block.Start + dm.Index))
                 {
+                    markerDrawAt = block.Start + dm.Index;
                     hasDictMarker = true;
                     dictId = (int)xs.Dict.GetInt("StampId", 0);
                     isImage = xs.Dict.GetName("Subtype") == "Image";
@@ -104,6 +108,7 @@ public sealed partial class PdfContentEditor
 
         // The %StampId comment (when present) names the id; otherwise use the dict id.
         var stampId = commentId != 0 ? commentId : dictId;
+        if (markerDrawAt >= 0) sk.claimedDraws.Add(markerDrawAt);
         sk.result.Add(new StampBlock(extendedStart, block.End, stampId, isImage, xname, xobject, commentRect, hidden));
     }
 }

@@ -20,8 +20,7 @@ public partial class Table
     /// <summary>True when the text contains any CJK ideograph, kana, or Hangul character.</summary>
     private static bool ContainsCjk(string s)
     {
-        foreach (var c in s) if (IsCjk(c)) return true;
-        return false;
+        return s.Any(c => IsCjk(c));
     }
 
     /// <summary>True when the text has CJK content AND the embedded font actually covers every
@@ -48,7 +47,8 @@ public partial class Table
     private static bool NeedsCjkChain(string s, byte[]? primaryTtf)
     {
         var pp = primaryTtf is null ? null : GetInlineGlyphParser(primaryTtf);
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             int cp = s[i];
             if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
@@ -58,8 +58,9 @@ public partial class Table
             }
             var ext = (cp >= 0x2E80 && cp <= 0x2FDF) || cp >= 0x20000
                 || (cp >= 0x2300 && cp <= 0x23FF);
-            if (!ext) continue;
+            if (!ext) { i++; continue; }
             if (pp is null || !pp.CMap.TryGetValue(cp, out var g) || g == 0) return true;
+            i++;
         }
         return false;
     }
@@ -75,7 +76,8 @@ public partial class Table
         var effPrimary = primaryTtf ?? (chain0.Count > 0 ? chain0[0].Bytes : null);
         var cur = new System.Text.StringBuilder();
         double curW = 0;
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             var frag = s[i].ToString();
             if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
@@ -84,10 +86,10 @@ public partial class Table
                 i++;
             }
             var segs = SegmentByCoverageChain(frag, effPrimary, primaryName);
-            var fragW = segs is { Count: > 0 }
-                ? MeasureWidthWithFont(segs[0].Text, fontSize, segs[0].Ttf)
-                : effPrimary is not null ? MeasureWidthWithFont(frag, fontSize, effPrimary)
-                : fontSize;
+            double fragW;
+            if (segs is { Count: > 0 }) fragW = MeasureWidthWithFont(segs[0].Text, fontSize, segs[0].Ttf);
+            else if (effPrimary is not null) fragW = MeasureWidthWithFont(frag, fontSize, effPrimary);
+            else fragW = fontSize;
             if (cur.Length > 0 && curW + fragW > availWidth)
             {
                 lines.Add(cur.ToString());
@@ -96,6 +98,7 @@ public partial class Table
             }
             cur.Append(frag);
             curW += fragW;
+            i++;
         }
         if (cur.Length > 0) lines.Add(cur.ToString());
         return lines;
@@ -141,6 +144,9 @@ public partial class Table
         public bool HtmlEngine;
         public Color? ForegroundColor;
         public bool Bold;                // draw with the bold face of the table font
+        /// <summary>An underline the paragraph's or the cell's text state declared: one
+        /// rule under the drawn run, whatever the dialect.</summary>
+        public bool StateUnderline;
         // The source fragment demands CSS line boxes even at a uniform size
         // (see TextFragment.CssLineBoxAlways).
         public bool CssForce;
@@ -194,6 +200,22 @@ public partial class Table
         /// <summary>When set, this line carries a checkbox field whose widget is placed at
         /// the laid-out cell position (its /AP appearance supplies the box and check glyph).</summary>
         public Aspose.Pdf.Forms.CheckboxField? Checkbox;
+
+        /// <summary>When set, this line carries a text box field whose widget is placed at the
+        /// laid-out cell position at the field's own width and height.</summary>
+        public Aspose.Pdf.Forms.TextBoxField? TextBox;
+
+        /// <summary>When set, this line carries an annotation that is not a form control (a link),
+        /// placed at the laid-out cell position at its own size.</summary>
+        public Aspose.Pdf.Annotations.Annotation? Annotation;
+
+        /// <summary>Whether this line is the box of a control (a checkbox, a text box or an annotation).</summary>
+        public bool HasControlBox => Checkbox is not null || TextBox is not null || Annotation is not null;
+
+        /// <summary>The height of the control this line is a box for: a text box's layout height
+        /// (its own, not its unplaced widget's), else the control's rectangle height; 0 without one.</summary>
+        public double ControlBoxHeight
+            => TextBox?.Height ?? ((Aspose.Pdf.Annotations.Annotation?)Checkbox ?? Annotation)?.Height ?? 0;
 
         /// <summary>Hyperlink carried by the source fragment, if any. Rendered as a
         /// link annotation over the line's text rectangle.</summary>
@@ -331,7 +353,7 @@ public partial class Table
     private static int CountInkSegments(Aspose.Pdf.Text.TextFragment tf)
     {
         var n = 0;
-        foreach (var seg in tf.Segments) if (!string.IsNullOrEmpty(seg.Text)) n++;
+        foreach (var seg in tf.Segments.Where(seg => !string.IsNullOrEmpty(seg.Text))) n++;
         return n;
     }
 
@@ -368,8 +390,10 @@ public partial class Table
         {
             if (string.IsNullOrEmpty(seg.Text)) continue;
             var ss = seg.TextState;
-            var fs = ss.FontSizeTouched ? ss.FontSize
-                : tf.TextState.FontSizeTouched ? tf.TextState.FontSize : defaultFontSize;
+            double fs;
+            if (ss.FontSizeTouched) fs = ss.FontSize;
+            else if (tf.TextState.FontSizeTouched) fs = tf.TextState.FontSize;
+            else fs = defaultFontSize;
             var bold = ss.IsBold || tf.TextState.IsBold;
             var italic = ss.IsItalic || tf.TextState.IsItalic;
             var underline = ss.Underline || tf.TextState.Underline;
@@ -377,9 +401,12 @@ public partial class Table
                          ?? cellTextState?.ForegroundColor;
             var (ttf, faceName) = StyledSegmentFace(ss, bold, italic);
 
-            double Measure(string t) => ttf is not null
-                ? MeasureWidthWithFont(t, fs, ttf)
-                : bold || italic ? MeasureFaceExact(t, fs, bold) : MeasureWidthExact(t, fs);
+            double Measure(string t)
+            {
+                if (ttf is not null) return MeasureWidthWithFont(t, fs, ttf);
+                if (bold || italic) return MeasureFaceExact(t, fs, bold);
+                return MeasureWidthExact(t, fs);
+            }
 
             foreach (var piece in seg.Text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
             {
@@ -448,7 +475,7 @@ public partial class Table
         sk.cell = sk.block.Cell;
         sk.row = sk.block.Row;
         sk.padding = EffectivePad(sk.cell, sk.row);
-        sk.dp = DefaultPad(sk.cell, sk.row);
+        sk.dp = DefaultPad;
         // Same box the GRID cells wrap in: where the cell border joins the column pitch
         // the text starts at the border's inner edge and takes no implicit padding on
         // top of it, and the pitch itself is not text space. Measuring the span cell
@@ -466,7 +493,9 @@ public partial class Table
         sk.maxLine = 0;
         sk.tight = 0;
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var paragraph in sk.cell.Paragraphs)
+#pragma warning restore S3267
         {
             if (!BuildSpanBlockParagraph(sk, paragraph)) break;
         }
@@ -531,7 +560,7 @@ public partial class Table
         // align the cell (a "text-align:center" after the space that ended the value is dead).
         if (html.Contains("\\\""))
         {
-            foreach (Match tag in AnyTagRegex.Matches(html))
+            foreach (Match tag in SafeRegex.Matches(AnyTagRegex, html))
             {
                 var css = EngineStyleValue(tag.Value)?.Replace(" ", string.Empty) ?? "";
                 if (css.IndexOf("text-align:center", StringComparison.OrdinalIgnoreCase) >= 0) return HorizontalAlignment.Center;
@@ -564,13 +593,13 @@ public partial class Table
         if (h.IndexOf("<li", StringComparison.OrdinalIgnoreCase) < 0) return null;
 
         var size = defaultSize;
-        var fsm = Regex.Match(h, @"font-size\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+        var fsm = SafeRegex.Match(h, @"font-size\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
         if (fsm.Success && double.TryParse(fsm.Groups[1].Value, NumberStyles.Float,
                 CultureInfo.InvariantCulture, out var px) && px > 0)
             size = px * 0.75;
 
         var result = new List<CellLine>();
-        var listStart = Regex.Match(h, @"<[uo]l\b", RegexOptions.IgnoreCase);
+        var listStart = SafeRegex.Match(h, @"<[uo]l\b", RegexOptions.IgnoreCase);
         var head = HtmlFragment.StripHtmlTags(listStart.Success ? h[..listStart.Index] : h).Trim();
         // Justified block text in a narrow list cell seats each line at the
         // column's right edge (short lines keep their natural width).
@@ -588,7 +617,7 @@ public partial class Table
         const double listIndent = 40 * 0.75; // CSS default margin-start
         var bulletPrefix = (char)0x95 + " "; // WinAnsi bullet
         var bulletW = MeasureWidthExact(bulletPrefix, size);
-        foreach (Match im in Regex.Matches(h, @"<li\b[^>]*>(.*?)</li>",
+        foreach (Match im in SafeRegex.Matches(h, @"<li\b[^>]*>(.*?)</li>",
                      RegexOptions.IgnoreCase | RegexOptions.Singleline))
         {
             var item = HtmlFragment.StripHtmlTags(im.Groups[1].Value).Trim();
@@ -618,17 +647,14 @@ public partial class Table
     /// gets 0, matching the generator (its borderless default cell seats text at the
     /// content edge and its row pitch is just the font size). Cells that carry a border or
     /// explicit padding keep the historical 2pt default (their templates depend on it).</summary>
-    private double DefaultPad(Cell cell, Row row)
-    {
-        // A BorderInfo with Side=None is decorative-only — such cells behave
-        // exactly like borderless ones (text at the content edge,
-        // row pitch = font size), so only a border that actually DRAWS keeps
-        // the historical 2 pt padding.
-        // Probed on the reference (Arial 11 cells, 0.1 pt rules): a drawn side adds only its
-        // own stroke width on that side - a Top-only or Bottom-only rule leaves the text at
-        // the column edge, an All / Box rule offsets it by the rule's width - so no side
-        // carries a default 2 pt padding; an explicit padding is read from the cell, row
-        // or table directly by the caller.
-        return 0.0;
-    }
+    // A BorderInfo with Side=None is decorative-only — such cells behave
+    // exactly like borderless ones (text at the content edge,
+    // row pitch = font size), so only a border that actually DRAWS keeps
+    // the historical 2 pt padding.
+    // Probed on the reference (Arial 11 cells, 0.1 pt rules): a drawn side adds only its
+    // own stroke width on that side - a Top-only or Bottom-only rule leaves the text at
+    // the column edge, an All / Box rule offsets it by the rule's width - so no side
+    // carries a default 2 pt padding; an explicit padding is read from the cell, row
+    // or table directly by the caller.
+    private const double DefaultPad = 0.0;
 }

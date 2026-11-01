@@ -19,18 +19,20 @@ internal static partial class HtmlToPdfConverter
         // tag.class — the class decides presence: "br.altova-page-break"
         // matches only elements CARRYING the class, so a class nobody uses
         // cannot disqualify the flow no matter how common the tag is.
+#pragma warning disable S2692 // a match at index 0 is deliberately excluded here
         if (last.IndexOf('.') > 0)
+#pragma warning restore S2692
         {
             var cls = last[(last.IndexOf('.') + 1)..].Split('.')[0];
             return cls.Length > 0 && markup.HasClass(cls);
         }
         if (last[0] == '#') return markup.HasId(last[1..]);
-        var tagOnly = Regex.Match(last, @"^[A-Za-z][A-Za-z0-9]*").Value;
+        var tagOnly = SafeRegex.Match(last, @"^[A-Za-z][A-Za-z0-9]*").Value;
         if (tagOnly.Length == 0) return true;
         return markup.HasTag(tagOnly);
     }
 
-    private static bool TableScopedSelector(string html, ConvertState cv, bool bodyAllTables, bool edgeToEdgePre, string sel, IReadOnlyDictionary<string, string> decls)
+    private static bool TableScopedSelector(string html, ConvertState cv, bool bodyAllTables, bool edgeToEdgePre, string sel)
     {
         // Authored-margin documents (beyond the edge-to-edge zero-margin
         // dialect) were calibrated on the legacy flow — their table skins
@@ -41,7 +43,9 @@ internal static partial class HtmlToPdfConverter
         if (selParts.Length == 0) return false;
         var last = selParts[^1];
         // (a pseudo-class on the tail - `th:first-child` - names the same table part)
-        var lastTag = last.Split('.', ':')[0].ToLowerInvariant();
+#pragma warning disable S3878 // the explicit array keeps the call off Split(char, int, options)
+        var lastTag = last.Split(new[] { '.', ':' })[0].ToLowerInvariant();
+#pragma warning restore S3878
         if (lastTag is "table" or "td" or "th" or "tr" or "img") return true;
         string? scopeCls = null;
         if (last.StartsWith('.'))
@@ -69,22 +73,19 @@ internal static partial class HtmlToPdfConverter
     {
         var uses = MarkupIndex.For(html).TaggedUsesOf(cls).ToList();
         if (uses.Count == 0) return false;
-        foreach (var u in uses)
-            if (!u.Tag.Equals("img", StringComparison.OrdinalIgnoreCase))
-                return false;
-        return true;
+        return !uses.Any(u => !u.Tag.Equals("img", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>A table cell whose inline style declares both its family and its line box.</summary>
     private static bool CellStylesAuthorTypography(string html)
     {
-        foreach (Match cm in Regex.Matches(html,
+        foreach (Match cm in SafeRegex.Matches(html,
                      @"<t[dh]\b[^>]*?style\s*=\s*(?:""(?<s>[^""]*)""|'(?<s>[^']*)')",
                      RegexOptions.IgnoreCase))
         {
             var st = cm.Groups["s"].Value;
-            if (Regex.IsMatch(st, @"font-family\s*:", RegexOptions.IgnoreCase)
-                && Regex.IsMatch(st, @"line-height\s*:", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(st, @"font-family\s*:", RegexOptions.IgnoreCase)
+                && SafeRegex.IsMatch(st, @"line-height\s*:", RegexOptions.IgnoreCase))
                 return true;
         }
         return false;
@@ -93,17 +94,17 @@ internal static partial class HtmlToPdfConverter
     private static bool InlineFamiliesDisqualify(ConvertState cv, bool cssLayoutFree, string htmlSansTables)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match sm in Regex.Matches(htmlSansTables,
+        foreach (Match sm in SafeRegex.Matches(htmlSansTables,
                      @"\bstyle\s*=\s*(?:""(?<s>[^""]*)""|'(?<s>[^']*)')",
                      RegexOptions.IgnoreCase))
         {
-            if (Regex.Match(sm.Groups["s"].Value,
+            if (SafeRegex.Match(sm.Groups["s"].Value,
                     @"font-family\s*:\s*(?<f>[^;]*)",
                     RegexOptions.IgnoreCase) is not { Success: true } fam)
                 continue;
             var ownerLt = htmlSansTables.LastIndexOf('<', sm.Index);
             var ownerTag = ownerLt >= 0
-                ? Regex.Match(htmlSansTables.Substring(ownerLt + 1,
+                ? SafeRegex.Match(htmlSansTables.Substring(ownerLt + 1,
                         Math.Min(8, htmlSansTables.Length - ownerLt - 1)),
                         @"^[a-zA-Z]+").Value.ToLowerInvariant()
                 : "";
@@ -122,7 +123,7 @@ internal static partial class HtmlToPdfConverter
             // A family declared WITH its own typography (a size or pitch in
             // the same style) is the statement idiom the calibrated flow was
             // measured on; a family declared ALONE is a candidate face swap.
-            if (Regex.IsMatch(sm.Groups["s"].Value, @"font-size|font\s*:|line-height",
+            if (SafeRegex.IsMatch(sm.Groups["s"].Value, @"font-size|font\s*:|line-height",
                     RegexOptions.IgnoreCase))
             {
                 // …and the flow this document is pushed ONTO must apply the very
@@ -135,9 +136,13 @@ internal static partial class HtmlToPdfConverter
                 // 9.75 pt in the expected render); a face the flow has not got, or a
                 // declaration that also states its PITCH (a verdana 9px line-height:2
                 // paragraph beside its table), pushes the document onto the calibrated
-                // flow as before - a run carries a face and a size, not a line box.
+                // flow as before - a run carries a face and a size, not a line box. (The pitch
+                // disqualifies beside a TABLE or a flex row only: a table-free page whose div states face,
+                // size and line-height keeps the reference's UA serif flow, its first line at the UA top,
+                // while a page of inline-flex rows is the row dialect the calibrated flow renders.)
                 if (WinMetricsFor(inlFam) is null
-                    || Regex.IsMatch(sm.Groups["s"].Value, @"line-height", RegexOptions.IgnoreCase)) return true;
+                    || (SafeRegex.IsMatch(sm.Groups["s"].Value, @"line-height", RegexOptions.IgnoreCase)
+                        && SafeRegex.IsMatch(cv.html, @"<table\b|display\s*:\s*(?:inline-)?flex", RegexOptions.IgnoreCase))) return true;
                 cv.profile.inlineRunFaces = true;
                 continue;
             }

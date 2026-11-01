@@ -11,11 +11,6 @@ public sealed partial class TableAbsorber
 private sealed class TableComponentBuildState
 {
     public List<int> rowIndices = null!;
-    // Row-span support: a cell extends DOWN through the next grid row when the
-    // boundary between them carries no border across this cell's column span
-    // (cells are built from the drawn rules - an uncovered interior
-    // boundary means one tall cell, not stacked cells with an invented rule).
-    public HashSet<(int r, int c)> compSet = null!;
     public HashSet<(int r, int c)> consumed = null!;
     // Build rows top-to-bottom: in PDF coords, larger y = higher on page,
     // so reverse row index order to get visual top-to-bottom.
@@ -46,6 +41,8 @@ private sealed class TableComponentBuildState
     // to both grid edges) keep their per-cell layout.
     public int gridMinCol;
     public bool spanning;
+    // Whether a column rule of the grid's interior crosses the current row's band.
+    public bool rowRuled;
     public List<(int cFrom, int cTo)> cellSpans = null!;
     public List<Aspose.Pdf.Text.AbsorbedCell> cells = null!;
 }

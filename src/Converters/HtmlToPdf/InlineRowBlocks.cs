@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -9,7 +10,9 @@ internal static partial class HtmlToPdfConverter
     /// width: one line of side-by-side boxes whose last text lines share a baseline.</summary>
     internal sealed class InlineRow
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<InlineRowCell> Cells = new();
+#pragma warning restore S3218
         // A display:table row: its cells stack their lines from the row's top (vertical-align
         // top) instead of sharing a last-line baseline, and the row is at least this tall.
         public bool TopAligned;
@@ -34,7 +37,9 @@ internal static partial class HtmlToPdfConverter
         public double MarginLeftPt;
         // A table cell's block children, one line each in its own typography (null: the cell is
         // the single Text run above).
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<InlineRowLine>? Lines;
+#pragma warning restore S3218
     }
 
     internal sealed class InlineRowLine
@@ -47,8 +52,8 @@ internal static partial class HtmlToPdfConverter
 
     // Inline-block row law (measured on the claim-confirmation form against the
     // reference): each item is a box of its percent share of the UA content box; its text wraps
-    // inside the box on the UA serif at the item's class size (13px bold headers = 9.75);
-    // the items align on their LAST line's baseline, the row's baseline standing the tallest
+    // inside the box on the UA serif at the item's class size (13px bold headers = 9.75); the
+    // items align on their LAST line's baseline, the row's baseline standing the tallest
     // item's ascent below the row top, and the row ends at the deepest item's line-box
     // bottom. The whitespace between two inline-blocks is one space glyph at the start of the
     // following item. A container's padding stands above and below the row (the section
@@ -92,10 +97,10 @@ internal static partial class HtmlToPdfConverter
                 Console.WriteLine($"[inlinerow] host class='{(host.Attrs is not null && host.Attrs.TryGetValue("class", out var hc) ? hc : "")}' item class='{(item.Attrs is not null && item.Attrs.TryGetValue("class", out var ic) ? ic : "")}' display='{DomDecl(item, "display", css)}' width='{DomDecl(item, "width", css)}'");
             if (DomDecl(item, "display", css)?.Trim().Equals("inline-block", StringComparison.OrdinalIgnoreCase) != true) return null;
             if (DomDecl(item, "position", css)?.Trim().Equals("absolute", StringComparison.OrdinalIgnoreCase) == true) return null;
-            foreach (var d in item.Descendants())
-                if (d.Tag.Length > 0 && !InlineRowTags.Contains(d.Tag)) return null;
+            foreach (var tag in item.Descendants().Select(d => d.Tag))
+                if (tag.Length > 0 && !InlineRowTags.Contains(tag)) return null;
             if (DomDecl(item, "width", css)?.Trim() is not { } w
-                || Regex.Match(w, @"^([\d.]+)\s*%$") is not { Success: true } pm
+                || SafeRegex.Match(w, @"^([\d.]+)\s*%$") is not { Success: true } pm
                 || !double.TryParse(pm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var pct) || pct <= 0)
                 return null;
@@ -105,7 +110,7 @@ internal static partial class HtmlToPdfConverter
             if (DomDecl(item, "font-size", css) is { } fsv && TryParseLength(fsv.Trim()) is { } fsPt && fsPt > 0) cell.FontPt = fsPt;
             // weight, colour and slant inherit from the container when the item declares none
             cell.Bold = DomDecl(item, "font-weight", css) is { } fw
-                ? fw.Trim().StartsWith("bold", StringComparison.OrdinalIgnoreCase) || (int.TryParse(fw.Trim(), out var fwN) && fwN >= 600)
+                ? fw.Trim().StartsWith("bold", StringComparison.OrdinalIgnoreCase) || (int.TryParse(fw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var fwN) && fwN >= 600)
                 : hostBold;
             cell.Italic = DomDecl(item, "font-style", css)?.Trim().Equals("italic", StringComparison.OrdinalIgnoreCase) == true;
             cell.Color = DomDecl(item, "color", css) is { } col ? ParseCssColor(col) : hostColor;
@@ -136,7 +141,7 @@ internal static partial class HtmlToPdfConverter
         static double Pt(string v)
         {
             v = v.Trim();
-            if (Regex.Match(v, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase) is { Success: true } em
+            if (SafeRegex.Match(v, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase) is { Success: true } em
                 && double.TryParse(em.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var ems))
                 return ems * UaDefaultFontPt;
@@ -182,7 +187,7 @@ internal static partial class HtmlToPdfConverter
             ? cv.flow.contentWidth - UaBodyMarginPt - block.LeftIndent - block.RightInsetPt
             : cv.pageWidth - 2 * cv.marginLeft) - row.HostLeftPt - row.HostRightPt;
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_SEAT") == "1")
-            Console.WriteLine(FormattableString.Invariant($"[inlinerow] li={block.LeftIndent:0.##} ri={block.RightInsetPt:0.##} hostL={row.HostLeftPt:0.##} hostR={row.HostRightPt:0.##} cw={cv.flow.contentWidth:0.##} rowW={rowW:0.##}"));
+            Console.WriteLine(Compat.Format(CultureInfo.InvariantCulture, $"[inlinerow] li={block.LeftIndent:0.##} ri={block.RightInsetPt:0.##} hostL={row.HostLeftPt:0.##} hostR={row.HostRightPt:0.##} cw={cv.flow.contentWidth:0.##} rowW={rowW:0.##}"));
         var n = row.Cells.Count;
         var lines = new string[n][];
         var lineH = new double[n];
@@ -230,11 +235,14 @@ internal static partial class HtmlToPdfConverter
             for (var li = 0; li < k && fontDict is not null; li++)
             {
                 var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDict, ttf, faceName, lines[i][li], stripSpacesInBaseFont: true);
-                var rgb = c.Color is { } col ? $"{col.R / 255.0:0.###} {col.G / 255.0:0.###} {col.B / 255.0:0.###} rg" : "0 0 0 rg";
+                var rgb = c.Color is { } col ? Compat.Format(inv, $"{col.R / 255.0:0.###} {col.G / 255.0:0.###} {col.B / 255.0:0.###} rg") : "0 0 0 rg";
                 // a right- or centre-aligned line seats against its box's far edge or middle
-                var lineX = c.Align == InlineRowAlignLeft ? textX
-                    : c.Align == InlineRowAlignRight ? x + cellW - MeasureFaceText(faceName, lines[i][li], c.FontPt)
-                    : x + (cellW - MeasureFaceText(faceName, lines[i][li], c.FontPt)) / 2;
+                var lineX = c.Align switch
+                {
+                    InlineRowAlignLeft => textX,
+                    InlineRowAlignRight => x + cellW - MeasureFaceText(faceName, lines[i][li], c.FontPt),
+                    _ => x + (cellW - MeasureFaceText(faceName, lines[i][li], c.FontPt)) / 2,
+                };
                 sb.Append(Compat.Format(inv,
                     $"BT {rgb} /{rn} {c.FontPt:F2} Tf 1 0 0 1 {lineX:F3} {baseline + (k - 1 - li) * lineH[i]:F3} Tm <{Compat.ToHexString(hex)}> Tj ET\n"));
             }

@@ -56,7 +56,7 @@ internal static partial class MarkdownToPdfConverter
         }
     }
 
-    private static Document LayoutBlocks(List<Blk> blocks, double pageW, double pageH,
+    private static Document LayoutBlocks(List<IBlk> blocks, double pageW, double pageH,
         double margin, double marginTop, double marginBottom)
     {
         var doc = Document.Create();
@@ -350,7 +350,7 @@ internal static partial class MarkdownToPdfConverter
 
         foreach (var run in runs)
         {
-            var tokens = Regex.Split(run.Text, "( )");
+            var tokens = SafeRegex.Split(run.Text, "( )");
             foreach (var tok in tokens)
             {
                 if (tok.Length == 0) continue;
@@ -412,7 +412,7 @@ internal static partial class MarkdownToPdfConverter
                     // Per-word underline: the space gaps stay open.
                     var ux = cursor;
                     var uy = flow.PageH - (baselineTop + UnderlineDrop);
-                    foreach (var word in Regex.Split(seg.Text, "( )"))
+                    foreach (var word in SafeRegex.Split(seg.Text, "( )"))
                     {
                         if (word.Length == 0) continue;
                         var ww = MeasureText(word, seg.Style, size);

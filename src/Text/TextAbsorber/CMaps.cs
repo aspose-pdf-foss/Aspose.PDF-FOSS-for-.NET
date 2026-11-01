@@ -125,7 +125,7 @@ public sealed partial class TextAbsorber
         cm.map = new Dictionary<int, string>();
         // Normalize: ensure section markers are on their own lines.
         // This handles CMaps where all content is on a single line (space-separated).
-        cm.cmapText = Regex.Replace(cm.cmapText,
+        cm.cmapText = SafeRegex.Replace(cm.cmapText,
             @"(begin|end)(bfchar|bfrange)",
             "\n$1$2\n",
             RegexOptions.IgnoreCase);
@@ -134,7 +134,9 @@ public sealed partial class TextAbsorber
         cm.inBfChar = false;
         cm.inBfRange = false;
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var rawLine in cm.lines)
+#pragma warning restore S3267
         {
             if (!ParseCMapLine(cm, rawLine)) break;
         }
@@ -174,7 +176,8 @@ public sealed partial class TextAbsorber
     private static string HexToString(string hex)
     {
         var sb = new StringBuilder();
-        for (var i = 0; i + 3 < hex.Length; i += 4)
+        var i = 0;
+        while (i + 3 < hex.Length)
         {
             var codePoint = ParseHexInt(hex[i..(i + 4)]);
             // UTF-16BE surrogate pair (emoji / CJK Ext-B): combine with the next unit.
@@ -185,12 +188,14 @@ public sealed partial class TextAbsorber
                 {
                     sb.Append(char.ConvertFromUtf32(char.ConvertToUtf32((char)codePoint, (char)low)));
                     i += 4;
+                    i += 4;
                     continue;
                 }
             }
             if (codePoint is >= 0xD800 and <= 0xDFFF || codePoint > 0x10FFFF)
-                continue; // skip unpaired surrogate units
+                { i += 4; continue; } // skip unpaired surrogate units
             sb.Append(char.ConvertFromUtf32(codePoint));
+            i += 4;
         }
         if (sb.Length == 0 && hex.Length >= 2)
         {

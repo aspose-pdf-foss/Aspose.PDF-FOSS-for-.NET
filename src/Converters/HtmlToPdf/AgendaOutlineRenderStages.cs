@@ -34,13 +34,13 @@ internal static partial class HtmlToPdfConverter
         if (ao.prevLvl >= 0) ao.y += AgItemPadPt * (1 + Math.Max(0, ao.prevLvl - lvl));
         else ao.y += AgItemPadPt;
 
-        var mk = Regex.Match(inner,
+        var mk = SafeRegex.Match(inner,
             @"<span\b[^>]*class\s*=\s*[""'][^""']*agenda-outline-level[^""']*[""'][^>]*>([\s\S]*?)</span\s*>",
             RegexOptions.IgnoreCase);
-        var nm = Regex.Match(inner,
+        var nm = SafeRegex.Match(inner,
             @"<span\b[^>]*class\s*=\s*[""'][^""']*agenda-item-name[^""']*[""'][^>]*>([\s\S]*?)</span\s*>",
             RegexOptions.IgnoreCase);
-        var pr = Regex.Match(inner,
+        var pr = SafeRegex.Match(inner,
             @"<span\b[^>]*class\s*=\s*[""'][^""']*agenda-presenter[^""']*[""'][^>]*>([\s\S]*?)</span\s*>",
             RegexOptions.IgnoreCase);
 
@@ -87,5 +87,5 @@ internal static partial class HtmlToPdfConverter
         return true;
     }
     private static string AgTxt(string markup) =>
-        CollapseWs(DecodeEntities(Regex.Replace(markup, @"<[^>]+>", " "))).Trim();
+        CollapseWs(DecodeEntities(SafeRegex.Replace(markup, @"<[^>]+>", " "))).Trim();
 }

@@ -15,7 +15,7 @@ public sealed class LinearGradientLayoutTests
         new([gray, gray, gray], double.IsNaN(offset) ? 0 : offset, double.IsNaN(offset) ? GradientOffsetKind.Auto : kind, hint, hintKind);
 
     private static string Pieces(LinearGradientLayout layout) => string.Join(" ",
-        layout.Segments.Select(s => $"{s.Start:0.###}..{s.End:0.###}:{s.From[0]:0.#}>{s.To[0]:0.#}" + (s.Exponent == 1 ? "" : $"^{s.Exponent:0.####}")));
+        layout.Segments.Select(s => FormattableString.Invariant($"{s.Start:0.###}..{s.End:0.###}:{s.From[0]:0.#}>{s.To[0]:0.#}") + (s.Exponent == 1 ? "" : FormattableString.Invariant($"^{s.Exponent:0.####}"))));
 
     [Fact]
     public void PositionlessStopsAreSpreadEvenlyBetweenTheirNeighbours()

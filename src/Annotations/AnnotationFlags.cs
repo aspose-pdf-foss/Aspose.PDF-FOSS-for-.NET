@@ -4,14 +4,18 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Annotations;
 
+#pragma warning disable S2344 // public API: the published enum name
 /// <summary>
 /// Annotation flags as defined in PDF spec Table 165.
 /// </summary>
 [Flags]
 public enum AnnotationFlags
+#pragma warning restore S2344
 {
+#pragma warning disable S2346 // public API: the published zero member
     /// <summary>Default flag set — alias for <see cref="None"/>.</summary>
     Default = 0,
+#pragma warning restore S2346
     None = 0,
     Invisible = 1 << 0,
     Hidden = 1 << 1,

@@ -9,6 +9,7 @@ namespace Aspose.Pdf.Facades;
 
 public sealed partial class PdfFileEditor
 {
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Create a booklet from a PDF: every output page is one SHEET SIDE carrying two
     /// source pages side by side, so that printed double-sided and folded the sheets
@@ -24,6 +25,7 @@ public sealed partial class PdfFileEditor
     /// output pages, a five-page document four.
     /// </remarks>
     public byte[] MakeBooklet(byte[] inputPdf)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(inputPdf);
         var n = doc.PageCount;
@@ -39,44 +41,6 @@ public sealed partial class PdfFileEditor
         return ComposeBookletSheets(doc, sides);
     }
 
-    /// <summary>Compose one output page per (left, right) pair; a slot outside the
-    /// source page range stays blank.</summary>
-    private static byte[] ComposeBookletSheets(Document source, List<(int left, int right)> sides)
-    {
-        var first = source.Pages[1];
-        var sheetW = first.Height;
-        var sheetH = first.Width;
-        var half = sheetW / 2;
-
-        using var booklet = Document.Create();
-        foreach (var (left, right) in sides)
-        {
-            var sheet = booklet.Pages.Add(sheetW, sheetH);
-            PlaceOnHalfSheet(sheet, source, left, 0, half, sheetH);
-            PlaceOnHalfSheet(sheet, source, right, half, half, sheetH);
-        }
-        return booklet.ToArray();
-    }
-
-    private static void PlaceOnHalfSheet(Page sheet, Document source, int pageNumber,
-        double x0, double halfW, double sheetH)
-    {
-        if (pageNumber < 1 || pageNumber > source.PageCount) return;
-        var page = source.Pages[pageNumber];
-        var scale = Math.Min(halfW / page.Width, sheetH / page.Height);
-        var w = page.Width * scale;
-        var h = page.Height * scale;
-        var stamp = new PdfPageStamp(page)
-        {
-            Width = w,
-            Height = h,
-            XIndent = x0 + (halfW - w) / 2,
-            YIndent = (sheetH - h) / 2,
-            CarryAnnotations = false,
-        };
-        sheet.AddStamp(stamp);
-    }
-
     /// <summary>
     /// Create a booklet from a PDF using a specified page size.
     /// Pages are reordered so that when printed double-sided and folded, they form a booklet.
@@ -89,6 +53,7 @@ public sealed partial class PdfFileEditor
         return ResizePages(booklet, pageSize.Width, pageSize.Height);
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Create a booklet from explicit left/right page lists: output page i carries
     /// <c>leftPages[i]</c> on its left half and <c>rightPages[i]</c> on its right;
@@ -96,6 +61,7 @@ public sealed partial class PdfFileEditor
     /// that half blank. One output page per pair — no front/back generation.
     /// </summary>
     public byte[] MakeBooklet(byte[] inputPdf, int[] leftPages, int[] rightPages)
+#pragma warning restore S2325
     {
         var maxPairs = Math.Max(leftPages.Length, rightPages.Length);
         var sides = new List<(int left, int right)>();
@@ -153,5 +119,45 @@ public sealed partial class PdfFileEditor
         var result = MakeBooklet(File.ReadAllBytes(inputFile), pageSize, leftPages, rightPages);
         File.WriteAllBytes(outputFile, result);
         return true;
+    }
+
+    /// <summary>Compose one output page per (left, right) pair; a slot outside the
+    /// source page range stays blank.</summary>
+    private static byte[] ComposeBookletSheets(Document source, List<(int left, int right)> sides)
+    {
+        var first = source.Pages[1];
+        var (firstW, firstH) = PdfPageStamp.ShownPageSize(first);
+        var sheetW = firstH;
+        var sheetH = firstW;
+        var half = sheetW / 2;
+
+        using var booklet = Document.Create();
+        foreach (var (left, right) in sides)
+        {
+            var sheet = booklet.Pages.Add(sheetW, sheetH);
+            PlaceOnHalfSheet(sheet, source, left, 0, half, sheetH);
+            PlaceOnHalfSheet(sheet, source, right, half, half, sheetH);
+        }
+        return booklet.ToArray();
+    }
+
+    private static void PlaceOnHalfSheet(Page sheet, Document source, int pageNumber,
+        double x0, double halfW, double sheetH)
+    {
+        if (pageNumber < 1 || pageNumber > source.PageCount) return;
+        var page = source.Pages[pageNumber];
+        var (pw, ph) = PdfPageStamp.ShownPageSize(page);
+        var scale = Math.Min(halfW / pw, sheetH / ph);
+        var w = pw * scale;
+        var h = ph * scale;
+        var stamp = new PdfPageStamp(page)
+        {
+            Width = w,
+            Height = h,
+            XIndent = x0 + (halfW - w) / 2,
+            YIndent = (sheetH - h) / 2,
+            CarryAnnotations = false,
+        };
+        sheet.AddStamp(stamp);
     }
 }

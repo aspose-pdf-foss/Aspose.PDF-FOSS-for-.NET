@@ -55,7 +55,7 @@ public sealed partial class Document
                 _scripts![name] = value;
                 if (!_keys!.Contains(name))
                 {
-                    var insertAt = _keys!.Count;
+                    var insertAt = _keys.Count;
                     for (var i = 0; i < _keys.Count; i++)
                     {
                         if (string.CompareOrdinal(_keys[i], name) > 0) { insertAt = i; break; }
@@ -133,6 +133,8 @@ public sealed partial class Document
                 names = new Aspose.Pdf.Core.PdfDictionary();
                 catalog.Set("Names", names);
             }
+            // The tree being replaced, scripts and all, is still an object of the file: the save leaves it out.
+            if (names.ContainsKey("JavaScript")) reader.MayHaveOrphansOnSave = true;
             if (_scripts!.Count == 0)
             {
                 names.Remove("JavaScript");
@@ -150,7 +152,7 @@ public sealed partial class Document
                 actionDict.Set("Type", new Aspose.Pdf.Core.PdfName("Action"));
                 actionDict.Set("S", new Aspose.Pdf.Core.PdfName("JavaScript"));
                 actionDict.Set("JS", new Aspose.Pdf.Core.PdfString(
-                    Compat.Latin1.GetBytes(_scripts![key])));
+                    Compat.Latin1.GetBytes(_scripts[key])));
                 arr.Add(new Aspose.Pdf.Core.PdfString(Compat.Latin1.GetBytes(key)));
                 arr.Add(actionDict);
             }

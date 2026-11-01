@@ -16,7 +16,6 @@ namespace Aspose.Pdf.Security;
 internal static class Rfc3161
 {
     private const string OidSignedData = "1.2.840.113549.1.7.2";
-    private const string OidTstInfo = "1.2.840.113549.1.9.16.1.4";
 
     private const string OidSha1 = "1.3.14.3.2.26";
     private const string OidSha256 = "2.16.840.1.101.3.4.2.1";
@@ -105,7 +104,9 @@ internal static class Rfc3161
 
     private static byte[] BuildRequest(DigestHashAlgorithm digest, byte[] imprint)
     {
+#pragma warning disable S125 // RFC 3161 ASN.1 quoted verbatim, not code
         // TimeStampReq ::= SEQUENCE {
+#pragma warning restore S125
         //   version INTEGER { v1(1) },
         //   messageImprint MessageImprint,
         //   reqPolicy TSAPolicyId OPTIONAL,          -- omitted
@@ -167,8 +168,6 @@ internal static class Rfc3161
     {
         string? hashOid = default;
         byte[]? hashedMessage = default;
-        hashOid = string.Empty;
-        hashedMessage = [];
         var tst = new Asn1Reader(tstInfo).ReadSequence();
         tst.ReadInteger();                        // version
         tst.Skip();                               // policy (TSAPolicyId OID)

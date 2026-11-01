@@ -152,10 +152,14 @@ public sealed class CosPdfNumber : CosPdfPrimitive
     public override int GetHashCode() => Value.GetHashCode();
 
     /// <inheritdoc/>
+#pragma warning disable S1244 // value equality of the type - exact by contract, as its hash code
     public override bool Equals(object? obj) => obj is CosPdfNumber other && other.Value == Value;
+#pragma warning restore S1244
 
     internal override PdfObject ToPdfObject()
+#pragma warning disable S1244 // integrality test - exact by definition
         => Value == System.Math.Floor(Value) && System.Math.Abs(Value) < long.MaxValue
+#pragma warning restore S1244
             ? new PdfInteger((long)Value)
             : new PdfReal(Value);
 }

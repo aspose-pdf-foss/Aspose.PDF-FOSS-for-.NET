@@ -39,7 +39,7 @@ public sealed partial class Document : IDisposable
                 var tocPageIdx = Pages.IndexOf(lc.page);
                 for (var ci = 1; ci <= lc.pl.tocSlot; ci++)
                 {
-                    var cont = Pages.Insert(tocPageIdx + ci, lc.page.Width, lc.page.Height);
+                    var cont = Pages.Insert(tocPageIdx + ci, lc.page.LayoutFrameWidth, lc.page.LayoutFrameHeight);
                     // The buffered entry bytes reference the TOC page's font
                     // resource name — register Helvetica on the continuation
                     // page and alias it under that exact name if the fresh
@@ -52,6 +52,7 @@ public sealed partial class Document : IDisposable
                         contFonts.Set(lc.pl.fontName, contFonts.Get(contFontName)!);
                     }
                     cont.LayoutApplied = true;
+                    cont.InheritDeferredStamps(lc.page);
                     tocContPages.Add(cont);
                 }
             }
@@ -81,14 +82,15 @@ public sealed partial class Document : IDisposable
         // Y cursor (Heading.Build draws at the supplied Y verbatim, so
         // just resetting the cursor would leave the heading on the
         // current page).
-        if (ParagraphIsInNewPage(para) && para != lc.page.Paragraphs[0])
+        if (ParagraphIsInNewPage(para) && para != lc.pl.paraList[0])
             lc.pl.flow.ForceNewPage();
         // A kept-with-next fragment whose follower opens a new page cannot stay
         // with it; the reference engine moves the fragment onto a fresh page of its
         // own first (probed: a kept note before a new-page table takes a page alone).
         if (para is HtmlFragment { IsKeptWithNext: true } && lc.paraIdx + 1 < lc.pl.paraList.Count
-            && ParagraphIsInNewPage(lc.pl.paraList[lc.paraIdx + 1]) && para != lc.page.Paragraphs[0])
+            && ParagraphIsInNewPage(lc.pl.paraList[lc.paraIdx + 1]) && para != lc.pl.paraList[0])
             lc.pl.flow.ForceNewPage();
+        KeepRunWithNext(lc, para);
 
         // Record this paragraph's starting position so a later
         // LocalHyperlink that targets it (e.g. LocalHyperlink(head))
@@ -139,7 +141,7 @@ public sealed partial class Document : IDisposable
         }
         else if (para is Aspose.Pdf.Drawing.Graph graph)
         {
-            LayoutGraphParagraph(graph, lc.pl.flow, lc.page, lc.pl.marginLeft, lc.pl.marginTop, lc.pl.marginBottom);
+            LayoutGraphParagraph(graph, lc.pl.flow, lc.pl.marginLeft);
         }
         else if (para is Forms.Field fieldPara)
         {
@@ -165,6 +167,9 @@ public sealed partial class Document : IDisposable
     /// <summary></summary>
     private void PrepareLayout(PageContentLayoutState lc)
     {
+        // The flow writes in the page's own space: whatever matrix the page's content leaves in force, its
+        // opening one included, is bracketed away before the paragraphs are appended under it.
+        lc.page.IsolateContentLeavingMatrix();
         if (lc.page.RotateDegrees % 360 == 0)
         {
             var cropForLayout = lc.page.CropBox;
@@ -221,7 +226,7 @@ public sealed partial class Document : IDisposable
         // has no Arabic coverage and the renderer applies no OpenType shaping).
         ShapeArabicForGenerator(tf);
         // Replace page number macros
-        if (tf.Text.Contains("$p") || tf.Text.Contains("$P"))
+        if (lc.page.ProcessSpecialSymbols && (tf.Text.Contains("$p") || tf.Text.Contains("$P")))
         {
             tf.Text = tf.Text
                 .Replace("$p", lc.page.Number.ToString())
@@ -269,8 +274,8 @@ public sealed partial class Document : IDisposable
                 && wholeH <= lc.pl.flow.ContentTop - lc.pl.flow.BottomMargin + 0.5)
                 lc.pl.flow.ForceNewPage();
         }
-        // A fragment's own top margin is vertical space reserved above it;
-        // dropping the cursor by it (which paginates when it overflows the
+        // A fragment's own top margin is vertical space reserved above it; dropping
+        // the cursor by it (which paginates when it overflows the
         // page) is what places a fragment with a large Margin.Top onto a
         // later page instead of pinning it to the current one.
         //
@@ -300,8 +305,10 @@ public sealed partial class Document : IDisposable
             // getter is never null now, so test HasExplicitPosition, not `??=`).
             if (!tf.HasExplicitPosition)
                 tf.Position = new Text.Position(
-                    lc.pl.marginLeft, lc.page.Height - lc.pl.marginTop - (tf.TextState.FontSize > 0 ? tf.TextState.FontSize : 12));
+                    lc.pl.marginLeft, lc.page.LayoutFrameHeight - lc.pl.marginTop - (tf.TextState.FontSize > 0 ? tf.TextState.FontSize : 12));
             lc.pl.tb.AppendTextInline(tf);
+            // The fragment's hyperlink covers the box it was written in, as a flowed fragment's does.
+            EmitPositionedFragmentLink(lc.page, tf);
         }
         var tfBottomMargin = tf.Margin?.Bottom ?? 0;
         if (tfBottomMargin > 0) lc.pl.flow.AdvanceY(tfBottomMargin);

@@ -177,9 +177,12 @@ public sealed partial class Document
             {
                 if (_reader.ResolveDict(_reader.ResolveDict(entry)?.Get("AP")) is not { } ap) continue;
                 var normal = _reader.Resolve(ap.Get("N"));
-                var streams = normal is PdfStream single ? [single]
-                    : normal is PdfDictionary states ? states.Keys.Select(k => _reader.ResolveStream(states.Get(k))).OfType<PdfStream>().ToList()
-                    : new List<PdfStream>();
+                var streams = normal switch
+                {
+                    PdfStream single => [single],
+                    PdfDictionary states => states.Keys.Select(k => _reader.ResolveStream(states.Get(k))).OfType<PdfStream>().ToList(),
+                    _ => new List<PdfStream>(),
+                };
                 foreach (var stream in streams)
                 {
                     if (!seen.Add(stream)) continue;
@@ -237,7 +240,9 @@ public sealed partial class Document
                     byte[]? map = _reader.Resolve(cidFont.Get("CIDToGIDMap")) is PdfStream m ? _reader.DecodeStream(m) : null;
                     return cid =>
                     {
-                        var gid = map is null ? cid : cid * 2 + 1 < map.Length ? (map[cid * 2] << 8) | map[cid * 2 + 1] : 0;
+                        int gid = 0;
+                        if (map is null) gid = cid;
+                        else if (cid * 2 + 1 < map.Length) gid = (map[cid * 2] << 8) | map[cid * 2 + 1];
                         return gid == 0 || gid >= glyphCount;
                     };
                 }

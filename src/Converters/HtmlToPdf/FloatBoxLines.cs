@@ -12,10 +12,12 @@ internal static partial class HtmlToPdfConverter
     {
         public string Text = "";
         public FbStyle St = null!;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double Adv, Above, Below;
         public double X;                                        // pen offset in its line, set at flush
         public bool IsSpace, IsBreak, IsSpacer, VAlignTop;
         public FbBox? Box;
+#pragma warning restore S3218
         public bool IsContent => !IsSpace && !IsBreak && !IsSpacer;
         public static FbItem Break() => new() { IsBreak = true, St = new FbStyle() };
         public static FbItem Spacer(double adv, FbStyle st) => new() { IsSpacer = true, Adv = adv, St = st };
@@ -23,10 +25,12 @@ internal static partial class HtmlToPdfConverter
 
     private sealed class FbLine
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double X, Y, W, Above, Below;                    // X = segment left, W = segment width
         public List<FbItem> Items = new();
         public double Height => Above + Below;
         public double Advance;                                  // the items' total advance
+#pragma warning restore S3218
     }
 
     /// <summary>The line box of a size in a face in px: the declared line height, else the hhea
@@ -54,14 +58,18 @@ internal static partial class HtmlToPdfConverter
 
     private static double FbBelowPt(FbState fb, FbStyle st) => FbLineBoxPx(fb, st) * FbPxPt - FbAbovePt(fb, st);
 
-    private static double FbMeasure(FbStyle st, string text) => text.Length == 0 ? 0
-        : st.Own is { } own ? FbMeasureOwn(own, text, st.Pt) : MeasureFaceText(st.MeasureFace, text, st.Pt);
+    private static double FbMeasure(FbStyle st, string text)
+    {
+        if (text.Length == 0) return 0;
+        if (st.Own is { } own) return FbMeasureOwn(own, text, st.Pt);
+        return MeasureFaceText(st.MeasureFace, text, st.Pt);
+    }
 
     /// <summary>Add a text node to the run as words and spaces (entities decoded, whitespace
     /// collapsed; a no-break space stays inside its word).</summary>
     private static void FbAddText(FbState fb, List<FbItem> run, string raw, FbStyle st)
     {
-        var text = Regex.Replace(DecodeEntities(raw), "[ \\t\\r\\n]+", " ");
+        var text = SafeRegex.Replace(DecodeEntities(raw), "[ \\t\\r\\n]+", " ");
         if (text.Length == 0) return;
         if (st.Uppercase) text = text.ToUpperInvariant();
         var above = FbAbovePt(fb, st);
@@ -109,14 +117,16 @@ internal static partial class HtmlToPdfConverter
             if (items[pos].IsBreak) { pos++; cursor += strutAbove + strutBelow; continue; }
             var (s0, s1) = bfc.Segment(cursor, cx, cw);
             var lineW = s1 - s0;
-            var end = FbLineEnd(items, pos, lineW, box.St.Nowrap);
+            var end = FbLineEnd(items, pos, lineW, box.St.Nowrap, fb.columns);
             if (end == pos) end = pos + 1;
             if (FbItemsAdvance(items, pos, end) > lineW + FbEpsilon && s1 - s0 < cw - FbEpsilon)
             {
                 // the line does not fit beside the floats (a no-wrap line included): it drops
                 // below the next float bottom; only a line the container itself cannot hold overflows
                 var next = bfc.NextBottom(cursor);
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
                 if (next != double.MaxValue) { cursor = next; continue; }
+#pragma warning restore S1244
             }
             // (quirks: a line holding only replaced boxes has no strut - the block is exactly the box)
             var strutless = fb.quirks && !FbLineHasText(items, pos, end);
@@ -155,7 +165,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>The index after the last item of a line starting at pos in a width: words and the
     /// spaces between them, stopping before the first word that would overflow (a break ends the line).</summary>
-    private static int FbLineEnd(List<FbItem> items, int pos, double lineW, bool nowrap)
+    private static int FbLineEnd(List<FbItem> items, int pos, double lineW, bool nowrap, bool dashStaysWithWord = false)
     {
         var x = 0.0;
         var end = pos;
@@ -164,11 +174,22 @@ internal static partial class HtmlToPdfConverter
             var it = items[i];
             if (it.IsBreak) break;
             if (it.IsSpace) { x += it.Adv; continue; }
-            if (!nowrap && end > pos && x + it.Adv > lineW + FbEpsilon) break;
+            // (the column claim: a spaced dash never opens a line - the word before it goes down with it)
+            var needed = it.Adv + (dashStaysWithWord ? FbTrailingDashAdvance(items, i) : 0);
+            if (!nowrap && end > pos && x + needed > lineW + FbEpsilon && it.Text != FbSpacedDash) break;
             x += it.Adv;
             end = i + 1;
         }
         return end;
+    }
+
+    private const string FbSpacedDash = "-";
+
+    /// <summary>The advance of a spaced dash that follows a word (the space and the dash), zero without one.</summary>
+    private static double FbTrailingDashAdvance(List<FbItem> items, int word)
+    {
+        if (word + 2 >= items.Count || !items[word + 1].IsSpace || items[word + 2].Text != FbSpacedDash || items[word + 2].Box is not null) return 0;
+        return items[word + 1].Adv + items[word + 2].Adv;
     }
 
     /// <summary>Build a line from the items: the pens, the strut and the items' extents (a

@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -23,7 +23,9 @@ public class BaseOperatorCollection : System.Collections.Generic.IEnumerable<Ope
     /// <summary>Gets the number of operators in the list.</summary>
     public int Count => _ops.Count;
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
     /// <summary>Whether the absorber is operating in fast-text-extraction mode (stored only).</summary>
     public bool IsFastTextExtractionMode { get; internal set; }
@@ -51,11 +53,11 @@ public class BaseOperatorCollection : System.Collections.Generic.IEnumerable<Ope
     public bool Remove(Operator item) => _ops.Remove(item);
 
     /// <summary>Suspend any deferred-update bookkeeping. No-op.</summary>
-    public void SuppressUpdate() { }
+    public void SuppressUpdate() { /* no deferred updates to suppress */ }
     /// <summary>Resume deferred-update bookkeeping. No-op.</summary>
-    public void ResumeUpdate() { }
+    public void ResumeUpdate() { /* no deferred updates to resume */ }
     /// <summary>Cancel any pending deferred update. No-op.</summary>
-    public void CancelUpdate() { }
+    public void CancelUpdate() { /* no deferred updates to cancel */ }
 
     public System.Collections.Generic.IEnumerator<Operator> GetEnumerator() => _ops.GetEnumerator();
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
@@ -78,6 +80,36 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
     // ops added OUTSIDE a batch are live-visible (an image Do renders unsaved).
     private bool _suspendBatched;
     private bool _materialized;
+
+    /// <summary>True while operators read from the page's streams are held here unwritten;
+    /// they go back by the identity of the streams they came from.</summary>
+    internal bool IsMaterialized => _materialized;
+
+    /// <summary>True while operators are held here that a save writes to the page.</summary>
+    internal bool HasUnflushedOperators => _materialized || _operators.Count > 0;
+
+    /// <summary>The operators as text, one string per operator, operands first and the name
+    /// last: the parse the typed view is read from, or the operators held here written out.</summary>
+    internal IReadOnlyList<string> OperatorTexts()
+    {
+        if (_operators.Count > 0) return _operators.Select(o => o.ToPdf()).ToList();
+        EnsureParsed();
+        return _parsed!;
+    }
+
+    /// <summary>Hands each operator to <paramref name="sink"/>: the operators held here or the lines
+    /// of an earlier parse when there are any, else the streams scanned without keeping their lines
+    /// - a pass that counts operators by name over a large page reads it this way.</summary>
+    internal void ScanOperators(Action<ContentStreamOperatorParser.ScannedOperator> sink)
+    {
+        if (_operators.Count > 0 || _parsed is not null)
+        {
+            foreach (var text in OperatorTexts()) sink(new ContentStreamOperatorParser.ScannedOperator(text));
+            return;
+        }
+        var bytes = GetContentBytes();
+        if (bytes.Length > 0) ContentStreamOperatorParser.ScanOperators(bytes, sink);
+    }
     // The page's content streams the operators were read from; streams added to the page after
     // that (text a TextBuilder writes) are not in the list and are kept when it is written back.
     private List<Core.PdfStream>? _parsedStreams;
@@ -85,8 +117,8 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
     // Streams added to the page while the operators were held here, each after the operator it
     // followed (null: before them all), so written back they keep their place among them.
     private readonly List<(Operator? After, Core.PdfStream Stream)> _addedStreams = [];
-    // Where a stream-backed collection writes its operators back (an XForm's stream);
-    // null for a page (which flushes through the page) or a read-only view.
+    // Where a stream-backed collection writes its operators back (an XForm's stream); null
+    // for a page (which flushes through the page) or a read-only view.
     private readonly Action<byte[]>? _streamSink;
     // True once a mutator ran since the last materialisation or flush: only an edited
     // collection is written back, so a stream that was merely inspected keeps its bytes.
@@ -137,11 +169,41 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
     /// <summary>Add an operator to the collection.</summary>
     public void Add(Operator op)
     {
+        // Appended after the page's content, the operators draw in the space it draws the page in.
+        _page?.IsolateContentLeavingMatrix(keepOpeningMatrix: true);
         Materialize();
         ResolveAgainstFont(op);
-        _operators.Add(op);
+        Append(op);
         if (_suppressed) _suspendBatched = true;
-        Reindex();
+    }
+
+    /// <summary>Add several operators in one call.</summary>
+    public void Add(Operator[] ops)
+    {
+        if (ops is null) return;
+        _page?.IsolateContentLeavingMatrix(keepOpeningMatrix: true);
+        Materialize();
+        foreach (var op in ops) Append(op);
+        _edited = true; // even an empty batch counts as an edit, as it always has
+    }
+
+    /// <summary>Add several operators from any collection in one call.</summary>
+    public void Add(System.Collections.Generic.ICollection<Operator> ops)
+    {
+        if (ops is null) return;
+        _page?.IsolateContentLeavingMatrix(keepOpeningMatrix: true);
+        Materialize();
+        foreach (var op in ops) Append(op);
+        _edited = true; // even an empty batch counts as an edit, as it always has
+    }
+
+    // An appended operator takes the next number; the ones before it keep theirs. Renumbering
+    // the whole collection on every append made building a page operator by operator quadratic.
+    private void Append(Operator op)
+    {
+        _operators.Add(op);
+        op.Index = _operators.Count;
+        _edited = true;
     }
 
     /// <summary>
@@ -163,6 +225,23 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
                 show.UseGlyphIds(Encode(show.Font!, show.Text, show.Features));
                 break;
 
+            case Aspose.Pdf.Operators.ShowText show when show.Font?.SourceFontData?.PredefinedCid is { } cid:
+                show.UseGlyphIds(cid.Encode(show.Text));
+                break;
+
+            case Aspose.Pdf.Operators.SetGlyphsPositionShowText positioned
+                when positioned.Font?.SourceFontData?.PredefinedCid is { } cid:
+                positioned.UseGlyphIds(positioned.Items.Select(item => item is string run ? cid.Encode(run) : null).ToArray());
+                break;
+
+            case Aspose.Pdf.Operators.ShowText show when show.Font?.SourceFontData?.Type1 is { } type1:
+                show.UseCodes(Type1Codes(type1, show.Text));
+                break;
+
+            case Aspose.Pdf.Operators.ShowText show when WinAnsiCore(show.Font):
+                show.UseCodes(WinAnsiCodes(show.Text));
+                break;
+
             case Aspose.Pdf.Operators.SetGlyphsPositionShowText positioned when Usable(positioned.Font, "x"):
                 positioned.UseGlyphIds(EncodeEach(positioned));
                 break;
@@ -171,6 +250,30 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
 
     private static bool Usable(Aspose.Pdf.Text.FontInfo? font, string text) =>
         font is not null && text.Length > 0 && font.ProgramBytes() is not null;
+
+    /// <summary>A core text face with nothing to embed, which the page declares with WinAnsiEncoding.</summary>
+    private static bool WinAnsiCore(Aspose.Pdf.Text.FontInfo? font) =>
+        font is not null && font.ProgramBytes() is null
+        && Aspose.Pdf.Text.Standard14Fonts.CanonicalName(font.FontName ?? string.Empty) is { } core
+        && !Aspose.Pdf.Text.Standard14Fonts.IsSymbolic(core);
+
+    /// <summary>The run's characters as WinAnsi codes: a curly quote or a dash outside
+    /// Latin-1 becomes the byte the encoding gives it, not a character the font lacks.</summary>
+    private static string WinAnsiCodes(string text)
+    {
+        var codes = new char[text.Length];
+        for (var i = 0; i < text.Length; i++)
+            codes[i] = Aspose.Pdf.Content.ContentStreamBuilder.ToWinAnsi(text[i]);
+        return new string(codes);
+    }
+
+    /// <summary>The run's characters as the codes a Type 1 face is declared with.</summary>
+    private static string Type1Codes(Aspose.Pdf.Text.Type1FontFile type1, string text)
+    {
+        var codes = new char[text.Length];
+        for (var i = 0; i < text.Length; i++) codes[i] = type1.Code(text[i]);
+        return new string(codes);
+    }
 
     /// <summary>Each string element of a positioned run, encoded; adjustments left alone.</summary>
     private byte[]?[] EncodeEach(Aspose.Pdf.Operators.SetGlyphsPositionShowText positioned)
@@ -190,24 +293,6 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
             fontDict, font.ProgramBytes()!, font.EmbeddedBaseFontName ?? font.FontName ?? "Font",
             text, resNameHint: font.PageResourceName, features: features);
         return glyphIds;
-    }
-
-    /// <summary>Add several operators in one call.</summary>
-    public void Add(Operator[] ops)
-    {
-        if (ops is null) return;
-        Materialize();
-        foreach (var op in ops) _operators.Add(op);
-        Reindex();
-    }
-
-    /// <summary>Add several operators from any collection in one call.</summary>
-    public void Add(System.Collections.Generic.ICollection<Operator> ops)
-    {
-        if (ops is null) return;
-        Materialize();
-        foreach (var op in ops) _operators.Add(op);
-        Reindex();
     }
 
     /// <summary>Re-stamp every live operator's 1-based <see cref="Operator.Index"/>.
@@ -276,6 +361,16 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
         RemoveEach(list);
     }
 
+    /// <summary>Remove operator at the given 1-based index.</summary>
+    public void Delete(int index)
+    {
+        Materialize();
+        if (index < 1 || index > _operators.Count)
+            throw new ArgumentOutOfRangeException(nameof(index));
+        _operators.RemoveAt(index - 1);
+        Reindex();
+    }
+
     /// <summary>Remove the given operators from the materialised list. An operator a caller
     /// collected from a plain enumeration is a throw-away parse, not the materialised
     /// instance, so one that is not found by reference is matched by its 1-based index and
@@ -284,8 +379,8 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
     {
         Materialize();
         var byIndex = new System.Collections.Generic.List<Operator>();
-        foreach (var op in ops)
-            if (op is not null && !_operators.Remove(op)) byIndex.Add(op);
+        foreach (var op in ops.Where(op => op is not null && !_operators.Remove(op)))
+            byIndex.Add(op);
         byIndex.Sort((a, b) => b.Index.CompareTo(a.Index));
         foreach (var op in byIndex)
         {
@@ -330,13 +425,17 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
         Reindex();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether the absorber/parser is in fast-text-extraction mode
     /// (no glyph-width metrics, character-position approximations only).
     /// Always false in this build — we always parse precisely.</summary>
     public bool IsFastTextExtractionMode => false;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers may add and remove operators.</summary>
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
     /// <summary>Remove the first occurrence of <paramref name="op"/>; returns
     /// true when an operator was removed.</summary>
@@ -383,7 +482,7 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
     /// In this build the collection re-serializes its operators lazily on save, so
     /// this is a no-op kept for public API compatibility (mirrors <see cref="SuppressUpdate"/>
     /// / <see cref="ResumeUpdate()"/> / <see cref="CancelUpdate"/>).</summary>
-    public void UpdateData() { }
+    public void UpdateData() { /* the collection writes through; nothing is pending */ }
 
     /// <summary>
     /// Number of operators in the page content stream.
@@ -446,16 +545,6 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
     /// the next <c>FlushToPage</c> (a non-materialised enumeration yields
     /// throw-away parses).</summary>
     internal void EnsureMaterialized() => Materialize();
-
-    /// <summary>Remove operator at the given 1-based index.</summary>
-    public void Delete(int index)
-    {
-        Materialize();
-        if (index < 1 || index > _operators.Count)
-            throw new ArgumentOutOfRangeException(nameof(index));
-        _operators.RemoveAt(index - 1);
-        Reindex();
-    }
 
     /// <summary>Materialize the content and remove every operator matching the predicate.
     /// Operating on the materialized list (rather than enumerator-yielded instances) keeps
@@ -565,6 +654,27 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
 
     internal void FlushToPage() => FlushToPage(fromRender: false);
 
+    internal void FlushToPage(bool fromRender)
+    {
+        if (_page is null) return;
+        // A render-time flush must not materialise a suspended batch - it is
+        // deferred until save (see _suspendBatched).
+        if (fromRender && _suspendBatched) return;
+        // Materialised operators are the page's complete content (the caller read
+        // or edited existing operators), so the stream is replaced. Non-materialised
+        // operators were added on top of existing content, so they are appended.
+        if (!_materialized && _operators.Count == 0) return;
+        if (_materialized)
+            _page.SetContentStream(Parts(), keepAddedSince: _materializedStreams);
+        else
+            _page.AppendContentBytes(Serialize(_operators));
+        _addedStreams.Clear();
+        _operators.Clear();
+        _parsed = null;
+        _materialized = false;
+        _suspendBatched = false;
+    }
+
     /// <summary>The operators as content-stream bytes. Every operand byte survives: the parser
     /// read the stream as Latin-1 and the writer gives it back the same way (an ASCII pass
     /// turned each code above 127 in a shown string into a question mark).</summary>
@@ -604,27 +714,6 @@ public sealed class OperatorCollection : IEnumerable<Operator>, IDisposable
         if (start < _operators.Count || parts.Count == 0) parts.Add((Serialize(_operators.GetRange(start, _operators.Count - start)), null));
         foreach (var stream in orphans) parts.Add((null, stream));
         return parts;
-    }
-
-    internal void FlushToPage(bool fromRender)
-    {
-        if (_page is null) return;
-        // A render-time flush must not materialise a suspended batch - it is
-        // deferred until save (see _suspendBatched).
-        if (fromRender && _suspendBatched) return;
-        // Materialised operators are the page's complete content (the caller read
-        // or edited existing operators), so the stream is replaced. Non-materialised
-        // operators were added on top of existing content, so they are appended.
-        if (!_materialized && _operators.Count == 0) return;
-        if (_materialized)
-            _page.SetContentStream(Parts(), keepAddedSince: _materializedStreams);
-        else
-            _page.AppendContentBytes(Serialize(_operators));
-        _addedStreams.Clear();
-        _operators.Clear();
-        _parsed = null;
-        _materialized = false;
-        _suspendBatched = false;
     }
 
     /// <summary>Write the operators back into the backing stream through the sink the

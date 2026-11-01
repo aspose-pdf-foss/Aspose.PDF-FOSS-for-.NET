@@ -32,6 +32,8 @@ private sealed class TableParagraphState
     // a table taller than a whole page still splits (43 twenty-point rows fill page
     // two and spill nine onto page three), and its own top margin is dropped there.
     public bool movedToOwnPage;
+    // The table's first rows went to an overflow page the flow had already opened.
+    public bool startPageDeferred;
     public Page tablePage = null!;
     // Overflow pages inset by the margin a freshly-added page would get:
     // the document-level top margin when the caller set one (explicitly

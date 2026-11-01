@@ -86,11 +86,8 @@ public sealed partial class Document
     /// fit against the body.</summary>
     private static bool DissolvedBoxHasNotes(FloatingBox fbox)
     {
-        foreach (var p in fbox.Paragraphs)
-            if (p is Text.TextFragment { FootNote.Paragraphs.Count: > 0 }
-                || p is Text.TextFragment { EndNote.Paragraphs.Count: > 0 })
-                return true;
-        return false;
+        return fbox.Paragraphs.Any(p => p is Text.TextFragment { FootNote.Paragraphs.Count: > 0 }
+                || p is Text.TextFragment { EndNote.Paragraphs.Count: > 0 });
     }
 
     /// <summary>Lay a dissolved (flow-positioned, no-size) FloatingBox's children
@@ -115,7 +112,7 @@ public sealed partial class Document
         {
             var (lefts, widths) = BuildColumnGeometry(
                 fbox.ColumnInfo!, marginLeft,
-                page.Width - marginLeft - marginRight);
+                page.LayoutFrameWidth - marginLeft - marginRight);
             if (lefts.Length > 1)
             {
                 flow.BeginColumns(lefts, widths);

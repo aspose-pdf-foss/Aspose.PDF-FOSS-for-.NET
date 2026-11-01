@@ -148,10 +148,10 @@ public sealed class HiddenDataSanitizer
             page.Dict.Remove("Annots");
 
             // Replace the content with a single full-page image draw, tagged as an
-            // /Artifact and doubly q/Q-nested (8 operators: BDC q q cm Do Q Q EMC).
+            // /Artifact and doubly q/Q-nested (8 operators: BMC q q cm Do Q Q EMC).
             var content = System.Globalization.CultureInfo.InvariantCulture;
             var sb = new System.Text.StringBuilder();
-            sb.Append("/Artifact BDC\n");
+            sb.Append("/Artifact BMC\n");
             sb.Append("q\n");
             sb.Append("q\n");
             sb.AppendFormat(content, "{0:F2} 0 0 {1:F2} {2:F2} {3:F2} cm\n", w, h, media.LLX, media.LLY);
@@ -171,8 +171,8 @@ public sealed class HiddenDataSanitizer
     private static void CompressImages(Document document, ImageCompressionOptions ico)
     {
         var reader = document.Reader;
-        if (ico.MaxResolution > 0)
-            Aspose.Pdf.Optimization.ImageCompressor.DownsampleImages(reader, ico.MaxResolution, ico.ImageQuality);
+        if (ico.ResizeResolution > 0)
+            Aspose.Pdf.Optimization.ImageCompressor.DownsampleImages(reader, ico.ResizeResolution, ico.ImageQuality);
         if (ico.CompressImages)
             Aspose.Pdf.Optimization.ImageCompressor.CompressImages(reader, ico.ImageQuality);
     }
@@ -237,10 +237,10 @@ public sealed class HiddenDataSanitizer
         catalog.Remove("AF");
 
         // FileAttachment annotations and page-level associated files.
-        foreach (var page in document.Pages)
+        foreach (var dict in document.Pages.Select(page => page.Dict))
         {
-            page.Dict.Remove("AF");
-            if (reader.Resolve(page.Dict.Get("Annots")) is not PdfArray annots) continue;
+            dict.Remove("AF");
+            if (reader.Resolve(dict.Get("Annots")) is not PdfArray annots) continue;
             var kept = new PdfArray();
             foreach (var item in annots)
             {
@@ -249,7 +249,7 @@ public sealed class HiddenDataSanitizer
                     continue;
                 kept.Add(item);
             }
-            page.Dict.Set("Annots", kept);
+            dict.Set("Annots", kept);
         }
     }
 

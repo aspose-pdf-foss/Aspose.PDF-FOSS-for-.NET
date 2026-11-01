@@ -5,12 +5,12 @@ namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
-// The SVG replay helpers: number parsing, the mask-definition test, the pending-path flush and the current graphics-state resource.
+// The SVG replay helpers: number parsing, the definition test, the pending-path flush and the current graphics-state resource.
     private static double Num(SvgReplayState sr, string v) => double.Parse(v, System.Globalization.NumberStyles.Float, sr.inv);
 
-    private static bool InsideMaskDef(SvgReplayState sr, int idx)
+    private static bool InsideDef(SvgReplayState sr, int idx)
     {
-        foreach (var (s0, e0) in sr.maskSpans)
+        foreach (var (s0, e0) in sr.defSpans)
             if (idx >= s0 && idx < e0) return true;
         return false;
     }

@@ -22,13 +22,13 @@ internal static partial class AutoTagger
     // are a run of figures (two may be a date or a range in prose).
     private const string Figure = @"(\(?[-+−]?(\d[\d,]*(\.\d*)?|\.\d+)\)?%?|n\.a\.|\.\.\.|-)";
     private static readonly System.Text.RegularExpressions.Regex FigureRun = new(
-        @"^\s*" + Figure + @"(\s+" + Figure + @"){2,}\s*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        @"^\s*" + Figure + @"(\s+" + Figure + @"){2,}\s*$", System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
     // Two figures with their decimals, a space apart, are two cells as well: no date or range reads so.
     private const string DecimalFigure = @"\(?[-+−]?\d[\d,]*\.\d+\)?%?";
     private static readonly System.Text.RegularExpressions.Regex DecimalPair = new(
-        @"^\s*" + DecimalFigure + @"\s+" + DecimalFigure + @"\s*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        @"^\s*" + DecimalFigure + @"\s+" + DecimalFigure + @"\s*$", System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
 
-    private static bool IsFigureRun(string text) => FigureRun.IsMatch(text) || DecimalPair.IsMatch(text);
+    private static bool IsFigureRun(string text) => SafeRegex.IsMatch(FigureRun, text) || SafeRegex.IsMatch(DecimalPair, text);
 
     /// <summary>The figures of a run of figures, each with the span its characters cover.</summary>
     private static List<(double X, double R, string Text)> FigureTokens(List<(char C, double L, double R)> chars)
@@ -57,7 +57,7 @@ internal static partial class AutoTagger
         if (whole <= 0) return new List<(double X, double R, string Text)> { (rect.LLX, rect.URX, text) };
         var scale = rect.Width / whole;
         var tokens = new List<(double X, double R, string Text)>();
-        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, @"\S+"))
+        foreach (System.Text.RegularExpressions.Match m in SafeRegex.Matches(text, @"\S+"))
         {
             var x = rect.LLX + fragment.TextState.MeasureString(text.Substring(0, m.Index)) * scale;
             tokens.Add((x, x + fragment.TextState.MeasureString(m.Value) * scale, m.Value));
@@ -137,13 +137,15 @@ internal static partial class AutoTagger
     private static List<Line> JoinWrappedLabels(List<Line> lines)
     {
         var result = new List<Line>();
-        for (var i = 0; i < lines.Count; i++)
+        var i = 0;
+        while (i < lines.Count)
         {
             var k = i + 1;
             while (k < lines.Count && k - i <= MaxLabelLines && Close(lines[k - 1], lines[k]) && Cells(lines[k]).Count < MinRowCells) k++;
             if (k >= lines.Count || k - i > MaxLabelLines || !Close(lines[k - 1], lines[k]) || !Wraps(lines, i, k))
             {
                 result.Add(lines[i]);
+                i++;
                 continue;
             }
             var upper = lines[i];
@@ -155,7 +157,7 @@ internal static partial class AutoTagger
                 MinX = Enumerable.Range(i, k - i + 1).Min(r => lines[r].MinX), ColumnRight = row.ColumnRight,
                 Frags = Enumerable.Range(i, k - i + 1).SelectMany(r => lines[r].Frags).OrderBy(f => f.X).ToList(),
             });
-            i = k;
+            i = k + 1;
         }
         return result;
 
@@ -170,6 +172,7 @@ internal static partial class AutoTagger
             // heading over the row - "Assets" over "1 Bank credit" - is a row of its own).
             var first = lines[row].Frags.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f.Text)).Text?.TrimStart();
             if (string.IsNullOrEmpty(first)) return false;
+            if (CellsWrapDown(lines.GetRange(from, row - from), lines[row])) return true;
             // Or the label above starts with the row's number and the row starts with none of its own ("30 Total
             // federal funds sold and reverse" over "RPs").
             var numbered = LeadingNumber(lines[from]) && !LeadingNumber(lines[row]);
@@ -182,6 +185,25 @@ internal static partial class AutoTagger
         static bool LeadingNumber(Line line)
             => line.Frags.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f.Text)).Text?.Trim().Split(' ')[0] is { Length: > 0 and <= 3 } word
                && word.All(char.IsDigit);
+    }
+
+    /// <summary>Whether a row whose cells stand on its last line - set at the foot of the row - has its cells of text
+    /// wrapped over the lines <paramref name="over"/> it ("Psoriasis, ankylosing" / "spondylitis and" over "Cosentyx ...
+    /// psoriatic arthritis 409 33"): those lines hold fewer cells than a row, clear of the row's first cell, each starting
+    /// where a cell of the row starts, and a cell of the row under them goes on from them - it starts in lower case (a
+    /// cell wrapped down from the row above, "sclerosis" under "Relapsing multiple", stands over a row's cell starting
+    /// one of its own).</summary>
+    private static bool CellsWrapDown(List<Line> over, Line row)
+    {
+        var cells = Cells(row);
+        if (cells.Count < MinRowCells || over.Count == 0 || over.Count > MaxLabelLines) return false;
+        var labels = over.Select(Cells).ToList();
+        if (labels.Any(c => c.Count == 0 || c.Count >= MinRowCells
+                            || c.Any(x => x.X <= cells[0].R || !cells.Any(y => Math.Abs(y.X - x.X) <= AlignTolerance))))
+            return false;
+        return labels.SelectMany(c => c).Any(x => row.Frags.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f.Text)
+                                                                             && Math.Abs(f.X - x.X) <= AlignTolerance)
+                                                      .Text?.TrimStart() is { Length: > 0 } text && char.IsLower(text[0]));
     }
 
     /// <summary>A table row written as one string - its figures spaced out into the columns - is
@@ -209,7 +231,7 @@ internal static partial class AutoTagger
     private const double LinesStartTogether = 1.5;
     // A definition is prose: at least this many words (a column of figures, a sum set out in lines, is none).
     private const int MinDefinitionWords = 3;
-    private static readonly System.Text.RegularExpressions.Regex ProseWords = new(@"\p{L}{2,}", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex ProseWords = new(@"\p{L}{2,}", System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The pieces of a line standing a wide gap apart, written in one string with the spaces between them
     /// stretched (") The output of..." after its term), are shown as strings of their own: each piece's text then stands
@@ -225,7 +247,7 @@ internal static partial class AutoTagger
             var apart = Enumerable.Range(1, line.Frags.Count - 1)
                 .Any(k => line.Frags[k].X - line.Frags[k - 1].R > ApartGapEms * Math.Max(line.Size, 1)
                           && !string.IsNullOrWhiteSpace(line.Frags[k].Text) && !string.IsNullOrWhiteSpace(line.Frags[k - 1].Text)
-                          && ProseWords.Matches(line.Frags[k].Text).Count >= MinDefinitionWords
+                          && SafeRegex.Matches(ProseWords, line.Frags[k].Text).Count >= MinDefinitionWords
                           && rows.Any(o => o.Running == 0 && o.Y < line.Y && line.Y - o.Y < NextLinePitches * Math.Max(line.Size, 1)
                                            && Math.Abs(o.MinX - line.Frags[k].X) <= LinesStartTogether));
             if (!apart) continue;
@@ -250,10 +272,12 @@ internal static partial class AutoTagger
     /// <summary>A line whose shows reach into one another - a formula an equation editor set, its letters one string
     /// placed glyph by glyph (the pen stepping back between them), its operators another, its indices a third - has its
     /// shows cut into their words and the glyphs they place apart (every glyph lands where it did): the text of each
-    /// then stands where its glyphs do, and the line reads left to right. True when the page's content changed.</summary>
+    /// then stands where its glyphs do, and the line reads left to right. So has a line with words in its own size raised
+    /// over it among its text (a law's 260ter): the show that left the gap for one is cut at it. True when the page's
+    /// content changed.</summary>
     private static bool SplitInterleavedShows(Page page, List<Line> lines)
     {
-        var apart = lines.Where(Interleaved)
+        var apart = lines.Where(l => Interleaved(l) || RaisedAmong(l))
             .Select(l => new Rectangle(l.MinX - InterleaveSlack, l.Y, l.Frags.Max(f => f.R) + InterleaveSlack, l.Y + l.Size)).ToList();
         if (apart.Count == 0) return false;
         var shown = PageContentScan.ShownMatrix(page.Reader, page.Dict);
@@ -264,6 +288,17 @@ internal static partial class AutoTagger
             var inked = line.Frags.Where(f => !string.IsNullOrWhiteSpace(f.Text)).ToList();
             return inked.Any(a => inked.Any(b => b.X > a.X + InterleaveSlack
                                                  && b.X < a.R - (a.Text.Length - a.Text.TrimEnd().Length) * BlankEms * a.Size - InterleaveSlack));
+        }
+
+        // A word in the line's size raised over it within the span of a fragment of the line's text, or closing up to
+        // the text before and after it (the show that left the gap for it); one after a line's end needs no cut.
+        static bool RaisedAmong(Line line)
+        {
+            var inked = line.Frags.Where(f => !string.IsNullOrWhiteSpace(f.Text)).ToList();
+            var onLine = inked.Where(h => Math.Abs(h.Base - line.Baseline) < InterleaveSlack).ToList();
+            return inked.Any(f => Math.Abs(f.Size - line.Size) < NoteMarkSizeStep && f.Base - line.Baseline >= NoteMarkRiseEms * line.Size
+                                  && (onLine.Any(h => h.X < f.X - InterleaveSlack && h.R > f.R + InterleaveSlack)
+                                      || (onLine.Any(h => Math.Abs(h.R - f.X) <= InterleaveSlack) && onLine.Any(h => Math.Abs(h.X - f.R) <= InterleaveSlack))));
         }
     }
 
@@ -279,8 +314,9 @@ internal static partial class AutoTagger
         {
             var first = line.Frags[0];
             // (a label read as a piece of its own, text after it on the line: its show may still hold that text)
-            var label = LabelOnly.IsMatch(first.Text) ? line.Frags.Count > 1 ? first.Text.TrimStart() : null
-                : LabelLead.Match(first.Text) is { Success: true } lead ? lead.Groups[1].Value : null;
+            string? label = null;
+            if (SafeRegex.IsMatch(LabelOnly, first.Text)) label = line.Frags.Count > 1 ? first.Text.TrimStart() : null;
+            else if (SafeRegex.Match(LabelLead, first.Text) is { Success: true } lead) label = lead.Groups[1].Value;
             if (label is null) continue;
             leads.Add((new Rectangle(first.X - 1, line.Y, first.X + first.Size, line.Y + line.Size), label));
         }

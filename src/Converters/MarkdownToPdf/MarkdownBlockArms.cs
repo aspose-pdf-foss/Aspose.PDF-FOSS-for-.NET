@@ -45,9 +45,9 @@ internal static partial class MarkdownToPdfConverter
             while (mb.i < mb.lines.Length && !string.IsNullOrWhiteSpace(mb.lines[mb.i]))
                 html.Append(mb.lines[mb.i++].TrimEnd('\r')).Append('\n');
             var h = html.ToString();
-            if (Regex.IsMatch(h, "align\\s*=\\s*[\"']center[\"']", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(h, "align\\s*=\\s*[\"']center[\"']", RegexOptions.IgnoreCase))
                 mb.pendingCenter = true;
-            var img = Regex.Match(h, "<img[^>]*src=[\"']([^\"']+)[\"']", RegexOptions.IgnoreCase);
+            var img = SafeRegex.Match(h, "<img[^>]*src=[\"']([^\"']+)[\"']", RegexOptions.IgnoreCase);
             if (img.Success && LoadImage(img.Groups[1].Value) is { } data
                 && TryReadPngSize(data) is (var pw, var ph))
             {
@@ -89,9 +89,9 @@ internal static partial class MarkdownToPdfConverter
             while (mb.i < mb.lines.Length)
             {
                 var l2 = mb.lines[mb.i].TrimEnd('\r');
-                var u2 = Regex.Match(l2, @"^(\s*)[*+\-]\s+(.+)$");
-                var o2 = Regex.Match(l2, @"^(\s*)(\d+)[.)]\s+(.+)$");
-                if (u2.Success && !Regex.IsMatch(l2, @"^\s*([-*_])(\s*\1){2,}\s*$"))
+                var u2 = SafeRegex.Match(l2, @"^(\s*)[*+\-]\s+(.+)$");
+                var o2 = SafeRegex.Match(l2, @"^(\s*)(\d+)[.)]\s+(.+)$");
+                if (u2.Success && !SafeRegex.IsMatch(l2, @"^\s*([-*_])(\s*\1){2,}\s*$"))
                     items.Add(("\u2022", ParseInline(u2.Groups[2].Value.TrimEnd())));
                 else if (o2.Success)
                     items.Add((num++ + ".", ParseInline(o2.Groups[3].Value.TrimEnd())));

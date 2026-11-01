@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Xml;
 
@@ -6,14 +6,17 @@ namespace Aspose.Pdf.Forms.Xfa;
 
 internal static partial class XfaRenderer
 {
-    private static void AddText(Ctx ctx, XmlElement e, double x, double ytop, double w, double h, string text, bool capOverride = false,
-        double? fsOverride = null, bool? boldOverride = null, double[]? colorOverride = null, XmlElement? alignSource = null)
+    private static void AddText(Ctx ctx, XmlElement e, double x, double ytop, double w, string text,
+        double? fsOverride = null, bool? boldOverride = null, double[]? colorOverride = null, XmlElement? alignSource = null,
+        bool ownRegion = false, double middleOf = 0, bool singleLine = false, double boxH = 0)
     {
         double fs = fsOverride ?? FontSize(e);
         var (mt, mb, ml, mr) = Margins(e);
         bool bold = boldOverride ?? FontBold(e);
         var color = colorOverride ?? FontColor(e);
-        double avail = Math.Max(4, w - ml - mr);
+        // A caption beside its field wraps in the strip reserved for it, the width its
+        // lines were counted in: the field's insets lie around the field, not inside the strip.
+        double avail = ownRegion ? Math.Max(4, w) : Math.Max(4, w - ml - mr);
         // Plain-text line pitch: exactly the font size
         // (single-spaced), or the element's explicit <para lineHeight> when declared.
         double lineH = FirstChild(e, "para") is { } pe && LenN(pe.GetAttribute("lineHeight")) is { } plh && plh > 0
@@ -26,37 +29,86 @@ internal static partial class XfaRenderer
         // A caption aligns by its OWN <para>, not the field's — the field para
         // describes the value region (a centred value must not centre its label).
         var hAlign = FirstChild(alignSource ?? e, "para")?.GetAttribute("hAlign") ?? "";
-        // Captions measure against their reserve with a slack: the Helvetica width
-        // model overestimates narrow Designer faces (Myriad, Arial Narrow), and a
-        // caption that fits its reserve in a viewer must not wrap here.
-        if (alignSource is not null) avail *= 1.10;
-        // Unicode line/paragraph separators are hard line breaks (a double U+2029 = a blank line).
-        text = text.Replace((char)0x2028, (char)0x0A).Replace((char)0x2029, (char)0x0A).Replace((char)0x0D, (char)0x0A);
-        var wide = FontWideFactor(e);
+        // Captions measure against their reserve with a slack: a caption that fits its
+        // reserve in a viewer must not wrap here. A caption is measured by its own font's
+        // width factor.
+        var fontOwner = alignSource is not null && FirstChild(alignSource, "font")?.GetAttribute("typeface") is { Length: > 0 }
+            ? alignSource
+            : e;
+        var wide = FontWideFactor(fontOwner);
+        var serif = FontSerif(fontOwner);
+        // Right and centred lines align in the region itself, not in the widened measure below: a caption's
+        // own strip ends where the field's edit region (or the field) begins or ends.
+        double region = ownRegion ? Math.Max(4, w - ml) : avail;
         // A resolvable non-default face (Verdana, Tahoma …) measures and paints
         // with its real advances; the Tz wide-factor stays 1 on that path.
-        var family = ResolvedFamily(e, bold);
+        // A caption that names a face of its own is set in that face, not in the field's.
+        var family = ResolvedFamily(fontOwner, bold);
+        // A real face set condensed or widened is measured and painted at that share (the model's factor holds it).
+        var hScale = FontHorizontalScale(fontOwner);
+        // A caption measured by the model has its slack; other text of the narrow face wraps as measured at
+        // the narrowest share. The slack keeps a caption that fits its region in a viewer on one line; one
+        // that does not fit even so, or one measured in its real face, wraps at the region itself, so none
+        // of its lines runs past it.
+        double captionAvail = alignSource is null ? 0 : family is null ? avail * CaptionWrapSlack(fontOwner) : avail;
+        // A paragraph kept whole at that share is painted on one line; one that wraps all the same breaks at the
+        // region itself, the share it is painted at, so none of its lines runs past the box.
+        double breakAvail = avail;
+        if (alignSource is null) avail *= wide / WrapWideFactor(fontOwner);
+        // Unicode line/paragraph separators are hard line breaks (a double U+2029 = a blank line).
+        text = text.Replace((char)0x2028, (char)0x0A).Replace((char)0x2029, (char)0x0A).Replace((char)0x0D, (char)0x0A);
         double LineWidth(string l) => family is null
-            ? TextWidth(l, fs, bold) * wide
-            : FamTextWidth(l, fs, family, bold);
+            ? TextWidth(l, fs, bold, serif) * wide
+            : FamTextWidth(l, fs, family, bold) * hScale;
+        var lines = new List<string>();
         foreach (var para in text.Split('\n'))
-            foreach (var line in family is null
-                ? WrapLine(para, avail / wide, fs, bold)
-                : WrapLineMeasured(para, avail, l => FamTextWidth(l, fs, family, bold)))
+        {
+            if (singleLine)
             {
-                double baseline = ctx.PageH - (topY + fs + li * lineH);
-                if (line.Length > 0)
-                {
-                    double lx = x + ml;
-                    if (hAlign is "right" or "center")
-                    {
-                        double slack = avail - LineWidth(line);
-                        if (slack > 0) lx += hAlign == "right" ? slack : slack / 2;
-                    }
-                    ctx.Items.Add(new Item { Kind = "text", X = lx, Y = baseline, W = w, Text = line, FontSize = fs, Bold = bold, Color = color, HScale = family is null ? wide : 1.0, Family = family });
-                }
-                li++;
+                lines.Add(para.Trim());
+                continue;
             }
+            double paraAvail = alignSource is null ? avail
+                : LineWidth(para.Trim()) <= captionAvail ? captionAvail : avail;
+            lines.AddRange(family is null
+                ? WrapLine(para, paraAvail / wide, fs, bold, serif, (alignSource is null ? breakAvail : paraAvail) / wide)
+                : WrapLineMeasured(para, paraAvail, l => FamTextWidth(l, fs, family, bold) * hScale));
+        }
+        // A block centred in a box of the given height is centred as a whole: its first line's 1.15 em box
+        // and the pitch of each further line, as a value's block is.
+        if (middleOf > 0) topY += Math.Max(0, (middleOf - (fs * 1.15 + Math.Max(0, lines.Count - 1) * lineH)) / 2);
+        if (boxH > 0) topY += ParaBoxOffset(e, boxH - mt - mb, fs * 1.15 + Math.Max(0, lines.Count - 1) * lineH);
+        foreach (var line in lines)
+        {
+            double baseline = ctx.PageH - (topY + fs + li * lineH);
+            if (line.Length > 0)
+            {
+                double lx = x + ml;
+                if (hAlign is "right" or "center")
+                {
+                    double slack = region - LineWidth(line);
+                    if (slack > 0) lx += hAlign == "right" ? slack : slack / 2;
+                }
+                ctx.Items.Add(new Item { Kind = "text", X = lx, Y = baseline, W = w, Text = line, FontSize = fs, Bold = bold, Color = color, HScale = family is null ? wide : hScale, Family = family, Serif = family is null && serif });
+            }
+            li++;
+        }
+    }
+
+    /// <summary>How far below the top of a box's content region its text block starts by the box's paragraph:
+    /// its space above, then its vertical alignment in what the spaces above and below leave of the region.</summary>
+    private static double ParaBoxOffset(XmlElement e, double inner, double blockH, bool spaced = true)
+    {
+        if (FirstChild(e, "para") is not { } para) return 0;
+        double above = spaced ? LenN(para.GetAttribute("spaceAbove")) ?? 0 : 0;
+        double below = spaced ? LenN(para.GetAttribute("spaceBelow")) ?? 0 : 0;
+        double slack = Math.Max(0, inner - above - below - blockH);
+        return above + para.GetAttribute("vAlign") switch
+        {
+            "middle" => slack / 2,
+            "bottom" => slack,
+            _ => 0,
+        };
     }
 
     /// <summary>Greedy word-wrap with an arbitrary line-measure callback (real
@@ -77,8 +129,22 @@ internal static partial class XfaRenderer
                 cur.Clear(); cur.Append(wd);
             }
             else { cur.Clear(); cur.Append(trial); }
+            foreach (var piece in BreakOverlongWord(cur, maxWidth, measure)) yield return piece;
         }
         if (cur.Length > 0) yield return cur.ToString();
+    }
+
+    /// <summary>A word wider than the line on its own breaks between characters, as a viewer breaks it: the
+    /// pieces that fill a line are returned and the remainder stays in <paramref name="cur"/>.</summary>
+    private static IEnumerable<string> BreakOverlongWord(StringBuilder cur, double maxWidth, Func<string, double> measure)
+    {
+        while (cur.Length > 1 && measure(cur.ToString()) > maxWidth)
+        {
+            var fit = cur.Length - 1;
+            while (fit > 1 && measure(cur.ToString(0, fit)) > maxWidth) fit--;
+            yield return cur.ToString(0, fit);
+            cur.Remove(0, fit);
+        }
     }
 
     private sealed class RtRun
@@ -88,7 +154,9 @@ internal static partial class XfaRenderer
         public double Size = 10;
         public bool Serif;
         public double LetterSpacing;   // extra advance per glyph (pt)
+        public double HScale = 1.0;    // horizontal scale the run is set at (Tz/100)
         public string? Family;         // resolvable non-default template face
+        public double[]? Color;        // the colour a style sets; null = the element's font colour
     }
 
     private sealed class RtPara
@@ -101,33 +169,35 @@ internal static partial class XfaRenderer
     /// <summary>Render an exData XHTML body: per-paragraph alignment and spacing, per-run
     /// font family / size / weight / style, greedy mixed-run word wrap, and justified
     /// line filling (all lines but a paragraph's last).</summary>
-    private static void AddRichText(Ctx ctx, XmlElement e, double x, double ytop, double w, double h, XmlElement exData)
+    private static void AddRichText(Ctx ctx, XmlElement e, double x, double ytop, double w, double h, XmlElement exData,
+        XmlElement? caption = null, bool spaced = false)
     {
         var (mt, _, ml, mr) = Margins(e);
         double avail = Math.Max(4, w - ml - mr);
+        // A field's caption is laid out in the field's box with its own paragraph settings, in its own
+        // font when it declares one, else in the field's.
+        var fontEl = caption is not null && FirstChild(caption, "font") is not null ? caption : e;
+        var paraEl = caption ?? e;
         // Rich text without an explicit font size uses the XFA default of 10pt (the
         // renderer-wide 8pt default is calibrated for plain caption/value text).
-        double baseFs = FontSizeN(e) ?? 10;
-        bool baseBold = FontBold(e);
-        var color = FontColor(e);
+        double baseFs = FontSizeN(fontEl) ?? 10;
+        bool baseBold = FontBold(fontEl);
+        var color = FontColor(fontEl);
         double cy = ytop + mt;
 
         // The draw's <para hAlign> is the default paragraph alignment; its <font typeface>
         // picks the base family — a typeface outside the well-known sans set renders as
         // Times (the standard substitution for unavailable Designer families).
-        var defaultAlign = FirstChild(e, "para")?.GetAttribute("hAlign") is { Length: > 0 } ha ? ha : "left";
-        var typeface = FirstChild(e, "font")?.GetAttribute("typeface") ?? "";
+        var defaultAlign = FirstChild(paraEl, "para")?.GetAttribute("hAlign") is { Length: > 0 } ha ? ha : "left";
+        var typeface = FirstChild(fontEl, "font")?.GetAttribute("typeface") ?? "";
         var baseSerif = typeface.Length > 0 && !IsSansTypeface(typeface);
 
         // Measure pass: wrap every paragraph so a vAlign=middle/bottom block can be
         // positioned before emission.
-        var (measured, contentH) = MeasureRichParas(ctx, e, avail, exData, baseFs, baseBold, baseSerif, defaultAlign);
+        var (measured, contentH) = MeasureRichParas(ctx, fontEl, avail, exData, baseFs, baseBold, baseSerif, defaultAlign);
 
-        var vAlign = FirstChild(e, "para")?.GetAttribute("vAlign") ?? "";
-        var (mtIgn, mb, _, _) = Margins(e);
-        double inner = h - mt - mb;
-        if (vAlign == "middle" && contentH < inner) cy += (inner - contentH) / 2;
-        else if (vAlign == "bottom" && contentH < inner) cy += inner - contentH;
+        var (_, mb, _, _) = Margins(e);
+        cy += ParaBoxOffset(paraEl, h - mt - mb, contentH, spaced);
 
         foreach (var (para, lines, lineH) in measured)
         {
@@ -168,11 +238,11 @@ internal static partial class XfaRenderer
             {
                 var text = child.Value ?? "";
                 if (text.Length > 0)
-                    into.Add(new RtRun { Text = text, Bold = style.Bold, Italic = style.Italic, Size = style.Size, Serif = style.Serif, LetterSpacing = style.LetterSpacing, Family = style.Family });
+                    into.Add(new RtRun { Text = text, Bold = style.Bold, Italic = style.Italic, Size = style.Size, Serif = style.Serif, LetterSpacing = style.LetterSpacing, HScale = style.HScale, Family = style.Family, Color = style.Color });
             }
             else if (child is XmlElement el)
             {
-                var sub = new RtRun { Bold = style.Bold, Italic = style.Italic, Size = style.Size, Serif = style.Serif, LetterSpacing = style.LetterSpacing, Family = style.Family };
+                var sub = new RtRun { Bold = style.Bold, Italic = style.Italic, Size = style.Size, Serif = style.Serif, LetterSpacing = style.LetterSpacing, HScale = style.HScale, Family = style.Family, Color = style.Color };
                 if (el.LocalName is "b" or "strong") sub.Bold = true;
                 if (el.LocalName is "i" or "em") sub.Italic = true;
                 var st = ParseStyle(el.GetAttribute("style"));
@@ -180,13 +250,15 @@ internal static partial class XfaRenderer
                 if (st.italic is not null) sub.Italic = st.italic.Value;
                 if (st.size is not null) sub.Size = st.size.Value;
                 if (st.serif is not null) sub.Serif = st.serif.Value;
+                if (StyleColor(el.GetAttribute("style")) is { } spanColor) sub.Color = spanColor;
+                if (st.hScale is not null) sub.HScale = st.hScale.Value;
                 if (st.lsPt is not null) sub.LetterSpacing = st.lsPt.Value;
                 else if (st.lsEm is not null) sub.LetterSpacing = st.lsEm.Value * sub.Size;
                 var embed = el.Attributes.OfType<XmlAttribute>()
                     .FirstOrDefault(a => a.LocalName == "embed")?.Value ?? "";
                 if (embed.StartsWith("#", StringComparison.Ordinal))
                 {
-                    into.Add(new RtRun { Text = ResolveEmbedText(ctx, embed.TrimStart('#')), Bold = sub.Bold, Italic = sub.Italic, Size = sub.Size, Serif = sub.Serif, LetterSpacing = sub.LetterSpacing, Family = sub.Family });
+                    into.Add(new RtRun { Text = ResolveEmbedText(ctx, embed.TrimStart('#')), Bold = sub.Bold, Italic = sub.Italic, Size = sub.Size, Serif = sub.Serif, LetterSpacing = sub.LetterSpacing, HScale = sub.HScale, Family = sub.Family, Color = sub.Color });
                     continue;
                 }
                 if (el.GetAttribute("style").Contains("xfa-spacerun", StringComparison.Ordinal))
@@ -195,12 +267,12 @@ internal static partial class XfaRenderer
                     // keep the actual character count (NBSPs render as ordinary spaces).
                     var spaces = el.InnerText.Replace('\u00A0', ' ');
                     if (spaces.Trim().Length > 0 || spaces.Length == 0) spaces = " ";
-                    into.Add(new RtRun { Text = spaces, Bold = sub.Bold, Italic = sub.Italic, Size = sub.Size, Serif = sub.Serif, LetterSpacing = sub.LetterSpacing, Family = sub.Family });
+                    into.Add(new RtRun { Text = spaces, Bold = sub.Bold, Italic = sub.Italic, Size = sub.Size, Serif = sub.Serif, LetterSpacing = sub.LetterSpacing, HScale = sub.HScale, Family = sub.Family, Color = sub.Color });
                     continue;
                 }
                 if (el.LocalName == "br")
                 {
-                    into.Add(new RtRun { Text = "\n", Bold = sub.Bold, Italic = sub.Italic, Size = sub.Size, Serif = sub.Serif, Family = sub.Family });
+                    into.Add(new RtRun { Text = "\n", Bold = sub.Bold, Italic = sub.Italic, Size = sub.Size, Serif = sub.Serif, HScale = sub.HScale, Family = sub.Family, Color = sub.Color });
                     continue;
                 }
                 CollectRuns(ctx, el, sub, into);
@@ -263,7 +335,7 @@ internal static partial class XfaRenderer
         var lines = new List<List<RtWord>>();
         var cur = new List<RtWord>();
         double curW = 0;
-        foreach (var word in words)
+        foreach (var word in words.SelectMany(w => FittingPieces(w, maxWidth)))
         {
             if (word.Text == "\n")
             {
@@ -281,6 +353,22 @@ internal static partial class XfaRenderer
         }
         if (cur.Count > 0) lines.Add(cur);
         return lines;
+    }
+
+    /// <summary>A word wider than the line breaks between characters into pieces that fit it, as the plain
+    /// text wrap breaks one (see <see cref="BreakOverlongWord"/>); any other word stands as it is.</summary>
+    private static IEnumerable<RtWord> FittingPieces(RtWord word, double maxWidth)
+    {
+        if (word.Text is "\n" or "\t" || word.Width <= maxWidth || maxWidth <= 0)
+        {
+            yield return word;
+            yield break;
+        }
+        var rest = new StringBuilder(word.Text);
+        foreach (var piece in BreakOverlongWord(rest, maxWidth, t => TextWidthF(t, word.Style)))
+            yield return new RtWord { Text = piece, Style = word.Style, Width = TextWidthF(piece, word.Style) };
+        if (rest.Length > 0)
+            yield return new RtWord { Text = rest.ToString(), Style = word.Style, Width = TextWidthF(rest.ToString(), word.Style) };
     }
 
     private static double SpaceWidth(RtRun r) => TextWidthF(" ", r);
@@ -319,19 +407,21 @@ internal static partial class XfaRenderer
                 var seg = new StringBuilder(line[i].Text);
                 double segW = line[i].Width;
                 int j = i + 1;
-                while (j < line.Count && SameStyle(line[j].Style, st))
+                // A word of ideographs is painted in a face of its own: the words of other scripts beside it stay
+                // in runs of their own, painted in the face they were measured in.
+                while (j < line.Count && SameStyle(line[j].Style, st) && HoldsFullWidth(line[j].Text) == HoldsFullWidth(line[i].Text))
                 {
                     seg.Append(' ').Append(line[j].Text);
                     segW += SpaceWidth(st) + line[j].Width;
                     j++;
                 }
-                ctx.Items.Add(new Item { Kind = "text", X = cx, Y = baseline, W = segW, Text = seg.ToString(), FontSize = st.Size, Bold = st.Bold, Italic = st.Italic, Serif = st.Serif, CharSpacing = st.LetterSpacing, Rich = true, Family = st.Family, Color = color });
+                ctx.Items.Add(new Item { Kind = "text", X = cx, Y = baseline, W = segW, Text = seg.ToString(), FontSize = st.Size, Bold = st.Bold, Italic = st.Italic, Serif = st.Serif, CharSpacing = st.LetterSpacing, HScale = st.HScale, Rich = true, Family = st.Family, Color = st.Color ?? color });
                 cx += segW + (j < line.Count ? SpaceWidth(line[j].Style) : 0);
                 i = j;
             }
             else
             {
-                ctx.Items.Add(new Item { Kind = "text", X = cx, Y = baseline, W = line[i].Width, Text = line[i].Text, FontSize = st.Size, Bold = st.Bold, Italic = st.Italic, Serif = st.Serif, CharSpacing = st.LetterSpacing, Rich = true, Family = st.Family, Color = color });
+                ctx.Items.Add(new Item { Kind = "text", X = cx, Y = baseline, W = line[i].Width, Text = line[i].Text, FontSize = st.Size, Bold = st.Bold, Italic = st.Italic, Serif = st.Serif, CharSpacing = st.LetterSpacing, HScale = st.HScale, Rich = true, Family = st.Family, Color = st.Color ?? color });
                 cx += line[i].Width + SpaceWidth(st) + gap;
                 i++;
             }
@@ -339,12 +429,13 @@ internal static partial class XfaRenderer
     }
 
     private static bool SameStyle(RtRun a, RtRun b)
-        => a.Bold == b.Bold && a.Italic == b.Italic && a.Serif == b.Serif && a.Family == b.Family
-           && Math.Abs(a.Size - b.Size) < 0.01 && Math.Abs(a.LetterSpacing - b.LetterSpacing) < 0.001;
+        => a.Bold == b.Bold && a.Italic == b.Italic && a.Serif == b.Serif && a.Family == b.Family && ReferenceEquals(a.Color, b.Color)
+           && Math.Abs(a.Size - b.Size) < 0.01 && Math.Abs(a.LetterSpacing - b.LetterSpacing) < 0.001 && Math.Abs(a.HScale - b.HScale) < 0.001;
 
     private static bool IsSansTypeface(string typeface)
         => typeface.Contains("Arial", StringComparison.OrdinalIgnoreCase)
            || typeface.Contains("Helvetica", StringComparison.OrdinalIgnoreCase)
+           || typeface.Contains("sans", StringComparison.OrdinalIgnoreCase)
            || typeface.Contains("Verdana", StringComparison.OrdinalIgnoreCase)
            || typeface.Contains("Tahoma", StringComparison.OrdinalIgnoreCase)
            || typeface.Contains("Segoe", StringComparison.OrdinalIgnoreCase)
@@ -352,22 +443,26 @@ internal static partial class XfaRenderer
 
     /// <summary>Greedy word-wrap of a line to <paramref name="maxWidth"/> pt using an approximate
     /// Helvetica advance-width metric.</summary>
-    private static IEnumerable<string> WrapLine(string para, double maxWidth, double fs, bool bold)
+    private static IEnumerable<string> WrapLine(string para, double maxWidth, double fs, bool bold, bool serif = false,
+        double? breakWidth = null)
     {
         para = para.Trim();
         if (para.Length == 0) { yield return ""; yield break; }
-        if (TextWidth(para, fs, bold) <= maxWidth) { yield return para; yield break; }
+        if (TextWidth(para, fs, bold, serif) <= maxWidth) { yield return para; yield break; }
+        // A paragraph that does not fit whole breaks at the break width when it has one.
+        maxWidth = breakWidth ?? maxWidth;
         var words = para.Split(' ');
         var cur = new StringBuilder();
         foreach (var wd in words)
         {
             var trial = cur.Length == 0 ? wd : cur.ToString() + " " + wd;
-            if (TextWidth(trial, fs, bold) > maxWidth && cur.Length > 0)
+            if (TextWidth(trial, fs, bold, serif) > maxWidth && cur.Length > 0)
             {
                 yield return cur.ToString();
                 cur.Clear(); cur.Append(wd);
             }
             else { cur.Clear(); cur.Append(trial); }
+            foreach (var piece in BreakOverlongWord(cur, maxWidth, l => TextWidth(l, fs, bold, serif))) yield return piece;
         }
         if (cur.Length > 0) yield return cur.ToString();
     }

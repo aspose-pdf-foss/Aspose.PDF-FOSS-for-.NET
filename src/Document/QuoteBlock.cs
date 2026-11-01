@@ -10,7 +10,7 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>Quote schedule: one block of the fragment rendered.</summary>
-    private void RenderQuoteBlock(QuoteScheduleState qs, QsBlock b)
+    private static void RenderQuoteBlock(QuoteScheduleState qs, QsBlock b)
     {
         switch (b.Kind)
         {

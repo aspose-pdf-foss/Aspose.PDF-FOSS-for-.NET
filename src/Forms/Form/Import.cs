@@ -31,13 +31,13 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         if (_reader is not null && _acroForm is not null
             && _reader.Resolve(_acroForm.Get("Fields")) is PdfArray topArray && topArray.Count > 0)
         {
-            // Reuse the tracked Field instances (they carry unsaved in-memory state);
-            // materialise a fresh Field only for top-level dicts _fields never surfaced
+            // Reuse the tracked Field instances (they carry unsaved in-memory state); materialise
+            // a fresh Field only for top-level dicts _fields never surfaced
             // directly (e.g. an expanded radio group node or an unnamed-container root
             // that was flattened through at collect time).
             var byDict = new Dictionary<PdfDictionary, Field>();
-            foreach (var f in _fields)
-                if (!byDict.ContainsKey(f.Dict)) byDict[f.Dict] = f;
+            foreach (var f in _fields.Where(f => !byDict.ContainsKey(f.Dict)))
+                byDict[f.Dict] = f;
             foreach (var item in topArray)
             {
                 if (_reader.ResolveDict(item) is not PdfDictionary dict) continue;
@@ -53,8 +53,11 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         }
         // No backing /Fields array (programmatic or widget-reconstructed form): the
         // tracked list is flat, so yielding it IS the top level.
-        foreach (var f in _fields)
-            if (f.PartialName is not null)
+        foreach (var f in _fields.Where(f => f.PartialName is not null))
+            yield return Widgetize(f);
+        // A dynamic XFA form keeps its fields in the template alone: those are what it has to list.
+        if (_fields.Count == 0)
+            foreach (var f in XfaTemplateFields())
                 yield return Widgetize(f);
     }
 
@@ -73,8 +76,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
 
     bool ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.Contains(Aspose.Pdf.Annotations.WidgetAnnotation item)
     {
-        foreach (var w in this) if (ReferenceEquals(w, item)) return true;
-        return false;
+        return this.Any(w => ReferenceEquals(w, item));
     }
 
     void ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.CopyTo(Aspose.Pdf.Annotations.WidgetAnnotation[] array, int arrayIndex)
@@ -135,7 +137,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 // are expanded to individual widgets so callers can access per-option rects.
                 // All other cases (Text, Choice, Sig, or FormFieldBuilder radio without /Parent)
                 // return the parent field, which carries /T, /V, and type info.
-                var ff = (long)(dict.ContainsKey("Ff") ? dict.GetInt("Ff") : 0);
+                var ff = (dict.ContainsKey("Ff") ? dict.GetInt("Ff") : 0);
                 bool isRadioGroup = ft == "Btn" && (ff & (1 << 15)) != 0 && (ff & (1 << 16)) == 0;
 
                 bool kidsHaveParent = false;
@@ -238,8 +240,13 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         RenderFormAsUnsigned = 1,
     }
 
-    /// <summary>Strategy applied to widgets whose appearance depends on signed-state at conversion time.</summary>
-    public SignDependentElementsRenderingModes SignDependentElementsRenderingModeWhenConverted;
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
+    /// <summary>Strategy applied to widgets whose appearance depends on signed-state at conversion time. A
+    /// conversion renders the form as unsigned - from its template, its scripts and its data - unless asked
+    /// to render it as signed, in the state the viewer saved it, where the saved form packet also says which
+    /// boxes are shown.</summary>
+    public SignDependentElementsRenderingModes SignDependentElementsRenderingModeWhenConverted = SignDependentElementsRenderingModes.RenderFormAsUnsigned;
+#pragma warning restore S1104
 
     /// <summary>True when the form contains an XFA part.</summary>
     public bool HasXfa => IsXfa;
@@ -270,19 +277,56 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         }
     }
 
-    /// <summary>The field order used to drive calculation passes. Stored only.</summary>
-    public IEnumerable<Field>? CalculatedFields { set => _calculatedFields = value; }
-
-    private IEnumerable<Field>? _calculatedFields;
+#pragma warning disable S2376 // public API: a write-only property of the published surface
+    /// <summary>The fields whose calculate actions run, in that order: written as the form's /CO, which a
+    /// viewer (and the form's own recalculation) reads to know what to recompute; none removes it.</summary>
+    public IEnumerable<Field>? CalculatedFields
+    {
+        set
+        {
+            var reader = _reader ?? OwnerDocument?.Reader;
+            if (reader is null) return;
+            var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
+            var order = new PdfArray();
+            foreach (var field in value ?? []) order.Add(field.Dict);
+            if (order.Count == 0)
+            {
+                acroForm?.Remove("CO");
+                return;
+            }
+            if (acroForm is null)
+            {
+                acroForm = _acroForm ?? new PdfDictionary();
+                reader.Catalog.Set("AcroForm", acroForm);
+            }
+            acroForm.Set("CO", order);
+        }
+    }
+#pragma warning restore S2376
 
     /// <summary>Default appearance applied to fields that don't carry their own /DA.</summary>
     public Aspose.Pdf.Annotations.DefaultAppearance DefaultAppearance { get; set; } = new();
 
-    /// <summary>Default font / colorspace resources used by the form. Returns null until a backing Resources instance is wired through.</summary>
-    public Aspose.Pdf.Resources? DefaultResources { get; internal set; }
+    /// <summary>Default font / colorspace resources used by the form (the AcroForm /DR); null while the
+    /// form has none. Read from the document when first asked for, so a form built in code exposes the
+    /// resources its fields put there.</summary>
+    public Aspose.Pdf.Resources? DefaultResources
+    {
+        get
+        {
+            if (_defaultResources is null && ResolvedReader is { } reader
+                && ResolveAcroForm() is { } acroForm && reader.ResolveDict(acroForm.Get("DR")) is { } dr)
+                _defaultResources = new Aspose.Pdf.Resources(dr, reader);
+            return _defaultResources;
+        }
+        internal set => _defaultResources = value;
+    }
+    private Aspose.Pdf.Resources? _defaultResources;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether the underlying collection is thread-safe. Always false.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>True when the form has the NeedsAppearances flag set.</summary>
     public bool NeedsRendering => !IgnoreNeedsRendering;
@@ -450,15 +494,20 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     public void Delete(Field field)
     {
         if (field is null) return;
-        _fields.Remove(field);
+        var reader = _reader ?? OwnerDocument?.Reader;
+        // The terminals under a deleted node (a radio group's options, a group's fields) go with it:
+        // kept, they outlived their root and the form still counted them once /Fields was empty.
+        if (reader is not null && field.Dict.ContainsKey("Kids"))
+            _fields.RemoveAll(f => ReferenceEquals(f, field) || IsUnder(f.Dict, field.Dict, reader));
+        else
+            _fields.Remove(field);
 
         // Keep the AcroForm /Fields array in sync with the cached field list — Count reads
         // /Fields, so a cache-only removal left the deleted field still counted (and saved).
         // Rebuild /Fields from the surviving top-level fields (the deleted one is already gone
         // from _fields), preserving each field's original /Fields item where it is still present.
-        var reader = _reader ?? OwnerDocument?.Reader;
-        var af = _acroForm ?? (reader is not null ? reader.ResolveDict(reader.Catalog?.Get("AcroForm")) : null);
-        if (reader is not null && af is not null && reader.Resolve(af.Get("Fields")) is PdfArray fields)
+        if (reader is null) return;
+        if (_acroForm is not null && reader.Resolve(_acroForm.Get("Fields")) is PdfArray fields)
         {
             var survivors = new System.Collections.Generic.HashSet<PdfDictionary>(
                 System.Collections.Generic.ReferenceEqualityComparer.Instance);
@@ -467,8 +516,25 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             foreach (var item in fields)
                 if (reader.ResolveDict(item) is { } d && survivors.Contains(d))
                     kept.Add(item);
-            af.Set("Fields", kept);
+            _acroForm.Set("Fields", kept);
         }
+        // An empty form's own AcroForm carries no /Fields: Add put its fields in the catalog's, where the form
+        // editor adds fields this form does not list, so only the deleted field's entry leaves it.
+        else if (reader.Resolve(reader.ResolveDict(reader.Catalog?.Get("AcroForm"))?.Get("Fields")) is PdfArray shared)
+            for (var i = shared.Count - 1; i >= 0; i--)
+                if (ReferenceEquals(reader.Resolve(shared[i]), field.Dict)) shared.RemoveAt(i);
+    }
+
+    /// <summary>Whether <paramref name="node"/> is <paramref name="ancestor"/> or one of the fields under it.</summary>
+    private static bool IsUnder(PdfDictionary node, PdfDictionary ancestor, PdfReader reader)
+    {
+        PdfDictionary? cur = node;
+        for (var depth = 0; cur is not null && depth < MaxFieldDepth; depth++)
+        {
+            if (ReferenceEquals(cur, ancestor)) return true;
+            cur = reader.ResolveDict(cur.Get("Parent"));
+        }
+        return false;
     }
 
     /// <summary>The root form fields — one per resolvable entry of the AcroForm
@@ -520,8 +586,10 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     /// <summary>True when the supplied field belongs to this form.</summary>
     public bool HasField(Field field) => field is not null && _fields.Contains(field);
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Detach form annotations from the field tree so they can be moved between pages independently.</summary>
     public void MakeFormAnnotationsIndependent(Page page)
+#pragma warning restore S2325
     {
         _ = page;
         // Records intent; the widget-annotation hierarchy is not yet rewritten.
@@ -538,7 +606,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         // (when it has one), then each /Kids entry. appearanceIndex must be in [1..Count].
         int count = field.Count;
         if (appearanceIndex < 1 || appearanceIndex > count)
+#pragma warning disable S112 // public API: the exception type callers catch
             throw new IndexOutOfRangeException(
+#pragma warning restore S112
                 $"childIndex should be in the range [1..{count}] where n equals to the field count");
 
         var widgets = new System.Collections.Generic.List<PdfDictionary>();
@@ -572,8 +642,8 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         if (ReferenceEquals(target, field.Dict))
             foreach (var key in new[] { "Rect", "AP", "AS", "MK" }) field.Dict.Remove(key);
         var newKids = new PdfArray();
-        foreach (var w in widgets)
-            if (!ReferenceEquals(w, field.Dict)) newKids.Add(w);
+        foreach (var w in widgets.Where(w => !ReferenceEquals(w, field.Dict)))
+            newKids.Add(w);
         field.Dict.Set("Kids", newKids);
     }
 

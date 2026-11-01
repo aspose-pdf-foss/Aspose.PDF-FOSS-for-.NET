@@ -62,7 +62,7 @@ internal static partial class HtmlToPdfConverter
     private static bool ReadInlineStyleFixedDivs(string html, HtmlLoadOptions? options, List<FixedPageDiv> divs)
     {
         // pdf-page dialect: self-contained (inline pt styles, data-URI background).
-        var pageDivs = Regex.Matches(html, @"<div class=""pdf-page""[^>]*style=""(?<st>[^""]*)""[^>]*>");
+        var pageDivs = SafeRegex.Matches(html, @"<div class=""pdf-page""[^>]*style=""(?<st>[^""]*)""[^>]*>");
         if (pageDivs.Count == 0) return false;
         for (var p = 0; p < pageDivs.Count; p++)
         {
@@ -74,19 +74,19 @@ internal static partial class HtmlToPdfConverter
                 SrcW = StylePt(pageDivs[p].Groups["st"].Value, "width") ?? 612.0,
                 SrcH = StylePt(pageDivs[p].Groups["st"].Value, "height") ?? 792.0,
             };
-            var bg = Regex.Match(seg, @"<img\s+(?=[^>]*class=""pdf-page-bg"")[^>]*src=""(?<src>[^""]*)""");
+            var bg = SafeRegex.Match(seg, @"<img\s+(?=[^>]*class=""pdf-page-bg"")[^>]*src=""(?<src>[^""]*)""");
             if (bg.Success)
                 div.Background = LoadConverterImage(bg.Groups["src"].Value, options);
 
-            foreach (Match m in Regex.Matches(seg,
+            foreach (var groups in SafeRegex.Matches(seg,
                 @"<span class=""pdf-text"" style=""(?<st>[^""]*)"">(?<body>.*?)</span>",
-                RegexOptions.Singleline))
+                RegexOptions.Singleline).Select(m => m.Groups))
             {
-                var st = m.Groups["st"].Value;
-                var text = DecodeEntities(Regex.Replace(m.Groups["body"].Value, "<[^>]+>", ""));
+                var st = groups["st"].Value;
+                var text = DecodeEntities(SafeRegex.Replace(groups["body"].Value, "<[^>]+>", ""));
                 if (text.Length == 0) continue;
-                var famM = Regex.Match(st, @"font-family:\s*(?<v>[^;""]+)");
-                var colM = Regex.Match(st, @"(?<!-)color:\s*(?<v>[^;]+)");
+                var famM = SafeRegex.Match(st, @"font-family:\s*(?<v>[^;""]+)");
+                var colM = SafeRegex.Match(st, @"(?<!-)color:\s*(?<v>[^;]+)");
                 div.Spans.Add(new FixedSpan
                 {
                     Left = StylePt(st, "left") ?? 0,
@@ -105,27 +105,25 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The stl_ class dialect: the stylesheet box, the page containers and the spans they hold.</summary>
     private static bool? ReadStlFixedDivs(string html, HtmlLoadOptions? options, List<FixedPageDiv> divs)
     {
-        bool emGridMarkup = false;
         var fx = new FixedDivReadState();
         fx.html = html;
         fx.options = options;
         fx.divs = divs;
         fx.css = GatherStlCss(fx.html, fx.options?.BasePathAutoDerived == true ? null : fx.options);
         if (string.IsNullOrWhiteSpace(fx.css)) return null;
-        emGridMarkup = StlLetterSpacingOnEmGrid(fx.css);
 
         fx.clsFont = new Dictionary<string, (double? fs, string? fam, string? col, double? ls)>(StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(fx.css, @"\.(?<cls>[\w-]+)\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline))
+        foreach (var groups in SafeRegex.Matches(fx.css, @"\.(?<cls>[\w-]+)\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline).Select(m => m.Groups))
         {
-            var body = m.Groups["body"].Value;
+            var body = groups["body"].Value;
             double? fs = null, ls = null;
-            var fm = Regex.Match(body, @"font-size:\s*(?<v>[\d.]+)em");
+            var fm = SafeRegex.Match(body, @"font-size:\s*(?<v>[\d.]+)em");
             if (fm.Success) fs = double.Parse(fm.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture);
-            var lm = Regex.Match(body, @"letter-spacing:\s*(?<v>-?[\d.]+)em");
+            var lm = SafeRegex.Match(body, @"letter-spacing:\s*(?<v>-?[\d.]+)em");
             if (lm.Success) ls = double.Parse(lm.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture);
-            var am = Regex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
-            var cm = Regex.Match(body, @"(?<!-)color:\s*(?<v>[^;}]+)");
-            var key = m.Groups["cls"].Value;
+            var am = SafeRegex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
+            var cm = SafeRegex.Match(body, @"(?<!-)color:\s*(?<v>[^;}]+)");
+            var key = groups["cls"].Value;
             // Later rules override earlier ones per property, like a cascade.
             fx.clsFont.TryGetValue(key, out var prev);
             fx.clsFont[key] = (fs ?? prev.fs,
@@ -135,29 +133,12 @@ internal static partial class HtmlToPdfConverter
         }
 
         fx.ownFaces = ParseFontFaces(fx.css, fx.html, fx.options);
-        fx.pageDivs = Regex.Matches(fx.html, @"<div id=""page_\d+""[^>]*>");
+        fx.pageDivs = SafeRegex.Matches(fx.html, @"<div id=""page_\d+""[^>]*>");
         if (fx.pageDivs.Count == 0) return false;
         for (var p = 0; p < fx.pageDivs.Count; p++)
         {
             if (!ReadStlFixedPageDiv(fx, p)) return false;
         }
         return true;
-    }
-
-    /// <summary>True when the stylesheet declares em letter-spacing and every value sits on the
-    /// hundredth-em grid: the markup was authored on the em grid.</summary>
-    private static bool StlLetterSpacingOnEmGrid(string css)
-    {
-        var sawLs = false; var onGrid = true;
-        foreach (Match lm in Regex.Matches(css, @"letter-spacing:\s*(-?[\d.]+)em"))
-        {
-            var le = double.Parse(lm.Groups[1].Value,
-                System.Globalization.CultureInfo.InvariantCulture);
-            if (le == 0) continue;
-            sawLs = true;
-            var cents = le * 100.0;
-            if (System.Math.Abs(cents - System.Math.Round(cents)) > 1e-6) { onGrid = false; break; }
-        }
-        return sawLs && onGrid;
     }
 }

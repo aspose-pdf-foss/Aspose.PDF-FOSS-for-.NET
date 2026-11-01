@@ -106,8 +106,10 @@ public sealed partial class Document
                         var w = MeasureText(run, wtf.baseFont, wtf.fontSize);
                         var (sgAbove, sgBelow) = LinkBoxExtent(tf.TextState, wtf.fontSize);
                         var sgBase = (wtf.fragFirstBaseline ?? wtf.fragTop - wtf.fontSize) - wtf.lineHeight * li;
+                        // The deferred write seats the run a descent above this baseline, so the box opens at
+                        // the queued line (the descender line) and closes at the ascent above the written baseline.
                         _pendingLinks.Add((wtf.fragSlot,
-                            new Rectangle(x0, sgBase - sgBelow, x0 + w, sgBase + sgAbove), h));
+                            new Rectangle(x0, sgBase, x0 + w, sgBase + sgBelow + sgAbove), h));
                     }
                 }
             }

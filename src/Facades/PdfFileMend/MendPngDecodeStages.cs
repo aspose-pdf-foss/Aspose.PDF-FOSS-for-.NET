@@ -81,6 +81,9 @@ public sealed partial class PdfFileMend : ISaveableFacade
         }
     }
 
+    // The interlace method's place in the IHDR data: width, height, depth, colour type, compression, filter.
+    private const int IhdrInterlaceByte = 12;
+
     /// <summary></summary>
     private static void ReadPngChunks(MendPngDecodeState pd)
     {
@@ -96,6 +99,7 @@ public sealed partial class PdfFileMend : ISaveableFacade
                 pd.height = ReadInt32BE(pd.png, dataStart + 4);
                 pd.bitDepth = pd.png[dataStart + 8];
                 pd.colorType = pd.png[dataStart + 9];
+                pd.interlaced = pd.png[dataStart + IhdrInterlaceByte] == 1;
             }
             else if (chunkType == "PLTE")
             {

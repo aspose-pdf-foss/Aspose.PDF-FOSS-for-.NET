@@ -53,7 +53,10 @@ internal static partial class HtmlToPdfConverter
             && ParseCssColor(bgv) is { } bfill
             && (el.Display ?? EffectiveChainDisplay(ps)) == "inline-block")
         {
-            var runFontPt = ps.curFontPt > 0 ? ps.curFontPt : ps.cellClassPt > 0 ? ps.cellClassPt : cellFontSize;
+            double runFontPt;
+            if (ps.curFontPt > 0) runFontPt = ps.curFontPt;
+            else if (ps.cellClassPt > 0) runFontPt = ps.cellClassPt;
+            else runFontPt = cellFontSize;
             var run = new ChainBoxRun { Elem = el, StartLen = ps.line.Length, Fill = bfill };
             if (decls.TryGetValue("padding", out var bpv))
             {
@@ -73,8 +76,10 @@ internal static partial class HtmlToPdfConverter
         else if (ps.chainBoxOpen is { Count: > 0 }
             && decls.TryGetValue("padding-top", out var cptv))
         {
-            var cptBase = ps.curFontPt > 0 ? ps.curFontPt
-                : ps.cellClassPt > 0 ? ps.cellClassPt : cellFontSize;
+            double cptBase;
+            if (ps.curFontPt > 0) cptBase = ps.curFontPt;
+            else if (ps.cellClassPt > 0) cptBase = ps.cellClassPt;
+            else cptBase = cellFontSize;
             ps.chainBoxOpen[^1].ContPadTop = Math.Max(0, ChainLenPt(cptv, cptBase));
         }
     }

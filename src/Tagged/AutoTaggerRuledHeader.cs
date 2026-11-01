@@ -27,7 +27,7 @@ internal static partial class AutoTagger
             var inside = content.Where(l => l.Frags.Count > 0 && l.Baseline > box.LLY && l.Baseline < box.URY
                                             && l.MinX < box.URX && l.Frags[^1].R > box.LLX).ToList();
             if (inside.Count == 0 || inside.SelectMany(l => l.Frags).Any(f => f.Size > HeadingMarkSizeShare * size
-                    && NumericCell.IsMatch(f.Text) && f.Text.Any(char.IsDigit) && !PeriodCell.IsMatch(f.Text.Trim()))) continue;
+                    && SafeRegex.IsMatch(NumericCell, f.Text) && f.Text.Any(char.IsDigit) && !SafeRegex.IsMatch(PeriodCell, f.Text.Trim()))) continue;
             return box;
         }
         return null;
@@ -70,8 +70,8 @@ internal static partial class AutoTagger
             var right = Enumerable.Range(0, t.cols).Count(c => figures.Any(f => f.X >= x && (f.X + f.R) / 2 > t.colX[c] && (f.X + f.R) / 2 <= t.colX[c + 1]));
             return k >= 1 && right >= 1 && k + right == t.cols ? k : null;
         }
-        foreach (var rule in pw.Rules.Where(r => !r.Horizontal && r.Drawn && r.To > box.LLY && r.From < box.URY))
-            if (EdgeAt(rule.At) is { } k) colX[k] = rule.At;
+        foreach (var at in pw.Rules.Where(r => !r.Horizontal && r.Drawn && r.To > box.LLY && r.From < box.URY).Select(rule => rule.At))
+            if (EdgeAt(at) is { } k) colX[k] = at;
         if (Enumerable.Range(1, colX.Count - 1).Any(k => colX[k] <= colX[k - 1])) return false;
         t = (t.region, t.rows, t.cols, colX, t.rowY);
         var joined = (new Rectangle(colX[0], t.region.LLY, colX[^1], box.URY), body + rows, t.cols, colX, rowY);

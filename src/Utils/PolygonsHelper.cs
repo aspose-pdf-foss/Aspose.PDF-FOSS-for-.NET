@@ -94,13 +94,9 @@ public static class PolygonsHelper
             new Point(rect.URX, rect.LLY),
         };
         bool allCornersInPoly = true;
-        foreach (var c in corners)
+        if (corners.Any(c => !IsPointInsidePolygon(polygon, c, includeBoundary: true)))
         {
-            if (!IsPointInsidePolygon(polygon, c, includeBoundary: true))
-            {
-                allCornersInPoly = false;
-                break;
-            }
+            allCornersInPoly = false;
         }
         if (allCornersInPoly) return RectanglePosition.Contained;
 
@@ -121,11 +117,7 @@ public static class PolygonsHelper
     /// </summary>
     public static bool IsPolygonInsidePolygon(Point[] outer, Point[] inner, bool includeBoundary)
     {
-        foreach (var v in inner)
-        {
-            if (!IsPointInsidePolygon(outer, v, includeBoundary)) return false;
-        }
-        return true;
+        return !inner.Any(v => !IsPointInsidePolygon(outer, v, includeBoundary));
     }
 
     /// <summary>

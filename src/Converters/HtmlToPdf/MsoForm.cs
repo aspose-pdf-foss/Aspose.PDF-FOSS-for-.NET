@@ -24,7 +24,6 @@ internal partial class HtmlToPdfConverter
     private const double MsoCheckboxPt = 7.8;         // checkbox square
     private const double MsoCellPadPt = 5.75;         // the sheet's padding: 0in 5.75pt
     private const double MsoInputChromePt = 5.5;      // input margins inside its cell
-    private const double MsoLabelLinePt = 8.5;        // 7pt label line box
     private const double MsoRowBottomPadPt = 12.2;    // input row's bottom band
     private const double MsoBodyInsetPt = 6.0;        // body inset before the table
 
@@ -67,7 +66,9 @@ internal partial class HtmlToPdfConverter
     {
         public double StyleHPt;
         public bool Nested;           // a row of the roster's nested table
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<MsoCell> Cells = new();
+#pragma warning restore S3218
     }
 
     /// <summary>Detects and renders the Word-filtered form-grid document.
@@ -75,24 +76,24 @@ internal partial class HtmlToPdfConverter
     /// its own flow).</summary>
     private static Document? TryRenderMsoWordForm(string html)
     {
-        if (!Regex.IsMatch(html, @"<meta[^>]+Generator[^>]+Microsoft Word", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(html, @"<meta[^>]+Generator[^>]+Microsoft Word", RegexOptions.IgnoreCase))
             return null;
-        if (!Regex.IsMatch(html, @"class=""?MsoNormalTable", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(html, @"class=""?MsoNormalTable", RegexOptions.IgnoreCase))
             return null;
-        var inputCount = Regex.Matches(html, @"<input\b", RegexOptions.IgnoreCase).Count;
+        var inputCount = SafeRegex.Matches(html, @"<input\b", RegexOptions.IgnoreCase).Count;
         if (inputCount < 5) return null;
-        var tm = Regex.Match(html, @"<table[^>]*MsoNormalTable[\s\S]*?</table>", RegexOptions.IgnoreCase);
+        var tm = SafeRegex.Match(html, @"<table[^>]*MsoNormalTable[\s\S]*?</table>", RegexOptions.IgnoreCase);
         if (!tm.Success) return null;
 
         // #ID { width: Npx; height: Npx; } control sizing rules.
         var idW = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         var idH = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match im in Regex.Matches(html, @"#(\w+)\s*\{([^}]*)\}"))
+        foreach (var groups in SafeRegex.Matches(html, @"#(\w+)\s*\{([^}]*)\}").Select(im => im.Groups))
         {
-            var wm = Regex.Match(im.Groups[2].Value, @"width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
-            if (wm.Success) idW[im.Groups[1].Value] = DtpNum(wm.Groups[1].Value) * 0.75;
-            var hm = Regex.Match(im.Groups[2].Value, @"height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
-            if (hm.Success) idH[im.Groups[1].Value] = DtpNum(hm.Groups[1].Value) * 0.75;
+            var wm = SafeRegex.Match(groups[2].Value, @"width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+            if (wm.Success) idW[groups[1].Value] = DtpNum(wm.Groups[1].Value) * 0.75;
+            var hm = SafeRegex.Match(groups[2].Value, @"height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+            if (hm.Success) idH[groups[1].Value] = DtpNum(hm.Groups[1].Value) * 0.75;
         }
 
         var rows = ParseMsoFormTable(tm.Value, idW, idH);

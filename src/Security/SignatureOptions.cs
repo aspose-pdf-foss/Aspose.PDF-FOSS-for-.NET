@@ -78,15 +78,25 @@ public sealed class SignatureOptions
     /// signature.</summary>
     public int? DocMdpPermissions { get; set; }
 
+    /// <summary>The 1-based page an invisible signature's widget belongs to: its /P, and the page whose
+    /// /Annots lists it.</summary>
+    internal int PageNumber { get; set; } = 1;
+
     /// <summary>RFC 3161 Time-Stamp Authority URL. Consumed by
     /// <see cref="PdfSigner.SignDocumentTimestamp"/> to produce a document
-    /// timestamp (/SubFilter <c>ETSI.RFC3161</c>).</summary>
+    /// timestamp (/SubFilter <c>ETSI.RFC3161</c>); on a certificate signature the
+    /// token is taken over the signature value and embedded in the CMS signer info
+    /// as its signature-timestamp attribute.</summary>
     public string? TimestampUrl { get; set; }
+
+    /// <summary>The /Contents room a signature timestamp adds to the reservation: the
+    /// same room a document timestamp's token gets, since it carries the TSA's chain.</summary>
+    internal const int TimestampTokenReserve = 16384;
 
     /// <summary>Optional Base64 BasicAuth value sent to the TSA.</summary>
     public string? TimestampBasicAuth { get; set; }
 
-    /// <summary>Digest algorithm for the document-timestamp message imprint.</summary>
+    /// <summary>Digest algorithm for the timestamp message imprint.</summary>
     public DigestHashAlgorithm TimestampDigest { get; set; } = DigestHashAlgorithm.Sha256;
 
     /// <summary>Message digest for the signature itself. <see cref="DigestHashAlgorithm.Auto"/>

@@ -110,7 +110,7 @@ internal sealed class PsPath
     /// <summary>Add a straight segment.</summary>
     public void LineTo(double x, double y)
     {
-        if (!HasCurrentPoint) throw new PsErrorSignal("nocurrentpoint");
+        if (!HasCurrentPoint) throw new PsErrorException("nocurrentpoint");
         _segments.Add(new PsSegment(PsSegmentKind.Line, x, y));
         CurrentX = x;
         CurrentY = y;
@@ -119,7 +119,7 @@ internal sealed class PsPath
     /// <summary>Add a cubic Bezier.</summary>
     public void CurveTo(double x1, double y1, double x2, double y2, double x3, double y3)
     {
-        if (!HasCurrentPoint) throw new PsErrorSignal("nocurrentpoint");
+        if (!HasCurrentPoint) throw new PsErrorException("nocurrentpoint");
         _segments.Add(new PsSegment(PsSegmentKind.Curve, x3, y3, x1, y1, x2, y2));
         CurrentX = x3;
         CurrentY = y3;

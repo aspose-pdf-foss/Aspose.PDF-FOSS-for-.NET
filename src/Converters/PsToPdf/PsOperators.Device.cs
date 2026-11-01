@@ -277,7 +277,7 @@ internal sealed partial class PsInterpreter
             return;
         }
 
-        throw new PsErrorSignal("undefinedresource");
+        throw new PsErrorException("undefinedresource");
     }
 
     private static void ResourceStatusOperator(PsInterpreter i)
@@ -313,8 +313,9 @@ internal sealed partial class PsInterpreter
                 i.ExecuteProcedure(proc);
             }
         }
-        catch (PsExitSignal)
+        catch (PsExitException)
         {
+            // exit ends the loop - the operator finishes normally
         }
     }
 
@@ -361,7 +362,7 @@ internal sealed partial class PsInterpreter
 
     private static PsFile FileOf(PsValue value)
     {
-        if (value.Type != PsType.File) throw new PsErrorSignal("typecheck");
+        if (value.Type != PsType.File) throw new PsErrorException("typecheck");
         return value.AsFile!;
     }
 

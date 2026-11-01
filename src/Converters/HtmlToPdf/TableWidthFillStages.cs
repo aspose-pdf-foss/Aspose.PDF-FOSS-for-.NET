@@ -40,7 +40,7 @@ internal static partial class HtmlToPdfConverter
         // (a POSITIONED grid overflows its declared box the way it overflows the page: the sheet grows
         //  to its ink - the absolutely placed 763 px report grid keeps its 887 pt content)
         if (declBoxPt > 0 && ws.naturalWidthPt > capToPt && !grewForPreLine
-            && !Regex.IsMatch(ws.tblTag.Value, @"white-space\s*:\s*(nowrap|pre(?![-\w]))|position\s*:\s*(absolute|fixed)", RegexOptions.IgnoreCase))
+            && !SafeRegex.IsMatch(ws.tblTag.Value, @"white-space\s*:\s*(nowrap|pre(?![-\w]))|position\s*:\s*(absolute|fixed)", RegexOptions.IgnoreCase))
         {
             ws.naturalWidthPt = capToPt;
             ws.table.HtmlPreferredWidthPt = capToPt;
@@ -74,7 +74,6 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The declared column widths add up to the grid's own box, and the table tag's declared width is read over them.</summary>
     private static void MeasureDeclaredColumnSum(TableWidthSolveState ws, TableColumnModel colModel, bool nestedGrid, double pctBoxPt, double declSumPt, bool uaCellBoxes)
     {
-        const double PxToPt = 0.75;
         if (uaCellBoxes && nestedGrid && !(pctBoxPt > 0 && declSumPt > pctBoxPt + 0.01))
             for (var i = 0; i < colModel.colDeclW.Count && i < colModel.colMinW.Count; i++)
                 if (colModel.colDeclW[i] > 0 && (i >= colModel.colPctW.Count || colModel.colPctW[i] <= 0))
@@ -104,7 +103,7 @@ internal static partial class HtmlToPdfConverter
         ws.tableWidthAbsPt = 0;
         if (ws.tblTag.Success)
         {
-            var twAbs = Regex.Match(ws.tblTag.Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)\s*(px)?\s*[""'\s/>]",
+            var twAbs = SafeRegex.Match(ws.tblTag.Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)\s*(px)?\s*[""'\s/>]",
                 RegexOptions.IgnoreCase);
             if (twAbs.Success && double.TryParse(twAbs.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,

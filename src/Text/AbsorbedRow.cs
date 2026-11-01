@@ -4,10 +4,12 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Text;
 
+#pragma warning disable S1210 // public API: ordering only, the published class defines no operators
 /// <summary>
 /// Represents a row in an absorbed table.
 /// </summary>
 public sealed class AbsorbedRow : IComparable<AbsorbedRow>
+#pragma warning restore S1210
 {
     /// <summary>Creates an empty row with no cells.</summary>
     public AbsorbedRow() { }
@@ -20,7 +22,9 @@ public sealed class AbsorbedRow : IComparable<AbsorbedRow>
         get
         {
             if (Cells is IList<AbsorbedCell> list) return list;
+#pragma warning disable S2365 // public API: the published list view
             return new List<AbsorbedCell>(Cells);
+#pragma warning restore S2365
         }
     }
 
@@ -32,13 +36,13 @@ public sealed class AbsorbedRow : IComparable<AbsorbedRow>
             double minX = double.PositiveInfinity, minY = double.PositiveInfinity;
             double maxX = double.NegativeInfinity, maxY = double.NegativeInfinity;
             bool any = false;
-            foreach (var c in Cells)
+            foreach (var rect in Cells.Select(c => c.Rect))
             {
-                if (c.Rect is null) continue;
-                if (c.Rect.LLX < minX) minX = c.Rect.LLX;
-                if (c.Rect.LLY < minY) minY = c.Rect.LLY;
-                if (c.Rect.URX > maxX) maxX = c.Rect.URX;
-                if (c.Rect.URY > maxY) maxY = c.Rect.URY;
+                if (rect is null) continue;
+                if (rect.LLX < minX) minX = rect.LLX;
+                if (rect.LLY < minY) minY = rect.LLY;
+                if (rect.URX > maxX) maxX = rect.URX;
+                if (rect.URY > maxY) maxY = rect.URY;
                 any = true;
             }
             return any ? new Rectangle(minX, minY, maxX, maxY) : null;

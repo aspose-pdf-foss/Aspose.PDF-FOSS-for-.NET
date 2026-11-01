@@ -60,11 +60,11 @@ internal static partial class HtmlToPdfConverter
             || !bv.html.Contains("display-address=", StringComparison.Ordinal))
             return null;
 
-        bv.bodyM = Regex.Match(bv.html, "<body[^>]*>([\\s\\S]*?)(?:</body|$)", RegexOptions.IgnoreCase);
+        bv.bodyM = SafeRegex.Match(bv.html, "<body[^>]*>([\\s\\S]*?)(?:</body|$)", RegexOptions.IgnoreCase);
         if (!bv.bodyM.Success) return null;
-        bv.body = Regex.Replace(bv.bodyM.Groups[1].Value, "<!--[\\s\\S]*?-->", "");
-        bv.body = Regex.Replace(bv.body, "<style[\\s\\S]*?</style>", "", RegexOptions.IgnoreCase);
-        bv.body = Regex.Replace(bv.body, "<script[\\s\\S]*?</script>", "", RegexOptions.IgnoreCase);
+        bv.body = SafeRegex.Replace(bv.bodyM.Groups[1].Value, "<!--[\\s\\S]*?-->", "");
+        bv.body = SafeRegex.Replace(bv.body, "<style[\\s\\S]*?</style>", "", RegexOptions.IgnoreCase);
+        bv.body = SafeRegex.Replace(bv.body, "<script[\\s\\S]*?</script>", "", RegexOptions.IgnoreCase);
 
         bv.lines = new List<BrLine>();
         bv.cur = new List<BrRun>();
@@ -79,9 +79,11 @@ internal static partial class HtmlToPdfConverter
 
         BuildBenefitReviewTagSets(bv);
 
-        bv.tagRx = new Regex("<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:\"[^\"]*\"|'[^']*'|[^>\"'])*)>");
+        bv.tagRx = new Regex("<(/?)([a-zA-Z][a-zA-Z0-9]*)((?:\"[^\"]*\"|'[^']*'|[^>\"'])*)>", RegexOptions.None, RegexLimits.Timeout);
         bv.pos = 0;
-        foreach (Match m in bv.tagRx.Matches(bv.body))
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match m in SafeRegex.Matches(bv.tagRx, bv.body))
+#pragma warning restore S3267
         {
             if (!AbsorbBenefitReviewTag(bv, m)) break;
         }

@@ -56,7 +56,8 @@ internal static partial class HtmlToPdfConverter
                 // inset, so the block opens the full max-collapse below the bare page top
                 // (measured: an 18 pt heading's ink seats at 14.04 = its
                 // 14.94 margin, on the zero-top RTL report; mt - 6 left it 6 short).
-                cv.flow.y -= block.MarginTop - (cv.profile.hasZeroTopMargin ? 0 : UaBodyMarginPt);
+                // (an authored body margin is what the block's margin collapses into instead)
+                cv.flow.y -= Math.Max(0, block.MarginTop - (cv.profile.hasZeroTopMargin ? 0 : BodyTopCollapsePt(cv)));
             }
         cv.flow.uaTopMarginPending = false;
     }
@@ -67,9 +68,9 @@ internal static partial class HtmlToPdfConverter
         // pt-styled fragment: the first baseline under a grid seats an
         // ASCENT below its edge (probed: the nbsp line at end + 0.935em),
         // not the full legacy 1.15em drop.
-        cv.flow.y -= rb.metrics.blockFontSize * (cv.profile.ptStyledFragment
-            ? PtDropEm + (cv.flow.pendingTableDropBordered ? PtBorderedDropExtraEm : 0)
-            : 1.15);
+        var dropEm = 1.15;
+        if (cv.profile.ptStyledFragment) dropEm = PtDropEm + (cv.flow.pendingTableDropBordered ? PtBorderedDropExtraEm : 0);
+        cv.flow.y -= rb.metrics.blockFontSize * dropEm;
         cv.flow.pendingTableDropBordered = false;
         // The pinned-body report's painted panels carry REAL margins past
         // the drop: whatever their margin-top declares beyond the pad the
@@ -80,18 +81,42 @@ internal static partial class HtmlToPdfConverter
         cv.flow.pendingTableDrop = false;
     }
 
+    /// <summary>A text block the sheet-typography flow does not seat by line boxes: it names no face,
+    /// or one without metrics (see the seat in the line metrics stage).</summary>
+    private static bool IsSheetTextWithoutMetricFace(RenderBlockState rb, Block block) =>
+        rb.metrics.blockFontSize > 0 && !string.IsNullOrEmpty(block.Text)
+        && !(block.FontFamily is { Length: > 0 } face && WinMetricsFor(face) is not null);
+
+    /// <summary>Whether the block's first baseline stands on the flow cursor itself: the metric flow seats it
+    /// inside its line box, the sheet-typography flow one ascent side down for text in a face it has metrics
+    /// for, and the report and fragment dialects from their own measured gaps.</summary>
+    private static bool SeatsBaselineOnCursor(ConvertState cv, RenderBlockState rb, Block block) =>
+        !cv.profile.metricFlow && !cv.profile.sectionedReport && !cv.profile.redlineDiffDoc && !cv.profile.ptStyledFragment
+        && (!cv.profile.sheetBoxFlow || IsSheetTextWithoutMetricFace(rb, block));
+
     /// <summary>The block's top spacing: the pending top drop, rule drop, form-table gap, pending table drop, UA top margin or the block's own margin, whichever the flow owes.</summary>
-    private static void ApplyBlockTopDrop(ConvertState cv, RenderBlockState rb, HtmlLoadOptions? options, List<byte[]> inlineSvgs, Block block)
+    private static void ApplyBlockTopDrop(ConvertState cv, RenderBlockState rb, Block block)
     {
         if (cv.profile.floatBothSidesDoc && block.ShorthandTopPt > block.MarginTop)
             block.MarginTop = block.ShorthandTopPt;
+        // A body that pads its own box keeps the sheet's vertical margins as declared (a heading's
+        // `margin: 20px 0 10px` opens 15 above it and leaves 7.5 below), not the flow's calibrated
+        // heading gaps.
+        if (cv.profile.cssBoxBody && block.ShorthandBottomPt > 0)
+        {
+            block.MarginTop = block.ShorthandTopPt;
+            block.MarginBottom = block.ShorthandBottomPt;
+        }
         if (cv.flow.pendingTopDrop && !(cv.flow.uaTopMarginPending && cv.uaFlow))
         {
             // First line of a zero-top-margin page: baseline = line box + block margin.
             // The metric flow needs no such drop — its baseline always sits inside the
             // line box (half-leading model), on every page.
             // (the sheet-typography flow seats its first line one ascent side down instead)
-            if (!cv.profile.metricFlow && !cv.profile.sheetBoxFlow) cv.flow.y -= rb.metrics.blockFontSize * 1.15 + block.MarginTop;
+            // …which it does only for text in a face it has metrics for: any other text keeps this drop,
+            // or its first baseline would stand on the page edge itself.
+            if (!cv.profile.metricFlow && (!cv.profile.sheetBoxFlow || IsSheetTextWithoutMetricFace(rb, block)))
+                cv.flow.y -= rb.metrics.blockFontSize * ZeroTopMarginLineBoxEm + block.MarginTop;
             cv.flow.pendingTopDrop = false;
             cv.flow.afterRuleDrop = false;
         }
@@ -115,13 +140,23 @@ internal static partial class HtmlToPdfConverter
         {
             // (the sheet-typography flow seats its first line one ascent side under the table,
             // its own margin collapsed with the table's, spent here)
-            if (cv.profile.sheetBoxFlow)
+            // (…for text in a face it has metrics for: face-less text under a table - a stylesheet form's links
+            // under its control grid, a section heading or closing line under a data table - keeps the line-box
+            // drop, or its first baseline stands on the table's bottom)
+            if (cv.profile.sheetBoxFlow && !IsSheetTextWithoutMetricFace(rb, block))
             {
                 cv.flow.pendingTableDrop = false;
                 cv.flow.y -= Math.Max(0, block.MarginTop - rb.uaPrevMB);
             }
             else ApplyPendingTableDrop(cv, rb, block);
         }
+        // Text that seats its first baseline on the cursor, which a table leaves on its bottom edge,
+        // drops a line box first, as a block opening a page does: else its glyphs stand in the table's
+        // last row (a mail page's body over the header table's Subject row, a form's closing line struck
+        // through by its last table's bottom rule). A blank line - a mail's spacer paragraph between two
+        // tables - draws no glyphs there, so it keeps its place.
+        else if (rb.afterTable && !string.IsNullOrWhiteSpace(block.Text) && SeatsBaselineOnCursor(cv, rb, block))
+            cv.flow.y -= rb.metrics.blockFontSize * ZeroTopMarginLineBoxEm + block.MarginTop;
         // Browser margin-collapse: the FIRST flow block's top margin collapses with the
         // page/body top margin at the document top — it does not stack on top of it (an
         // opening <h1> starts at the content top, not one h1-margin below it).
@@ -145,12 +180,15 @@ internal static partial class HtmlToPdfConverter
             // seating its first line 24.67 below the content edge.
             || (cv.profile.floatBothSidesDoc && cv.flow.floatIndentPt > 0)
             || cv.flow.y < cv.pageHeight - cv.marginTop - 1e-3)
-            cv.flow.y -= cv.profile.uaStdSerif || cv.profile.printGrid || cv.profile.sectionedReport || cv.articleFlow
-                    // the float flow's paragraphs carry real UA margins now, so they
-                    // collapse with the block above like every other CSS box
-                    || cv.profile.floatBothSidesDoc || cv.profile.sheetTypographyDoc
-                // a margin-less follower stands the previous box's UA closing gap below it
-                ? Math.Max(0, (block.MarginTop > 0 ? block.MarginTop : rb.uaClosingGap) - rb.uaPrevMB) : block.MarginTop;
+        {
+            // a margin-less follower stands the previous box's UA closing gap below it
+            if (cv.profile.uaStdSerif || cv.profile.printGrid || cv.profile.sectionedReport || cv.articleFlow
+                // the float flow's paragraphs carry real UA margins now, so they
+                // collapse with the block above like every other CSS box
+                || cv.profile.floatBothSidesDoc || cv.profile.sheetTypographyDoc)
+                cv.flow.y -= Math.Max(0, (block.MarginTop > 0 ? block.MarginTop : rb.uaClosingGap) - rb.uaPrevMB);
+            else cv.flow.y -= block.MarginTop;
+        }
     }
 
     /// <summary>A hard break or an empty block spends its margins and is done.</summary>
@@ -443,8 +481,8 @@ internal static partial class HtmlToPdfConverter
             return false;
         }
 
-        // RTL topics table: the matrix figure paints as graphics (right-pinned);
-        // the caption and topic items stack on the left in the serif face, each
+        // RTL topics table: the matrix figure paints as graphics (right-pinned); the
+        // caption and topic items stack on the left in the serif face, each
         // item right-aligned on a common pen edge with its bullet marker (one
         // " •" run) just right of that edge — marker before item text, so the
         // absorber reads caption, bullet, item, bullet, item, … Layout rule:

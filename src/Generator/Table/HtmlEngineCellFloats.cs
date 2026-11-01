@@ -18,8 +18,8 @@ public partial class Table
     private static double? EngineFloatWidth(HtmlEngineCellState hc, string tag)
     {
         var css = EngineStyleValue(tag);
-        if (css is null || !Regex.IsMatch(css, @"(?<![-\w])float\s*:\s*left", RegexOptions.IgnoreCase)) return null;
-        var wm = Regex.Match(css, @"(?<![-\w])width\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase);
+        if (css is null || !SafeRegex.IsMatch(css, @"(?<![-\w])float\s*:\s*left", RegexOptions.IgnoreCase)) return null;
+        var wm = SafeRegex.Match(css, @"(?<![-\w])width\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase);
         if (!wm.Success || !double.TryParse(wm.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var pct) || pct <= 0)
             return null;
         return hc.availWidth * pct / 100.0;
@@ -50,10 +50,10 @@ public partial class Table
     /// <summary>The markup between an element's open tag and its matching close, and the index after that close.</summary>
     private static string EngineElementInner(string html, Match open, string tag, out int end)
     {
-        var rx = new Regex(@"<(/?)" + tag + @"\b[^>]*>", RegexOptions.IgnoreCase);
+        var rx = new Regex(@"<(/?)" + tag + @"\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var depth = 1;
         var from = open.Index + open.Length;
-        for (var m = rx.Match(html, from); m.Success; m = m.NextMatch())
+        for (var m = SafeRegex.Match(rx, html, from); m.Success; m = SafeRegex.NextMatch(m))
         {
             depth += m.Groups[1].Value.Length > 0 ? -1 : 1;
             if (depth == 0)
@@ -127,7 +127,7 @@ public partial class Table
     /// written (probed: <c>alt=\"action.png\"</c> in an escaped fixture draws with its quotes).</summary>
     private static void EngineImageAlt(HtmlEngineCellState hc, string tag)
     {
-        var alt = Regex.Match(tag, @"\balt\s*=\s*(?:'(?<v>[^']*)'|""(?<v>[^""]*)""|(?<v>[^\s>]+))", RegexOptions.IgnoreCase);
+        var alt = SafeRegex.Match(tag, @"\balt\s*=\s*(?:'(?<v>[^']*)'|""(?<v>[^""]*)""|(?<v>[^\s>]+))", RegexOptions.IgnoreCase);
         if (alt.Success && alt.Groups["v"].Value.Length > 0) EmitText(hc, alt.Groups["v"].Value);
     }
 
@@ -135,13 +135,13 @@ public partial class Table
     /// picture whose source does not resolve to a file (a real picture keeps the image arms).</summary>
     private static bool EngineAcceptsStructure(string html)
     {
-        foreach (Match tr in Regex.Matches(html, @"<tr\b[^>]*>(.*?)</tr\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
-            if (Regex.Matches(tr.Groups[1].Value, @"<t[dh]\b", RegexOptions.IgnoreCase).Count > 1) return false;
-        foreach (Match img in Regex.Matches(html, @"<img\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match tr in SafeRegex.Matches(html, @"<tr\b[^>]*>(.*?)</tr\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
+            if (SafeRegex.Matches(tr.Groups[1].Value, @"<t[dh]\b", RegexOptions.IgnoreCase).Count > 1) return false;
+        foreach (Match img in SafeRegex.Matches(html, @"<img\b[^>]*>", RegexOptions.IgnoreCase))
         {
             // Only a picture that cannot be a file - no source, or a source that opens with
             // the escaped quote - is the engine's (its alt text); a real one keeps the image arms.
-            var src = Regex.Match(img.Value, @"\bsrc\s*=\s*(?:'(?<v>[^']*)'|""(?<v>[^""]*)""|(?<v>[^\s>]+))", RegexOptions.IgnoreCase);
+            var src = SafeRegex.Match(img.Value, @"\bsrc\s*=\s*(?:'(?<v>[^']*)'|""(?<v>[^""]*)""|(?<v>[^\s>]+))", RegexOptions.IgnoreCase);
             if (src.Success && src.Groups["v"].Value.Length > 0 && !src.Groups["v"].Value.StartsWith("\\\"", StringComparison.Ordinal))
                 return false;
         }

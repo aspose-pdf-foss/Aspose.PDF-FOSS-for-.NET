@@ -61,18 +61,18 @@ internal static partial class HtmlToPdfConverter
     private const double RfqIntroAr3X = 339.70;
     // ── the items grid (cellspacing 1 → 0.75 pt gaps) ───────────────────────
     private static string RqFlat(string s) => CollapseWs(DecodeEntities(
-        Regex.Replace(s, "<[^>]+>", " "))).Trim();
+        SafeRegex.Replace(s, "<[^>]+>", " "))).Trim();
 
     private static List<string> RqLabels(string frag)
     {
         var list = new List<string>();
-        foreach (Match m in Regex.Matches(frag, "<label[^>]*>((?:(?!</label>)[\\s\\S])*)</label>",
+        foreach (Match m in SafeRegex.Matches(frag, "<label[^>]*>((?:(?!</label>)[\\s\\S])*)</label>",
             RegexOptions.IgnoreCase))
             list.Add(RqFlat(m.Groups[1].Value));
         return list;
     }
 
-    private static List<Match> RqCells(string frag) => Regex.Matches(frag,
+    private static List<Match> RqCells(string frag) => SafeRegex.Matches(frag,
         "<t[dh]\\b([^>]*)>((?:(?!</t[dh]>)[\\s\\S])*)</t[dh]>", RegexOptions.IgnoreCase).Cast<Match>().ToList();
 
     // the wrap rule: the last word drops to the following line
@@ -85,7 +85,7 @@ internal static partial class HtmlToPdfConverter
     private static List<string> RqSpans(string frag)
     {
         var list = new List<string>();
-        foreach (Match m in Regex.Matches(frag, "<span\\b[^>]*>((?:(?!</span>)[\\s\\S])*)</span>",
+        foreach (Match m in SafeRegex.Matches(frag, "<span\\b[^>]*>((?:(?!</span>)[\\s\\S])*)</span>",
             RegexOptions.IgnoreCase))
             list.Add(RqFlat(m.Groups[1].Value));
         return list;

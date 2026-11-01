@@ -90,6 +90,6 @@ public class ActualTextTests
         var absorber = new TextAbsorber();
         absorber.Visit(doc.Pages[1]);
         Assert.Contains("Hello", absorber.Text);
-        Assert.DoesNotContain("Hel lo", absorber.Text);
+        Assert.DoesNotContain("Hel lo", absorber.Text, StringComparison.Ordinal);
     }
 }

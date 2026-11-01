@@ -12,25 +12,27 @@ public class TextBuilderScriptTests
 {
     private const double BaseSize = 11;
 
-    private static TextFragment Fragment(string text, double rotation, bool subscript, bool superscript)
+    private static TextFragment Fragment(string text, double rotation, bool subscript, bool superscript, bool onSegment)
     {
         var fragment = new TextFragment(text);
         fragment.TextState.FontSize = (float)BaseSize;
         fragment.Position = new Position(300, 500);
-        fragment.TextState.Subscript = subscript;
-        fragment.TextState.Superscript = superscript;
+        // A script set on the one segment of a fragment is the whole run's.
+        var scriptState = onSegment ? fragment.Segments[1].TextState : fragment.TextState;
+        scriptState.Subscript = subscript;
+        scriptState.Superscript = superscript;
         fragment.TextState.Rotation = rotation;
         return fragment;
     }
 
-    private static TextFragment[] WriteAndReadBack(double rotation)
+    private static TextFragment[] WriteAndReadBack(double rotation, bool onSegment)
     {
         var doc = new Document();
         var page = doc.Pages.Add();
         var builder = new TextBuilder(page);
-        builder.AppendText(Fragment("Base", rotation, false, false));
-        builder.AppendText(Fragment("Sub", rotation, true, false));
-        builder.AppendText(Fragment("Sup", rotation, false, true));
+        builder.AppendText(Fragment("Base", rotation, false, false, onSegment));
+        builder.AppendText(Fragment("Sub", rotation, true, false, onSegment));
+        builder.AppendText(Fragment("Sup", rotation, false, true, onSegment));
         using var ms = new MemoryStream();
         doc.Save(ms);
         using var saved = new Document(new MemoryStream(ms.ToArray()));
@@ -40,11 +42,13 @@ public class TextBuilderScriptTests
     }
 
     [Theory]
-    [InlineData(0.0)]
-    [InlineData(90.0)]
-    public void ScriptFragmentsDrawSmallerOnAShiftedBaseline(double rotation)
+    [InlineData(0.0, false)]
+    [InlineData(90.0, false)]
+    [InlineData(0.0, true)]
+    [InlineData(180.0, true)]
+    public void ScriptFragmentsDrawSmallerOnAShiftedBaseline(double rotation, bool onSegment)
     {
-        var fragments = WriteAndReadBack(rotation);
+        var fragments = WriteAndReadBack(rotation, onSegment);
         var baseRun = Assert.Single(fragments, f => f.Text == "Base");
         var sub = Assert.Single(fragments, f => f.Text == "Sub");
         var sup = Assert.Single(fragments, f => f.Text == "Sup");

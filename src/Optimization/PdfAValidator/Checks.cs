@@ -78,7 +78,7 @@ internal static partial class PdfAValidator
         }
     }
 
-    private static void CheckMetadata(Document document, PdfFormat format,
+    private static void CheckMetadata(Document document,
         List<string> issues, List<PdfAViolation> violations)
     {
         if (!document.HasMetadata)
@@ -318,19 +318,16 @@ internal static partial class PdfAValidator
             if (subtype != "Image") continue;
 
             var csObj = xobjDict.Get("ColorSpace");
-            if (csObj is PdfName csName)
+            if (csObj is PdfName csName && csName.Value is "DeviceRGB" or "DeviceCMYK" or "DeviceGray")
             {
-                if (csName.Value is "DeviceRGB" or "DeviceCMYK" or "DeviceGray")
+                var msg = "Image uses device-dependent color space without OutputIntent";
+                issues.Add(msg);
+                violations.Add(new PdfAViolation
                 {
-                    var msg = "Image uses device-dependent color space without OutputIntent";
-                    issues.Add(msg);
-                    violations.Add(new PdfAViolation
-                    {
-                        Rule = "ColorSpace",
-                        Description = msg,
-                        PageNumber = page.Number,
-                    });
-                }
+                    Rule = "ColorSpace",
+                    Description = msg,
+                    PageNumber = page.Number,
+                });
             }
         }
     }
@@ -349,8 +346,11 @@ internal static partial class PdfAValidator
             var subtype = annotDict.GetName("Subtype");
 
             // PDF/A-4f (ISO 19005-4) permits embedded files: FileAttachment
-            // annotations are valid content there.
-            if (subtype == "FileAttachment" && format is PdfFormat.PDF_A_4F)
+            // annotations are valid content there. Part 3 permits them as associated
+            // files, whose specification states its relationship to the document.
+            if (subtype == "FileAttachment" && (format is PdfFormat.PDF_A_4F
+                || (format is PdfFormat.PDF_A_3A or PdfFormat.PDF_A_3B or PdfFormat.PDF_A_3U
+                    && document.Reader.ResolveDict(annotDict.Get("FS"))?.Get("AFRelationship") is not null)))
                 continue;
 
             // Check prohibited subtypes

@@ -35,7 +35,9 @@ public sealed partial class TextFragmentAbsorber
         var (laterInk, _, _) = ComputeLaterInkOcclusion(bf.rawFragments);
         bf.fillIndex = bf.fillRects is { Count: > 0 } ? new FillRectIndex(bf.fillRects) : null;
         bf.runIndex = -1;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var run in bf.rawFragments)
+#pragma warning restore S3267
         {
             if (!BuildFragmentFromRun(bf, run, laterInk)) break;
         }

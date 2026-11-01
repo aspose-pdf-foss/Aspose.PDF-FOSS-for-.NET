@@ -17,9 +17,11 @@ public sealed partial class Document
         var ae = a * 0.91;
         var v = new double[col.vals.Length];
         for (var i = 0; i < v.Length; i++)
-            v[i] = !blendIt ? col.vals[i]
-                : col.comps == 4 ? col.vals[i] * ae          // cmyk: white = 0
-                : 1 - (1 - col.vals[i]) * ae;                // gray/rgb: white = 1
+        {
+            if (!blendIt) v[i] = col.vals[i];
+            else if (col.comps == 4) v[i] = col.vals[i] * ae;  // cmyk: white = 0
+            else v[i] = 1 - (1 - col.vals[i]) * ae;
+        }                // gray/rgb: white = 1
         var op = col.comps switch
         {
             1 => stroke ? "G" : "g",
@@ -53,20 +55,57 @@ public sealed partial class Document
                           || (tp.blend != "Normal" && tp.blend != "Compatible")
                           || tp.softMask;
 
+    /// <summary>A text run whose look only a composite keeps: one under a blend mode or a soft mask, or one
+    /// whose fill or stroke - whichever its rendering mode paints - is under a fractional constant alpha. The
+    /// text stays vector (extractable, made opaque by the neutralisation) and the composite of its region is
+    /// drawn over it, as the reference does: a 20% poster glyph restated solid would hide the text beneath.</summary>
+    private static bool TransparentText(TransparentScanState tp)
+        => (tp.blend != "Normal" && tp.blend != "Compatible") || tp.softMask
+           || (!tp.embeddedCompositeFont
+               && ((PaintsFill(tp.textRender) && tp.fillA is > 0 and < 1)
+                   || (PaintsStroke(tp.textRender) && tp.strokeA is > 0 and < 1)));
+
+    /// <summary>Whether the font a Tf selects is a composite (Type0) font whose program the file embeds. The
+    /// reference leaves constant-alpha text in such a font to the neutralisation alone (measured: a deck's
+    /// shadow runs in an embedded Identity-H font convert to solid vector text with no raster, while the same
+    /// runs in a simple font, embedded or not, or in that font with its program removed, are composited).</summary>
+    private bool IsEmbeddedCompositeFont(PdfDictionary resources, string? name)
+    {
+        if (name is null || _reader.ResolveDict(resources.Get("Font")) is not { } fonts
+            || _reader.ResolveDict(fonts.Get(name)) is not { } font || font.GetName("Subtype") != "Type0")
+            return false;
+        var descendant = _reader.ResolveArray(font.Get("DescendantFonts")) is { Count: > 0 } kids ? _reader.ResolveDict(kids[0]) : null;
+        var descriptor = descendant is null ? null : _reader.ResolveDict(descendant.Get("FontDescriptor"));
+        return descriptor is not null
+               && (descriptor.Get("FontFile2") is not null || descriptor.Get("FontFile3") is not null || descriptor.Get("FontFile") is not null);
+    }
+
+    private const int FillClipTextMode = 4;
+    private const int StrokeClipTextMode = 5;
+    private const int FillStrokeClipTextMode = 6;
+
+    private static bool PaintsFill(int mode) => mode is FillTextMode or FillStrokeTextMode or FillClipTextMode or FillStrokeClipTextMode;
+
+    private static bool PaintsStroke(int mode) => mode is StrokeTextMode or FillStrokeTextMode or StrokeClipTextMode or FillStrokeClipTextMode;
+
     /// <summary>The state operators of the scan: the q/Q stack, the CTM, the ExtGState alpha and blend, the text font and matrix.</summary>
-    private void ScanStateOperator(TransparentScanState tp, double fillScale, double strokeScale, string token)
+    private static void ScanStateOperator(TransparentScanState tp, double fillScale, double strokeScale, string token)
     {
         switch (token)
         {
             case "q":
-                tp.stack.Push((tp.ctm, tp.fillA, tp.strokeA, tp.blend, tp.softMask, tp.fillCol, tp.strokeCol));
+                tp.stack.Push((tp.ctm, tp.fillA, tp.strokeA, tp.blend, tp.softMask, tp.fillCol, tp.strokeCol, tp.textRender));
                 break;
             case "Q":
-                if (tp.stack.Count > 0) (tp.ctm, tp.fillA, tp.strokeA, tp.blend, tp.softMask, tp.fillCol, tp.strokeCol) = tp.stack.Pop();
+                if (tp.stack.Count > 0) (tp.ctm, tp.fillA, tp.strokeA, tp.blend, tp.softMask, tp.fillCol, tp.strokeCol, tp.textRender) = tp.stack.Pop();
+                break;
+            case "Tr":
+                if (tp.nums.Count >= 1) tp.textRender = (int)tp.nums[^1];
                 break;
             case "cm":
                 if (tp.nums.Count >= 6)
-                    tp.ctm = new SimMatrix(tp.nums[^6], tp.nums[^5], tp.nums[^4], tp.nums[^3], tp.nums[^2], tp.nums[^1]).Concat(tp.ctm);
+                    // The new matrix applies first, then the one in force (Concat(m) is m, then this).
+                    tp.ctm = tp.ctm.Concat(new SimMatrix(tp.nums[^6], tp.nums[^5], tp.nums[^4], tp.nums[^3], tp.nums[^2], tp.nums[^1]));
                 break;
             case "gs" when tp.lastName is not null:
                 if (tp.gsInfo.TryGetValue(tp.lastName, out var info))
@@ -81,13 +120,20 @@ public sealed partial class Document
                 if (tp.nums.Count >= 1) tp.fontSize = tp.nums[^1];
                 break;
             case "Tm":
-                if (tp.nums.Count >= 6) { tp.tmX = tp.nums[^2]; tp.tmY = tp.nums[^1]; }
+                if (tp.nums.Count >= 6) tp.tm = new SimMatrix(tp.nums[^6], tp.nums[^5], tp.nums[^4], tp.nums[^3], tp.nums[^2], tp.nums[^1]);
+                break;
+            case "BT":
+                tp.tm = SimMatrix.Identity;
+                break;
+            // A line move: the next run starts that far along the text matrix.
+            case "Td" or "TD":
+                if (tp.nums.Count >= 2) tp.tm = tp.tm.Concat(new SimMatrix(1, 0, 0, 1, tp.nums[^2], tp.nums[^1]));
                 break;
         }
     }
 
     /// <summary>The colour operators: the fill and stroke colour the transparent paint is simulated from.</summary>
-    private void ScanColorOperator(TransparentScanState tp, string token)
+    private static void ScanColorOperator(TransparentScanState tp, string token)
     {
         switch (token)
         {
@@ -125,7 +171,7 @@ public sealed partial class Document
 
     /// <summary>The path operators: points collected, and a painted path replaced by its simulated opaque colour.</summary>
     /// <returns>The operator's replacement text, or null when the token is written through unchanged.</returns>
-    private string? ScanPathOperator(TransparentScanState tp, List<double[]> regions, double fillScale, double strokeScale, bool recolor, string token)
+    private static string? ScanPathOperator(TransparentScanState tp, List<double[]> regions, double fillScale, double strokeScale, bool recolor, string token)
     {
         string? replacement = null;
         switch (token)
@@ -159,10 +205,17 @@ public sealed partial class Document
                 }
                 break;
             case "f" or "F" or "f*" or "B" or "B*" or "b" or "b*" or "S" or "s":
-                if (Transparent(tp))
+                var usesFill = token is not ("S" or "s");
+                var usesStroke = token is "S" or "s" or "B" or "B*" or "b" or "b*";
+                if ((!usesFill || tp.fillA == 0) && (!usesStroke || tp.strokeA == 0))
                 {
-                    var usesFill = token is not ("S" or "s");
-                    var usesStroke = token is "S" or "s" or "B" or "B*" or "b" or "b*";
+                    // A paint under an alpha of 0 shows nothing: it stays a no-op, instead of
+                    // becoming opaque once the alpha is neutralised. No region: there is no look to keep.
+                    replacement = "n";
+                    tp.changed = true;
+                }
+                else if (Transparent(tp))
+                {
                     if (recolor)
                     {
                         // Recolour (Mask) mode applies ONLY to alpha inherited
@@ -237,8 +290,8 @@ public sealed partial class Document
                             var fres = _reader.ResolveDict(xs.Dict.Get("Resources")) ?? resources;
                             var fm = tp.ctm;
                             if (_reader.Resolve(xs.Dict.Get("Matrix")) is PdfArray fmArr && fmArr.Count == 6)
-                                fm = new SimMatrix(Num(fmArr[0]), Num(fmArr[1]), Num(fmArr[2]),
-                                    Num(fmArr[3]), Num(fmArr[4]), Num(fmArr[5])).Concat(tp.ctm);
+                                fm = tp.ctm.Concat(new SimMatrix(Num(fmArr[0]), Num(fmArr[1]), Num(fmArr[2]),
+                                    Num(fmArr[3]), Num(fmArr[4]), Num(fmArr[5])));
                             // A /Group form composites its RESULT at the alpha
                             // active here, so its inner gs values scale by it; a
                             // non-group form shares this content's group context.
@@ -255,12 +308,12 @@ public sealed partial class Document
     }
 
     /// <summary>The scan's starting state for one content stream: its text, output, matrices, alphas, colours and path box.</summary>
-    private void OpenTransparentScan(TransparentScanState tp, byte[] contentBytes, SimMatrix ctm0, double fillA0, double strokeA0, string blend0)
+    private static void OpenTransparentScan(TransparentScanState tp, byte[] contentBytes, SimMatrix ctm0, double fillA0, double strokeA0, string blend0)
     {
         tp.text = Compat.Latin1.GetString(contentBytes);
         tp.output = new System.Text.StringBuilder(tp.text.Length);
         tp.stack = new Stack<(SimMatrix Ctm, double FillA, double StrokeA, string Bm, bool Sm,
-            (int comps, double[] vals)? FillCol, (int comps, double[] vals)? StrokeCol)>();
+            (int comps, double[] vals)? FillCol, (int comps, double[] vals)? StrokeCol, int Tr)>();
         tp.ctm = ctm0;
         tp.fillA = fillA0;
         tp.strokeA = strokeA0;
@@ -268,6 +321,8 @@ public sealed partial class Document
         tp.softMask = false;
         tp.fillCol = (1, new[] { 0.0 });
         tp.strokeCol = (1, new[] { 0.0 });
+        tp.textRender = FillTextMode;
+        tp.operandStart = 0;
 
         tp.lastName = null;
         tp.nums = new List<double>(8);
@@ -279,8 +334,7 @@ public sealed partial class Document
         tp.pMaxX = double.MinValue;
         tp.pMaxY = double.MinValue;
         tp.hasPath = false;
-        tp.tmX = 0;
-        tp.tmY = 0;
+        tp.tm = SimMatrix.Identity;
         tp.fontSize = 0;
         tp.lastStringLen = 0;
     }
@@ -314,64 +368,116 @@ public sealed partial class Document
             return true;
         }
 
+        var tokEnd = tp.pos;
+        while (tokEnd < tp.text.Length && !char.IsWhiteSpace(tp.text[tokEnd])
+               && tp.text[tokEnd] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
+            tokEnd++;
+        var token = tp.text[tp.pos..tokEnd];
+
+        if (double.TryParse(token, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var num))
         {
-            var end = tp.pos;
-            while (end < tp.text.Length && !char.IsWhiteSpace(tp.text[end])
-                   && tp.text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
-                end++;
-            var token = tp.text[tp.pos..end];
-
-            if (double.TryParse(token, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var num))
-            {
-                tp.nums.Add(num);
-                tp.output.Append(token);
-                tp.pos = end;
-                return true;
-            }
-
-            string? replacement = null;
-            switch (token)
-            {
-                case "BI":
-                    tp.bailOut = true; // inline image: bail out, keep the page as-is
-                    return false;
-                case "q": case "Q": case "cm": case "gs": case "Tf": case "Tm":
-                    ScanStateOperator(tp, fillScale, strokeScale, token);
-                    break;
-                case "g": case "G": case "rg": case "RG": case "k": case "K": case "sc": case "scn": case "SC": case "SCN":
-                    ScanColorOperator(tp, token);
-                    break;
-                case "re": case "m": case "l": case "c": case "v": case "y": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "S": case "s": case "n":
-                    replacement = ScanPathOperator(tp, regions, fillScale, strokeScale, recolor, token);
-                    break;
-                case "Tj" or "TJ" or "'" or "\"":
-                    // Recolour (Mask) mode never rasterises: transparent text keeps
-                    // the legacy Mask behaviour (neutralised opaque, as always).
-                    if (Transparent(tp) && tp.fontSize > 0 && !recolor)
-                    {
-                        var (dx0, dy0) = tp.ctm.Apply(tp.tmX, tp.tmY - 0.3 * tp.fontSize);
-                        var (dx1, dy1) = tp.ctm.Apply(tp.tmX + Math.Max(1, tp.lastStringLen) * 0.55 * tp.fontSize, tp.tmY + tp.fontSize);
-                        regions.Add(new[]
-                        {
-                            Math.Min(dx0, dx1), Math.Min(dy0, dy1),
-                            Math.Max(dx0, dx1), Math.Max(dy0, dy1),
-                        });
-                    }
-                    break;
-                case "Do":
-                    ScanXObjectOperator(tp, resources, regions, formRewrites, visited, fillScale, strokeScale, recolor, token);
-                    break;
-            }
-            tp.nums.Clear();
-            tp.output.Append(replacement ?? token);
-            tp.pos = end;
+            tp.nums.Add(num);
+            tp.output.Append(token);
+            tp.pos = tokEnd;
+            return true;
         }
+
+        string? replacement = null;
+        switch (token)
+        {
+            case "BI":
+                tp.bailOut = true; // inline image: bail out, keep the page as-is
+                return false;
+            case "q": case "Q": case "cm": case "gs": case "Tf": case "Tm": case "Tr": case "BT": case "Td": case "TD":
+                ScanStateOperator(tp, fillScale, strokeScale, token);
+                if (token == "Tf") tp.embeddedCompositeFont = IsEmbeddedCompositeFont(resources, tp.lastName);
+                break;
+            case "g": case "G": case "rg": case "RG": case "k": case "K": case "sc": case "scn": case "SC": case "SCN":
+                ScanColorOperator(tp, token);
+                break;
+            case "re": case "m": case "l": case "c": case "v": case "y": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "S": case "s": case "n":
+                replacement = ScanPathOperator(tp, regions, fillScale, strokeScale, recolor, token);
+                break;
+            case "Tj" or "TJ" or "'" or "\"":
+                if (HiddenTextMode(tp) is var hidden and >= 0)
+                {
+                    // Text shown under an alpha of 0 paints nothing: it is shown in the invisible
+                    // mode (the mode restored after it), instead of turning opaque with the alpha.
+                    tp.output.Insert(tp.operandStart, $" {hidden} Tr ");
+                    replacement = $"{token} {tp.textRender} Tr";
+                    tp.changed = true;
+                }
+                // Recolour (Mask) mode never rasterises: transparent text keeps
+                // the legacy Mask behaviour (neutralised opaque, as always).
+                else if (TransparentText(tp) && tp.fontSize > 0 && !recolor)
+                {
+                    regions.Add(TextRunRegion(tp));
+                }
+                break;
+            case "Do":
+                ScanXObjectOperator(tp, resources, regions, formRewrites, visited, fillScale, strokeScale, recolor, token);
+                break;
+        }
+        tp.nums.Clear();
+        tp.output.Append(replacement ?? token);
+        tp.operandStart = tp.output.Length;
+        tp.pos = tokEnd;
         return true;
     }
 
+    /// <summary>The run's advance is taken at a full em per character, as no glyph widths are read here: the
+    /// region covers the run with room to spare, and the composite of a little more of the page changes nothing.</summary>
+    private const double TextRegionEmsPerChar = 1.0;
+
+    /// <summary>How far below the baseline, and above it, the region reaches, in ems.</summary>
+    private const double TextRegionDescentEms = 0.3;
+    private const double TextRegionAscentEms = 1.0;
+
+    /// <summary>The device-space box of the text run just shown: its em box through the text matrix and the CTM.</summary>
+    private static double[] TextRunRegion(TransparentScanState tp)
+    {
+        var width = Math.Max(1, tp.lastStringLen) * TextRegionEmsPerChar * tp.fontSize;
+        var bottom = -TextRegionDescentEms * tp.fontSize;
+        var top = TextRegionAscentEms * tp.fontSize;
+        var box = new[] { double.MaxValue, double.MaxValue, double.MinValue, double.MinValue };
+        foreach (var (u, v) in new[] { (0.0, bottom), (width, bottom), (0.0, top), (width, top) })
+        {
+            var (tx, ty) = tp.tm.Apply(u, v);
+            var (dx, dy) = tp.ctm.Apply(tx, ty);
+            box[0] = Math.Min(box[0], dx);
+            box[1] = Math.Min(box[1], dy);
+            box[2] = Math.Max(box[2], dx);
+            box[3] = Math.Max(box[3], dy);
+        }
+        return box;
+    }
+
+    private const int FillTextMode = 0;
+    private const int StrokeTextMode = 1;
+    private const int FillStrokeTextMode = 2;
+    private const int InvisibleTextMode = 3;
+
+    /// <summary>The text rendering mode that leaves out the channels painted with an alpha of 0
+    /// (fill, stroke or both), or -1 when the current mode paints nothing with such a channel.
+    /// The clipping modes are left alone: they add to the clip whatever they paint.</summary>
+    private static int HiddenTextMode(TransparentScanState tp)
+    {
+        var fillHidden = tp.fillA == 0;
+        var strokeHidden = tp.strokeA == 0;
+        return tp.textRender switch
+        {
+            FillTextMode when fillHidden => InvisibleTextMode,
+            StrokeTextMode when strokeHidden => InvisibleTextMode,
+            FillStrokeTextMode when fillHidden && strokeHidden => InvisibleTextMode,
+            FillStrokeTextMode when fillHidden => StrokeTextMode,
+            FillStrokeTextMode when strokeHidden => FillTextMode,
+            _ => -1,
+        };
+    }
+
     /// <summary>A string or hex token is copied through untouched, its length remembered for the text-matrix advance.</summary>
-    private bool CopyStringOrHexToken(TransparentScanState tp, char c)
+    private static bool CopyStringOrHexToken(TransparentScanState tp, char c)
     {
         if (c == '(')
         {

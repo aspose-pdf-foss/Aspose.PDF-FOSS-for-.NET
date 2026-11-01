@@ -37,11 +37,10 @@ public partial class Table
     /// the body rows are laid on rather than shrinking to its natural height.</summary>
     private double BandSliceHeight(RowPlan plan)
     {
-        var contentH = plan.LineCount == 0
-            ? plan.MinBlankHeight
-            : plan.CssContentH > 0
-                ? CssRowContentH(plan)
-                : (plan.LineCount - 1) * plan.LineHeight + plan.TightLine;
+        double contentH;
+        if (plan.LineCount == 0) contentH = plan.MinBlankHeight;
+        else if (plan.CssContentH > 0) contentH = CssRowContentH(plan);
+        else contentH = (plan.LineCount - 1) * plan.LineHeight + plan.TightLine;
         var sliceH = plan.LineCount == 0 || plan.IsBlankRow ? contentH : contentH + plan.VertPadding;
         var floor = MinRowFloor(plan);
         return floor > sliceH ? floor : sliceH;

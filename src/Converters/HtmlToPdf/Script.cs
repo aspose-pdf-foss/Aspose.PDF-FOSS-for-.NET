@@ -13,12 +13,14 @@ internal static partial class HtmlToPdfConverter
     // engine is out of scope; instead a micro-interpreter covers the STRAIGHT-LINE
     // subset such pages actually use:
     //
+#pragma warning disable S125 // the grammar table quotes the JavaScript it accepts
     //   assignments        x = expr;  var x = expr;  x += expr;
     //   expressions        'str' / "str" literals, numbers, [ 'a', 'b' ] arrays,
     //                      identifiers, arr[i] indexing, arr.length, + concatenation
     //   counted loop       for (var i = 0; i < arr.length; i++) { ...assignments... }
     //   DOM tail           document.getElementsByTagName('body')[0]
     //                      document.createTextNode(x) · body.appendChild(node)
+#pragma warning restore S125
     //
     // Each <script> body either parses WHOLE into this grammar (its appendChild
     // text is then injected where the script tag stood, exactly where the DOM got
@@ -28,7 +30,7 @@ internal static partial class HtmlToPdfConverter
     /// calls added to the document; leave every other script untouched.</summary>
     private static string ApplyTrivialDomScripts(string html)
     {
-        return Regex.Replace(html, @"<script[^>]*>([\s\S]*?)</script>", m =>
+        return SafeRegex.Replace(html, @"<script[^>]*>([\s\S]*?)</script>", m =>
         {
             var body = m.Groups[1].Value;
             return TryEvalTrivialDomScript(body) is { } text ? text : m.Value;
@@ -38,7 +40,9 @@ internal static partial class HtmlToPdfConverter
     private sealed class JsVal
     {
         public string? Str;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double Num;
+#pragma warning restore S3218
         public bool IsNum;
         public List<string>? Arr;
         public bool IsBody;          // the document.body element
@@ -68,8 +72,10 @@ internal static partial class HtmlToPdfConverter
             while (pos < block.Length && (char.IsWhiteSpace(block[pos]) || block[pos] == ';')) pos++;
             if (pos >= block.Length) return true;
 
+#pragma warning disable S125 // the JavaScript shape the pattern matches
             // for (var i = 0; i < arr.length; i++) { body }
-            var forM = Regex.Match(block[pos..],
+#pragma warning restore S125
+            var forM = SafeRegex.Match(block[pos..],
                 @"\Afor\s*\(\s*(?:var\s+)?(\w+)\s*=\s*(\d+)\s*;\s*\1\s*<\s*(\w+)\.length\s*;\s*\1\+\+\s*\)\s*\{",
                 RegexOptions.Singleline);
             if (forM.Success)
@@ -110,7 +116,7 @@ internal static partial class HtmlToPdfConverter
         for (var i = pos; i < s.Length; i++)
         {
             var c = s[i];
-            if (quote != '\0') { if (c == quote && s[i - 1] != '\\') quote = '\0'; continue; }
+            if (quote != '\0') { if (c == quote && s[i - 1] != '\\') { quote = '\0'; } continue; }
             if (c is '\'' or '"') quote = c;
             else if (c is '[' or '(' or '{') depth++;
             else if (c is ']' or ')' or '}') depth--;
@@ -133,7 +139,7 @@ internal static partial class HtmlToPdfConverter
     private static bool EvalStatement(string stmt, Dictionary<string, JsVal> vars, StringBuilder output)
     {
         // x.appendChild(y)
-        var app = Regex.Match(stmt, @"^(\w+)\.appendChild\s*\(\s*(\w+)\s*\)$");
+        var app = SafeRegex.Match(stmt, @"^(\w+)\.appendChild\s*\(\s*(\w+)\s*\)$");
         if (app.Success)
         {
             if (!vars.TryGetValue(app.Groups[1].Value, out var target) || !target.IsBody) return false;
@@ -143,17 +149,17 @@ internal static partial class HtmlToPdfConverter
         }
 
         // [var] name = expr   ·   name += expr
-        var asg = Regex.Match(stmt, @"^(?:var\s+)?(\w+)\s*(\+?=)\s*(.+)$", RegexOptions.Singleline);
+        var asg = SafeRegex.Match(stmt, @"^(?:var\s+)?(\w+)\s*(\+?=)\s*(.+)$", RegexOptions.Singleline);
         if (!asg.Success) return false;
         var name = asg.Groups[1].Value;
         var rhs = asg.Groups[3].Value.Trim();
 
         JsVal? val;
         // document.getElementsByTagName('body')[0]
-        if (Regex.IsMatch(rhs, @"^document\.getElementsByTagName\s*\(\s*['""]body['""]\s*\)\s*\[\s*0\s*\]$"))
+        if (SafeRegex.IsMatch(rhs, @"^document\.getElementsByTagName\s*\(\s*['""]body['""]\s*\)\s*\[\s*0\s*\]$"))
             val = new JsVal { IsBody = true };
         // document.createTextNode(expr)
-        else if (Regex.Match(rhs, @"^document\.createTextNode\s*\(\s*(.+?)\s*\)$") is { Success: true } ctn)
+        else if (SafeRegex.Match(rhs, @"^document\.createTextNode\s*\(\s*(.+?)\s*\)$") is { Success: true } ctn)
         {
             if (EvalExpr(ctn.Groups[1].Value, vars) is not { Str: not null } tv) return false;
             val = new JsVal { TextNode = tv.Str };
@@ -206,12 +212,12 @@ internal static partial class HtmlToPdfConverter
             else if (double.TryParse(term, System.Globalization.NumberStyles.Float,
                          System.Globalization.CultureInfo.InvariantCulture, out var n))
                 tv = new JsVal { IsNum = true, Num = n };
-            else if (Regex.Match(term, @"^(\w+)\.length$") is { Success: true } lm)
+            else if (SafeRegex.Match(term, @"^(\w+)\.length$") is { Success: true } lm)
             {
                 if (!vars.TryGetValue(lm.Groups[1].Value, out var av) || av.Arr is null) return null;
                 tv = new JsVal { IsNum = true, Num = av.Arr.Count };
             }
-            else if (Regex.Match(term, @"^(\w+)\s*\[\s*(\w+)\s*\]$") is { Success: true } ix)
+            else if (SafeRegex.Match(term, @"^(\w+)\s*\[\s*(\w+)\s*\]$") is { Success: true } ix)
             {
                 if (!vars.TryGetValue(ix.Groups[1].Value, out var av) || av.Arr is null) return null;
                 double idx;
@@ -220,7 +226,7 @@ internal static partial class HtmlToPdfConverter
                 if (idx < 0 || idx >= av.Arr.Count || idx % 1 != 0) return null;
                 tv = new JsVal { Str = av.Arr[(int)idx] };
             }
-            else if (Regex.IsMatch(term, @"^\w+$") && vars.TryGetValue(term, out var vv))
+            else if (SafeRegex.IsMatch(term, @"^\w+$") && vars.TryGetValue(term, out var vv))
                 tv = vv;
             else
                 return null;
@@ -250,7 +256,7 @@ internal static partial class HtmlToPdfConverter
         for (var i = 0; i < s.Length; i++)
         {
             var c = s[i];
-            if (quote != '\0') { if (c == quote && s[i - 1] != '\\') quote = '\0'; continue; }
+            if (quote != '\0') { if (c == quote && s[i - 1] != '\\') { quote = '\0'; } continue; }
             if (c is '\'' or '"') quote = c;
             else if (c is '[' or '(' or '{') depth++;
             else if (c is ']' or ')' or '}') depth--;

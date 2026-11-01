@@ -149,7 +149,9 @@ internal sealed partial class TextStateModifier
 
         // Use enough precision so size * tmScale rounds back to the intended value
         string sizeStr;
+#pragma warning disable S1244 // integrality test - exact by definition
         if (newSize == Math.Floor(newSize))
+#pragma warning restore S1244
             sizeStr = ((int)newSize).ToString(CultureInfo.InvariantCulture);
         else
             sizeStr = newSize.ToString("R", CultureInfo.InvariantCulture); // round-trip format
@@ -174,7 +176,7 @@ internal sealed partial class TextStateModifier
     internal readonly record struct OverflowRelay(double SourceSpaceW, double Drop);
 
     private static readonly System.Text.RegularExpressions.Regex SimpleTm =
-        new(@"1 0 0 1 (-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?) Tm");
+        new(@"1 0 0 1 (-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?) Tm", System.Text.RegularExpressions.RegexOptions.None, RegexLimits.Timeout);
 
     /// <summary>Re-seat the source line after a font assignment left its replaced run
     /// wider than the sheet: the matched run (seated at the anchor) keeps its x and
@@ -189,7 +191,7 @@ internal sealed partial class TextStateModifier
         var newY = baselineY - r.Drop;
         var tailX = matchX + r.SourceSpaceW;
         static string Fmt(double v) => v.ToString("0.0###", CultureInfo.InvariantCulture);
-        var patched = SimpleTm.Replace(s, m =>
+        var patched = SafeRegex.Replace(SimpleTm, s, m =>
         {
             var x = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
             var y = double.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
@@ -221,10 +223,31 @@ internal sealed partial class TextStateModifier
         Dictionary<int, string>? toUnicode = null;
         if (fz.fonts.TryGetValue(show.fontRes, out var fontDict))
             toUnicode = TextAbsorber.ParseToUnicodeFromDict(fontDict, fz.reader);
-        var items = LexShowItems(fz.streamBytes, show.showStart, show.showEnd, toUnicode, out var opEnd);
+        var rawOld = RawTfFor(fz.streamBytes, show);
+        var scale = show.effSize / Math.Max(0.0001, rawOld);
+        var rawNew = newSize / Math.Max(0.0001, scale);
+        return SplitShowAtCodes(fz.streamBytes, show.showStart, show.showEnd, toUnicode, matchStart, matchEnd,
+            TfText(show.fontRes, rawNew), TfText(show.fontRes, rawOld), show.decoded.Length);
+    }
+
+    private static string TfText(string fontRes, double rawSize)
+        => " /" + fontRes + " " + rawSize.ToString("0.####", CultureInfo.InvariantCulture) + " Tf ";
+
+    /// <summary>Split one show operator at the codes covering characters [<paramref name="matchStart"/>,
+    /// <paramref name="matchEnd"/>) of its text: the codes before as they were, then <paramref name="beforeOps"/>,
+    /// the match's codes, <paramref name="afterOps"/> and the codes after. Each piece is a TJ of hex codes keeping
+    /// its kern numbers - a kern belongs to the code it precedes - so the cursor runs on through the pieces as
+    /// through the one show; a string in any form, of one- or two-byte codes, is cut this way - or, with
+    /// <paramref name="piecesAsTj"/>, a piece without kerns is one string under Tj, as a Tj operand was shown. Null
+    /// when the match does not start and end on code boundaries, the codes show other than
+    /// <paramref name="showChars"/> characters (when given), or the operand cannot be re-lexed.</summary>
+    private static byte[]? SplitShowAtCodes(byte[] stream, int showStart, int showEnd, Dictionary<int, string>? toUnicode,
+        int matchStart, int matchEnd, string beforeOps, string afterOps, int? showChars = null, bool piecesAsTj = false)
+    {
+        var items = LexShowItems(stream, showStart, showEnd, toUnicode, out var opEnd);
         if (items is null || opEnd <= 0) return null;
         // Locate the code range [first, last] covering the match; the match must start and
-        // end exactly on code boundaries, else the resize would reach text the caller did not name.
+        // end exactly on code boundaries, else the change would reach text the caller did not name.
         int first = -1, last = -1, chars = 0;
         for (var i = 0; i < items.Count; i++)
         {
@@ -238,32 +261,25 @@ internal sealed partial class TextStateModifier
             if (first < 0) first = i;
             last = i;
         }
-        if (first < 0 || last < first || chars != show.decoded.Length) return null;
-        var rawOld = RawTfFor(fz.streamBytes, show);
-        var scale = show.effSize / Math.Max(0.0001, rawOld);
-        var rawNew = newSize / Math.Max(0.0001, scale);
+        if (first < 0 || last < first || (showChars is int expected && chars != expected)) return null;
         // A kern ahead of the first matched code opens the matched group (it belongs to the
         // code it precedes); the kerns after the last matched code open the tail group.
         var preEnd = first;
         while (preEnd > 0 && items[preEnd - 1].Kern is not null) preEnd--;
         var postStart = last + 1;
         var sb = new StringBuilder();
-        EmitShowGroup(sb, items, 0, preEnd);
-        AppendTf(sb, show.fontRes!, rawNew);
-        EmitShowGroup(sb, items, preEnd, postStart);
-        AppendTf(sb, show.fontRes!, rawOld);
-        EmitShowGroup(sb, items, postStart, items.Count);
+        EmitShowGroup(sb, items, 0, preEnd, piecesAsTj);
+        sb.Append(beforeOps);
+        EmitShowGroup(sb, items, preEnd, postStart, piecesAsTj);
+        sb.Append(afterOps);
+        EmitShowGroup(sb, items, postStart, items.Count, piecesAsTj);
         var piece = Compat.Latin1.GetBytes(sb.ToString());
-        var result = new byte[fz.streamBytes.Length - (opEnd - show.showStart) + piece.Length];
-        Array.Copy(fz.streamBytes, 0, result, 0, show.showStart);
-        piece.CopyTo(result, show.showStart);
-        Array.Copy(fz.streamBytes, opEnd, result, show.showStart + piece.Length, fz.streamBytes.Length - opEnd);
+        var result = new byte[stream.Length - (opEnd - showStart) + piece.Length];
+        Array.Copy(stream, 0, result, 0, showStart);
+        piece.CopyTo(result, showStart);
+        Array.Copy(stream, opEnd, result, showStart + piece.Length, stream.Length - opEnd);
         return result;
     }
-
-    private static void AppendTf(StringBuilder sb, string fontRes, double rawSize)
-        => sb.Append(" /").Append(fontRes).Append(' ')
-             .Append(rawSize.ToString("0.####", CultureInfo.InvariantCulture)).Append(" Tf ");
 
     /// <summary>One item of a show operand: a code (its bytes and decoded text) or a kern
     /// number (its raw spelling).</summary>
@@ -335,10 +351,19 @@ internal sealed partial class TextStateModifier
         }
     }
 
-    /// <summary>Write the items in [from, to) as one TJ, every code as a hex string.</summary>
-    private static void EmitShowGroup(StringBuilder sb, List<ShowItem> items, int from, int to)
+    /// <summary>Write the items in [from, to) as one TJ, every code as a hex string - or, <paramref name="asTj"/> and
+    /// no kern among them, the codes as one hex string under Tj.</summary>
+    private static void EmitShowGroup(StringBuilder sb, List<ShowItem> items, int from, int to, bool asTj)
     {
         if (from >= to) return;
+        if (asTj && items.Skip(from).Take(to - from).All(it => it.Kern is null))
+        {
+            sb.Append('<');
+            for (var i = from; i < to; i++)
+                foreach (var b in items[i].Code!) sb.Append(b.ToString("X2"));
+            sb.Append("> Tj");
+            return;
+        }
         sb.Append('[');
         for (var i = from; i < to; i++)
         {

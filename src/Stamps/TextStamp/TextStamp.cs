@@ -103,7 +103,9 @@ public partial class TextStamp : Stamp
     /// <summary>When true, the renderer shrinks the font size until the text fits the stamp's Width/Height.</summary>
     public bool AutoAdjustFontSizeToFitStampRectangle { get; set; }
 
-    /// <summary>When false, the stamp records intent but skips drawing. Stored only.</summary>
+    /// <summary>When true, the stamp's text may be stroked as well as filled: an
+    /// <see cref="Stamp.OutlineWidth"/>, or an <see cref="Stamp.Opacity"/> of zero under a visible
+    /// <see cref="Stamp.OutlineOpacity"/>, draws the glyph outlines.</summary>
     public bool Draw { get; set; } = true;
 
     /// <summary>When true, the stamp's text is full-justified within the stamp width. Stored only.</summary>
@@ -182,8 +184,9 @@ public partial class TextStamp : Stamp
     {
         var fn = TextState?.FontName ?? FontName ?? "Helvetica";
         var family = fn;
-        foreach (var suffix in new[] { "-BoldOblique", "-BoldItalic", "-Bold", "-Oblique", "-Italic" })
-            if (family.EndsWith(suffix, StringComparison.Ordinal)) { family = family.Substring(0, family.Length - suffix.Length); break; }
+        var suffix = new[] { "-BoldOblique", "-BoldItalic", "-Bold", "-Oblique", "-Italic" }
+            .FirstOrDefault(suffix => family.EndsWith(suffix, StringComparison.Ordinal));
+        if (suffix is not null) family = family.Substring(0, family.Length - suffix.Length);
         if (!Std14ToTrueType.TryGetValue(family, out var ttFamily)) return null;
 
         var bold = TextState?.IsBold ?? false;
@@ -249,7 +252,8 @@ public partial class TextStamp : Stamp
         {
             if (sb.Length > 0) { runs.Add((curTtf, curName, sb.ToString())); sb.Clear(); }
         }
-        for (var i = 0; i < row.Length; i++)
+        var i = 0;
+        while (i < row.Length)
         {
             int cp = row[i];
             var pair = false;
@@ -271,6 +275,7 @@ public partial class TextStamp : Stamp
             if (!ReferenceEquals(tgtTtf, curTtf)) { Flush(); curTtf = tgtTtf; curName = tgtName; }
             sb.Append(row[i]);
             if (pair) { sb.Append(row[i + 1]); i++; }
+            i++;
         }
         Flush();
         return runs;
@@ -281,7 +286,8 @@ public partial class TextStamp : Stamp
     internal static (byte[] ttf, string name)? TryResolveCjkTtf(string text)
     {
         bool kana = false, hangul = false, han = false, extb = false;
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
             var ch = text[i];
             if (char.IsHighSurrogate(ch) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
@@ -289,21 +295,20 @@ public partial class TextStamp : Stamp
                 // CJK Ext-B and later planes (these are stamped in MingLiU-ExtB
                 // even when the caller declared a covering face).
                 if (char.ConvertToUtf32(ch, text[i + 1]) is >= 0x20000 and <= 0x3FFFF) extb = true;
-                i++;
+                i += 2;
                 continue;
             }
             if (ch is >= '぀' and <= 'ヿ') kana = true;
             else if (ch is >= '가' and <= '힯' or >= 'ᄀ' and <= 'ᇿ') hangul = true;
             else if (ch is >= '一' and <= '鿿' or >= '㐀' and <= '䶿') han = true;
+            i++;
         }
         if (!kana && !hangul && !han && !extb) return null;
-        var candidates = kana
-            ? new[] { "MS-Gothic", "MS Gothic", "Yu Gothic", "Meiryo" }
-            : hangul
-            ? new[] { "Malgun Gothic", "Gulim", "Batang" }
-            : han
-            ? new[] { "SimSun", "MS-Gothic", "Microsoft YaHei" }
-            : new[] { "MingLiU-ExtB", "SimSun-ExtB" };
+        string[] candidates;
+        if (kana) candidates = new[] { "MS-Gothic", "MS Gothic", "Yu Gothic", "Meiryo" };
+        else if (hangul) candidates = new[] { "Malgun Gothic", "Gulim", "Batang" };
+        else if (han) candidates = new[] { "SimSun", "MS-Gothic", "Microsoft YaHei" };
+        else candidates = new[] { "MingLiU-ExtB", "SimSun-ExtB" };
         foreach (var name in candidates)
         {
             var ttf = Aspose.Pdf.Text.SystemFontResolver.Resolve(name);
@@ -327,11 +332,12 @@ public partial class TextStamp : Stamp
         {
             if (charLevel)
             {
-                for (var i = 0; i < runText.Length; i++)
+                var i = 0;
+                while (i < runText.Length)
                 {
                     var len = char.IsHighSurrogate(runText[i]) && i + 1 < runText.Length ? 2 : 1;
                     tokens.Add((runTtf, runName, runText.Substring(i, len)));
-                    i += len - 1;
+                    i += len;
                 }
             }
             else
@@ -420,18 +426,20 @@ public partial class TextStamp : Stamp
         var pageHeight = page.Height;
         var blockHeight = Math.Max(1, rowCount) * lineHeight;
 
+        // An alignment places the block by the margins alone; XIndent/YIndent
+        // position a stamp that has none.
         var originX = HorizontalAlignment switch
         {
             HorizontalAlignment.Center => (pageWidth - scaledBlockWidth) / 2,
-            HorizontalAlignment.Right => pageWidth - scaledBlockWidth - XIndent - RightMargin,
+            HorizontalAlignment.Right => pageWidth - scaledBlockWidth - RightMargin,
             // LeftMargin stands in when no XIndent is set — the same fallback the
             // CID-stamp block placement applies.
             _ => XIndent > 0 ? XIndent : LeftMargin,
         };
 
         // topBaseline is the first line's baseline. Top: one line below the top
-        // edge; Bottom: leave room for the remaining lines above the bottom edge;
-        // Center: centre the whole block vertically.
+        // edge; Bottom: leave room for the remaining lines above the bottom edge; Center:
+        // centre the whole block vertically.
         // BottomMargin measures to the bottom of the text box (the descender), so
         // the last baseline seats one font descent above it — unless the caller
         // declared YIndent to BE the baseline, which seats exactly there.
@@ -439,7 +447,7 @@ public partial class TextStamp : Stamp
         var descentInset = (d < 0 ? -d / 1000.0 : 0.2) * fontSize;
         var topBaseline = VerticalAlignment switch
         {
-            VerticalAlignment.Top => pageHeight - TopMargin - YIndent - fontSize,
+            VerticalAlignment.Top => pageHeight - TopMargin - fontSize,
             VerticalAlignment.Center => (pageHeight + blockHeight) / 2 - fontSize,
             VerticalAlignment.Bottom => YIndent + BottomMargin + blockHeight - fontSize
                 + (YIndentIsBaseline ? 0 : descentInset),

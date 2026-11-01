@@ -24,6 +24,8 @@ private sealed class StepRowsState
     public string html = default!;
     public IReadOnlyDictionary<string, Dictionary<string, string>> css = default!;
     public double pageHeight = 0;
+    // the converter's load options: a step picture resolves against its base path and resource loader
+    public HtmlLoadOptions? options;
     public int srEnd;
     public string srBody = null!;
     public System.Text.RegularExpressions.Match bulletM = null!;

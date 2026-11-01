@@ -27,6 +27,8 @@ private sealed class MarginFragmentState
     // ascent/descent is the max over the fragment's own font
     // (the block strut) and every run on the line.
     public double mfSize;
+    // The radio buttons placed so far: each is a group of its own, named in fragment order.
+    public int mfRadios;
     public MarginInfo mfFirst = null!;
     public MarginInfo mfRest = null!;
     public double mfLeft;

@@ -9,21 +9,21 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextReplacer
 {
 // The helpers of the text re-flow, lifted out of ReflowFromMatch.
-    private FontMetrics? MetricsOf(ReflowState rf, CrossTextOp o)
+    private static FontMetrics? MetricsOf(ReflowState rf, CrossTextOp o)
     {
         if (o.FontDict is null) return null;
         if (rf.metricsCache.TryGetValue(o.FontDict, out var m)) return m;
         FontMetrics? built = null;
-        try { built = FontMetrics.FromFontDict(o.FontDict, rf.reader); } catch { }
+        try { built = FontMetrics.FromFontDict(o.FontDict, rf.reader); } catch { /* a font program that does not parse leaves the fallback metrics in place */ }
         rf.metricsCache[o.FontDict] = built;
         return built;
     }
 
-    private double PageX(ReflowState rf, CrossTextOp o) => o.CtmA * o.TmTx + o.CtmC * o.TmTy + o.CtmTx;
+    private static double PageX(CrossTextOp o) => o.CtmA * o.TmTx + o.CtmC * o.TmTy + o.CtmTx;
 
-    private double PageY(ReflowState rf, CrossTextOp o) => o.CtmB * o.TmTx + o.CtmD * o.TmTy + o.CtmTy;
+    private static double PageY(CrossTextOp o) => o.CtmB * o.TmTx + o.CtmD * o.TmTy + o.CtmTy;
 
-    private double ScaleOf(ReflowState rf, CrossTextOp o)
+    private static double ScaleOf(CrossTextOp o)
     {
         var det = Math.Abs(o.CtmA * o.CtmD - o.CtmB * o.CtmC);
         return det > 1e-12 ? Math.Sqrt(det) : 1.0;
@@ -31,11 +31,11 @@ public sealed partial class TextReplacer
 
     // The text-matrix scale multiplies every advance: producers often set
     // `/F 1 Tf` and carry the size in Tm (e.g. `33 0 0 33 … Tm`).
-    private double TmScaleOf(ReflowState rf, CrossTextOp o) => Math.Sqrt(o.TmA * o.TmA + o.TmB * o.TmB);
+    private static double TmScaleOf(CrossTextOp o) => Math.Sqrt(o.TmA * o.TmA + o.TmB * o.TmB);
 
     // Page-space advance of a byte run under an op's font state (glyph widths +
     // per-glyph Tc; the op's own TJ kerns only when measuring its full bytes).
-    private double AdvPage(ReflowState rf, CrossTextOp o, byte[] bytes, bool own)
+    private static double AdvPage(ReflowState rf, CrossTextOp o, byte[] bytes, bool own)
     {
         var m = MetricsOf(rf, o);
         double w;
@@ -50,7 +50,7 @@ public sealed partial class TextReplacer
         var glyphs = m?.IsCid == true ? (bytes.Length + 1) / 2 : bytes.Length;
         w += o.Tc * glyphs;
         if (own) w -= o.KernSum / 1000.0 * o.FontSize;
-        return w * TmScaleOf(rf, o) * ScaleOf(rf, o);
+        return w * TmScaleOf(o) * ScaleOf(o);
     }
 
     // The advance of this run's own SPACE glyph. A source line break that the flow
@@ -58,7 +58,7 @@ public sealed partial class TextReplacer
     // words, so text pulled up from the next line must not butt against the last word of
     // this one. The result is "even- tempered", not "even-tempered", with the
     // pulled-up run at 122.70 against this measure's 122.73.
-    private double SpaceAdv(ReflowState rf, CrossTextOp o)
+    private static double SpaceAdv(ReflowState rf, CrossTextOp o)
     {
         foreach (var b in o.Bytes)
         {
@@ -67,13 +67,13 @@ public sealed partial class TextReplacer
         }
         var sp32 = DecodeString(new byte[] { 32 }, o.ToUnicode, o.FontDict, rf.reader);
         if (sp32 == " ") return AdvPage(rf, o, new byte[] { 32 }, own: false);
-        return o.FontSize * 0.25 * TmScaleOf(rf, o) * ScaleOf(rf, o);
+        return o.FontSize * 0.25 * TmScaleOf(o) * ScaleOf(o);
     }
 
     // A line's TRAILING space does not count against the wrap margin: "…should
     // automatically " fits at 266.70 against a 264.63 column, and it is the space that
     // overhangs. Measuring it in breaks the line one word early.
-    private double TrailingSpaceAdv(ReflowState rf, CrossTextOp o, byte[] bytes)
+    private static double TrailingSpaceAdv(ReflowState rf, CrossTextOp o, byte[] bytes)
     {
         var n = bytes.Length;
         while (n > 0)
@@ -85,9 +85,9 @@ public sealed partial class TextReplacer
         return n == bytes.Length ? 0 : AdvPage(rf, o, bytes[n..], own: false);
     }
 
-    private int LineOf(ReflowState rf, CrossTextOp o)
+    private static int LineOf(ReflowState rf, CrossTextOp o)
     {
-        double py = PageY(rf, o); int best = -1; double bestD = rf.yTol;
+        double py = PageY(o); int best = -1; double bestD = rf.yTol;
         for (int li = 0; li < rf.lines.Count; li++)
         {
             double d = Math.Abs(py - rf.lines[li].y);
@@ -101,12 +101,12 @@ public sealed partial class TextReplacer
     // space code from the paragraph's own bytes: any byte in an affected run of the
     // same font that DECODES space-like is the font's space. Bail (so the caller
     // falls back) when any character has no code at all.
-    private byte[]? TryEncodeInFont(ReflowState rf, string text)
+    private static byte[]? TryEncodeInFont(ReflowState rf, string text)
     {
         if (rf.head.ToUnicode is null)
         {
-            foreach (var ch in text) if (ch > 0xFF) return null;
-            return EncodeString(text, null, rf.head.FontDict);
+            if (text.Any(ch => SimpleFontCode(ch, rf.head.FontDict) is null)) return null;
+            return EncodeString(text, null, rf.head.FontDict, rf.reader);
         }
         var rev = BuildReverseMap(rf.head.ToUnicode);
         int spaceCode = -1;
@@ -138,7 +138,7 @@ public sealed partial class TextReplacer
     // face is substituted, not that the metadata is merely sparse. (The facade
     // path's SimpleFontMissingGlyphChars deliberately requires an embedded
     // program — different semantics.)
-    private bool HeadWidthsLack(ReflowState rf, string text)
+    private static bool HeadWidthsLack(ReflowState rf, string text)
     {
         var fd = rf.head.FontDict;
         if (fd is null || fd.GetName("Subtype") == "Type0") return false;
@@ -148,10 +148,9 @@ public sealed partial class TextReplacer
         foreach (var ch in text)
         {
             if (ch == ' ') continue;
-            if (ch >= 0x100) return true;
-            if (ch < fc || ch >= fc + widths.Count) return true;
-            var wv = rf.reader.Resolve(widths[ch - fc]);
-            double width = wv is PdfInteger wi ? wi.Value : wv is PdfReal wr ? wr.Value : 0;
+            if (SimpleFontCode(ch, fd) is not { } code || code < fc || code >= fc + widths.Count) return true;
+            var wv = rf.reader.Resolve(widths[code - fc]);
+            double width = wv switch { PdfInteger wi => wi.Value, PdfReal wr => wr.Value, _ => 0 };
             if (width == 0) return true;
         }
         return false;
@@ -159,7 +158,7 @@ public sealed partial class TextReplacer
 
     // True when the run's own face gives every glyph the same advance - the source
     // grid the squeeze above preserves. Sampled over the run's distinct bytes.
-    private bool MonospacedRun(ReflowState rf, CrossTextOp op)
+    private static bool MonospacedRun(ReflowState rf, CrossTextOp op)
     {
         var seen = new Dictionary<byte, double>();
         foreach (var b in op.Bytes)
@@ -182,7 +181,7 @@ public sealed partial class TextReplacer
     }
 
     // Width, in the run's OWN face, of the first word of the text being replaced.
-    private double OriginalFirstWordWidth(ReflowState rf, CrossTextOp op, string searchText)
+    private static double OriginalFirstWordWidth(ReflowState rf, CrossTextOp op, string searchText)
     {
         var word = searchText;
         var cut = word.IndexOfAny([' ', '\r', '\n']);
@@ -198,16 +197,16 @@ public sealed partial class TextReplacer
     // run's gap is padded by the REPLACED text's Tc allowance as well
     // (followers sit Tc·len(old) right of the drawn end; a growing
     // replacement or an un-switched one abuts exactly).
-    private double SwitchedAdv(ReflowState rf, string text)
+    private static double SwitchedAdv(ReflowState rf, string text)
     {
         double w;
         try { w = rf.switchedFace!.MeasureString(text, rf.head.FontSize); }
         catch { w = rf.head.FontSize * 0.5 * text.Length; }
         w += rf.head.Tc * text.Length;
-        return w * TmScaleOf(rf, rf.head) * ScaleOf(rf, rf.head);
+        return w * TmScaleOf(rf.head) * ScaleOf(rf.head);
     }
 
-    private double BaseY(ReflowState rf, int li) => li < rf.lines.Count
+    private static double BaseY(ReflowState rf, int li) => li < rf.lines.Count
         ? rf.lineBaseY[li]!.Value
         : rf.lineBaseY[^1]!.Value - rf.newPitch * (li - rf.lines.Count + 1);
 
@@ -220,18 +219,18 @@ public sealed partial class TextReplacer
     // Width contributed by the TJ kerns falling strictly inside the byte range
     // [from, to) of a run. The offsets are recorded against the run's own array, so
     // a caller that has sliced the bytes passes the offset the slice starts at.
-    private double KernRange(ReflowState rf, CrossTextOp o, int from, int to)
+    private static double KernRange(CrossTextOp o, int from, int to)
     {
         if (o.KernAt is null) return 0;
         double k1000 = 0;
         foreach (var (at, amount) in o.KernAt)
             if (at > from && at < to) k1000 += amount;
-        return -k1000 / 1000.0 * o.FontSize * TmScaleOf(rf, o) * ScaleOf(rf, o);
+        return -k1000 / 1000.0 * o.FontSize * TmScaleOf(o) * ScaleOf(o);
     }
 
     // The kerns strictly inside a piece's byte range, with their run-relative byte
     // index, ready to be re-emitted in the piece's own TJ array.
-    private List<(int byteIndex, double amount)> KernsInside(ReflowState rf, CrossTextOp o, int off, int count)
+    private static List<(int byteIndex, double amount)> KernsInside(CrossTextOp o, int off, int count)
     {
         var result = new List<(int, double)>();
         if (o.KernAt is null) return result;
@@ -246,8 +245,8 @@ public sealed partial class TextReplacer
     // run spaced it, and on a justified line those kerns carry most of the
     // inter-word space; measuring pieces without them walks the cursor steadily left
     // of where it belongs.
-    private double PieceAdv(ReflowState rf, CrossTextOp o, byte[] bytes, int off, int count)
-        => AdvPage(rf, o, bytes[..count], own: false) + KernRange(rf, o, off, off + count);
+    private static double PieceAdv(ReflowState rf, CrossTextOp o, byte[] bytes, int off, int count)
+        => AdvPage(rf, o, bytes[..count], own: false) + KernRange(o, off, off + count);
 
     // `authoredLine` says whether the text is being fitted onto the line it was
     // AUTHORED on. The TJ kerns are that line's justification: they are part of
@@ -273,7 +272,7 @@ public sealed partial class TextReplacer
         // 548.7 against a 542.7 border — over, so the break falls before it.
         // Only kerns strictly INSIDE the prefix apply; the one that follows the break
         // belongs to the next line and is dropped with it.
-        double KernBefore(int byteCount) => authoredLine ? KernRange(rf, o, off, off + byteCount) : 0;
+        double KernBefore(int byteCount) => authoredLine ? KernRange(o, off, off + byteCount) : 0;
         double run = 0; int lastFit = -1;
         for (int k = 0; k < bytes.Length; k++)
         {
@@ -285,7 +284,7 @@ public sealed partial class TextReplacer
             double gw;
             try { gw = m.MeasureString(new[] { bytes[k] }, o.FontSize); }
             catch { gw = o.FontSize * 0.5; }
-            run += (gw + o.Tc) * TmScaleOf(rf, o) * ScaleOf(rf, o);
+            run += (gw + o.Tc) * TmScaleOf(o) * ScaleOf(o);
             if (run + KernBefore(k + 1) > budget) break;
         }
         return lastFit < 0 ? -1 : lastFit + 1; // piece keeps the space glyph
@@ -295,9 +294,9 @@ public sealed partial class TextReplacer
     // head line is dedented relative to its continuation lines;
     // each existing baseline keeps its own left margin). Lines created beyond the paragraph
     // continue at the last line's indent.
-    private double LeftOf(ReflowState rf, int li2) => li2 < rf.lines.Count ? rf.lines[li2].lx : rf.lines[^1].lx;
+    private static double LeftOf(ReflowState rf, int li2) => li2 < rf.lines.Count ? rf.lines[li2].lx : rf.lines[^1].lx;
 
-    private string PieceText(ReflowState rf, CrossTextOp o, byte[] bytes, string? sw)
+    private static string PieceText(ReflowState rf, CrossTextOp o, byte[] bytes, string? sw)
     {
         string text;
         if (sw is not null) text = sw;
@@ -318,9 +317,9 @@ public sealed partial class TextReplacer
         return end > 0 && text.Length - end >= 2 ? text[..end] : text;
     }
 
-    private string Coord(ReflowState rf, double v) => v.ToString("0.0", CultureInfo.InvariantCulture);
+    private static string Coord(double v) => v.ToString("0.0", CultureInfo.InvariantCulture);
 
-    private void NoteMove(ReflowState rf, CrossTextOp o, double x, int landedLine, int originalLine,
+    private static void NoteMove(ReflowState rf, CrossTextOp o, double x, int landedLine, int originalLine,
         byte[] bytes, string? sw)
     {
         if (rf.notes is null) return;
@@ -334,21 +333,21 @@ public sealed partial class TextReplacer
         {
             rf.notes.Add($"The word(s) '{text}' is(are) moved to the next line because "
                 + $"text reached paragraph right border near "
-                + $"{{X={Coord(rf, push.x)}, Y={Coord(rf, BaseY(rf, push.line))}}}.");
+                + $"{{X={Coord(push.x)}, Y={Coord(BaseY(rf, push.line))}}}.");
         }
         else if (landedLine < originalLine)
         {
             rf.notes.Add($"The word(s) '{text}' is(are) moved to previous line because "
                 + $"it has free space near "
-                + $"{{X={Coord(rf, x)}, Y={Coord(rf, BaseY(rf, landedLine))}}}.");
+                + $"{{X={Coord(x)}, Y={Coord(BaseY(rf, landedLine))}}}.");
         }
     }
 
     // Rewrite the stream. Pieces group back to their source op; ops are edited in
     // byte order regardless of reading order.
-    private string N(ReflowState rf, double v) => Math.Round(v, 5).ToString("0.#####", CultureInfo.InvariantCulture);
+    private static string N(double v) => Math.Round(v, 5).ToString("0.#####", CultureInfo.InvariantCulture);
 
-    private (double tx, double ty) SolveTm(ReflowState rf, CrossTextOp o, double px, double py)
+    private static (double tx, double ty) SolveTm(CrossTextOp o, double px, double py)
     {
         var det = o.CtmA * o.CtmD - o.CtmB * o.CtmC;
         if (Math.Abs(det) < 1e-12) return (o.TmTx, o.TmTy);
@@ -356,12 +355,12 @@ public sealed partial class TextReplacer
         return ((o.CtmD * dx - o.CtmC * dy) / det, (-o.CtmB * dx + o.CtmA * dy) / det);
     }
 
-    private string TmOf(ReflowState rf, CrossTextOp o, double tx, double ty) =>
-        $" {N(rf, o.TmA)} {N(rf, o.TmB)} {N(rf, o.TmC)} {N(rf, o.TmD)} {N(rf, tx)} {N(rf, ty)} Tm ";
+    private static string TmOf(CrossTextOp o, double tx, double ty) =>
+        $" {N(o.TmA)} {N(o.TmB)} {N(o.TmC)} {N(o.TmD)} {N(tx)} {N(ty)} Tm ";
 
     // Copy [lastWritePos, to) verbatim, splicing in the sorted insertions and
     // skipping the sorted deletion spans that fall inside the range.
-    private void CopyTo(ReflowState rf, int to)
+    private static void CopyTo(ReflowState rf, int to)
     {
         while (true)
         {

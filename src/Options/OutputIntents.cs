@@ -27,7 +27,9 @@ public sealed class OutputIntents : IEnumerable<OutputIntent>
         }
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
     public OutputIntent this[int index]
     {
@@ -56,9 +58,7 @@ public sealed class OutputIntents : IEnumerable<OutputIntent>
     public bool Contains(OutputIntent item)
     {
         if (item is null) return false;
-        foreach (var existing in this)
-            if (Equals(existing, item)) return true;
-        return false;
+        return this.Any(existing => Equals(existing, item));
     }
 
     public void CopyTo(OutputIntent[] array, int arrayIndex)

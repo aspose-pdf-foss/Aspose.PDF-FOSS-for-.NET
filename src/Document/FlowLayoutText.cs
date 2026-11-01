@@ -18,8 +18,12 @@ public sealed partial class Document
     {
         /// <summary>The size a styled run draws at: a note mark at half its parent's
         /// size, a superscript at the superscript ratio, else its own.</summary>
-        private static double StyledRunSize(StyledRun r) =>
-            r.NoteMark ? r.Size * MarkerSizeRatio : r.Sup ? r.Size * 0.583 : r.Size;
+        private static double StyledRunSize(StyledRun r)
+        {
+            if (r.NoteMark) return r.Size * MarkerSizeRatio;
+            if (r.Sup) return r.Size * 0.583;
+            return r.Size;
+        }
 
         private static double MeasureStyled(string text, StyledRun r, double size)
         {
@@ -51,12 +55,12 @@ public sealed partial class Document
             {
                 var (left, cells) = lines[lineIdx];
                 var m = MeasureStyledLine(cells, runs, lineIdx);
-                // A picture-only line takes the picture's own height and no leading;
-                // a line that also carries text keeps the text's pitch and lets the
+                // A picture-only line takes the picture's own height and no leading; a
+                // line that also carries text keeps the text's pitch and lets the
                 // picture overhang.
-                var lh = m.HasText || (m.MaxImage <= 0 && m.BreakSize <= 0)
-                    ? m.MaxBase + (prevHadText ? lineSpacing : 0)
-                    : m.MaxBase;
+                double lh;
+                if (m.HasText || (m.MaxImage <= 0 && m.BreakSize <= 0)) lh = m.MaxBase + (prevHadText ? lineSpacing : 0);
+                else lh = m.MaxBase;
                 if (_curY - lh < EffectiveBottom)
                 {
                     FlushStyledHighlight(hl, background);
@@ -126,10 +130,14 @@ public sealed partial class Document
             }
             var hasText = maxBase > 0;
             if (!hasText)
-                maxBase = maxImage > 0 ? maxImage
-                    : breakSize > 0 ? breakSize
-                    : lineIdx == 0 && markParent > 0 ? markParent
-                    : markSize > 0 ? markSize : runs.Count > 0 ? runs[0].Size : 10;
+            {
+                if (maxImage > 0) maxBase = maxImage;
+                else if (breakSize > 0) maxBase = breakSize;
+                else if (lineIdx == 0 && markParent > 0) maxBase = markParent;
+                else if (markSize > 0) maxBase = markSize;
+                else if (runs.Count > 0) maxBase = runs[0].Size;
+                else maxBase = 10;
+            }
             return new StyledLineExtents(maxBase, maxImage, breakSize, hasText);
         }
 
@@ -166,7 +174,8 @@ public sealed partial class Document
                 }
                 if (text.Length == 0) continue;
                 var cx = CurLeft + left + xs[ci];
-                var y = (r.NoteMark ? markTop - size : boxBottom + (r.Sup ? 0.33 * maxBase : 0))
+                var supRise = r.Sup ? 0.33 * maxBase : 0;
+                var y = (r.NoteMark ? markTop - size : boxBottom + supRise)
                         + Std14Seat(r.State, size);
                 _pendingEmbeddedRenders.Add((_currentSlot, cx, _curY, text, r.State, size, y));
                 if (r.NoteMark && r.Note is { } markNote)
@@ -229,8 +238,10 @@ public sealed partial class Document
             public double Width;
             public double Size;
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
             /// <summary>Opens the region's rectangle on its first line; later lines are ignored.</summary>
             public void Open(double boxBottom, double left, double size)
+#pragma warning restore S3218
             {
                 if (IsOpen) return;
                 IsOpen = true;
@@ -348,8 +359,11 @@ public sealed partial class Document
             var firstIndent = chunkStartsParagraph ? firstLineIndent : subsequentLinesIndent;
             var indents = new double[Math.Max(1, lines.Count)];
             for (var i = 0; i < lines.Count; i++)
-                indents[i] = lineOffsets is not null ? lineOffsets[i]
-                    : i == 0 ? firstIndent : subsequentLinesIndent;
+            {
+                if (lineOffsets is not null) indents[i] = lineOffsets[i];
+                else if (i == 0) indents[i] = firstIndent;
+                else indents[i] = subsequentLinesIndent;
+            }
 
             var b = new Content.ContentStreamBuilder();
             b.SaveState();
@@ -612,7 +626,9 @@ public sealed partial class Document
             if (state.RenderingMode != Text.TextRenderingMode.FillText)
             {
                 b.SetTextRenderingMode((int)state.RenderingMode);
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
                 if (state.LineWidth != 1.0) b.SetLineWidth(state.LineWidth);
+#pragma warning restore S1244
             }
             else if (state.FormattingOptions?.SyntheticBoldPen is > 0 and var pen)
             {
@@ -690,11 +706,13 @@ public sealed partial class Document
         private readonly record struct InlineLineMetrics(Dictionary<int, double> GroupPitch,
             double Advance, double LineWidth, bool HasText);
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         /// <summary>Measures one inline line. A line holding no text and no picture — a newline
         /// segment's own line — is one builder-default line (10 pt) and charges no leading
         /// (probed: a 12 pt / 15 pt-leading fragment opening with a newline drops 10 to it, then
         /// 27 to its first text line).</summary>
         private static InlineLineMetrics MeasureInlineLine(
+#pragma warning restore S3218
             List<(double x, string text, InlineRun run)> cells)
         {
             var groupPitch = new Dictionary<int, double>();
@@ -824,8 +842,10 @@ public sealed partial class Document
             private readonly Content.ContentStreamBuilder _builder = new();
             private bool _any;
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
             /// <summary>The overlay's builder, with its graphics state opened on first use.</summary>
             public Content.ContentStreamBuilder Open()
+#pragma warning restore S3218
             {
                 if (!_any) { _builder.SaveState(); _any = true; }
                 return _builder;

@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Text;
 
@@ -12,13 +13,13 @@ internal static partial class HtmlToPdfConverter
     // ascent — so reusing it on every later page starts each one 6.2 pt low.
     /// <summary>Top of a continuation page for the flow.</summary>
     private static double FreshPageTopY(HtmlDocProfile profile, double pageHeight, double marginTop)
-        => profile.escapedAttrDoc
-        ? pageHeight - 72 - 0.9 * 12
+    {
+        if (profile.escapedAttrDoc) return pageHeight - 72 - 0.9 * 12;
         // The Word export's continuation page starts at the page margin: the UA body inset is the
         // body's, spent once at the document top (probed: page 2's first baseline 84.73 = 72 + 0.905 x 14).
-        : profile.wordExportDoc
-        ? pageHeight - (marginTop - UaBodyMarginPt)
-        : pageHeight - marginTop;
+        if (profile.wordExportDoc) return pageHeight - (marginTop - UaBodyMarginPt);
+        return pageHeight - marginTop;
+    }
 
     // Shared control placement: the AcroForm field plus its visible box at
     // (xLeft, baseline). Under the control-box dialect the box STRADDLES its
@@ -33,11 +34,23 @@ internal static partial class HtmlToPdfConverter
                 ? System.Math.Min(ctl.InputWidth, flow.contentWidth - ctl.LeftIndent)
                 : flow.contentWidth - ctl.LeftIndent;
             var cH = ctl.InputHeight > 0 ? ctl.InputHeight : lineHeight;
-            var above = aboveOverride ?? (!ctl.InputDrawValue ? 0
-                : ctl.IsSelectBox ? SelectBoxAboveBaselinePt : InputBoxAboveBaselinePt);
+            var above = aboveOverride ?? ((ctl.InputDrawValue, ctl.IsSelectBox) switch
+            {
+                (false, _) => 0,
+                (_, true) => SelectBoxAboveBaselinePt,
+                _ => InputBoxAboveBaselinePt,
+            });
             var lx = xLeft + (ctl.IsSelectBox ? SelectSideBearingPt : 0);
+            EmitControlBox(ctl, lx, baseY + above - cH, cW, cH, flow, doc);
+        }
+
+    /// <summary>The text field over a control's box - its left, bottom, width and height - and
+    /// the border the flow draws around it.</summary>
+    private static void EmitControlBox(Block ctl, double lx, double bottom, double cW, double cH,
+        HtmlFlowCursor flow, Document doc)
+        {
             var field = new Forms.TextBoxField(flow.page,
-                new Rectangle(lx, baseY + above - cH, lx + cW, baseY + above))
+                new Rectangle(lx, bottom, lx + cW, bottom + cH))
             {
                 Multiline = ctl.InputMultiline,
                 ReadOnly = ctl.InputReadOnly,
@@ -50,7 +63,7 @@ internal static partial class HtmlToPdfConverter
             {
                 field.StyleLineHeightPt = TextareaValuePitchPt;
                 field.Dict.Set("DS", new Core.PdfString(
-                    Encoding.ASCII.GetBytes(FormattableString.Invariant($"line-height: {TextareaValuePitchPt}pt"))));
+                    Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture, $"line-height: {TextareaValuePitchPt}pt"))));
             }
             // Carry the HTML name/id through to the AcroForm field name so
             // callers can find the field by FullName.
@@ -63,28 +76,36 @@ internal static partial class HtmlToPdfConverter
             if (ctl.InputDrawValue)
                 field.DefaultAppearance = new Annotations.DefaultAppearance(
                     ctl.InputValueMono ? "Courier" : "Helvetica", 10);
+            // The control's own colour is the ink of whatever is typed into the field.
+            if (ctl.InputColor is { } ink)
+                field.DefaultAppearance = new Annotations.DefaultAppearance(
+                    field.DefaultAppearance.FontName, field.DefaultAppearance.FontSize, ink.ToRgb());
             doc.Form.Add(field, flow.page.Number);
             // Draw a visible border box for the input so it reads as a form field
             // in the rendered page (the widget's own appearance is not rasterised).
             // The 1 pt stroke runs HALF A POINT INSIDE the widget rect, so
             // the visible box is exactly the widget's 15.75 — stroking the rect
             // itself runs a point taller and crowds the label below.
+            // A control's own CSS border and background replace the UA frame outside the control-box dialect.
+            if (!ctl.InputDrawValue && ctl.InputChrome is { } chrome
+                && PaintControlChrome(flow.page, chrome, lx, bottom, cW, cH))
+                return;
             if (ctl.InputDrawValue)
-                DrawBox(flow.page, lx + 0.5, baseY + above - cH + 0.5, cW - 1, cH - 1,
+                DrawBox(flow.page, lx + 0.5, bottom + 0.5, cW - 1, cH - 1,
                     border: Color.Black, borderWidth: 1.0, fill: null);
             // the UA text input beside a label column draws its black border
             else if (ctl.InputInColumn)
-                DrawBox(flow.page, lx + UaInputBorderPt / 2, baseY + above - cH + UaInputBorderPt / 2,
+                DrawBox(flow.page, lx + UaInputBorderPt / 2, bottom + UaInputBorderPt / 2,
                     cW - UaInputBorderPt, cH - UaInputBorderPt,
                     border: Color.Black, borderWidth: UaInputBorderPt, fill: null);
             // A textarea's UA border is the same 1 pt black stroke half a point inside its
             // widget rect that the control-box dialect draws (probed: 96.5..218.52 x
             // 77.75..103.75 around a 96..219.02 x 77.25..104.25 widget).
             else if (ctl.InputMultiline)
-                DrawBox(flow.page, lx + 0.5, baseY + above - cH + 0.5, cW - 1, cH - 1,
+                DrawBox(flow.page, lx + 0.5, bottom + 0.5, cW - 1, cH - 1,
                     border: Color.Black, borderWidth: 1.0, fill: null);
             else
-                DrawBox(flow.page, lx, baseY + above - cH, cW, cH,
+                DrawBox(flow.page, lx, bottom, cW, cH,
                     border: Color.FromArgb(130, 130, 130), borderWidth: 0.75, fill: null);
         }
 
@@ -94,21 +115,19 @@ internal static partial class HtmlToPdfConverter
     private static void EmitSerifRun(string text, string res, double pt, double x, double baseY,
         HtmlFlowCursor flow)
         {
-            var famName = res == "F6" ? "Times New Roman Bold"
-                : res == "F7" ? "Times New Roman Italic" : "Times New Roman";
-            var baseName = res == "F6" ? "TimesNewRomanBold"
-                : res == "F7" ? "TimesNewRomanItalic" : "TimesNewRoman";
+            var famName = res switch { "F6" => "Times New Roman Bold", "F7" => "Times New Roman Italic", _ => "Times New Roman" };
+            var baseName = res switch { "F6" => "TimesNewRomanBold", "F7" => "TimesNewRomanItalic", _ => "TimesNewRoman" };
             if (PosFace(famName).ttf is { } srTtf
                 && flow.page.Dict.Get("Resources") is Core.PdfDictionary srRes
                 && srRes.Get("Font") is Core.PdfDictionary srFd)
             {
                 var (rn, hex) = Text.Type0FontEmbedder.Embed(srFd, srTtf, baseName,
                     text, stripSpacesInBaseFont: true);
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+                flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
                     $"BT /{rn} {pt:0.##} Tf 1 0 0 1 {x:0.##} {baseY:0.##} Tm {KernedTj(srTtf, hex)}ET\n")));
             }
             else
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+                flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
                     $"BT /{res} {pt:0.##} Tf 1 0 0 1 {x:0.##} {baseY:0.##} Tm ({EscapePdfString(text)}) Tj ET\n")));
         }
 
@@ -141,8 +160,9 @@ internal static partial class HtmlToPdfConverter
         if (ib.flow.y < ib.pageHeight - ib.marginTop - 1e-3)
             ib.flow.y -= ib.block.MarginTop;
         ib.fieldH = ib.block.InputHeight > 0 ? ib.block.InputHeight : ib.lineHeight;
-        ib.boxAbove = !ib.block.InputDrawValue ? 0
-            : ib.block.IsSelectBox ? SelectBoxAboveBaselinePt : InputBoxAboveBaselinePt;
+        if (!ib.block.InputDrawValue) ib.boxAbove = 0;
+        else if (ib.block.IsSelectBox) ib.boxAbove = SelectBoxAboveBaselinePt;
+        else ib.boxAbove = InputBoxAboveBaselinePt;
         if (ib.flow.y + ib.boxAbove - ib.fieldH < ib.marginBottom)
         {
             ib.flow.page = ib.doc.Pages.Add(ib.pageWidth, ib.pageHeight);
@@ -191,9 +211,9 @@ internal static partial class HtmlToPdfConverter
             // viewport is the content box in CSS px, so the artwork
             // keeps its 0.75 pt/px scale unclipped (measured:
             // ink to 850 px drawn from margin+6, never squeezed).
-            var svgHeadM = Regex.Match(Encoding.UTF8.GetString(svgSrc), @"<svg\b[^>]*>");
+            var svgHeadM = SafeRegex.Match(Encoding.UTF8.GetString(svgSrc), @"<svg\b[^>]*>");
             if (svgHeadM.Success
-                && !Regex.IsMatch(svgHeadM.Value, @"\bwidth\s*=\s*[""']?\d"))
+                && !SafeRegex.IsMatch(svgHeadM.Value, @"\bwidth\s*=\s*[""']?\d"))
             {
                 var vpWpx = Math.Max(100.0, flow.contentWidth - 2 * UaBodyMarginPt) / 0.75;
                 // height:100% of an AUTO parent is auto — the replaced
@@ -201,7 +221,7 @@ internal static partial class HtmlToPdfConverter
                 // svg CLIPS at it (measured: the list box cuts
                 // at svg y=150, only row 1 and the ascenders of row 2
                 // survive). An absolute height attribute stands.
-                var svgHAttr = Regex.Match(svgHeadM.Value,
+                var svgHAttr = SafeRegex.Match(svgHeadM.Value,
                     @"\bheight\s*=\s*[""']?([\d.]+)");
                 var vpHpx = svgHAttr.Success && double.TryParse(
                         svgHAttr.Groups[1].Value,
@@ -263,7 +283,7 @@ internal static partial class HtmlToPdfConverter
         Dictionary<string, (int objNum, string embedName)> fontFileCache)
     {
         if (string.IsNullOrEmpty(blk.FontFamily)) return blk.FontRes;
-        var family = blk.FontFamily!;
+        var family = blk.FontFamily;
         // pt-styled fragment: a bold block embeds the family's BOLD variant
         // (the h2 title draws VerdanaBold).
         // The DataWorks header sets its reference bold-italic — both
@@ -277,23 +297,30 @@ internal static partial class HtmlToPdfConverter
         else if ((profile.ptStyledFragment || profile.dwFormDoc) && blk.EmItalic
             && !family.EndsWith(" Italic", StringComparison.OrdinalIgnoreCase))
             family += " Italic";
+        // A face the sheet carries as a data: URI stands before any installed face of that name.
+        var dataFace = DataFaceFor(profile, blk.FontFamily, blk.FontRes == "F2" || blk.EmBold, blk.EmItalic);
+        if (dataFace is { } df) family = df.key;
         if (!embeddedFonts.TryGetValue(family, out var entry))
         {
-            var ttf = Text.FontRepository.GetTtfData(family);
+            var ttf = dataFace?.ttf ?? Text.FontRepository.GetTtfData(family);
             if (ttf is null) { embeddedFonts[family] = default; return blk.FontRes; }
             // /BaseFont: a style-qualified PostScript name (contains '-', e.g.
             // "HelveticaNeueLTStd-Roman") is used verbatim; an unqualified face
             // keeps the space-stripped family ("Arial", not "ArialMT").
-            var baseName = family.Replace(" ", "");
-            try
+            // A data: URI face is named by its family and style ("ArialMTProBold").
+            var baseName = dataFace?.baseName ?? family.Replace(" ", "");
+            if (dataFace is null)
             {
-                var ttp = new Text.TrueTypeParser(ttf);
-                ttp.Parse();
-                if (!string.IsNullOrEmpty(ttp.PostScriptName) && ttp.PostScriptName != "Unknown"
-                    && ttp.PostScriptName.Contains('-'))
-                    baseName = ttp.PostScriptName.Replace(" ", "");
+                try
+                {
+                    var ttp = new Text.TrueTypeParser(ttf);
+                    ttp.Parse();
+                    if (!string.IsNullOrEmpty(ttp.PostScriptName) && ttp.PostScriptName != "Unknown"
+                        && ttp.PostScriptName.Contains('-'))
+                        baseName = ttp.PostScriptName.Replace(" ", "");
+                }
+                catch { /* keep the family-derived name */ }
             }
-            catch { /* keep the family-derived name */ }
             var fontDict = new Core.PdfDictionary();
             Text.FontEmbedder.EmbedIntoFontDict(doc, ttf, fontDict, baseName, fontFileCache);
             var objNum = doc.AllocateObjectNumber();
@@ -305,6 +332,32 @@ internal static partial class HtmlToPdfConverter
         RegisterPageFont(pg, entry.resName, entry.fontRef);
         flow.usedCustomFont = true;
         return entry.resName;
+    }
+
+    /// <summary>The sheet's data: URI face for a family in the block's weight and style: the matching
+    /// variant first, else whichever face the family declares (a browser draws a bold-only family's
+    /// regular text in it too). Its cache key keeps two variants of one family apart.</summary>
+    private static (string key, byte[] ttf, string baseName)? DataFaceFor(HtmlDocProfile profile, string family, bool bold, bool italic)
+    {
+        if (profile.dataFaces is not { } faces) return null;
+        var fam = family.Trim().ToLowerInvariant();
+        var variant = bold ? "|bold" : italic ? "|italic" : "";
+        foreach (var suffix in new[] { variant, "", "|bold", "|italic" })
+        {
+            if (!faces.TryGetValue(fam + suffix, out var ttf)) continue;
+            var style = suffix switch { "|bold" => "Bold", "|italic" => "Italic", _ => "" };
+            return ("data:" + fam + suffix, ttf, family.Replace(" ", "") + style);
+        }
+        return null;
+    }
+
+    /// <summary>The checkbox field of a checkbox input: checked as the input is, named after it, read-only when it is
+    /// disabled or readonly.</summary>
+    private static Forms.CheckboxField NewCheckbox(Page page, Rectangle rect, Block block)
+    {
+        var checkbox = new Forms.CheckboxField(page, rect) { Checked = block.Checked, ReadOnly = block.InputReadOnly };
+        if (block.InputName is { } name) checkbox.PartialName = name;
+        return checkbox;
     }
 
     /// <summary>Lays out one checkbox block and advances the flow past it.</summary>
@@ -322,11 +375,7 @@ internal static partial class HtmlToPdfConverter
                 flow.y = pageHeight - marginTop; flow.pendingTopDrop = profile.hasZeroTopMargin;
             }
             var cbx = marginLeft + block.LeftIndent;
-            var checkbox = new Forms.CheckboxField(flow.page, new Rectangle(cbx, flow.y - boxSize, cbx + boxSize, flow.y))
-            {
-                Checked = block.Checked,
-            };
-            doc.Form.Add(checkbox, flow.page.Number);
+            doc.Form.Add(NewCheckbox(flow.page, new Rectangle(cbx, flow.y - boxSize, cbx + boxSize, flow.y), block), flow.page.Number);
             flow.y -= boxSize + 2;
             flow.lastWasHardBreak = false;
     }
@@ -361,7 +410,7 @@ internal static partial class HtmlToPdfConverter
                 DrawBox(flow.page, btnX + 2, btnTop - bh + 1.5, capW - 4, bh - 3,
                     null, 0, dialectButtonFill);
             if (block.ButtonCaption.Length > 0)
-                flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+                flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
                     $"q BT /F1 10 Tf {dialectButtonTextRg} 1 0 0 1 {btnX + ButtonCaptionInsetXPt:0.##} {btnTop - ButtonCaptionDropPt:0.##} Tm ({EscapePdfString(block.ButtonCaption)}) Tj ET Q\n")));
             flow.contentPage = flow.page;
             // DataWorks: the flow resumes tighter under the submit (the
@@ -445,7 +494,7 @@ internal static partial class HtmlToPdfConverter
     private static void TraceHardBreakSeat(ConvertState cv, Block block, HtmlBlockMetrics metrics, bool wasRow)
     {
         if (!cv.profile.sheetTypographyDoc || Environment.GetEnvironmentVariable("ASPOSE_TRACE_SEAT") != "1") return;
-        Console.WriteLine(FormattableString.Invariant($"[seat-hb] y={cv.flow.y:0.##} fs={block.FontSize:0.##} mfs={metrics.blockFontSize:0.##} lh={metrics.lineHeight:0.##} explicit={block.ExplicitHeight:0.##} br={block.IsLineBreak} lastHb={cv.flow.lastWasHardBreak} wasRow={wasRow} mt={block.MarginTop:0.##} mb={block.MarginBottom:0.##}"));
+        Console.WriteLine(Compat.Format(CultureInfo.InvariantCulture, $"[seat-hb] y={cv.flow.y:0.##} fs={block.FontSize:0.##} mfs={metrics.blockFontSize:0.##} lh={metrics.lineHeight:0.##} explicit={block.ExplicitHeight:0.##} br={block.IsLineBreak} lastHb={cv.flow.lastWasHardBreak} wasRow={wasRow} mt={block.MarginTop:0.##} mb={block.MarginBottom:0.##}"));
     }
 
     /// <summary>The vertical space a hard break spends: its declared height, its dialect's
@@ -453,18 +502,21 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The percent line-height factor a UA break's line box resolves at: the break's own
     /// (inherited) factor, else the body tag's where its attribute is the flow's typography; 0 = none.</summary>
     private static double UaBreakLineFactor(ConvertState cv, Block block)
-        => block.UaLineFactor > 0 ? block.UaLineFactor
-            : cv.uaBodyFaceFromAttr && cv.bodyLineFactor > 0 ? cv.bodyLineFactor : 0;
+    {
+        if (block.UaLineFactor > 0) return block.UaLineFactor;
+        if (cv.uaBodyFaceFromAttr && cv.bodyLineFactor > 0) return cv.bodyLineFactor;
+        return 0;
+    }
 
     private static double HardBreakSpacerPt(ConvertState cv, Block block, HtmlBlockMetrics metrics, bool breakAfterTable, bool wasRow)
     {
-        var spacer = block.ExplicitHeight > 0
-            ? block.ExplicitHeight
-            // Redline: an empty paragraph occupies its FULL 1.15 em box
-            // (probed: 13.8 between the FORM header and the first grid).
-            : cv.profile.redlineDiffDoc && metrics.blockFontSize > 0
-            ? RedlineEmptyParaPt
-            : (cv.flow.lastWasHardBreak ? 0 : (wasRow ? 13.5 : metrics.lineHeight * 0.5));
+        double spacer;
+        if (block.ExplicitHeight > 0) spacer = block.ExplicitHeight;
+        // Redline: an empty paragraph occupies its FULL 1.15 em box
+        // (probed: 13.8 between the FORM header and the first grid).
+        else if (cv.profile.redlineDiffDoc && metrics.blockFontSize > 0) spacer = RedlineEmptyParaPt;
+        else if (cv.flow.lastWasHardBreak) spacer = 0;
+        else spacer = wasRow ? 13.5 : metrics.lineHeight * 0.5;
         // Form dialect: this document family separates sections with CSS
         // margins, and its bare <br>s are all float-clears (`clear:both`) that
         // collapse to the float bottom — they add no line boxes of their own.
@@ -490,39 +542,51 @@ internal static partial class HtmlToPdfConverter
         // style — every <br> counts (no coalescing). Styled spacers keep their CSS
         // height; other empty containers collapse to nothing.
         if (cv.profile.metricFlow)
-            spacer = block.IsLineBreak && WinMetricsFor(cv.profile.metricFace) is { } brm
-                ? (cv.uaFlow
-                    // A declared line box is the break's WHOLE box, nothing added.
-                    ? block.LineBoxPt > 0 ? block.LineBoxPt
+        {
+            if (block.IsLineBreak && WinMetricsFor(cv.profile.metricFace) is { } brm)
+            {
+                // A declared line box is the break's WHOLE box, nothing added.
+                if (cv.uaFlow)
+                {
+                    if (block.LineBoxPt > 0) spacer = block.LineBoxPt;
                     // (…or a percent line-height's factor at the break's size - MEASURED, the evaluation
                     //  form: the 11 pt body's `line-height: 100%` paces its inter-table <br>s 11)
-                    : UaBreakLineFactor(cv, block) is > 0 and var brFactor
-                    ? (block.FontSize > 0 ? block.FontSize : 12.0) * brFactor + UaTailMarginPt(cv, block, breakAfterTable)
+                    else if (UaBreakLineFactor(cv, block) is > 0 and var brFactor)
+                        spacer = (block.FontSize > 0 ? block.FontSize : 12.0) * brFactor + UaTailMarginPt(cv, block, breakAfterTable);
                     // …otherwise the break's line box is the flow face's px-rounded hhea
                     // line at the break's size, the box every text line of the flow stands
                     // in (probed: a 14px cell's leading <br/> line is 16px = 12 pt, where
                     // 1.125 em gives 11.81; at 12 pt both give 13.5).
-                    : MetricLineHeight(block.FontSize > 0 ? block.FontSize : 12.0,
-                        HheaLineSumFor(cv.profile.metricFace) ?? brm.sum)
-                      // A break paragraph that FOLLOWS a metric table takes
-                      // the UA paragraph margin a text neighbour would have
-                      // opened (probed: table -> <p><br/></p> -> table gaps
-                      // 13.44 + 13.5 + 13.44 exactly; between text
-                      // paragraphs the margins come from the text path and
-                      // nothing is added here).
-                      // The first REAL line break of a post-table tail stands
-                      // the UA margin its table neighbour never read (probed:
-                      // table, bare <br>, <p><br/></p>, text spaces
-                      // 13.44+13.5 / 13.5 / 13.44+asc - the second break's
-                      // margin arrives through the following text block's own
-                      // margin-top).
-                      + UaTailMarginPt(cv, block, breakAfterTable)
-                    // (the pt form's bare <br> is one line box of the body's own size: 8 pt Tahoma -> 13 px)
-                    : MetricLineHeight(block.FontSize > 0 ? block.FontSize
-                        : cv.profile.ptFormDoc && cv.profile.formBodyFontPt > 0 ? cv.profile.formBodyFontPt : 11.0, brm.sum))
-                : block.IsLineBreak ? block.ExplicitHeight
-                : block.IsHardBreak && block.ExplicitHeight > 0 ? block.ExplicitHeight
-                : 0;
+                    else
+                        spacer = MetricLineHeight(block.FontSize > 0 ? block.FontSize : 12.0,
+                              HheaLineSumFor(cv.profile.metricFace) ?? brm.sum)
+                            // A break paragraph that FOLLOWS a metric table takes
+                            // the UA paragraph margin a text neighbour would have
+                            // opened (probed: table -> <p><br/></p> -> table gaps
+                            // 13.44 + 13.5 + 13.44 exactly; between text
+                            // paragraphs the margins come from the text path and
+                            // nothing is added here).
+                            // The first REAL line break of a post-table tail stands
+                            // the UA margin its table neighbour never read (probed:
+                            // table, bare <br>, <p><br/></p>, text spaces
+                            // 13.44+13.5 / 13.5 / 13.44+asc - the second break's
+                            // margin arrives through the following text block's own
+                            // margin-top).
+                            + UaTailMarginPt(cv, block, breakAfterTable);
+                }
+                // (the pt form's bare <br> is one line box of the body's own size: 8 pt Tahoma -> 13 px)
+                else
+                    spacer = MetricLineHeight((block.FontSize, cv.profile.ptFormDoc, cv.profile.formBodyFontPt) switch
+                    {
+                        (> 0, _, _) => block.FontSize,
+                        (_, true, > 0) => cv.profile.formBodyFontPt,
+                        _ => 11.0,
+                    }, brm.sum);
+            }
+            else if (block.IsLineBreak) spacer = block.ExplicitHeight;
+            else if (block.IsHardBreak && block.ExplicitHeight > 0) spacer = block.ExplicitHeight;
+            else spacer = 0;
+        }
         return spacer;
     }
 }

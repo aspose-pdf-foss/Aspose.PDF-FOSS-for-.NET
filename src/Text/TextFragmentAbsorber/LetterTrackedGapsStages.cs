@@ -23,13 +23,9 @@ public sealed partial class TextFragmentAbsorber
             lg.prevLineY = lg.runs[lg.j].Y;
             lg.j++;
         }
-        lg.lineY = lg.runs[lg.i].Y;
 
         // Need ≥3 gaps (≥4 runs) to call a pattern "uniform tracking".
-        if (lg.line.Count >= 4)
-        {
-            if (TrackLetterGapLine(lg)) return true;
-        }
+        if (lg.line.Count >= 4 && TrackLetterGapLine(lg)) return true;
 
         lg.i = lg.j;
         return true;
@@ -47,8 +43,7 @@ public sealed partial class TextFragmentAbsorber
             var t = lg.runs[lg.line[k]].Text;
             lg.wordy[k] = t.Contains(' ') && t.Trim().Length > 0;
             lg.cjky[k] = false;
-            foreach (var ch in t)
-                if (IsCjk(ch)) { lg.cjky[k] = true; break; }
+            if (t.Any(ch => IsCjk(ch))) { lg.cjky[k] = true; }
         }
         for (var k = 1; k < lg.line.Count; k++)
         {
@@ -105,9 +100,7 @@ public sealed partial class TextFragmentAbsorber
         // tight and only a MINORITY of gaps — the actual word spaces — exceed the
         // threshold. Applied per single-char RUN (not per line) so a glyph-by-glyph
         // token embedded among coalesced words is still handled.
-        {
-            MarkTrackedSingleGlyphSpans(lg);
-        }
+        MarkTrackedSingleGlyphSpans(lg);
         return false;
     }
 

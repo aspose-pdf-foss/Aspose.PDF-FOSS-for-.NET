@@ -66,7 +66,7 @@ public sealed class Point3D
 /// Represents a rectangle defined by lower-left and upper-right coordinates
 /// (PDF user-space convention: Y increases upward).
 /// </summary>
-public sealed class Rectangle
+public sealed class Rectangle : IEquatable<Rectangle>
 {
     /// <summary>Gets or sets the X coordinate of the lower-left corner, in points.</summary>
     public double LLX { get; set; }
@@ -162,12 +162,6 @@ public sealed class Rectangle
             : point.X >  LLX && point.X <  URX && point.Y >  LLY && point.Y <  URY;
     }
 
-    /// <summary>Test whether the line segment (<paramref name="x1"/>,<paramref name="y1"/>) →
-    /// (<paramref name="x2"/>,<paramref name="y2"/>) lies entirely within
-    /// the rectangle (both endpoints inside, inclusive of edges).</summary>
-    public bool ContainsLine(double x1, double y1, double x2, double y2)
-        => ContainsPoint(x1, y1) && ContainsPoint(x2, y2);
-
     /// <summary>Returns <c>true</c> when the point (<c>x</c>, <c>y</c>) lies inside the rectangle, edges included.</summary>
     public bool Contains(double x, double y) => ContainsPoint(x, y);
 
@@ -179,6 +173,12 @@ public sealed class Rectangle
     public bool Contains(Rectangle other) =>
         other.LLX >= LLX && other.LLY >= LLY &&
         other.URX <= URX && other.URY <= URY;
+
+    /// <summary>Test whether the line segment (<paramref name="x1"/>,<paramref name="y1"/>) →
+    /// (<paramref name="x2"/>,<paramref name="y2"/>) lies entirely within
+    /// the rectangle (both endpoints inside, inclusive of edges).</summary>
+    public bool ContainsLine(double x1, double y1, double x2, double y2)
+        => ContainsPoint(x1, y1) && ContainsPoint(x2, y2);
 
     /// <summary>Geometric intersection. When the rectangles do not overlap,
     /// returns <see cref="Empty"/> rather than null so callers can chain

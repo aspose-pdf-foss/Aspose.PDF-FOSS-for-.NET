@@ -31,15 +31,15 @@ internal static partial class HtmlToPdfConverter
         string? colClass = null;
         foreach (var (sel, decls) in css)
             if (sel.StartsWith('.') && decls.TryGetValue("columns", out var cv)
-                && int.TryParse(cv.Trim(), out var n) && n is > 1 and <= 12)
+                && int.TryParse(cv.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) && n is > 1 and <= 12)
             { nCols = n; colClass = sel[1..]; break; }
         if (nCols == 0 || colClass is null) return null;
-        var contM = Regex.Match(html,
+        var contM = SafeRegex.Match(html,
             @"class\s*=\s*[""']" + Regex.Escape(colClass) + @"[""'][^>]*>(?<body>[\s\S]*)</div>",
             RegexOptions.IgnoreCase);
         if (!contM.Success) return null;
         // the dialect models plain paragraph flow only
-        if (Regex.IsMatch(contM.Groups["body"].Value, @"<(table|img|ul|ol|h\d)\b", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(contM.Groups["body"].Value, @"<(table|img|ul|ol|h\d)\b", RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor("Times New Roman") is not { } fm) return null;
 
@@ -55,11 +55,11 @@ internal static partial class HtmlToPdfConverter
         var paras = new List<string[]>();
         var contentW = pageWidth - 2 * ColMarginX;
         var colW = (contentW - (nCols - 1) * gap) / nCols;
-        foreach (Match pm in Regex.Matches(contM.Groups["body"].Value,
+        foreach (Match pm in SafeRegex.Matches(contM.Groups["body"].Value,
             @"<p\b[^>]*>(?<c>[\s\S]*?)</p>", RegexOptions.IgnoreCase))
         {
-            var text = Regex.Replace(DecodeEntities(
-                Regex.Replace(pm.Groups["c"].Value, @"<[^>]+>", " ")), @"\s+", " ").Trim();
+            var text = SafeRegex.Replace(DecodeEntities(
+                SafeRegex.Replace(pm.Groups["c"].Value, @"<[^>]+>", " ")), @"\s+", " ").Trim();
             if (text.Length > 0)
                 paras.Add(MeasuredWordWrap(text, colW, "Times New Roman", fs));
         }

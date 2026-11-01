@@ -16,9 +16,10 @@ public partial class Table
     /// div/small as block boundaries, br as a forced (possibly empty) line. Returns null
     /// when the markup falls outside the family (legacy path) or the faces are missing.</summary>
     private static List<CellLine>? ParseHtmlEngineCell(string? html, double availWidth,
-        double baseSize = HtmlCellFontSize, bool breakWords = false, bool plainText = false)
+        double baseSize = HtmlCellFontSize, bool breakWords = false, bool plainText = false, Font? rootFont = null)
     {
         var hc = new HtmlEngineCellState();
+        hc.rootFont = rootFont;
         hc.html = html;
         hc.availWidth = availWidth;
         hc.baseSize = baseSize;
@@ -35,8 +36,7 @@ public partial class Table
         hc.rootBox = hc.rootLine.Box;
         hc.baseDrop = hc.rootLine.Drop;
         // Every tag present must belong to the allowed family.
-        foreach (Match any in AnyTagRegex.Matches(hc.html))
-            if (!HtmlEngineTagRegex.IsMatch(any.Value)) return null;
+        if (SafeRegex.Matches(AnyTagRegex, hc.html).Any(any => !SafeRegex.IsMatch(HtmlEngineTagRegex, any.Value))) return null;
         if (!EngineAcceptsStructure(hc.html)) return null;
 
         hc.lines = new List<CellLine>();
@@ -52,7 +52,7 @@ public partial class Table
         hc.pendingMarker = null;
 
         hc.pos = 0;
-        foreach (Match m in HtmlEngineTagRegex.Matches(hc.html))
+        foreach (Match m in SafeRegex.Matches(HtmlEngineTagRegex, hc.html))
         {
             AbsorbHtmlEngineTag(hc, m);
         }

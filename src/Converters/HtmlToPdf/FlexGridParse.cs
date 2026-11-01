@@ -10,7 +10,7 @@ internal static partial class HtmlToPdfConverter
     private static double PctFrac(string? v)
     {
         if (v is null) return 0;
-        var m = Regex.Match(v, @"([\d.]+)\s*%");
+        var m = SafeRegex.Match(v, @"([\d.]+)\s*%");
         return m.Success && double.TryParse(m.Groups[1].Value,
             System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var p) ? p / 100.0 : 0;
@@ -31,7 +31,7 @@ internal static partial class HtmlToPdfConverter
         if (DomDecl(c, "width", css)?.Trim() == "100%")
         {
             fc.ValueWide = true;
-            var pm = Regex.Match(DomDecl(c, "padding", css) ?? "",
+            var pm = SafeRegex.Match(DomDecl(c, "padding", css) ?? "",
                 @"([\d.]+)\s*px");
             if (pm.Success && double.TryParse(pm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,

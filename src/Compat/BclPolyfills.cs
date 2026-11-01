@@ -59,11 +59,33 @@ namespace System.Runtime.CompilerServices
 namespace System.Security.Cryptography.X509Certificates
 {
     /// <summary>DSA key accessors (.NET Core 2.0, .NET Framework 4.7.2); the netstandard2.0
-    /// reference assembly is the only one of this project's targets without them.</summary>
+    /// reference assembly is the only one of this project's targets without them. Every runtime
+    /// this target loads on carries the real ones, so they are bound once and called; the
+    /// certificate's PrivateKey answers only for a CryptoAPI key and reads a key the PKCS#12
+    /// loader placed in CNG (an ephemeral key set on .NET Framework) as absent.</summary>
+#pragma warning disable S101 // named after the BCL class it stands in for, so call sites read the same on every target
     internal static class DSACertificateExtensions
+#pragma warning restore S101
     {
-        public static DSA? GetDSAPrivateKey(X509Certificate2 certificate) => certificate.PrivateKey as DSA;
-        public static DSA? GetDSAPublicKey(X509Certificate2 certificate) => certificate.PublicKey.Key as DSA;
+        // The runtime keeps its DSA accessors in the assembly that holds the RSA ones, which the
+        // netstandard2.0 reference does carry (System.Core on .NET Framework).
+        private static readonly Type? s_runtime = typeof(RSACertificateExtensions).Assembly
+            .GetType("System.Security.Cryptography.X509Certificates.DSACertificateExtensions", false);
+        private static readonly Func<X509Certificate2, DSA?>? s_privateKey = Bind("GetDSAPrivateKey");
+        private static readonly Func<X509Certificate2, DSA?>? s_publicKey = Bind("GetDSAPublicKey");
+
+        private static Func<X509Certificate2, DSA?>? Bind(string name)
+        {
+            var method = s_runtime?.GetMethod(name, new[] { typeof(X509Certificate2) });
+            return method is null
+                ? null
+                : (Func<X509Certificate2, DSA?>)Delegate.CreateDelegate(typeof(Func<X509Certificate2, DSA?>), method);
+        }
+
+        public static DSA? GetDSAPrivateKey(X509Certificate2 certificate)
+            => s_privateKey is not null ? s_privateKey(certificate) : certificate.PrivateKey as DSA;
+        public static DSA? GetDSAPublicKey(X509Certificate2 certificate)
+            => s_publicKey is not null ? s_publicKey(certificate) : certificate.PublicKey.Key as DSA;
     }
 }
 #endif
@@ -147,6 +169,12 @@ namespace Aspose.Pdf
             }
             return sb.Append(text, start, text.Length - start).ToString();
         }
+
+        /// <summary>string.StartsWith(char) (.NET Core 2.0): ordinal, like the char overload.</summary>
+        public static bool StartsWith(this string text, char value) => text.Length > 0 && text[0] == value;
+
+        /// <summary>string.EndsWith(char) (.NET Core 2.0): ordinal, like the char overload.</summary>
+        public static bool EndsWith(this string text, char value) => text.Length > 0 && text[text.Length - 1] == value;
     }
 }
 #endif

@@ -27,7 +27,6 @@ private sealed class FormFillWrapState
     public List<(string text, double by, double w)> laidOut = null!;
     public double maxLineW;
     public Page page = default!;
-    public string oldText = default!;
     public string newText = default!;
 }
 }

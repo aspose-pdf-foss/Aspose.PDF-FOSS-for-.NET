@@ -49,9 +49,9 @@ internal static class SvgWriter
     {
         double llx = double.MaxValue, lly = double.MaxValue, urx = double.MinValue, ury = double.MinValue;
         var any = false;
-        foreach (var element in elements)
+        foreach (var paintBounds in elements.Select(element => element.PaintBounds))
         {
-            var r = element.PaintBounds;
+            var r = paintBounds;
             llx = Math.Min(llx, r.LLX);
             lly = Math.Min(lly, r.LLY);
             urx = Math.Max(urx, r.URX);

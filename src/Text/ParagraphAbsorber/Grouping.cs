@@ -127,7 +127,7 @@ public sealed partial class ParagraphAbsorber
                         // ("queries  or" is emitted there); the space-glyph
                         // re-insertion keeps the duplicate guard.
                         if (gap > f.FontSize * 0.15
-                            || (spaceGlyph && !prevFrag.Text.EndsWith(" ") && !f.Text.StartsWith(" ")))
+                            || (spaceGlyph && !prevFrag.Text.EndsWith(' ') && !f.Text.StartsWith(' ')))
                             sb.Append(' ');
                     }
                 }
@@ -165,18 +165,18 @@ public sealed partial class ParagraphAbsorber
         var sb = new StringBuilder();
         var lineFragments = new List<List<TextFragment>>();
 
-        foreach (var line in lines)
+        foreach (var fragments in lines.Select(line => line.Fragments))
         {
-            var frags = new List<TextFragment>(line.Fragments.Count);
+            var frags = new List<TextFragment>(fragments.Count);
             lineFragments.Add(frags);
 
-            for (var fi = 0; fi < line.Fragments.Count; fi++)
+            for (var fi = 0; fi < fragments.Count; fi++)
             {
-                var f = line.Fragments[fi];
+                var f = fragments[fi];
                 // Insert space between fragments when there's a horizontal gap
                 if (fi > 0 && f.Rectangle is not null)
                 {
-                    var prevFrag = line.Fragments[fi - 1];
+                    var prevFrag = fragments[fi - 1];
                     if (prevFrag.Rectangle is not null)
                     {
                         var gap = f.Rectangle.LLX - prevFrag.Rectangle.URX;
@@ -291,16 +291,6 @@ public sealed partial class ParagraphAbsorber
     private static double GetY(TextFragment f) =>
         f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0;
 
-    private static double Median(List<double> list)
-    {
-        if (list.Count == 0) return 0;
-        var sorted = list.OrderBy(x => x).ToList();
-        var mid = sorted.Count / 2;
-        return sorted.Count % 2 == 0
-            ? (sorted[mid - 1] + sorted[mid]) / 2
-            : sorted[mid];
-    }
-
     /// <summary>
     /// Represents a horizontal line of text.
     /// </summary>
@@ -332,10 +322,5 @@ public sealed partial class ParagraphAbsorber
             var avgFontSz = Fragments.Average(f => f.FontSize > 0 ? f.FontSize : 12);
             AvgFontSize = Math.Max(avgHeight, avgFontSz);
         }
-
-        private static double GetX(TextFragment f) =>
-            f.PositionOrNull?.XIndent ?? f.Rectangle?.LLX ?? 0;
-        private static double GetY(TextFragment f) =>
-            f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0;
     }
 }

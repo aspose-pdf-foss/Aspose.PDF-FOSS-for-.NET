@@ -16,6 +16,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         Dict.Set("Subtype", new PdfName("FreeText"));
         _defaultAppearance = appearance ?? DefaultFreeTextAppearance();
         Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(_defaultAppearance.ToAppearanceString())));
+        KeepAppearanceFace();
     }
 
     /// <summary>Document-bound ctor for creating a FreeTextAnnotation that
@@ -27,7 +28,21 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         Dict.Set("Subtype", new PdfName("FreeText"));
         _defaultAppearance = appearance ?? DefaultFreeTextAppearance();
         Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(_defaultAppearance.ToAppearanceString())));
+        KeepAppearanceFace();
     }
+
+    // The face a default appearance was built from, kept with the annotation's dictionary: the object
+    // model can hand out a fresh wrapper for the same annotation, which reads only the /DA string.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, Text.Font> AppearanceFaces = new();
+
+    private void KeepAppearanceFace()
+    {
+        if (_defaultAppearance?.EmbeddedFont is { } face) AppearanceFaces.AddOrUpdate(Dict, face);
+    }
+
+    /// <summary>The face the annotation's default appearance was built from, or null when it names a font.</summary>
+    private Text.Font? AppearanceFace() =>
+        _defaultAppearance?.EmbeddedFont ?? (AppearanceFaces.TryGetValue(Dict, out var face) ? face : null);
 
     /// <summary>Fallback /DA for a FreeText annotation created with no explicit
     /// appearance: Helvetica ("Helv") at 10pt black. A null appearance must still
@@ -44,6 +59,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         {
             if (value is null) Dict.Remove("DA");
             else Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(value)));
+            AppearanceFaces.Remove(Dict);
         }
     }
 
@@ -69,7 +85,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         {
             if (t[i] == "Tf" && i >= 2)
             {
-                if (t[i - 2].StartsWith("/")) fontName = NormalizeDaFontName(t[i - 2].Substring(1));
+                if (t[i - 2].StartsWith('/')) fontName = NormalizeDaFontName(t[i - 2].Substring(1));
                 if (TryD(t[i - 1]) is { } s && s > 0) size = s;
                 got = true;
             }
@@ -107,7 +123,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         set
         {
             if (value is null) Dict.Remove("DS");
-            else Dict.Set("DS", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else Dict.Set("DS", Forms.Field.EncodePdfTextString(value));
         }
     }
 
@@ -120,7 +136,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         set
         {
             if (value is null) Dict.Remove("RC");
-            else Dict.Set("RC", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else Dict.Set("RC", Forms.Field.EncodePdfTextString(value));
             // Capture the rich-text styling (plain text, per-range runs, base size/colour) so a
             // following SetTextStyle renders it, but do NOT take over appearance generation here:
             // rich text alone falls back to the normal save-time appearance (matching the
@@ -146,7 +162,22 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     /// appearance regenerates on a colour change
     /// (dropping any previously-embedded font for the /DA's standard font). Only rebuilt
     /// when there is text to render; otherwise the existing appearance is left intact.</summary>
-    private protected override void OnColorChanged()
+    private protected override void OnColorChanged() => RegenerateAppearanceForText();
+
+    /// <summary>The border is part of the generated appearance too - its stroke and the inset
+    /// the text sits at - so a border set after the appearance was painted paints it again.</summary>
+    private protected override void OnBorderChanged() => RegenerateAppearanceForText();
+
+    /// <summary>The text and its rotation are drawn by the appearance too: changed after the appearance was
+    /// painted, they paint it again. A note not painted yet is left to the save, which paints it once.</summary>
+    private protected override void OnContentsChanged() => RepaintAppearance();
+
+    private void RepaintAppearance()
+    {
+        if (Dict.ContainsKey("AP")) RegenerateAppearanceForText();
+    }
+
+    private void RegenerateAppearanceForText()
     {
         var text = Contents;
         if (string.IsNullOrEmpty(text)) text = PlainTextFromRichText(RichText);
@@ -180,7 +211,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     /// exceed <paramref name="avail"/>; a single word wider than the line still occupies
     /// its own line (no mid-word breaking).</summary>
     private static System.Collections.Generic.List<string> WrapText(
-        string text, Aspose.Pdf.Text.FontMetrics metrics, double fontSize, double avail)
+        string text, Func<string, double> measure, double avail)
     {
         var result = new System.Collections.Generic.List<string>();
         foreach (var rawLine in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
@@ -195,7 +226,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
                     continue;
                 }
                 var candidate = current + " " + word;
-                if (metrics.MeasureString(candidate, fontSize) <= avail)
+                if (measure(candidate) <= avail)
                     current = candidate;
                 else
                 {
@@ -262,8 +293,8 @@ public partial class FreeTextAnnotation : MarkupAnnotation
             var pts = new List<Point>(arr.Count / 2);
             for (var i = 0; i + 1 < arr.Count; i += 2)
             {
-                double x = arr[i] is PdfReal rx ? rx.Value : arr[i] is PdfInteger ix ? ix.Value : 0;
-                double y = arr[i + 1] is PdfReal ry ? ry.Value : arr[i + 1] is PdfInteger iy ? iy.Value : 0;
+                double x = arr[i] switch { PdfReal rx => rx.Value, PdfInteger ix => ix.Value, _ => 0 };
+                double y = arr[i + 1] switch { PdfReal ry => ry.Value, PdfInteger iy => iy.Value, _ => 0 };
                 pts.Add(new Point(x, y));
             }
             return pts.ToArray();
@@ -321,14 +352,14 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     /// <summary>Starting line-ending style (/LE first entry; callout intent only).</summary>
     public LineEnding StartingStyle
     {
-        get => GetCalloutLineEnding(0);
+        get => GetCalloutLineEnding();
         set => SetCalloutLineEnding(0, value);
     }
 
     /// <summary>Ending line-ending style (/LE second entry; callout intent only).</summary>
     public LineEnding EndingStyle
     {
-        get => GetCalloutLineEnding(1);
+        get => GetCalloutLineEnding();
         set => SetCalloutLineEnding(1, value);
     }
 
@@ -337,7 +368,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     // two-element [head tail] array (the form Acrobat/XFDF round-trips produce, with the
     // ending carried in one slot). Report that single ending for both StartingStyle and
     // EndingStyle, which matches the callout model.
-    private LineEnding GetCalloutLineEnding(int index)
+    private LineEnding GetCalloutLineEnding()
     {
         var le = InternalReader.Resolve(Dict.Get("LE"));
         if (le is PdfName name)
@@ -384,7 +415,11 @@ public partial class FreeTextAnnotation : MarkupAnnotation
                 _ => Aspose.Pdf.Rotation.None,
             };
         }
-        set => Dict.Set("Rotate", new PdfInteger((int)value));
+        set
+        {
+            Dict.Set("Rotate", new PdfInteger((int)value));
+            RepaintAppearance();
+        }
     }
 
     /// <summary>Inner text rectangle (/RD inset from /Rect).</summary>
@@ -477,10 +512,23 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         if (f.IndexOf("Italic", System.StringComparison.OrdinalIgnoreCase) >= 0
             || f.IndexOf("Oblique", System.StringComparison.OrdinalIgnoreCase) >= 0) italic = true;
         if (f.IndexOf("Times", System.StringComparison.OrdinalIgnoreCase) >= 0)
-            return bold && italic ? "Times-BoldItalic" : bold ? "Times-Bold" : italic ? "Times-Italic" : "Times-Roman";
+        {
+            if (bold && italic) return "Times-BoldItalic";
+            if (bold) return "Times-Bold";
+            if (italic) return "Times-Italic";
+            return "Times-Roman";
+        }
         if (f.IndexOf("Courier", System.StringComparison.OrdinalIgnoreCase) >= 0)
-            return bold && italic ? "Courier-BoldOblique" : bold ? "Courier-Bold" : italic ? "Courier-Oblique" : "Courier";
-        return bold && italic ? "Helvetica-BoldOblique" : bold ? "Helvetica-Bold" : italic ? "Helvetica-Oblique" : "Helvetica";
+        {
+            if (bold && italic) return "Courier-BoldOblique";
+            if (bold) return "Courier-Bold";
+            if (italic) return "Courier-Oblique";
+            return "Courier";
+        }
+        if (bold && italic) return "Helvetica-BoldOblique";
+        if (bold) return "Helvetica-Bold";
+        if (italic) return "Helvetica-Oblique";
+        return "Helvetica";
     }
 
     private bool BorderExplicitlyZero()
@@ -500,11 +548,10 @@ public partial class FreeTextAnnotation : MarkupAnnotation
     }
 
     /// <summary>Parse XHTML rich-text styling into the plain text, per-range style runs and a
-    /// base font size/colour. Returns true when styled markup was found (so the caller should
-    /// regenerate the styled appearance); false for plain text or no markup.</summary>
-    private bool ApplyRichTextStyles(string? xhtml)
+    /// base font size/colour. Plain text or no markup leaves them as they are.</summary>
+    private void ApplyRichTextStyles(string? xhtml)
     {
-        if (string.IsNullOrEmpty(xhtml) || xhtml!.IndexOf('<') < 0) return false;
+        if (string.IsNullOrEmpty(xhtml) || xhtml.IndexOf('<') < 0) return;
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         var sbText = new System.Text.StringBuilder();
         var runs = new System.Collections.Generic.List<(int from, int to, RichTextFontStyles st)>();
@@ -518,23 +565,23 @@ public partial class FreeTextAnnotation : MarkupAnnotation
             {
                 int gt = xhtml.IndexOf('>', p); if (gt < 0) break;
                 string tag = xhtml.Substring(p + 1, gt - p - 1);
-                if (tag.StartsWith("/")) { if (stack.Count > 1) stack.Pop(); }
-                else if (!tag.StartsWith("?") && !tag.StartsWith("!"))
+                if (tag.StartsWith('/')) { if (stack.Count > 1) stack.Pop(); }
+                else if (!tag.StartsWith('?') && !tag.StartsWith('!'))
                 {
                     var cur = stack.Peek();
                     bool b = cur.b, it = cur.i, u = cur.u;
-                    var sm = System.Text.RegularExpressions.Regex.Match(tag, "style\\s*=\\s*\"([^\"]*)\"");
+                    var sm = SafeRegex.Match(tag, "style\\s*=\\s*\"([^\"]*)\"");
                     if (sm.Success)
                     {
                         var css = sm.Groups[1].Value;
                         if (css.Replace(" ", "").Contains("font-weight:bold")) b = true;
                         if (css.Replace(" ", "").Contains("font-style:italic")) it = true;
                         if (css.Contains("underline")) u = true;
-                        var fs = System.Text.RegularExpressions.Regex.Match(css, "font-size:\\s*([0-9.]+)pt");
+                        var fs = SafeRegex.Match(css, "font-size:\\s*([0-9.]+)pt");
                         if (fs.Success && baseSize == 0) double.TryParse(fs.Groups[1].Value, System.Globalization.NumberStyles.Float, inv, out baseSize);
-                        var ff = System.Text.RegularExpressions.Regex.Match(css, "font-family:\\s*([^;\"]+)");
+                        var ff = SafeRegex.Match(css, "font-family:\\s*([^;\"]+)");
                         if (ff.Success && baseFont == null) baseFont = ff.Groups[1].Value.Trim();
-                        var cm = System.Text.RegularExpressions.Regex.Match(css, "color:\\s*#([0-9A-Fa-f]{6})");
+                        var cm = SafeRegex.Match(css, "color:\\s*#([0-9A-Fa-f]{6})");
                         if (cm.Success && baseColor == null)
                         {
                             var h = cm.Groups[1].Value;
@@ -544,7 +591,7 @@ public partial class FreeTextAnnotation : MarkupAnnotation
                                 System.Convert.ToInt32(h.Substring(4, 2), 16));
                         }
                     }
-                    if (!tag.EndsWith("/")) stack.Push((b, it, u));
+                    if (!tag.EndsWith('/')) stack.Push((b, it, u));
                 }
                 p = gt + 1;
             }
@@ -569,8 +616,8 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         }
         var plain = sbText.ToString();
         if (string.IsNullOrEmpty(Contents)) Contents = plain;
-        // Keep the construction-time base font (it may already encode weight, e.g. "Arial Bold");
-        // only the size/colour are taken from the rich text.
+        // Keep the construction-time base font (it may already encode weight, e.g. "Arial Bold"); only
+        // the size/colour are taken from the rich text.
         if (baseSize > 0 || baseColor != null)
         {
             var f = DefaultAppearanceObject.FontName;
@@ -580,7 +627,6 @@ public partial class FreeTextAnnotation : MarkupAnnotation
             _defaultAppearance = new DefaultAppearance(f, s, c);
         }
         _styleRuns.AddRange(runs);
-        return runs.Count > 0 || baseSize > 0 || baseColor != null;
     }
 
     /// <summary>Regenerate the /AP /N appearance honouring per-range rich-text styles
@@ -595,10 +641,10 @@ public partial class FreeTextAnnotation : MarkupAnnotation
         ra.text = Contents;
         if (string.IsNullOrEmpty(ra.text)) ra.text = PlainTextFromRichText(RichText);
         if (string.IsNullOrEmpty(ra.text)) return;
-        ra.text = ra.text!.Replace("\r\n", "\n").Replace("\r", "\n");
+        ra.text = ra.text.Replace("\r\n", "\n").Replace("\r", "\n");
 
         ra.da = DefaultAppearanceObject;
-        ra.baseFont = string.IsNullOrWhiteSpace(ra.da.FontName) ? "Helvetica" : ra.da.FontName!;
+        ra.baseFont = string.IsNullOrWhiteSpace(ra.da.FontName) ? "Helvetica" : ra.da.FontName;
         ra.size = ra.da.FontSize > 0 ? ra.da.FontSize : 12.0;
         ra.color = ra.da.TextColor;
 

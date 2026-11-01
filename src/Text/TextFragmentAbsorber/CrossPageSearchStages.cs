@@ -48,7 +48,7 @@ public sealed partial class TextFragmentAbsorber
             RenderingMode = (Aspose.Pdf.Text.TextRenderingMode)firstRun.RenderingMode,
             LineWidth = firstRun.LineWidth,
             IsBold = firstRun.IsBold,
-            IsItalic = firstRun.IsItalic,
+            IsItalic = IsItalicRun(firstRun),
             Font = firstRun.FontInfoObj ?? FontInfo.DefaultHelvetica,
             TextRise = firstRun.TextRise,
             IsSuperscript = firstRun.TextRise > 0,
@@ -86,9 +86,9 @@ public sealed partial class TextFragmentAbsorber
     }
 
     /// <summary></summary>
-    private bool CollectCrossPageRuns(CrossPageSearchState xp, int pi)
+    private static bool CollectCrossPageRuns(CrossPageSearchState xp, int pi)
     {
-        var (page, runs) = xp.allPageRuns[pi];
+        var (_, runs) = xp.allPageRuns[pi];
         var runStarts = new List<int>();
         xp.pageRunStartChars.Add(runStarts);
 

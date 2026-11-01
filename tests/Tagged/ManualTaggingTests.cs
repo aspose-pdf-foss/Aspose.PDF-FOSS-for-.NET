@@ -133,6 +133,33 @@ public class ManualTaggingTests
     }
 
     [Fact]
+    public void Remove_TakesALoadedTableOutOfTheTree_AndItsChildrenCanMoveToTheParent()
+    {
+        var document = new Document();
+        var content = document.TaggedContent;
+        var root = content.RootElement;
+        var table = content.CreateTableElement();
+        root.AppendChild(table);
+        var body = table.CreateTBody();
+        var row = body.CreateTR();
+        row.CreateTD().SetText("cell");
+        using var loaded = new Document(new MemoryStream(Saved(document)));
+        var loadedRoot = loaded.TaggedContent.RootElement;
+        var loadedTable = loadedRoot.FindElements<TableElement>(true).Single();
+        var loadedCell = loadedTable.FindElements<TableTDElement>(true).Single();
+
+        loadedTable.Remove();
+        loadedCell.ChangeParentElement(loadedRoot);
+
+        Assert.Empty(loadedRoot.FindElements<TableElement>(true));
+        Assert.Null(loadedTable.ParentElement);
+        Assert.Same(loadedRoot, loadedCell.ParentElement);
+        using var reread = new Document(new MemoryStream(Saved(loaded)));
+        Assert.Empty(reread.TaggedContent.RootElement.FindElements<TableElement>(true));
+        Assert.Single(reread.TaggedContent.RootElement.FindElements<TableTDElement>(true));
+    }
+
+    [Fact]
     public void AddEntryToTocPage_DrawsTheEntries_AndTiesThemToTheirItems()
     {
         var document = new Document();

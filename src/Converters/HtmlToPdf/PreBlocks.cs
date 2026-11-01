@@ -11,8 +11,11 @@ internal static partial class HtmlToPdfConverter
     /// margins.</summary>
     internal sealed class PreBlock
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<PreLine> Lines = new();
+#pragma warning restore S3218
         public double WidestPt;       // the widest line's advance: the page grows to hold it
+        public bool Clips;            // overflow auto/hidden/scroll: lines clip at the content box, the page never grows
     }
 
     internal sealed class PreLine
@@ -47,23 +50,51 @@ internal static partial class HtmlToPdfConverter
             && preRule.TryGetValue("white-space", out var preWs) && preWs.Contains("pre-wrap", StringComparison.OrdinalIgnoreCase)
             && preRule.TryGetValue("font-family", out var preFam) && FirstFontFamily(preFam) is { } preFace && WinMetricsFor(preFace) is not null)
             return;
-        foreach (Match m in Regex.Matches(rb.html, @"<pre\b[^>]*>([\s\S]*?)</pre\s*>", RegexOptions.IgnoreCase))
+        // (a pre whose overflow is auto, hidden or scroll neither wraps nor widens the sheet: probed,
+        //  its long lines are laid out whole and clipped at its box, the page keeping its width)
+        var sheetClips = rb.css is not null && rb.css.TryGetValue("pre", out var clipRule)
+            && clipRule.TryGetValue("overflow", out var sheetOverflow) && OverflowClips(sheetOverflow);
+        foreach (Match m in SafeRegex.Matches(rb.html, @"<pre\b([^>]*)>([\s\S]*?)</pre\s*>", RegexOptions.IgnoreCase))
         {
             if (Overlaps(rb, m.Index, m.Index + m.Length)) continue;
             var before = rb.html[..m.Index];
-            var opens = Regex.Matches(before, @"<table\b", RegexOptions.IgnoreCase).Count;
-            var closes = Regex.Matches(before, @"</table\b", RegexOptions.IgnoreCase).Count;
+            var opens = SafeRegex.Matches(before, @"<table\b", RegexOptions.IgnoreCase).Count;
+            var closes = SafeRegex.Matches(before, @"</table\b", RegexOptions.IgnoreCase).Count;
             if (opens > closes) continue;
-            var block = BuildPreBlock(m.Groups[1].Value);
-            if (block is not null) rb.extracts.Add((m.Index, m.Index + m.Length, block));
+            var block = BuildPreBlock(m.Groups[2].Value);
+            if (block is null) continue;
+            var inlineOverflow = SafeRegex.Match(m.Groups[1].Value, @"(?<![\w-])overflow\s*:\s*([a-z]+)", RegexOptions.IgnoreCase);
+            block.Pre!.Clips = inlineOverflow.Success ? OverflowClips(inlineOverflow.Groups[1].Value) : sheetClips;
+            rb.extracts.Add((m.Index, m.Index + m.Length, block));
         }
     }
+
+    /// <summary>A pre line's text runs: in the pre's own face, except that characters outside
+    /// WinAnsi (CJK in a code sample) draw in the fallback face that covers them, the way flow
+    /// text does; consecutive runs advance the pen, so nothing is measured.</summary>
+    private static string PreLineRuns(Core.PdfDictionary fontDict, byte[] ttf, string faceName, PreLine ln,
+        System.Globalization.CultureInfo inv)
+    {
+        var sb = new StringBuilder();
+        var segments = NeedsUnicode(ln.Text) ? SegmentByFont(ln.Text) : [(ln.Text, null)];
+        foreach (var (segText, segFont) in segments)
+        {
+            var segTtf = segFont?.SourceFontData?.TtfData;
+            var (rn, hex) = segTtf is not null
+                ? Text.Type0FontEmbedder.Embed(fontDict, segTtf, segFont!.FontName ?? "Unicode", segText, stripSpacesInBaseFont: true)
+                : Text.Type0FontEmbedder.Embed(fontDict, ttf, faceName, segText, stripSpacesInBaseFont: true);
+            sb.Append(Compat.Format(inv, $"/{rn} {ln.FontPt:F2} Tf <{Compat.ToHexString(hex)}> Tj "));
+        }
+        return sb.ToString();
+    }
+
+    private static bool OverflowClips(string overflow)
+        => overflow.Trim().ToLowerInvariant() is "auto" or "hidden" or "scroll";
 
     private sealed class PreParseState
     {
         public PreBlock block = new();
         public StringBuilder line = new();
-        public bool lineOpen;                 // text or a newline has been seen on the current line
         public Stack<double> sizeStack = new();
         public double size;                   // the current inherited size (pt)
         public string? pFace; public double pSize; public bool pCenter; public bool inP;
@@ -87,7 +118,9 @@ internal static partial class HtmlToPdfConverter
         for (var i = st.pOpenLineStart; i < st.block.Lines.Count; i++)
         {
             var ln = st.block.Lines[i];
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             if (ln.FontPt != st.pSize) continue;
+#pragma warning restore S1244
             ln.FontPt = fallbackSize;
             if (ln.ParagraphStart) ln.MarginPt = PreParagraphMarginEm * fallbackSize;
         }
@@ -102,7 +135,7 @@ internal static partial class HtmlToPdfConverter
         if (inner.StartsWith("\r\n")) inner = inner[2..];
         else if (inner.StartsWith('\n')) inner = inner[1..];
         var pos = 0;
-        foreach (Match t in Regex.Matches(inner, @"<!--[\s\S]*?-->|<(style|script)\b[^>]*>[\s\S]*?</\1\s*>|<(/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>", RegexOptions.IgnoreCase))
+        foreach (Match t in SafeRegex.Matches(inner, @"<!--[\s\S]*?-->|<(style|script)\b[^>]*>[\s\S]*?</\1\s*>|<(/?)([a-zA-Z][a-zA-Z0-9]*)([^>]*)>", RegexOptions.IgnoreCase))
         {
             if (t.Index > pos) PreText(st, inner[pos..t.Index]);
             pos = t.Index + t.Length;
@@ -185,7 +218,6 @@ internal static partial class HtmlToPdfConverter
         for (var i = 0; i < parts.Length; i++)
         {
             st.line.Append(parts[i]);
-            st.lineOpen = true;
             if (st.boldDepth > 0 && parts[i].Trim().Length > 0) st.lineBold = true;
             if (i < parts.Length - 1) PreFlushLine(st);
         }
@@ -208,7 +240,6 @@ internal static partial class HtmlToPdfConverter
         ln.MarginPt = st.inP ? PreParagraphMarginEm * ln.FontPt : 0;
         st.block.Lines.Add(ln);
         st.line.Clear();
-        st.lineOpen = false;
         st.lineBold = false;
         st.pFirstLine = false;
     }
@@ -217,7 +248,6 @@ internal static partial class HtmlToPdfConverter
     private static void PreBoundary(PreParseState st)
     {
         if (st.line.Length > 0) PreFlushLine(st);
-        st.lineOpen = false;
     }
 
     private static void PreTag(PreParseState st, bool closing, string tag, string attrText)
@@ -234,7 +264,8 @@ internal static partial class HtmlToPdfConverter
                 }
                 st.sizeStack.Push(st.size);
                 if (attrs is not null && attrs.TryGetValue("size", out var sz)
-                    && int.TryParse(sz.Trim().TrimStart('+'), out var sizeN))
+                    && int.TryParse(sz.Trim().TrimStart('+'), System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out var sizeN))
                     st.size = HtmlFontSizeToPt(Math.Max(1, Math.Min(7, sizeN)));
                 break;
             case "p":
@@ -282,7 +313,7 @@ internal static partial class HtmlToPdfConverter
             var value = decl[(colon + 1)..].Trim();
             if (name == "font-size" && TryParseLength(value) is { } pt && pt > 0) st.pSize = pt;
             else if (name == "font-family") st.pFace = value.Split(',')[0].Trim().Trim('"', '\'');
-            else if (name == "font" && !Regex.IsMatch(value, @"\d"))
+            else if (name == "font" && !SafeRegex.IsMatch(value, @"\d"))
                 st.pFace = value.Split(',')[0].Trim().Trim('"', '\'');
         }
     }
@@ -293,13 +324,14 @@ internal static partial class HtmlToPdfConverter
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         var yTop = cv.pageHeight - cv.flow.y;
-        var pageTop = cv.marginTop + UaBodyMarginPt;
+        var bodyTop = AuthoredBodyBox(cv) ? cv.bodyBox.Top : UaBodyMarginPt;
+        var pageTop = cv.marginTop + bodyTop;
         var atPageTop = Math.Abs(yTop - pageTop) < 1e-3;
         var prevBottomMargin = 0.0;
         foreach (var ln in pre.Lines)
         {
             if (ln.ParagraphStart)
-                yTop += atPageTop ? Math.Max(0, ln.MarginPt - UaBodyMarginPt) : Math.Max(prevBottomMargin, ln.MarginPt);
+                yTop += atPageTop ? Math.Max(0, ln.MarginPt - BodyTopCollapsePt(cv)) : Math.Max(prevBottomMargin, ln.MarginPt);
             // (the line box follows the face's WIN metrics: Lucida Console 8 pt = 11 px)
             // (a bold line draws in the face's bold, when the face has one installed)
             var faceName = ln.Face;
@@ -323,9 +355,11 @@ internal static partial class HtmlToPdfConverter
                 var x = cv.marginLeft;
                 if (ln.Center)
                     x += Math.Max(0, (cv.flow.contentWidth - InstalledFaceAdvance(ln.Face, ln.Text, ln.FontPt)) / 2);
-                var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDict, face.ttf, faceName, ln.Text, stripSpacesInBaseFont: true);
-                cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(inv,
-                    $"BT 0 0 0 rg /{rn} {ln.FontPt:F2} Tf 1 0 0 1 {x:F3} {cv.pageHeight - yTop - drop:F3} Tm <{Compat.ToHexString(hex)}> Tj ET\n")));
+                var text = Compat.Format(inv, $"BT 0 0 0 rg 1 0 0 1 {x:F3} {cv.pageHeight - yTop - drop:F3} Tm ")
+                    + PreLineRuns(fontDict, face.ttf, faceName, ln, inv) + "ET\n";
+                if (pre.Clips)
+                    text = Compat.Format(inv, $"q {cv.marginLeft:F3} {cv.pageHeight - yTop - lineH:F3} {cv.flow.contentWidth:F3} {lineH:F3} re W n\n") + text + "Q\n";
+                cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(text));
             }
             yTop += lineH;
             prevBottomMargin = ln.ParagraphLine ? ln.MarginPt : 0;

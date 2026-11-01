@@ -57,15 +57,15 @@ public sealed partial class TextAbsorber
         {
             int bytesPerRow = (im.imgW * im.imgColors * im.imgBpc + 7) / 8;
             int expected = im.imgH * bytesPerRow; // lower bound (a row predictor only adds bytes)
+            // The candidates are read in place: only the data up to a candidate is copied, so an
+            // image costs its own length, not the length of the content stream after it.
             int tailLen = (int)Math.Max(0, im.lenAll - im.dataStart0);
-            var tail = new byte[tailLen];
-            for (int i = 0; i < tailLen; i++) tail[i] = im.lexer.ByteAt(im.dataStart0 + i);
             for (int p = 1; p < tailLen - 1; p++)
             {
-                if (tail[p] != (byte)'E' || tail[p + 1] != (byte)'I') continue;
-                if (p + 2 < tailLen && !IsInlineImageWhitespace(tail[p + 2])) continue;
-                var slice = new byte[p];
-                Array.Copy(tail, 0, slice, 0, p);
+                long at = im.dataStart0 + p;
+                if (im.lexer.ByteAt(at) != (byte)'E' || im.lexer.ByteAt(at + 1) != (byte)'I') continue;
+                if (p + 2 < tailLen && !IsInlineImageWhitespace(im.lexer.ByteAt(at + 2))) continue;
+                var slice = im.lexer.CopyBytes(im.dataStart0, p);
                 try
                 {
                     var inflated = Aspose.Pdf.IO.Filters.FlateDecodeFilter.Decode(slice, null);
@@ -91,10 +91,10 @@ public sealed partial class TextAbsorber
                 if (im.key is "F" or "Filter" && im.firstFilter is null) im.firstFilter = n;
                 switch (n)
                 {
-                    case "RGB": case "DeviceRGB": if (im.key is "CS" or "ColorSpace") im.imgColors = 3; break;
-                    case "CMYK": case "DeviceCMYK": if (im.key is "CS" or "ColorSpace") im.imgColors = 4; break;
-                    case "G": case "DeviceGray": if (im.key is "CS" or "ColorSpace") im.imgColors = 1; break;
-                    case "Fl": case "FlateDecode": if (im.key is "F" or "Filter") im.imgFlate = true; break;
+                    case "RGB": case "DeviceRGB": if (im.key is "CS" or "ColorSpace") { im.imgColors = 3; } break;
+                    case "CMYK": case "DeviceCMYK": if (im.key is "CS" or "ColorSpace") { im.imgColors = 4; } break;
+                    case "G": case "DeviceGray": if (im.key is "CS" or "ColorSpace") { im.imgColors = 1; } break;
+                    case "Fl": case "FlateDecode": if (im.key is "F" or "Filter") { im.imgFlate = true; } break;
                 }
                 im.key = n;
             }

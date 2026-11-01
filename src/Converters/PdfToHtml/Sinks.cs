@@ -57,13 +57,16 @@ public sealed partial class PdfToHtmlConverter
             _imagesUrl = imagesUrl;
         }
 
-        public void Emit(StringBuilder sb, StringBuilder? svgBuf, ImageXObject img, CtmState ctm, double pageHeight)
+        /// <param name="stateAttrs">The clip and blend attributes of the graphics state the
+        /// picture is drawn under, carried by its placement group in the page SVG.</param>
+        public void Emit(StringBuilder sb, StringBuilder? svgBuf, ImageXObject img, CtmState ctm, double pageHeight,
+            string stateAttrs = "")
         {
             var png = img.ToPng();
             if (EmbedDataUris && svgBuf is not null)
             {
                 EmitSvgImageRef(svgBuf, img, ctm, pageHeight,
-                    "data:image/png;base64," + Convert.ToBase64String(png), InlineSvgAxes);
+                    "data:image/png;base64," + Convert.ToBase64String(png), InlineSvgAxes, stateAttrs);
                 return;
             }
             // The same image drawn on many pages (a logo, a letterhead) is written once
@@ -87,7 +90,7 @@ public sealed partial class PdfToHtmlConverter
             // A strategy-supplied URL is referenced from inside the page SVG (the
             // AsPngImagesEmbeddedIntoSvg shape) rather than as an HTML <img>.
             if ((SvgImageRefs || entry.FromCallback) && svgBuf is not null)
-                EmitSvgImageRef(svgBuf, img, ctm, pageHeight, EscapeHrefAmpersands(entry.Href), InlineSvgAxes);
+                EmitSvgImageRef(svgBuf, img, ctm, pageHeight, EscapeHrefAmpersands(entry.Href), InlineSvgAxes, stateAttrs);
             else
                 EmitImage(sb, img, ctm, pageHeight,
                     entry.FromCallback ? EscapeHrefAmpersands(entry.Href) : Ref(_imagesUrl, entry.Href));
@@ -96,6 +99,13 @@ public sealed partial class PdfToHtmlConverter
         /// <summary>Sequence source for SVG soft-mask ids: shared through the sink so
         /// masks emitted from nested form recursions stay unique per document.</summary>
         public int MaskSeq;
+
+        /// <summary>Sequence source for SVG gradient ids, shared the same way: a form's
+        /// first shading must not take the id the page's first shading already holds.</summary>
+        public int GradientSeq;
+
+        /// <summary>Sequence source for SVG clip path ids, shared the same way.</summary>
+        public int ClipSeq;
 
         /// <summary>Write a raster the converter produced itself (a rasterised
         /// luminosity soft-mask group) through the same naming, dedupe and
@@ -130,7 +140,7 @@ public sealed partial class PdfToHtmlConverter
         /// space (the negative vertical scale re-flips the bitmap upright); the sidecar
         /// name is relative because the SVG lives in the same folder.</summary>
         private static void EmitSvgImageRef(StringBuilder svgBuf, ImageXObject img,
-            CtmState ctm, double pageHeight, string name, bool inlineAxes = false)
+            CtmState ctm, double pageHeight, string name, bool inlineAxes = false, string stateAttrs = "")
         {
             var widthPt = Math.Abs(ctm.A);
             var heightPt = Math.Abs(ctm.D);
@@ -138,6 +148,17 @@ public sealed partial class PdfToHtmlConverter
             if (heightPt < 0.01) heightPt = img.Height;
             var sx = widthPt / img.Width;
             var sy = heightPt / img.Height;
+            // A clip or blend mode applies in the page's space, outside the placement group
+            // whose own matrix would transform the clip with the bitmap. The clip is written
+            // in the y-up space of the paths: the inline wrapper keeps y top-down, so its
+            // state group flips the axis and places the picture the way the sidecar does.
+            if (stateAttrs.Length > 0)
+            {
+                svgBuf.Append(inlineAxes
+                    ? $"<g transform=\"matrix(1 0 0 -1 0 {(int)pageHeight})\"{stateAttrs}>"
+                    : $"<g{stateAttrs}>");
+                inlineAxes = false;
+            }
             // The sidecar wrapper flips the y axis, so the group re-flips the bitmap
             // upright from the box's PDF top. The inline wrapper keeps y top-down:
             // the group scales positively from the box's top-down origin instead.
@@ -148,6 +169,7 @@ public sealed partial class PdfToHtmlConverter
                 .Append("<g transform=\"matrix(1 0 0 1 0 0)\">")
                 .Append($"<image x=\"0\" y=\"0\" xlink:href=\"{name}\" width=\"{img.Width}\" height=\"{img.Height}\" />")
                 .Append("</g></g>");
+            if (stateAttrs.Length > 0) svgBuf.Append("</g>");
         }
     }
 
@@ -227,6 +249,16 @@ public sealed partial class PdfToHtmlConverter
         /// <summary>True when the pinned layout reserves 03/04 for a backdrop wrapper
         /// (text layer at 05/06); false when the text layer itself takes 03/04.</summary>
         public bool BackdropLayout { get; private set; } = true;
+
+        /// <summary>Whether a page has already pinned the layout.</summary>
+        public bool BasePinned => _basePinned;
+
+        /// <summary>The content band of the first page trimmed under RemoveEmptyAreasOnTopAndBottom:
+        /// the structural classes take its measures, as they take the first page's box; a later page
+        /// whose band differs states its own measures inline.</summary>
+        public ContentBand? Band { get; private set; }
+
+        public void PinBand(ContentBand band) => Band ??= band;
 
         public int Font(string family, double sizeEm, string color, string? faceUrl,
             string? fallbackFamily = null)
@@ -339,6 +371,25 @@ public sealed partial class PdfToHtmlConverter
             return n;
         }
 
+        /// <summary>The class that turns a whole page layer a quarter for a page whose /Rotate is 90 or 270: the
+        /// layer is laid out in the page's unrotated frame and turned about its corner, then moved back onto the
+        /// page box by the unrotated page's height (a clockwise turn) or width (a counterclockwise one).</summary>
+        public int PageQuarterTurn(int degrees, double shiftEm)
+        {
+            var key = degrees + "/" + shiftEm.ToString("0.####", CultureInfo.InvariantCulture);
+            if (_pageRotations.TryGetValue(key, out var n)) return n;
+            n = _next++;
+            _pageRotations[key] = n;
+            var em = shiftEm.ToString("0.####", CultureInfo.InvariantCulture) + "em";
+            var transform = degrees == 90 ? $"translate({em}, 0) rotate(90deg)" : $"translate(0, {em}) rotate(-90deg)";
+            _rules.Add($"%SEL{n}% {{\n\t-o-transform: {transform};\n" +
+                $"\t-webkit-transform: {transform};\n" +
+                $"\t-moz-transform: {transform};\n" +
+                $"\ttransform: {transform};\n\ttransform-origin: 0 0;\n" +
+                $"\twidth: 0pt;\n\theight: 0pt;\n\tposition: absolute;\n}}\n");
+            return n;
+        }
+
         public int Rotation(double deg)
         {
             var key = deg.ToString("0.##", CultureInfo.InvariantCulture);
@@ -368,7 +419,7 @@ public sealed partial class PdfToHtmlConverter
         public void Renumber(Dictionary<int, int> map)
         {
             for (var i = 0; i < _rules.Count; i++)
-                _rules[i] = System.Text.RegularExpressions.Regex.Replace(_rules[i],
+                _rules[i] = SafeRegex.Replace(_rules[i],
                     @"%(SEL|IE)(\d+)%",
                     m =>
                     {
@@ -377,7 +428,7 @@ public sealed partial class PdfToHtmlConverter
                     });
             int RuleKey(string rule)
             {
-                var m = System.Text.RegularExpressions.Regex.Match(rule, @"%SEL(\d+)%");
+                var m = SafeRegex.Match(rule, @"%SEL(\d+)%");
                 return m.Success ? int.Parse(m.Groups[1].Value) : int.MaxValue;
             }
             var keyed = new List<(int Key, int Idx, string Rule)>(_rules.Count);
@@ -394,9 +445,9 @@ public sealed partial class PdfToHtmlConverter
             var sb = new StringBuilder();
             foreach (var r in _rules)
             {
-                var expanded = System.Text.RegularExpressions.Regex.Replace(r, @"%SEL(\d+)%",
+                var expanded = SafeRegex.Replace(r, @"%SEL(\d+)%",
                     m => namer.Sel(int.Parse(m.Groups[1].Value)));
-                expanded = System.Text.RegularExpressions.Regex.Replace(expanded, @"%IE(\d+)%",
+                expanded = SafeRegex.Replace(expanded, @"%IE(\d+)%",
                     m => namer.Sel("ie") + " " + namer.Sel(int.Parse(m.Groups[1].Value)));
                 sb.Append(expanded);
             }

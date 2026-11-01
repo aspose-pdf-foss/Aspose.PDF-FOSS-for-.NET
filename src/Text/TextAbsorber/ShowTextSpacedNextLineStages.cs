@@ -24,7 +24,7 @@ public sealed partial class TextAbsorber
         else
         {
             var fullDecoded = ApplyRtlIfPureRtl(NormalizeDecoded(
-                DecodeString(qStr.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine), foldNbsp: xs.searchRect is null));
+                DecodeString(qStr.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader), foldNbsp: xs.searchRect is null));
             // When a search rectangle is active, clip the run to the
             // glyphs whose advance box falls inside it (page space).
             var clipping = xs.clipRect is not null && xs.tmD > 0 && xs.currentMetrics is not null;
@@ -34,14 +34,14 @@ public sealed partial class TextAbsorber
                 var clip = new StringBuilder();
                 var pen = xs.tx;
                 AppendClippedRun(clip, qStr.Value, xs.currentToUnicode, xs.currentFontDict,
-                    xs.reader, xs.useFontEngine, xs.currentMetrics, xs.fontSize, xs.horizScale,
+                    xs.reader, xs.currentMetrics, xs.fontSize, xs.horizScale,
                     xs.clipRect!, xs.tmOriginX, xs.tmA, xs.localCmTx, xs.cmLa, pen, xs.charSpacing, xs.wordSpacing, xs.blankClip);
                 decoded = clip.ToString();
             }
             if (!clipping || decoded.Length > 0)
             {
                 TrackRowX(xs.tmRotated
-                    ? (_pageRotDominant ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx : xs.tmE)
+                    ? RotatedRunX(xs)
                     : (xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA) * xs.cmLa + xs.cmLe);
                 // Same-row continuation: insert proportional spaces for the
                 // horizontal gap (Pure mode), mirrors Tj/TJ gap logic.
@@ -62,11 +62,9 @@ public sealed partial class TextAbsorber
             xs.lastRunEndPageX = xs.tmRotated ? double.NaN : xs.tmE + (xs.tx + width - xs.tlmX) * xs.tmAr;
             xs.lastRunStartPageX = xs.tmRotated ? double.NaN : xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr;
             xs.lastRunEndX = xs.tx + width * (xs.tmRotated ? xs.tmA : 1.0); // rotated: advance projects through the axis norm
-            xs.lastRunEstWidth = width;
             xs.lastHadMetrics = measuredWidth.HasValue;
-            xs.lastDecodedLength = decoded.Length;
             xs.tx += width;
-            xs.lastRenderedY = newY; xs.lastRenderedFs = xs.fontSize * (xs.tmRotated ? xs.tmN : 1.0); xs.lastRenderedCmTy = xs.localCmTy;
+            xs.lastRenderedY = newY; xs.lastRenderedCmTy = xs.localCmTy;
         }
     }
 }

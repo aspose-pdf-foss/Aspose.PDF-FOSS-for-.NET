@@ -24,7 +24,7 @@ internal static partial class HtmlToPdfConverter
             foreach (var tc in mt.mps.tableClassNames)
                 if ((mt.css.TryGetValue("." + tc + " " + tag, out var tcRule) || mt.css.TryGetValue("table." + tc + " " + tag, out tcRule))
                     && tcRule.TryGetValue("line-height", out var tcLh)
-                    && Regex.Match(tcLh, @"^\s*([\d.]+)\s*(px|pt)\s*$", RegexOptions.IgnoreCase) is { Success: true } tcLhM)
+                    && SafeRegex.Match(tcLh, @"^\s*([\d.]+)\s*(px|pt)\s*$", RegexOptions.IgnoreCase) is { Success: true } tcLhM)
                 {
                     mt.mps.cell.LineHeightPt = DtpNum(tcLhM.Groups[1].Value)
                         * (tcLhM.Groups[2].Value.Equals("pt", StringComparison.OrdinalIgnoreCase) ? 1 : PxPt);
@@ -44,7 +44,7 @@ internal static partial class HtmlToPdfConverter
         // The sheet's own th/td element rule styles the cell (the
         // order-ticket th { font-size: 80%; text-align: left }).
         if (mt.stdSerif && mt.css.TryGetValue(tag, out var cellTagRule))
-            ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, cellTagRule);
+            ApplyCellClassBag(mt.mps, mt.stdSerif, mt.mps.cell, cellTagRule);
         // …and the element rule's line-height paces the cell's line box: a length as it stands, a
         // percent, number or em of the cell's size (MEASURED, the evaluation form: `TD { font-size:
         // .75em; line-height: 150% }` rows pitch 13.5 = 1.5 x 9, its blank <br> rows included)
@@ -57,19 +57,19 @@ internal static partial class HtmlToPdfConverter
         // legacy comment-wrapped sheet's first rule included).
         if (mt.stdSerif && ElementRule(mt.css, tag) is { } wsTagRule
             && wsTagRule.TryGetValue("white-space", out var tagWs)
-            && Regex.IsMatch(tagWs, @"^\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(tagWs, @"^\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
             mt.mps.cell.NoWrap = true;
         // …and so does a chain rule that ends in the tag through the grid's own structure
         // (`table tr th { border; width; text-align }` reaches every th).
         if (mt.stdSerif)
             foreach (var chainRule in CellChainRules(mt.css, tag, anyCell: mt.mps.sheetSpacingZero))
-                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, chainRule);
+                ApplyCellClassBag(mt.mps, mt.stdSerif, mt.mps.cell, chainRule);
         // (…and the row's FIRST cell takes the sheet's `:first-child` rule for its tag - the left rule
         //  the change-control grid gives its first column)
         if (mt.stdSerif && mt.mps.sheetSpacingZero && mt.mps.row.Count == 0)
             foreach (var fcKey in new[] { tag + ":first-child", "table " + tag + ":first-child" })
                 if (mt.css.TryGetValue(fcKey, out var fcRule))
-                    ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, fcRule);
+                    ApplyCellClassBag(mt.mps, mt.stdSerif, mt.mps.cell, fcRule);
         if (mt.mps.rowFs is { } rfs) { mt.mps.cell.FontSize = rfs; if (mt.mps.rowFsFromClass) mt.mps.cell.FontFromClass = true; }
         if (mt.mps.rowAlign is { } ra) mt.mps.cell.Align = ra;
         if (mt.mps.rowBg is { } rbg) mt.mps.cell.Bg = rbg;
@@ -80,18 +80,18 @@ internal static partial class HtmlToPdfConverter
         if (mt.mps.rowVTop) mt.mps.cell.VAlignTop = true;
         if (mt.mps.rowVBottom) mt.mps.cell.VAlignBottom = true;
         if (mt.mps.rowTdBags is not null)
-            foreach (var tb in mt.mps.rowTdBags) ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, mt.mps.cell, tb);
+            foreach (var tb in mt.mps.rowTdBags) ApplyCellClassBag(mt.mps, mt.stdSerif, mt.mps.cell, tb);
         ApplyMetricSiblingCellRules(mt, mt.mps.cell, tag, tok);
         if (tok.Attributes is { } ca)
         {
-            // NoWrap layout is part of the modern-nesting model;
-            // the dead-css greens stay on their calibrated wrap.
+            // NoWrap layout is part of the modern-nesting model; the
+            // dead-css greens stay on their calibrated wrap.
             if (mt.wrapperStacks && ca.ContainsKey("nowrap")) mt.mps.cell.NoWrap = true;
             if (ca.TryGetValue("colspan", out var csp)
-                && int.TryParse(csp.Trim(), out var cspN) && cspN > 1)
+                && int.TryParse(csp.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var cspN) && cspN > 1)
                 mt.mps.cell.ColSpan = cspN;
             if (ca.TryGetValue("rowspan", out var rsp)
-                && int.TryParse(rsp.Trim(), out var rspN) && rspN > 1)
+                && int.TryParse(rsp.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var rspN) && rspN > 1)
                 mt.mps.cell.RowSpan = rspN;
             if (ca.TryGetValue("bgcolor", out var tdbg)
                 && AttrColor(tdbg) is { } tdbgc)
@@ -106,6 +106,7 @@ internal static partial class HtmlToPdfConverter
             }
             ApplyMetricCellAttributes(mt, mt.mps.cell, ca);
         }
+        ApplyMetricCellCascadeBorders(mt, mt.mps.cell, tag, tok.Attributes);
     }
 
     /// <summary>The sheet's descendant-chain rules that end in the cell's tag and run only through the
@@ -143,6 +144,6 @@ internal static partial class HtmlToPdfConverter
                 ? cls.Split(' ', StringSplitOptions.RemoveEmptyEntries) : null,
         };
         if (MatchSiblingCellDecls(mt.siblingCellRules, left, right) is { } decls)
-            ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, cell, decls);
+            ApplyCellClassBag(mt.mps, mt.stdSerif, cell, decls);
     }
 }

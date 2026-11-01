@@ -40,7 +40,7 @@ internal static partial class HtmlToPdfConverter
                 if (mt.mps.cell is not null) { mt.mps.cell.Italic = true; mt.mps.italicDepth++; }
                 break;
             case "font":
-                OpenMetricFont(mt, tok, tag);
+                OpenMetricFont(mt, tok);
                 break;
             case "a":
                 OpenMetricAnchor(mt, tok);
@@ -52,7 +52,7 @@ internal static partial class HtmlToPdfConverter
                 OpenMetricDiv(mt, tok);
                 break;
             case "img":
-                HandleMetricImgOpen(mt.mps, tok, mt.text, mt.css, mt.stdSerif, mt.wrapperStacks, mt.reportCells, mt.rows, mt.face, mt.boldFace, mt.fm, mt.indent, mt.loadOptions, mt.p, mt.rtl, mt.s, mt.tableHtml, mt.tablePct, mt.tableWpt, tag);
+                HandleMetricImgOpen(mt.mps, tok, mt.text, mt.css, mt.stdSerif, mt.wrapperStacks, mt.reportCells, mt.loadOptions);
                 break;
             case "h1":
             case "h2":
@@ -63,10 +63,10 @@ internal static partial class HtmlToPdfConverter
                 OpenMetricHeading(mt, tok, tag);
                 break;
             case "p":
-                HandleMetricParaOpen(mt.mps, tok, mt.text, mt.css, mt.stdSerif, mt.wrapperStacks, mt.reportCells, mt.rows, mt.face, mt.boldFace, mt.fm, mt.indent, mt.loadOptions, mt.p, mt.rtl, mt.s, mt.tableHtml, mt.tablePct, mt.tableWpt, tag);
+                HandleMetricParaOpen(mt.mps, tok, mt.text, mt.css, mt.stdSerif, mt.reportCells, tag);
                 mt.mps.paraOpenTextLen = mt.text.Length;
                 mt.mps.paraZeroMargin = tok.Attributes is { } pzA && pzA.TryGetValue("style", out var pzSt) && pzSt is not null
-                    && Regex.IsMatch(pzSt, @"(?<![-\w])margin\s*:\s*0(?:pt|px|em|%)?(?:\s+0(?:pt|px|em|%)?){0,3}\s*(?:;|$)", RegexOptions.IgnoreCase);
+                    && SafeRegex.IsMatch(pzSt, @"(?<![-\w])margin\s*:\s*0(?:pt|px|em|%)?(?:\s+0(?:pt|px|em|%)?){0,3}\s*(?:;|$)", RegexOptions.IgnoreCase);
                 break;
             case "br":
                 // a <br> inside a cell is a hard line break (the letter's
@@ -76,7 +76,9 @@ internal static partial class HtmlToPdfConverter
                 // (the sized runs carry the break too: a UA cell's lines may each open in their own size)
                 if (mt.mps.cell is not null && mt.mps.curSeg is null && mt.stdSerif)
                 {
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
                     if (mt.mps.sizedSegs.Count == 0 || mt.mps.sizedSegs[^1].Fs != mt.mps.cell.FontSize)
+#pragma warning restore S1244
                         mt.mps.sizedSegs.Add((new StringBuilder(), mt.mps.cell.FontSize));
                     mt.mps.sizedSegs[^1].Sb.Append('\u0001');
                 }
@@ -90,7 +92,7 @@ internal static partial class HtmlToPdfConverter
             case "tbody":
             case "tfoot":
                 if (mt.mps.nestDepth == 0)
-                    mt.mps.curSection = tag == "thead" ? 0 : tag == "tfoot" ? 2 : 1;
+                    mt.mps.curSection = tag switch { "thead" => 0, "tfoot" => 2, _ => 1 };
                 break;
         }
     }

@@ -5,9 +5,6 @@ namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
-// Task report drawing helpers: flattening, numbers, pages, text, rules, bands, pills, cards and page breaks.
-    private static string Flat(TaskReportState tq, string s) => CollapseWs(DecodeEntities(
-        Regex.Replace(s, "<[^>]+>", " "))).Trim();
 
     private static string N(TaskReportState tq, double v) => v.ToString("0.###", tq.inv);
 
@@ -114,7 +111,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     // wrap the long stage guidance at the measured width
-    private static List<string> Wrap(TaskReportState tq, string text, double width, double fs)
+    private static List<string> Wrap(string text, double width, double fs)
     {
         var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var lines = new List<string>();

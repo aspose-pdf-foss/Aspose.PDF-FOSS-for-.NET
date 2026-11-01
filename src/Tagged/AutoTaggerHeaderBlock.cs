@@ -52,7 +52,9 @@ internal static partial class AutoTagger
                     pw.Tables.RemoveAt(k);
                     pw.TableCells.RemoveAt(k);
                     if (k < ruledCount) ruledCount--;
+#pragma warning disable S127 // an entry before the cursor was removed from the list - the cursor moves back with it
                     if (k < i) i--;
+#pragma warning restore S127
                 }
                 continue;
             }
@@ -104,7 +106,9 @@ internal static partial class AutoTagger
                 pw.Tables.RemoveAt(k);
                 pw.TableCells.RemoveAt(k);
                 if (k < ruledCount) ruledCount--;
+#pragma warning disable S127 // an entry before the cursor was removed from the list - the cursor moves back with it
                 if (k < i) i--;
+#pragma warning restore S127
             }
         }
         return ruledCount;
@@ -167,7 +171,7 @@ internal static partial class AutoTagger
             {
                 if (text[r, c] is null) continue;
                 filled++;
-                if (NumericCell.IsMatch(text[r, c]!.ToString())) numeric++;
+                if (SafeRegex.IsMatch(NumericCell, text[r, c]!.ToString())) numeric++;
             }
         return filled > 0 && numeric >= HeaderBlockNumericShare * filled;
     }
@@ -247,13 +251,17 @@ internal static partial class AutoTagger
     }
 
     /// <summary>Where a rule across a whole table stands beyond its edge at <paramref name="edge"/>, no further than
-    /// <paramref name="reach"/>, no text between: the nearest to the edge; null when none does.</summary>
+    /// <paramref name="reach"/>, no text between: the nearest to the edge; null when none does. A line stands between
+    /// when any of it from its foot to its baseline does - a row whose descenders the rule under it runs through stands
+    /// over the rule, a heading whose descenders dip under the shade it is set on stands under the shade's edge.</summary>
     private static double? EdgeRule(PageWork pw, List<Line> content, List<double> colX, double edge, double reach)
     {
         var (lo, hi) = (Math.Min(edge, reach), Math.Max(edge, reach));
+#pragma warning disable S1244 // the edge is a rule position from the same list - exact equality skips the edge's own rule
         return pw.Rules.Where(r => r.Horizontal && r.Drawn && r.At >= lo && r.At <= hi && r.At != edge
+#pragma warning restore S1244
                                    && r.From <= colX[0] + 2 * AlignTolerance && r.To >= colX[^1] - 2 * AlignTolerance
-                                   && !content.Any(l => l.Frags.Count > 0 && l.Y > Math.Min(r.At, edge) && l.Y < Math.Max(r.At, edge)
+                                   && !content.Any(l => l.Frags.Count > 0 && l.Baseline > Math.Min(r.At, edge) && l.Y < Math.Max(r.At, edge)
                                                         && l.MinX < colX[^1] && l.Frags[^1].R > colX[0]))
             .Select(r => (double?)r.At).OrderBy(at => Math.Abs(at!.Value - edge)).FirstOrDefault();
     }
@@ -288,13 +296,15 @@ internal static partial class AutoTagger
     /// its lines join the row above.</summary>
     private static void JoinRowsBetween(List<List<Line>> rows, List<double> colX)
     {
-        for (var r = 1; r + 1 < rows.Count; r++)
+        var r = 1;
+        while (r + 1 < rows.Count)
         {
             var own = rows[r].SelectMany(l => ColumnsOf(l, colX)).ToHashSet();
             if (own.Count == 0 || rows[r - 1].SelectMany(l => ColumnsOf(l, colX)).Any(own.Contains)
-                || rows[r + 1].SelectMany(l => ColumnsOf(l, colX)).Any(own.Contains)) continue;
+                || rows[r + 1].SelectMany(l => ColumnsOf(l, colX)).Any(own.Contains)) { r++; continue; }
             rows[r - 1].AddRange(rows[r]);
             rows.RemoveAt(r--);
+            r++;
         }
     }
 
@@ -304,7 +314,8 @@ internal static partial class AutoTagger
 
     /// <summary>The block's lines as rows, top to bottom: lines whose bottoms lie within a share of a size of the row's
     /// first line share it, and so does a line within that of the row's last line heading columns the row leaves empty
-    /// ("Account" a little under the years, over the months).</summary>
+    /// ("Account" a little under the years, over the months). A row of the table's own standing over it with its cells
+    /// set at the row's foot is one row with the lines its cells wrap over (<see cref="CellsWrapDown"/>).</summary>
     private static List<List<Line>> HeaderRows(List<Line> block, List<double> colX)
     {
         var rows = new List<List<Line>>();
@@ -315,8 +326,36 @@ internal static partial class AutoTagger
             if (rows.Count > 0 && (Near(rows[^1][0])
                                    || (Near(rows[^1][^1]) && !ColumnsOf(line, colX).Intersect(rows[^1].SelectMany(l => ColumnsOf(l, colX))).Any())))
                 rows[^1].Add(line);
+            else if (WrappedOver(rows, line) is var over and > 0)
+            {
+                // (the rows of the lines it wraps over are its own)
+                var row = rows.Skip(rows.Count - over).SelectMany(r => r).ToList();
+                rows.RemoveRange(rows.Count - over, over);
+                row.Add(line);
+                rows.Add(row);
+            }
             else rows.Add(new List<Line> { line });
         }
         return rows;
+    }
+
+    /// <summary>How many of the last rows read so far hold the lines a row's cells wrap over, each a line's pitch over the
+    /// next and over <paramref name="line"/>: as many as there are such lines (0: none).</summary>
+    private static int WrappedOver(List<List<Line>> rows, Line line)
+    {
+        var over = new List<Line>();
+        var below = line;
+        var count = 0;
+        for (var r = rows.Count - 1; r >= 0; r--)
+        {
+            foreach (var l in Enumerable.Reverse(rows[r]))
+            {
+                if (l.Y - below.Y >= WrapPitchFactor * Math.Max(l.Size, below.Size) || over.Count >= MaxLabelLines) return count;
+                over.Insert(0, l);
+                below = l;
+            }
+            if (CellsWrapDown(over, line)) count = rows.Count - r;
+        }
+        return count;
     }
 }

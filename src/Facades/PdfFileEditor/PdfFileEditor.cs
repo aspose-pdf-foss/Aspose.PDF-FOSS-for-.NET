@@ -12,10 +12,12 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public sealed partial class PdfFileEditor
 {
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Obsolete property kept for API compatibility. Always throws NotSupportedException.
     /// </summary>
     public bool AllowConcatenateExceptions
+#pragma warning restore S2325
     {
         get => throw new NotSupportedException("AllowConcatenateExceptions is not supported.");
         set => throw new NotSupportedException("AllowConcatenateExceptions is not supported.");

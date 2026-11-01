@@ -42,7 +42,7 @@ public partial class TextFragment
     private static bool IsArialFamily(string? fontName)
     {
         if (string.IsNullOrEmpty(fontName)) return false;
-        var stem = fontName!.ToLowerInvariant().Replace(" ", "");
+        var stem = fontName.ToLowerInvariant().Replace(" ", "");
         var plus = stem.IndexOf('+');
         if (plus >= 0 && plus + 1 < stem.Length) stem = stem[(plus + 1)..];
         return stem.StartsWith("arial", StringComparison.Ordinal)
@@ -74,9 +74,7 @@ public partial class TextFragment
         var lacksGlyph = font.Subtype == "Type0";
         try
         {
-            if (!lacksGlyph)
-                foreach (var ch in probe)
-                    if (!char.IsWhiteSpace(ch) && !font.CanRepresent(ch)) { lacksGlyph = true; break; }
+            if (!lacksGlyph && probe.Any(ch => !char.IsWhiteSpace(ch) && !font.CanRepresent(ch))) { lacksGlyph = true; }
         }
         catch { return null; }
         if (!lacksGlyph)
@@ -97,9 +95,8 @@ public partial class TextFragment
         // itself — that choice does not follow the source's weight or slope, so a
         // bold CID run is re-dressed in the regular face.
         if (font.Subtype == "Type0") return "Times-Roman";
-        return TextState.IsBold
-            ? (TextState.IsItalic ? "Times-BoldItalic" : "Times-Bold")
-            : (TextState.IsItalic ? "Times-Italic" : "Times-Roman");
+        if (TextState.IsBold) return TextState.IsItalic ? "Times-BoldItalic" : "Times-Bold";
+        return TextState.IsItalic ? "Times-Italic" : "Times-Roman";
     }
 
     /// <summary>The face a stand-in hands off to when it has no glyph for some character

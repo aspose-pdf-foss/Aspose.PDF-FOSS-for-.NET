@@ -9,10 +9,21 @@ internal static partial class XfaRenderer
     /// <summary>The stages of the XFA content emit: one item.</summary>
     private static bool EmitXfaItem(Content.ContentStreamBuilder b, Item it, Page page)
     {
+        if (it.Matrix is { } turned)
+        {
+            // An item of a turned box is drawn upright under the matrix that turns it.
+            b.SaveState().SetMatrix(turned[0], turned[1], turned[2], turned[3], turned[4], turned[5]);
+            it.Matrix = null;
+            EmitXfaItem(b, it, page);
+            it.Matrix = turned;
+            b.RestoreState();
+            return true;
+        }
         if (it.Kind == "fill")
         {
             b.SaveState().SetFillColor(it.Color[0], it.Color[1], it.Color[2]);
-            b.Rectangle(it.X, it.Y, it.W, it.H).Fill();
+            BoxPath(b, it);
+            b.Fill();
             b.RestoreState();
         }
         else if (it.Kind == "line")
@@ -23,9 +34,14 @@ internal static partial class XfaRenderer
         }
         else if (it.Kind == "box")
         {
-            b.SaveState().SetStrokeColor(0, 0, 0).SetLineWidth(0.6);
-            b.Rectangle(it.X, it.Y, it.W, it.H).Stroke();
+            b.SaveState().SetStrokeColor(it.Color[0], it.Color[1], it.Color[2]).SetLineWidth(0.6);
+            BoxPath(b, it);
+            b.Stroke();
             b.RestoreState();
+        }
+        else if (it.Kind == "mark")
+        {
+            EmitMark(b, it);
         }
         else if (it.Kind == "diag")
         {
@@ -45,7 +61,7 @@ internal static partial class XfaRenderer
             // Circle via four Bézier quadrants; "dot" is filled (radio selection).
             double r = it.W / 2, cx = it.X + r, cy = it.Y + r, k = r * 0.5523;
             b.SaveState();
-            if (it.Kind == "dot") b.SetFillColor(0, 0, 0); else b.SetStrokeColor(0, 0, 0).SetLineWidth(0.6);
+            if (it.Kind == "dot") b.SetFillColor(0, 0, 0); else b.SetStrokeColor(it.Color[0], it.Color[1], it.Color[2]).SetLineWidth(0.6);
             b.MoveTo(cx + r, cy)
              .CurveTo(cx + r, cy + k, cx + k, cy + r, cx, cy + r)
              .CurveTo(cx - k, cy + r, cx - r, cy + k, cx - r, cy)
@@ -70,21 +86,25 @@ internal static partial class XfaRenderer
     {
         b.SaveState().SetFillColor(it.Color[0], it.Color[1], it.Color[2]);
         b.BeginText();
+        // A face set condensed or widened keeps that scale whichever font shows it.
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
+        if (it.HScale != 1.0) b.SetHorizontalScaling(it.HScale * 100.0);
+#pragma warning restore S1244
         var unicodeShown = false;
         if (NeedsUnicodeFont(it.Text))
         {
             // Text WinAnsi can't encode (Hebrew, Cyrillic, CJK, …) is shown with
             // an embedded Identity-H Type0 font instead of collapsing to '?'.
-            var ttf = Text.SystemFontResolver.Resolve(it.Bold ? "Arial,Bold" : "Arial")
-                      ?? Text.SystemFontResolver.Resolve("Arial");
+            // A line Arial has no glyphs for (CJK) is shown in an installed face that has them.
+            var face = CoveringUnicodeFace(it.Text, it.Bold);
             var fontRes = PageFontDict(page);
-            if (ttf is not null && fontRes is not null)
+            if (face is var (ttf, faceName) && fontRes is not null)
             {
-                var (resName, hexGlyphs) = Text.Type0FontEmbedder.Embed(
-                    fontRes, ttf, it.Bold ? "Arial-Bold" : "Arial", OrderForExtraction(it.Text));
-                b.SetFont(resName, it.FontSize);
+                var runs = DirectionalRuns(it.Text) ?? [OrderForExtraction(it.Text)];
+                var shown = runs.Select(run => Text.Type0FontEmbedder.Embed(fontRes, ttf, faceName, run)).ToList();
+                b.SetFont(shown[0].resName, it.FontSize);
                 b.MoveTextPosition(it.X, it.Y);
-                b.ShowTextHex(hexGlyphs);
+                foreach (var (_, hexGlyphs) in shown) b.ShowTextHex(hexGlyphs);
                 unicodeShown = true;
             }
         }
@@ -95,7 +115,7 @@ internal static partial class XfaRenderer
             && PageFontDict(page) is { } famFd)
         {
             var famName = fam.Replace(" ", "")
-                + (it.Bold && it.Italic ? "-BoldItalic" : it.Bold ? "-Bold" : it.Italic ? "-Italic" : "");
+                + ((it.Bold, it.Italic) switch { (true, true) => "-BoldItalic", (true, _) => "-Bold", (_, true) => "-Italic", _ => "" });
             var (resName, hexGlyphs) = Text.Type0FontEmbedder.Embed(famFd, famf.ttf, famName, it.Text);
             b.SetFont(resName, it.FontSize);
             if (it.CharSpacing != 0) b.SetCharSpacing(it.CharSpacing);
@@ -120,7 +140,6 @@ internal static partial class XfaRenderer
         {
             b.SetFont(StandardFontRes(page, it.Serif, it.Bold, it.Italic), it.FontSize);
             if (it.CharSpacing != 0) b.SetCharSpacing(it.CharSpacing);
-            if (it.HScale != 1.0) b.SetHorizontalScaling(it.HScale * 100.0);
             b.MoveTextPosition(it.X, it.Y);
             b.ShowText(ToWinAnsi(it.Text));
         }
@@ -152,6 +171,13 @@ internal static partial class XfaRenderer
                 b.SaveState().SetMatrix(dw, 0, 0, dh, it.X, dy);
                 b.DrawXObject(name);
                 b.RestoreState();
+                if (it.Field is { } field)
+                {
+                    // The field's widget shows the very image object the page draws, drawn where the page draws it.
+                    field.Image = page.Resources.Images[page.Resources.Images.Count].Stream;
+                    field.ImageName = name;
+                    field.ImageAppearance = new Content.ContentStreamBuilder().SaveState().SetMatrix(dw, 0, 0, dh, it.X, dy).DrawXObject(name).RestoreState().Build();
+                }
             }
         }
         catch { /* undecodable image — skip */ }

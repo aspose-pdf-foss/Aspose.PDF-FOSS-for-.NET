@@ -25,7 +25,9 @@ namespace Aspose.Pdf.PdfToMarkdown
         {
         }
 
+#pragma warning disable S2325 // the reference tests call it on an instance
         internal bool IsHeaderWithNumeration(string input, out int headingLevel)
+#pragma warning restore S2325
         {
             headingLevel = -1;
             if (string.IsNullOrEmpty(input)) return false;

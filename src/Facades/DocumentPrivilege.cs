@@ -2,10 +2,12 @@ using System;
 
 namespace Aspose.Pdf.Facades;
 
+#pragma warning disable S1210 // public API: ordering only, the published class defines no operators
 /// <summary>
 /// Represents document access permissions (P value in encryption dictionary).
 /// </summary>
 public sealed class DocumentPrivilege : IComparable<object>
+#pragma warning restore S1210
 {
     private int _flags;
 

@@ -20,11 +20,12 @@ public partial class Table
         if (_measureOnly) linkPage = null;
         var slc = new SlicesContentState();
         slc.builder = new ContentStreamBuilder();
-        slc.links = linkPage is not null ? new List<(Rectangle rect, Hyperlink link)>() : null;
+        // (a page not yet materialised records its links too: its caller binds them there)
+        slc.links = _measureOnly ? null : new List<(Rectangle rect, Hyperlink link)>();
         slc.optionSink = linkPage is not null
             ? new List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>() : null;
         slc.checkboxSink = _measureOnly
-            ? null : new List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>();
+            ? null : new List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>();
         slc.pageImages = new List<(byte[] data, Rectangle rect)>();
         slc.pageBlocks = new List<(ReservedBlock block, ReservedPart part, Rectangle rect)>();
         slc.pageGraphs = new List<byte[]>();
@@ -36,11 +37,10 @@ public partial class Table
         if (HtmlSpaceClassFirst is ' ' or ' ')
             foreach (var slice in slices)
                 foreach (var cellLines in slice.Plan.CellLines)
-                    foreach (var cl in cellLines)
-                        if (cl.Text is { Length: > 0 })
-                            cl.Text = HtmlSpaceClassFirst == ' '
-                                ? cl.Text.Replace(' ', ' ')
-                                : cl.Text.Replace(' ', ' ');
+                    foreach (var cl in cellLines.Where(cl => cl.Text is { Length: > 0 }))
+                        cl.Text = HtmlSpaceClassFirst == ' '
+                            ? cl.Text.Replace(' ', ' ')
+                            : cl.Text.Replace(' ', ' ');
         slc.macroSwaps = SubstitutePageMacros(slices);
         slc.builder.SaveState();
         if (CornerRadii is not null && BackgroundColor is not null && slices.Count > 0)
@@ -61,11 +61,11 @@ public partial class Table
             // cells; one that sits further along follows them.
             foreach (var sc in slc.spanContent)
                 if (sc.contentRow == slice.RowIndex && SpanWrittenAheadOfRow(sc.block, sc.contentRow))
-                    EmitSpanBlockContent(slc, fontName, linkPage, sc.block, sc.x, sc.w, sc.h, sc.top, sc.bottom);
+                    EmitSpanBlockContent(slc, fontName, linkPage, sc.block, sc.x, sc.w, sc.h, sc.top);
             RenderRowSlice(slc.builder, slice, colWidths, tableX, fontName, cellMap, slc.links, slc.pageImages, slc.optionSink, slc.pageGraphs, slc.checkboxSink, linkPage, slc.pageFootnotes, slc.pageBlocks);
             foreach (var sc in slc.spanContent)
                 if (sc.contentRow == slice.RowIndex && !SpanWrittenAheadOfRow(sc.block, sc.contentRow))
-                    EmitSpanBlockContent(slc, fontName, linkPage, sc.block, sc.x, sc.w, sc.h, sc.top, sc.bottom);
+                    EmitSpanBlockContent(slc, fontName, linkPage, sc.block, sc.x, sc.w, sc.h, sc.top);
         }
         _pageImages.Add(slc.pageImages);
         _pageBlocks.Add(slc.pageBlocks);

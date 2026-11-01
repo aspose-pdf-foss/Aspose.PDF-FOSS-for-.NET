@@ -87,6 +87,8 @@ public partial class Table
             var pitch = last.Leading > 0 ? last.FontSize + last.Leading : plan.LineHeight;
             least = Math.Min(least, (pitch - (last.LineBoxAscentEm + last.LineBoxDescentEm) * last.FontSize) / 2);
         }
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
         return least == double.MaxValue ? 0 : Math.Max(0, least);
+#pragma warning restore S1244
     }
 }

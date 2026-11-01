@@ -4,10 +4,12 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Text;
 
+#pragma warning disable S1210 // public API: ordering only, the published class defines no operators
 /// <summary>
 /// Represents a cell in an absorbed table.
 /// </summary>
 public sealed class AbsorbedCell : IComparable<AbsorbedCell>
+#pragma warning restore S1210
 {
     /// <summary>Creates an empty cell with no text and no rectangle.</summary>
     public AbsorbedCell() { }

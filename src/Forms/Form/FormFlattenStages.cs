@@ -31,7 +31,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     }
 
     /// <summary></summary>
-    private bool FlattenPageAnnotations(FormFlattenState fl, Page page)
+    private static bool FlattenPageAnnotations(FormFlattenState fl, Page page)
     {
         // The facade flatten (flattenNonWidgets) consumes the page's WHOLE
         // /Annots — probed: a sticky note and a highlight leave with the

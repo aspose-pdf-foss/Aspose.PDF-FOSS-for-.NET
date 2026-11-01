@@ -13,20 +13,87 @@ internal static partial class ContentStreamOperatorParser
 {
     internal static List<string> ParseOperators(byte[] data)
     {
-        var po = new OperatorScanState();
-        po.data = data;
+        var po = NewScan(data);
         po.result = new List<string>();
-        po.text = Compat.Latin1.GetString(po.data);
-        po.pos = 0;
-        po.len = po.text.Length;
-        po.operands = new List<string>();
-
         while (po.pos < po.len)
         {
             if (!ScanOperator(po)) break;
         }
-
         return po.result;
+    }
+
+    /// <summary>Hands each operator to <paramref name="sink"/> as the content is scanned, the same
+    /// tokens <see cref="ParseOperators"/> lists but without keeping a line per operator: a pass
+    /// that only counts operators by name over a large stream reads it this way.</summary>
+    internal static void ScanOperators(byte[] data, Action<ScannedOperator> sink)
+    {
+        var po = NewScan(data);
+        po.sink = sink;
+        while (po.pos < po.len)
+        {
+            if (!ScanOperator(po)) break;
+        }
+    }
+
+    private static OperatorScanState NewScan(byte[] data)
+    {
+        var po = new OperatorScanState();
+        po.data = data;
+        po.text = Compat.Latin1.GetString(po.data);
+        po.pos = 0;
+        po.len = po.text.Length;
+        po.operands = new List<(int start, int end)>();
+        po.line = new StringBuilder();
+        return po;
+    }
+
+    /// <summary>One operator as the scan meets it, or one line of an earlier parse: its name, the
+    /// place its name follows in its line, and the line itself on demand.</summary>
+    internal readonly struct ScannedOperator
+    {
+        private readonly OperatorScanState? _po;
+        private readonly string? _line;
+
+        internal ScannedOperator(OperatorScanState po, string name) { _po = po; Name = name; }
+
+        /// <summary>A line as <see cref="ParseOperators"/> lists it: the name is its last token.</summary>
+        internal ScannedOperator(string line)
+        {
+            _line = line;
+            var space = line.LastIndexOf(' ');
+            // The ID line carries the image data after its keyword, not before it.
+            Name = line.StartsWith(ID.Keyword, StringComparison.Ordinal)
+                && (line.Length == ID.Keyword.Length || char.IsWhiteSpace(line[ID.Keyword.Length]))
+                ? ID.Keyword
+                : space < 0 ? line : line.Substring(space + 1);
+        }
+
+        public string Name { get; }
+
+        /// <summary>Where the name starts in the line less one - the operands' length with their
+        /// separating spaces - or -1 for an operator without operands.</summary>
+        public int NameAt
+        {
+            get
+            {
+                if (_line is not null) return _line.LastIndexOf(' ');
+                if (_po!.operands.Count == 0) return -1;
+                var length = _po.operands.Count - 1;
+                foreach (var (start, end) in _po.operands) length += end - start;
+                return length;
+            }
+        }
+
+        /// <summary>The operator's line, operands first and the name last.</summary>
+        public string Line => _line ?? (_po!.operands.Count > 0 ? OperatorLine(_po, Name) : Name);
+    }
+
+    /// <summary>One operator out, with the operands gathered since the last: to the sink, or as a line.</summary>
+    private static void Emit(OperatorScanState po, string name)
+    {
+        if (po.sink is { } sink) sink(new ScannedOperator(po, name));
+        else po.result!.Add(po.operands.Count > 0 ? OperatorLine(po, name) : name);
+        po.operands.Clear();
     }
 
     private static bool IsOperatorChar(char c) =>
@@ -67,7 +134,7 @@ internal static partial class ContentStreamOperatorParser
         }
     }
 
-    private static string ReadParenString(OperatorScanState po)
+    private static (int start, int end) ReadParenString(OperatorScanState po)
     {
         int start = po.pos;
         po.pos++; // skip (
@@ -79,19 +146,21 @@ internal static partial class ContentStreamOperatorParser
             else if (po.text[po.pos] == ')') depth--;
             po.pos++;
         }
-        return po.text[start..po.pos];
+        // an escape character that ends the data steps one past it
+        if (po.pos > po.len) po.pos = po.len;
+        return (start, po.pos);
     }
 
-    private static string ReadHexString(OperatorScanState po)
+    private static (int start, int end) ReadHexString(OperatorScanState po)
     {
         int start = po.pos;
         po.pos++; // skip <
         while (po.pos < po.len && po.text[po.pos] != '>') po.pos++;
         if (po.pos < po.len) po.pos++; // skip >
-        return po.text[start..po.pos];
+        return (start, po.pos);
     }
 
-    private static string ReadDictionary(OperatorScanState po)
+    private static (int start, int end) ReadDictionary(OperatorScanState po)
     {
         int start = po.pos;
         po.pos += 2; // skip <<
@@ -102,38 +171,44 @@ internal static partial class ContentStreamOperatorParser
             else if (po.pos + 1 < po.len && po.text[po.pos] == '>' && po.text[po.pos + 1] == '>') { depth--; po.pos += 2; }
             else po.pos++;
         }
-        return po.text[start..po.pos];
+        return (start, po.pos);
     }
 
-    private static string ReadArray(OperatorScanState po)
+    private static (int start, int end) ReadArray(OperatorScanState po)
     {
         int start = po.pos;
         po.pos++; // skip [
         int depth = 1;
         while (po.pos < po.len && depth > 0)
         {
-            if (po.text[po.pos] == '[') depth++;
-            else if (po.text[po.pos] == ']') depth--;
+            var c = po.text[po.pos];
+            // A string element holds any byte, a bracket included (a two-byte glyph code
+            // such as 0x015D is "\x01]"): step over the string whole, or the array ends
+            // inside it and every operator after it is read from the wrong place.
+            if (c == '(') { ReadParenString(po); continue; }
+            if (c == '<' && !(po.pos + 1 < po.len && po.text[po.pos + 1] == '<')) { ReadHexString(po); continue; }
+            if (c == '[') depth++;
+            else if (c == ']') depth--;
             po.pos++;
         }
-        return po.text[start..po.pos];
+        return (start, po.pos);
     }
 
-    private static string ReadName(OperatorScanState po)
+    private static (int start, int end) ReadName(OperatorScanState po)
     {
         int start = po.pos;
         po.pos++; // skip /
         while (po.pos < po.len && !IsDelimiter(po.text[po.pos]) && po.text[po.pos] != '/' &&
                po.text[po.pos] != '(' && po.text[po.pos] != '<' && po.text[po.pos] != '[') po.pos++;
-        return po.text[start..po.pos];
+        return (start, po.pos);
     }
 
-    private static string ReadNumber(OperatorScanState po)
+    private static (int start, int end) ReadNumber(OperatorScanState po)
     {
         int start = po.pos;
         if (po.text[po.pos] == '+' || po.text[po.pos] == '-') po.pos++;
         while (po.pos < po.len && ((po.text[po.pos] >= '0' && po.text[po.pos] <= '9') || po.text[po.pos] == '.')) po.pos++;
-        return po.text[start..po.pos];
+        return (start, po.pos);
     }
 
     private static string ReadOperatorName(OperatorScanState po)
@@ -141,6 +216,15 @@ internal static partial class ContentStreamOperatorParser
         int start = po.pos;
         while (po.pos < po.len && IsOperatorChar(po.text[po.pos])) po.pos++;
         return po.text[start..po.pos];
+    }
+
+    /// <summary>The operands joined by single spaces, then the operator name. The operand text is
+    /// sliced here, once per operator, instead of once per operand and again for the join.</summary>
+    private static string OperatorLine(OperatorScanState po, string opName)
+    {
+        var line = po.line.Clear();
+        foreach (var (start, end) in po.operands) line.Append(po.text, start, end - start).Append(' ');
+        return line.Append(opName).ToString();
     }
 
     private static int FindInlineImageEnd(OperatorScanState po)

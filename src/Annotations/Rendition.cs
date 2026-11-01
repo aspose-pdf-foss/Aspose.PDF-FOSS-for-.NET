@@ -13,7 +13,7 @@ public abstract partial class Rendition
     internal PdfDictionary Dict { get; }
     internal PdfReader? Reader { get; }
 
-    internal Rendition(PdfDictionary dict, PdfReader? reader)
+    private protected Rendition(PdfDictionary dict, PdfReader? reader)
     {
         Dict = dict;
         Reader = reader;
@@ -26,7 +26,7 @@ public abstract partial class Rendition
         set
         {
             if (value is null) Dict.Remove("N");
-            else Dict.Set("N", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else Dict.Set("N", Forms.Field.EncodePdfTextString(value));
         }
     }
 
@@ -90,7 +90,7 @@ public abstract partial class MediaClip
     internal PdfDictionary Dict { get; }
     internal PdfReader? Reader { get; }
 
-    internal MediaClip(PdfDictionary dict, PdfReader? reader)
+    private protected MediaClip(PdfDictionary dict, PdfReader? reader)
     {
         Dict = dict;
         Reader = reader;

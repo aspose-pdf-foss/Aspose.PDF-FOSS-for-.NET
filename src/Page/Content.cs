@@ -44,6 +44,7 @@ public sealed partial class Page
         if (ContentStreamCount == 0) { _contentStateWrapped = true; return; }
         InsertContentStreamAt(0, System.Text.Encoding.ASCII.GetBytes("q\n"));
         AddContent(System.Text.Encoding.ASCII.GetBytes("Q\n"));
+        NoteContentBracket();
         _trailingMarkedContent = null;
         _contentStateWrapped = true;
     }
@@ -238,10 +239,21 @@ public sealed partial class Page
 
     internal void SetContentStream(byte[] contentBytes)
     {
+        NoteContentObjectsDropped();
         _dict.Set("Contents", new PdfStream(new PdfDictionary(), contentBytes));
         _contents?.InvalidateCache();
         // The page's content is replaced whole: operators held in Contents now stand for this.
         _contents?.NoteContentReplaced();
+    }
+
+    /// <summary>The page's content is about to be replaced: a content stream the file held as an object of
+    /// its own may be left referenced by nothing, and the save then looks for what is still reachable
+    /// rather than writing every object the file had.</summary>
+    private void NoteContentObjectsDropped()
+    {
+        var held = _dict.Get("Contents");
+        if (held is PdfIndirectRef || (held is PdfArray streams && streams.Any(entry => entry is PdfIndirectRef)))
+            _reader.MayHaveOrphansOnSave = true;
     }
 
     /// <summary>Replace the content streams in <paramref name="keepAddedSince"/> (the ones an
@@ -266,6 +278,7 @@ public sealed partial class Page
         if (placed.Count == 0 && others.Count == 0 && parts.Count == 1)
         {
             SetContentStream(parts[0].Bytes!);
+            CommitHeldTransforms();
             return;
         }
 
@@ -292,9 +305,60 @@ public sealed partial class Page
             contents.Add(entry);
         }
         if (!emitted) EmitParts();
+        NoteContentObjectsDropped();
         _dict.Set("Contents", contents);
         _contents?.InvalidateCache();
+        CommitHeldTransforms();
     }
+
+    /// <summary>Join the content streams generated for this page into one. A layout pass
+    /// appends a stream per piece it draws - thousands on a dense page, each written as an
+    /// object of its own - and a reader takes an array of streams as their concatenation
+    /// (ISO 32000-2 § 7.7.3.3), so one stream of the same bytes reads the same. Only streams
+    /// this page made join - direct and bare; a stream held by reference may be shared, and one
+    /// marked uncompressed stays so - and none while operators read through
+    /// <see cref="Contents"/> are held unwritten: they go back by stream identity.</summary>
+    internal void JoinGeneratedContentStreams()
+    {
+        if (_contents is { IsMaterialized: true }) return;
+        if (_reader.Resolve(_dict.Get("Contents")) is not PdfArray arr || arr.Count < 2) return;
+        var joined = new PdfArray();
+        var run = new List<PdfStream>();
+        foreach (var entry in arr)
+        {
+            if (entry is PdfStream { Dict.Count: 0, DoNotCompress: false } bare) { run.Add(bare); continue; }
+            AddRun(joined, run);
+            joined.Add(entry);
+        }
+        AddRun(joined, run);
+        // Nothing joined: the page keeps its /Contents, or an unchanged page would be an edit to save.
+        if (joined.Count < arr.Count) _dict.Set("Contents", joined.Count == 1 ? joined[0] : joined);
+        _trailingMarkedContent = null;
+        _contents?.InvalidateCache();
+    }
+
+    /// <summary>Add a run of generated streams to <paramref name="joined"/> as one stream, their
+    /// bytes a line apart as <see cref="GetContentStreamBytes"/> reads them, and empty the run.</summary>
+    private static void AddRun(PdfArray joined, List<PdfStream> run)
+    {
+        if (run.Count == 0) return;
+        if (run.Count == 1) joined.Add(run[0]);
+        else
+        {
+            using var ms = new MemoryStream();
+            foreach (var data in run.Select(s => s.RawData))
+            {
+                if (ms.Length > 0) ms.WriteByte((byte)'\n');
+                ms.Write(data, 0, data.Length);
+            }
+            joined.Add(new PdfStream(new PdfDictionary(), ms.ToArray()));
+        }
+        run.Clear();
+    }
+
+    /// <summary>True once the page holds a content stream: a loaded or imported page, or one
+    /// drawn on already, as opposed to a fresh page the generator has yet to lay out.</summary>
+    internal bool CarriesContent => _dict.ContainsKey("Contents");
 
     /// <summary>The page's content streams, in /Contents order.</summary>
     internal List<PdfStream> ContentStreamObjects() => _reader.Resolve(_dict.Get("Contents")) switch
@@ -304,6 +368,49 @@ public sealed partial class Page
         _ => [],
     };
 
+    /// <summary>Replace every occurrence of <paramref name="find"/> in the page's content with
+    /// <paramref name="replacement"/>, each in the segment that holds it: a line written before
+    /// what it names was known (a table cell's page count) is rewritten where it stands, and the
+    /// segments keep their identity and order.</summary>
+    internal void ReplaceInContentStreams(byte[] find, byte[] replacement)
+    {
+        if (find.Length == 0) return;
+        var changed = false;
+        foreach (var segment in ContentStreamObjects())
+        {
+            var data = _reader.DecodeStream(segment);
+            var at = IndexOf(data, find, 0);
+            if (at < 0) continue;
+            using var rewritten = new MemoryStream(data.Length);
+            var from = 0;
+            while (at >= 0)
+            {
+                rewritten.Write(data, from, at - from);
+                rewritten.Write(replacement, 0, replacement.Length);
+                from = at + find.Length;
+                at = IndexOf(data, find, from);
+            }
+            rewritten.Write(data, from, data.Length - from);
+            segment.ReplaceData(rewritten.ToArray());
+            segment.Dict.Remove("Filter");
+            segment.Dict.Remove("DecodeParms");
+            segment.Dict.Set("Length", new PdfInteger((int)rewritten.Length));
+            changed = true;
+        }
+        if (changed) _contents?.InvalidateCache();
+    }
+
+    private static int IndexOf(byte[] data, byte[] needle, int from)
+    {
+        for (var i = from; i <= data.Length - needle.Length; i++)
+        {
+            var j = 0;
+            while (j < needle.Length && data[i + j] == needle[j]) j++;
+            if (j == needle.Length) return i;
+        }
+        return -1;
+    }
+
     /// <summary>Drop the cached typed-operator view of the page content so the
     /// next <see cref="Contents"/> access re-materialises from the current raw
     /// /Contents. Needed after low-level raw edits (SetContentStream /
@@ -311,7 +418,12 @@ public sealed partial class Page
     /// OperatorCollection: <see cref="SetContentStream"/> only clears the parsed
     /// string cache, so a previously materialised typed-operator list would
     /// otherwise survive stale and win on save.</summary>
-    internal void ResetContentsCache() => _contents = null;
+    internal void ResetContentsCache()
+    {
+        _contents = null;
+        // A resize's matrix held among the operators goes with them.
+        _heldTransforms = null;
+    }
 
     /// <summary>Persist operators added or edited through <see cref="Contents"/> into
     /// the page's real /Contents stream. Renderers call this before reading the
@@ -331,6 +443,7 @@ public sealed partial class Page
         existingData.CopyTo(combined, 0);
         if (existingData.Length > 0) combined[existingData.Length] = (byte)'\n';
         newBytes.CopyTo(combined, existingData.Length + (existingData.Length > 0 ? 1 : 0));
+        NoteContentObjectsDropped();
         _dict.Set("Contents", new PdfStream(new PdfDictionary(), combined));
         _contents?.NoteContentReplaced();
     }
@@ -357,6 +470,8 @@ public sealed partial class Page
     /// </summary>
     internal void ApplyContentResize(double sx, double sy, double tx, double ty)
     {
+        // Operators held in Contents go in first: written back at save they would replace the resize.
+        FlushHeldContent();
         var originalContent = CollectContentBytes();
 
         // Emit the resize matrix as the FIRST operator, then isolate the original
@@ -372,6 +487,7 @@ public sealed partial class Page
         suffix.CopyTo(wrapped, prefix.Length + originalContent.Length);
 
         SetContentStream(wrapped);
+        RecordContentTransform(WrittenMatrix(sx, 0, 0, sy, tx, ty), WrittenUnder(originalContent));
 
         // Transform annotation Rect arrays
         TransformAnnotationRects(sx, sy, tx, ty);
@@ -384,12 +500,15 @@ public sealed partial class Page
     /// PdfFileEditor.ResizeContents behaviour.</summary>
     internal void ApplyContentResizeAsForm(double sx, double sy, double tx, double ty)
     {
+        // Operators held in Contents go in first: written back at save they would replace the resize.
+        FlushHeldContent();
         var originalContent = CollectContentBytes();
         var formName = WrapContentInForm(originalContent);
 
         var bytes = System.Text.Encoding.ASCII.GetBytes(
             $"q {Format(sx)} 0 0 {Format(sy)} {Format(tx)} {Format(ty)} cm\n/{formName} Do\nQ\n");
         SetContentStream(bytes);
+        RecordContentTransform(WrittenMatrix(sx, 0, 0, sy, tx, ty), WrittenUnder(originalContent));
 
         TransformAnnotationRects(sx, sy, tx, ty);
     }
@@ -497,5 +616,57 @@ public sealed partial class Page
         if (_reader.Resolve(_dict.Get("Contents")) is null) return;
         PrependContentStream(System.Text.Encoding.ASCII.GetBytes("q\n"));
         AddContentStream(System.Text.Encoding.ASCII.GetBytes("Q\n"));
+        NoteContentBracket();
+    }
+
+    /// <summary>The page's content was checked, before text or operators were first appended to it, for a
+    /// matrix it leaves in force.</summary>
+    private bool _contentEndChecked;
+
+    /// <summary>Bracket the page's existing content in q/Q, once, before the first text or operators are
+    /// appended to it, when it leaves a matrix other than the identity in force at its end (a top-level y-flip
+    /// outside any q/Q): what is appended is then placed in the page's own space, where its caller put it, not
+    /// mirrored or shifted off the page. A save for each level the content restores below its start and a
+    /// restore for each it leaves open keep the bracket closed. Content that leaves the identity is not touched,
+    /// nor - for raw operators (<paramref name="keepOpeningMatrix"/>) - content that leaves only the matrix it
+    /// set before its first save: the space it draws the whole page in, which operators appended to its
+    /// operator list stay under; a matrix it leaves past that one (a stray cm before an image) is isolated.</summary>
+    internal void IsolateContentLeavingMatrix(bool keepOpeningMatrix = false)
+    {
+        if (_contentIsolated || _contentEndChecked) return;
+        _contentEndChecked = true;
+        if (OpeningLeavingMatrix() is not { } opening || GetContentStreamBytes() is not { Length: > 0 } content) return;
+        var (end, strayRestores, openSaves) = ImageStamp.ScanGraphicsState(content);
+        var (a, b, c, d, e, f) = end;
+        if (IsIdentity(new Matrix(a, b, c, d, e, f))) return;
+        if (keepOpeningMatrix && end == ImageStamp.ScanGraphicsState(opening, toFirstSave: true).Ctm) return;
+        _contentIsolated = true;
+        PrependContentStream(System.Text.Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("q\n", strayRestores + 1))));
+        AddContentStream(System.Text.Encoding.ASCII.GetBytes(string.Concat(Enumerable.Repeat("Q\n", openSaves + 1))));
+        NoteContentBracket();
+        // An operator view parsed before the bracket reads the content again.
+        _contents?.InvalidateCache();
+    }
+
+    /// <summary>How much of the page's content is read to see whether it opens by setting a matrix.</summary>
+    private const int OpeningContentBytes = 1024;
+
+    /// <summary>The opening bytes of the page's content when they leave a matrix other than the identity in force,
+    /// else null: content that draws the whole page through a matrix (a y-flip, a printer's scale) sets it there,
+    /// so only such content is read to its end, and text appended to any other page costs no decode of its content.</summary>
+    private byte[]? OpeningLeavingMatrix()
+    {
+        using var opening = new MemoryStream();
+        foreach (var stream in ContentStreamObjects())
+        {
+            var wanted = OpeningContentBytes - (int)opening.Length;
+            var data = _reader.DecodeStreamPrefix(stream, wanted);
+            opening.Write(data, 0, Math.Min(wanted, data.Length));
+            if (opening.Length >= OpeningContentBytes) break;
+            opening.WriteByte((byte)'\n');
+        }
+        var bytes = opening.ToArray();
+        var ((a, b, c, d, e, f), _, _) = ImageStamp.ScanGraphicsState(bytes);
+        return IsIdentity(new Matrix(a, b, c, d, e, f)) ? null : bytes;
     }
 }

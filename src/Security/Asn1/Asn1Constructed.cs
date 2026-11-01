@@ -149,7 +149,7 @@ internal sealed class Asn1Time(bool generalized, string text) : Asn1Node
             var fraction = Text.Substring(start, i - start);
             ticks = (long)Math.Round(double.Parse("0." + fraction, CultureInfo.InvariantCulture) * TimeSpan.TicksPerSecond);
         }
-        var local = new DateTime(year, month, day, hour, minute, second).AddTicks(ticks);
+        var local = new DateTime(year, month, day, hour, minute, second, DateTimeKind.Unspecified).AddTicks(ticks);
         return Zone(local, i);
     }
 

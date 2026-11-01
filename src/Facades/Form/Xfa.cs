@@ -28,7 +28,7 @@ public sealed partial class Form
             if (child.HasChildNodes && child.ChildNodes.Count == 1 && child.FirstChild!.NodeType == XmlNodeType.Text)
             {
                 // Leaf value — try to set XFA field
-                try { form.SetXfaFieldValue(childPath, child.InnerText); } catch { }
+                try { form.SetXfaFieldValue(childPath, child.InnerText); } catch { /* a value the XFA form cannot take is skipped - the import carries on with the next field */ }
             }
             else
             {
@@ -53,8 +53,8 @@ public sealed partial class Form
                 // (xfa-data namespace), or a bare <data>/<datasets> root. GetXfaDatasetsXml
                 // can return the whole XDP (preamble/config/template/. concatenated) when the
                 // form has no datasets packet — that is presentation metadata, NOT form data,
-                // so we must only take the rich path when a real <datasets>/<data> node exists;
-                // otherwise we fall through to building the export from the template below.
+                // so we must only take the rich path when a real <datasets>/<data> node exists; otherwise
+                // we fall through to building the export from the template below.
                 XmlNode? datasetsNode = dsDoc.SelectSingleNode("//*[local-name()='datasets']");
                 XmlNode? dataNode = datasetsNode?.SelectSingleNode("*[local-name()='data']")
                     ?? (dsDoc.DocumentElement?.LocalName == "data" ? dsDoc.DocumentElement : null);
@@ -75,7 +75,9 @@ public sealed partial class Form
                 // any CDATA/text values (collected via InnerText) survive.
                 int dataElementCount = 0;
                 if (dataRoot is not null)
+#pragma warning disable S3267 // the test has a side effect (an assignment or increment) - a LINQ predicate would hide it
                     foreach (var _ in DescendantElements(dataRoot)) { if (++dataElementCount > 5) break; }
+#pragma warning restore S3267
 
                 if (dataRoot is not null && dataElementCount > 5)
                 {
@@ -97,7 +99,7 @@ public sealed partial class Form
                     return;
                 }
             }
-            catch { }
+            catch { /* malformed datasets fall through to the template-built export below */ }
         }
 
         // Datasets are sparse/empty — build complete XML from template + dataset values
@@ -113,7 +115,7 @@ public sealed partial class Form
                 dsDoc.LoadXml(datasetsXml);
                 CollectDataValues(dsDoc.DocumentElement, "", dataValues);
             }
-            catch { }
+            catch { /* malformed XFA/XML leaves the values as they were */ }
         }
 
         try
@@ -277,7 +279,7 @@ public sealed partial class Form
                 ds.LoadXml(datasetsXml);
                 CollectDataValues(ds.DocumentElement, "", dataValues);
             }
-            catch { }
+            catch { /* malformed XFA/XML leaves the values as they were */ }
         }
 
         try
@@ -373,7 +375,7 @@ public sealed partial class Form
                 if (tmpl.DocumentElement is not null)
                     EmitXfdfLevel(tmpl.DocumentElement, LoadDatasetsDataRoot(), fieldsEl, ns);
             }
-            catch { }
+            catch { /* malformed XFA/XML leaves the values as they were */ }
         }
 
         var settings = new XmlWriterSettings
@@ -432,7 +434,7 @@ public sealed partial class Form
 
         void AppendContainer(XmlNode templateChild, XmlElement? inst, string name)
         {
-            var fieldEl = parent.OwnerDocument!.CreateElement("field", ns);
+            var fieldEl = parent.OwnerDocument.CreateElement("field", ns);
             fieldEl.SetAttribute("name", $"{name}[{NextIndex(name)}]");
             parent.AppendChild(fieldEl);
             var inner = parent.OwnerDocument.CreateElement("fields", ns);
@@ -443,7 +445,7 @@ public sealed partial class Form
 
         void AppendLeaf(string name, string? value)
         {
-            var fieldEl = parent.OwnerDocument!.CreateElement("field", ns);
+            var fieldEl = parent.OwnerDocument.CreateElement("field", ns);
             fieldEl.SetAttribute("name", $"{name}[{NextIndex(name)}]");
             parent.AppendChild(fieldEl);
             if (!string.IsNullOrEmpty(value))

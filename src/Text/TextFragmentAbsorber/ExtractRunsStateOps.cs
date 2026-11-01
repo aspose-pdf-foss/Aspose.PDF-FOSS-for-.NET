@@ -298,8 +298,8 @@ public sealed partial class TextFragmentAbsorber
             // STRICTLY axis-aligned geometry only: both the Tm and the CTM
             // must be rotation-free. Under a rotated CTM the page-Y of a Tm
             // position varies with text-X, so stacked rotated labels (Tm
-            // identity, rotation in cm) would get a false sentinel per label;
-            // a rotated/curved Tm moves page-Y along the line the same way.
+            // identity, rotation in cm) would get a false sentinel per label; a
+            // rotated/curved Tm moves page-Y along the line the same way.
             // With both rotation-free, page-Y depends on text-Y and the cm
             // translation alone — exactly the per-block-cm producer shape.
             if (!tmLineBreak && !double.IsNaN(xr.lastEmittedPageY)
@@ -334,15 +334,13 @@ public sealed partial class TextFragmentAbsorber
         xr.tyLine = xr.tmB * 0 + xr.tmD * (-xr.leading) + xr.tyLine;
         xr.tx = xr.txLine;
         xr.ty = xr.tyLine;
-        {
-            // Unlike Td/Tm (where a sentinel after a sentinel usually means the
-            // producer re-stated the same move), each T* is an explicit one-line
-            // advance, so consecutive T* = genuinely blank lines. Emit a sentinel
-            // per advance; sentinel consumers already skip runs of them.
-            var pageDispStar = Math.Abs(Math.Abs(xr.tmD) * xr.leading);
-            if (pageDispStar > 0.5 && xr.result.Count > 0)
-                xr.result.Add(new RawTextRun("\r\n", xr.tx, xr.ty, xr.fontSize, xr.currentFontName, 0, xr.ctm, xr.metrics));
-        }
+        // Unlike Td/Tm (where a sentinel after a sentinel usually means the
+        // producer re-stated the same move), each T* is an explicit one-line
+        // advance, so consecutive T* = genuinely blank lines. Emit a sentinel
+        // per advance; sentinel consumers already skip runs of them.
+        var pageDispStar = Math.Abs(Math.Abs(xr.tmD) * xr.leading);
+        if (pageDispStar > 0.5 && xr.result.Count > 0)
+            xr.result.Add(new RawTextRun("\r\n", xr.tx, xr.ty, xr.fontSize, xr.currentFontName, 0, xr.ctm, xr.metrics));
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
@@ -364,9 +362,13 @@ public sealed partial class TextFragmentAbsorber
                     // walk) contributes nothing. Keyed by object identity: two
                     // distinct objects with identical bytes are both absorbed, a
                     // different placement matrix does not defeat the dedup.
-                    if (xr.seenForms is not null && !xr.seenForms.Add(xobjStream))
+                    // The exception is a form an earlier Do showed only in part: a
+                    // tall form every page draws shifted under its own clip. Each
+                    // such Do contributes the text its clip lets through.
+                    var partForms = xr.seenForms as FormDedupSet;
+                    var seenBefore = xr.seenForms is not null && !xr.seenForms.Add(xobjStream);
+                    if (seenBefore && partForms?.ShownInPart.Contains(xobjStream) != true)
                         return;
-                    var xobjBytes = xr.reader.DecodeStream(xobjStream);
                     var xobjDict = xobjStream.Dict;
 
                     // Compute the CTM for the XObject: current CTM × form's own /Matrix
@@ -381,8 +383,14 @@ public sealed partial class TextFragmentAbsorber
                         xobjCtm = fm.Multiply(xr.ctm);
                     }
 
+                    if (seenBefore && partForms is not null && LaterDoShowsNothing(xr, partForms, xobjStream, xobjCtm))
+                        return;
+                    var xobjBytes = xr.reader.DecodeStream(xobjStream);
                     var runCountBefore = xr.result.Count;
                     ExtractRuns(xobjBytes, xobjDict, xr.reader, xr.result, xr.depth + 1, xobjCtm, xr.fillRects, xr.useFontEngineEncoding, xr.keepAllFillRects, xr.coverRects, xr.currentClip, seenForms: xr.seenForms, missingFontKeys: xr.missingFontKeys);
+                    // Only a form reaching past the clip it is drawn under can lose text to it.
+                    if (partForms is not null && (seenBefore || FormReachesPastClip(xr, xobjDict, xobjCtm)))
+                        KeepWhatThisDoShows(xr.result, runCountBefore, xobjStream, partForms, seenBefore, xobjCtm);
                     // Stamp the runs this form produced with their source
                     // stream (innermost wins for nested forms — inner
                     // recursion stamped its own runs first).

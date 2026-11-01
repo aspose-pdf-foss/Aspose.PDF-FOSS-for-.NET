@@ -33,10 +33,13 @@ internal static partial class HtmlToPdfConverter
             CardFrameBorderPt = pb.parent.CardFrameBorderPt,
             CardFrameInsetPt = pb.parent.CardFrameInsetPt,
             FormDialect = pb.parent.FormDialect,
+            MetricFlow = pb.parent.MetricFlow,
             ParentFontSize = pb.parent.FontSize,
             WidthFrac = pb.parent.WidthFrac,
             WidthPx = pb.parent.WidthPx,
+            WidthBoxAuto = pb.parent.WidthBoxAuto,
             AlignRight = pb.parent.AlignRight,
+            Rtl = pb.parent.Rtl,
             // …and so does an inline text-align: center (a centred div centres the
             // heading inside it) - and the align=center ATTRIBUTE the same way (probed: the
             // h1 and h2 inside `<div align=center>` centre at 197.16 / 214.74).
@@ -59,6 +62,9 @@ internal static partial class HtmlToPdfConverter
             LineBoxPt = pb.sheetElementTypography || pb.browserUa ? pb.parent.LineBoxPt : 0,
             // (…and a percent line-height's factor, the UA flow's inherited-as-factor reading)
             UaLineFactor = pb.browserUa ? pb.parent.UaLineFactor : 0,
+            // CSS text-indent is inherited too: the hanging tree-view block's inner div hangs its first line as
+            // its parent's rule says.
+            TextIndentPt = pb.browserUa ? pb.parent.TextIndentPt : 0,
             Tag = tag.ToLowerInvariant(),
             InFieldsBox = pb.parent.FieldsBox,
         };

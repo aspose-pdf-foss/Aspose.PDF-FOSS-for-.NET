@@ -19,10 +19,9 @@ public sealed partial class FormEditor
     public void DecorateField(FieldType fieldType)
     {
         if (_document?.Form is null) return;
-        foreach (var f in _document.Form.Fields)
+        foreach (var f in _document.Form.Fields.Where(f => MapToFacadeType(f.Type) == fieldType))
         {
-            if (MapToFacadeType(f.Type) == fieldType)
-                ApplyFacade(f);
+            ApplyFacade(f);
         }
     }
 
@@ -53,19 +52,18 @@ public sealed partial class FormEditor
         // Otherwise fail loudly — DecorateField throws rather than writing a /DA referencing
         // a missing font. (A field whose existing /DA names ZapfDingbats — the checkbox
         // glyph font — must not trip this guard.)
-        if (!string.IsNullOrEmpty(Facade.CustomFont) && !IsLoadableFormFont(Facade.CustomFont!))
+        if (!string.IsNullOrEmpty(Facade.CustomFont) && !IsLoadableFormFont(Facade.CustomFont))
         {
             throw new ArgumentException("Could not load specified font : " + Facade.CustomFont);
         }
 
-        // Active implementation: rewrite the field's /DA when the facade sets a font or size.
-        // Color/alignment changes are recorded on the field's /MK dict but not currently
-        // re-emitted into the appearance stream.
-        if (Facade.FontSize > 0 || !string.IsNullOrEmpty(Facade.CustomFont)
-            || Facade.Font != FontStyle.Helvetica)
-        {
-        ApplyFacadeFont(field);
-        }
+        // A font or size rewrites the field's /DA (with the text colour) and draws it again; a text or choice
+        // field's background, alignment and a text colour alone are written first, so one drawing shows them all.
+        var fontApplied = Facade.FontSize > 0 || !string.IsNullOrEmpty(Facade.CustomFont)
+            || Facade.Font != FontStyle.Helvetica;
+        var restyled = IsTextLike(field) && ApplyFacadeTextStyle(field, fontApplied);
+        if (fontApplied) ApplyFacadeFont(field);
+        else if (restyled) RedrawTextAppearance(field);
 
         // Border style/width → /BS on each widget (WidgetAnnotation.Border resolves
         // Style from /BS /S). Written on the kid widgets so per-widget Border surfaces it.
@@ -225,8 +223,8 @@ public sealed partial class FormEditor
         var widgets = new System.Collections.Generic.List<PdfDictionary>(field.AllKids());
         if (widgets.Count == 0) widgets.Add(field.Dict);
 
-        // The "Cross" style and the undefined default both draw the stroked-X mark;
-        // the other styles draw a ZapfDingbats glyph.
+        // The "Cross" style and the undefined default both draw the stroked-X mark; the
+        // other styles draw a ZapfDingbats glyph.
         int style = Facade.ButtonStyle == FormFieldFacade.CheckBoxStyleUndefined
             ? FormFieldFacade.CheckBoxStyleCross : Facade.ButtonStyle;
         // An add-time face keeps the legacy minimum-1 border; a decorated existing
@@ -255,7 +253,8 @@ public sealed partial class FormEditor
             if (_document.Reader.ResolveDict(widget.Get("AP")) is { } apOld &&
                 _document.Reader.ResolveDict(apOld.Get("N")) is { } nOld)
             {
-                foreach (var k in nOld.Keys) if (k != "Off") { onName = k; break; }
+                var k = nOld.Keys.FirstOrDefault(k => k != "Off");
+                if (k is not null) { onName = k; }
             }
             else if (widget.GetName("AS") is { } asn && asn != "Off") onName = asn;
 
@@ -334,7 +333,7 @@ public sealed partial class FormEditor
     // fills the border-inset extent and the pen centres that square in the widget box.
     private const double CheckMarkEmFraction = 2.0 / 3.0;
 
-    private PdfStream BuildCheckBoxFace(double w, double h, double bw, int style, char glyph,
+    private static PdfStream BuildCheckBoxFace(double w, double h, double bw, int style, char glyph,
         System.Drawing.Color bg, System.Drawing.Color border, System.Drawing.Color text, bool withMark,
         bool dashed = false, bool glyphFromCaption = false)
     {

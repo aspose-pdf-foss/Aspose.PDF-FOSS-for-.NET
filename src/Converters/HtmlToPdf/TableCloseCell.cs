@@ -72,7 +72,7 @@ internal static partial class HtmlToPdfConverter
         CommitCellColumnWidths(cc);
         cc.colModel.colCursor += cc.span;
         cc.ps.preWrapPending = false;
-        cc.ps.cell = null; cc.ps.lines.Clear(); cc.ps.lineHeightPctByIdx = null; cc.ps.pendingCellImgAt = null; cc.ps.loneBrBlankLines?.Clear(); cc.ps.line.Clear(); cc.ps.isHeader = false; cc.ps.colSpan = 1; cc.ps.cellRowSpan = 1; cc.ps.alignSet = false; cc.ps.cellWidthPt = 0; cc.ps.cellWidthPct = 0; cc.ps.cellCssPadPt = 0; cc.ps.cellShortPadPt = 0; cc.ps.pendingCellTablesMinW = 0; cc.ps.pendingCellTablesMaxW = 0; cc.ps.cellFixedDivPt = 0; cc.ps.cellPadLeftPt = 0; cc.ps.cellImgWidthPt = 0; cc.ps.cellControlBoxPt = 0; cc.ps.cellOwnLineHPt = 0; cc.ps.cellPrevPBottomPt = 0; cc.ps.cellPMarginRightPt = 0; cc.ps.cellFirstPMarginTopPt = 0; cc.ps.cellDecorActive = null; cc.ps.lineDecorUnion = null; cc.ps.lineDecorsByIdx = null; cc.ps.lineAlignByIdx = null; cc.ps.hrRuleLines = null; cc.ps.uaHrRulePending = false; cc.ps.lineColorRunsByIdx = null; cc.ps.lineColorRuns = null; cc.ps.cellInputBoxes = null; cc.ps.dwSelectDepth = 0; cc.ps.dwTextareaOpen = false; cc.ps.cellOwnHeightDecl = false; cc.ps.cellUpper = false; cc.ps.uaUpperDepths.Clear(); cc.ps.uaBlockBottoms.Clear(); cc.ps.lineMarker = null; cc.ps.lineMarkerByIdx = null; cc.ps.lineRunsByIdx = null; cc.ps.uaRuleBands = null; cc.ps.cellRuleBelowPt = 0; cc.ps.cellRuleColor = null; cc.ps.cellRuleAbovePt = 0; cc.ps.cellRuleAboveColor = null;
+        cc.ps.cell = null; cc.ps.lines.Clear(); cc.ps.lineHeightPctByIdx = null; cc.ps.pendingCellImgAt = null; cc.ps.loneBrBlankLines?.Clear(); cc.ps.line.Clear(); cc.ps.isHeader = false; cc.ps.colSpan = 1; cc.ps.cellRowSpan = 1; cc.ps.alignSet = false; cc.ps.cellWidthPt = 0; cc.ps.cellWidthPct = 0; cc.ps.cellCssPadPt = 0; cc.ps.cellShortPadPt = 0; cc.ps.pendingCellTablesMinW = 0; cc.ps.pendingCellTablesMaxW = 0; cc.ps.cellFixedDivPt = 0; cc.ps.cellPadLeftPt = 0; cc.ps.cellImgWidthPt = 0; cc.ps.cellImgMaxPt = 0; cc.ps.cellControlBoxPt = 0; cc.ps.cellOwnLineHPt = 0; cc.ps.cellPrevPBottomPt = 0; cc.ps.cellPMarginRightPt = 0; cc.ps.cellFirstPMarginTopPt = 0; cc.ps.cellDecorActive = null; cc.ps.lineDecorUnion = null; cc.ps.lineDecorsByIdx = null; cc.ps.lineAlignByIdx = null; cc.ps.hrRuleLines = null; cc.ps.uaHrRulePending = false; cc.ps.lineColorRunsByIdx = null; cc.ps.lineColorRuns = null; cc.ps.cellInputBoxes = null; cc.ps.dwSelectDepth = 0; cc.ps.dwTextareaOpen = false; cc.ps.cellOwnHeightDecl = false; cc.ps.cellUpper = false; cc.ps.uaUpperDepths.Clear(); cc.ps.uaBlockBottoms.Clear(); cc.ps.lineMarker = null; cc.ps.lineMarkerByIdx = null; cc.ps.lineRunsByIdx = null; cc.ps.uaRuleBands = null; cc.ps.cellRuleBelowPt = 0; cc.ps.cellRuleColor = null; cc.ps.cellRuleAbovePt = 0; cc.ps.cellRuleAboveColor = null;
         cc.ps.underlinedLines = null; cc.ps.lineHadU = cc.ps.uDepth > 0;
         cc.ps.chainTdElem = null; cc.ps.chainOpenElems?.Clear(); cc.chainUnbold.Clear();
         cc.ps.cellChainPadTopPt = 0; cc.ps.cellChainPadBotPt = 0; cc.ps.cellChainColor = null;
@@ -133,7 +133,7 @@ internal static partial class HtmlToPdfConverter
                     f = Text.FontRepository.TryFindFont(cc.famForFont, ignoreCase: true);
                 if (f is not null) cc.tf.TextState.Font = f;
             }
-            catch { }
+            catch { /* a font that cannot be found or read leaves the fallback in place */ }
         }
         // Non-WinAnsi text (CJK, Cyrillic, Greek, …) can't render in the Standard-14
         // WinAnsi fonts — it would collapse to '?'. Fall back to an embedded Unicode
@@ -146,6 +146,9 @@ internal static partial class HtmlToPdfConverter
             var uf = ResolveUnicodeFont(cc.ln);
             if (uf is not null) cc.tf.TextState.Font = uf;
         }
+        if (MixedWeightLinesFlow(cc) && cc.tf.TextState.Font?.SourceFontData is null
+            && Text.TextBuilder.IsStandard14Family(cc.tf.TextState.Font?.FontName))
+            FlowMixedWeightRuns(cc);
         TraceCellLine(cc, spec);
         // Inline boxes recorded for this line (plates/pills) ride the
         // fragment; the box line height reserves the pill's full height,
@@ -189,7 +192,9 @@ internal static partial class HtmlToPdfConverter
         // an otherwise-empty td) never pushed a line — materialise the
         // blank line(s) its segments point at.
         var needLines = 0;
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
         foreach (var (bLi0, _, _, _) in cc.ps.cellBoxSegs!)
+#pragma warning restore S8969
             if (bLi0 + 1 > needLines) needLines = bLi0 + 1;
         while (cc.ps.lines.Count < needLines) PushLine(cc.ps, cc.redlineCells, cc.dwFormCells, cc.widenProbe);
         var runSegs = new Dictionary<ChainBoxRun, int>();
@@ -200,8 +205,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var (bLi, bRun, _, bText) in cc.ps.cellBoxSegs)
         {
             var bSpec = bLi < cc.ps.lines.Count ? cc.ps.lines[bLi] : default;
-            var bPt = bSpec.FontPt > 0 ? bSpec.FontPt
-                : cc.ps.cellClassPt > 0 ? cc.ps.cellClassPt : cc.cellFontSize;
+            var bPt = (bSpec.FontPt, cc.ps.cellClassPt) switch { (> 0, _) => bSpec.FontPt, (_, > 0) => cc.ps.cellClassPt, _ => cc.cellFontSize };
             var bBold = bSpec.Bold || cc.ps.cellBold || cc.ps.isHeader;
             // Measure the box text with the REAL face the box renders in
             // (Arial advances run ~3% wider than the Standard-14 estimate on
@@ -211,8 +215,8 @@ internal static partial class HtmlToPdfConverter
                     MeasureFaceText(bBold ? "Arial Bold" : "Arial", bText, bPt),
                     MeasureLine(cc.ps, cc.options, cc.cellFontSize, cc.dwFormCells, cc.fullWidthCjkMin, cc.widenProbe, bText, bBold, bPt))
                 + bRun.LetterSpacing * bText.Length;
-            var bCircleD = bRun.CircleFill is not null
-                ? (bRun.CircleD > 0 ? bRun.CircleD : 14.25) : 0;
+            double bCircleD = 0;
+            if (bRun.CircleFill is not null) bCircleD = bRun.CircleD > 0 ? bRun.CircleD : 14.25;
             penByLine.TryGetValue(bLi, out var pen);
             InlineBoxDecoration deco;
             if (placed is not null && placed.TryGetValue(bRun, out var bAt))
@@ -243,8 +247,10 @@ internal static partial class HtmlToPdfConverter
             }
             else
             {
+                double circleW = 0;
+                if (bCircleD > 0) circleW = (bTw > 0 ? BadgeLabelGapPt : 0) + bCircleD;
                 var bW = bRun.PadL + bTw
-                    + (bCircleD > 0 ? (bTw > 0 ? BadgeLabelGapPt : 0) + bCircleD : 0)
+                    + circleW
                     + bRun.PadR;
                 deco = new InlineBoxDecoration
                 {
@@ -256,8 +262,7 @@ internal static partial class HtmlToPdfConverter
                     // A block bar (h1, margin:0) hugs its line box — no inset.
                     // A circle-only run (a standalone badge in its own cell)
                     // carries no pill chrome — its line is the circle.
-                    InsetV = bRun.DeclH > 0 ? PlateBreathingPt
-                        : bRun.FullWidth || bText.Length == 0 ? 0 : PillLineInsetPt,
+                    InsetV = (bRun.DeclH > 0, bRun.FullWidth || bText.Length == 0) switch { (true, _) => PlateBreathingPt, (_, true) => 0, _ => PillLineInsetPt },
                     Text = bText,
                     TextX = pen + (bCircleD > 0 ? bRun.PadL : (bW - bTw) / 2),
                     TextSize = bPt, TextBold = bBold,
@@ -291,5 +296,31 @@ internal static partial class HtmlToPdfConverter
             cc.ps.cell!.Paragraphs.Add(imgs[0]);
             imgs.RemoveAt(0); at.RemoveAt(0);
         }
+    }
+
+    /// <summary>Whether this cell's mixed-weight lines flow as segments: the form-grid, word-mail
+    /// and UA-box dialects draw them through their own run marks. A nested grid's lines flow too: its
+    /// rows are sized by the same run-by-run wrap (see RunsWrappedLineCount).</summary>
+    private static bool MixedWeightLinesFlow(CloseCellState cc)
+        => !cc.formGridDialect && !cc.ps.wordMailCells && !cc.uaCellBoxes;
+
+    /// <summary>A line whose runs change weight (`&lt;b&gt;Forenames: &lt;/b&gt;Joe`) in the table's
+    /// built-in face flows as segments, one per run, so the label draws bold and the value regular;
+    /// the whole line used to take one weight, the last run's. A line the built-in faces cannot
+    /// show stays whole for the face fallback.</summary>
+    private static void FlowMixedWeightRuns(CloseCellState cc)
+    {
+        if (cc.ps.lineRunsByIdx is null || !cc.ps.lineRunsByIdx.TryGetValue(cc.tfLineIdx, out var runs)
+            || runs.Count < 2 || NeedsUnicode(cc.ln)) return;
+        var segments = new Text.TextSegmentCollection();
+        foreach (var (text, bold) in runs)
+        {
+            var segment = new Text.TextSegment(text);
+            segment.TextState.IsBold = bold || cc.tf.TextState.IsBold;
+            segment.TextState.IsItalic = cc.tf.TextState.IsItalic;
+            segments.Add(segment);
+        }
+        cc.tf.Segments = segments;
+        cc.tf.TextState.FormattingOptions.SegmentsFlowAsRuns = true;
     }
 }

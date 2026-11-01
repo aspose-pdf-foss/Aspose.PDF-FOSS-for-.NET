@@ -19,6 +19,11 @@ public sealed partial class TextBuilder
     /// Null, as it is for every other caller, appends to the page as before.</summary>
     internal Action<byte[]>? ContentSink { get; set; }
 
+    /// <summary>Set by the library's own writers (a re-flow, an OCR overlay, a field caption), which compute each
+    /// run's seat in the page's own space under the matrix its content leaves: their runs are neither seated in the
+    /// view of a turned page nor isolated from that content, as a run a caller appends is.</summary>
+    internal bool SeatsInPageSpace { get; init; }
+
     /// <summary>Creates a text builder that writes text onto the given page.</summary>
     public TextBuilder(Page page)
     {
@@ -56,6 +61,16 @@ public sealed partial class TextBuilder
         }
     }
 
+    /// <summary>Writes the fragment's text to the page's content stream at the fragment's <c>Position</c>, using its text state, and registers the font it needs in the page resources.</summary>
+    public void AppendText(TextFragment textFragment) => AppendText(textFragment, false);
+
+    private void AppendText(TextFragment textFragment, bool addTrailingSpace)
+    {
+        if (ContentSink is null && !SeatsInPageSpace) _page.IsolateContentLeavingMatrix();
+        textFragment.AttachedTrailingSpace = addTrailingSpace;
+        WriteFragment(textFragment, addTrailingSpace, rewrite: null);
+    }
+
     /// <summary>True when <paramref name="next"/> follows <paramref name="cur"/> on the same
     /// baseline after a positive, word-sized horizontal gap (not an abutting glyph and not a
     /// wide column jump).</summary>
@@ -68,15 +83,6 @@ public sealed partial class TextBuilder
         var curEndX = cur.Rectangle is { } r ? r.URX : cp.XIndent;
         var gap = np.XIndent - curEndX;
         return gap > 0.2 * fs && gap < 3.0 * fs;
-    }
-
-    /// <summary>Writes the fragment's text to the page's content stream at the fragment's <c>Position</c>, using its text state, and registers the font it needs in the page resources.</summary>
-    public void AppendText(TextFragment textFragment) => AppendText(textFragment, false);
-
-    private void AppendText(TextFragment textFragment, bool addTrailingSpace)
-    {
-        textFragment.AttachedTrailingSpace = addTrailingSpace;
-        WriteFragment(textFragment, addTrailingSpace, rewrite: null);
     }
 
     /// <summary>Write a fragment the LAYOUT ENGINE has already positioned: its segments
@@ -112,7 +118,23 @@ public sealed partial class TextBuilder
         var fontData = st?.FontData ?? ownFont?.SourceFontData
             ?? fragment.TextState.FontData ?? fragment.TextState.Font?.SourceFontData;
         if (st is not null && ResolveStyledFace(st, fontData) is { } styled) fontData = styled;
-        return (fs, fontData);
+        return (fs, CoveringSegmentFace(fragment, segment, fontData));
+    }
+
+    /// <summary>The face a segment's own text draws in when <paramref name="fontData"/> cannot
+    /// show it: the installed face that covers more of it, like a whole fragment's
+    /// substitution - otherwise the run writes glyph 0, or '?' through a Standard-14 face.</summary>
+    private static FontData? CoveringSegmentFace(TextFragment fragment, TextSegment segment, FontData? fontData)
+    {
+        var text = segment.Text;
+        if (string.IsNullOrEmpty(text)) return fontData;
+        var font = segment.TextState?.Font ?? fragment.TextState.Font;
+        if (fontData?.TtfData is not { } ttf)
+            return FontRepository.SubstituteForUnencodableStandard14Text(text, font,
+                MapToStandard14(segment.TextState ?? fragment.TextState)) is { TtfData: not null } cover ? cover : fontData;
+        if (FontRepository.CoversText(ttf, text)) return fontData;
+        return FontRepository.SubstituteForMissingGlyphs(text, font) is { TtfData: { } subTtf } sub
+            && FontRepository.CoverCount(subTtf, text) > FontRepository.CoverCount(ttf, text) ? sub : fontData;
     }
 
     /// <summary>The page-space box a seat's glyphs sit in: the run's matrix lowered
@@ -169,7 +191,7 @@ public sealed partial class TextBuilder
             if (t.Length == 0) return;
             builder.BeginText();
             builder.SetFont(fontResName, fontSize);
-            if (fg is not null) builder.SetFillColor(fg.R / 255.0, fg.G / 255.0, fg.B / 255.0);
+            if (fg is not null) builder.SetFillColor(fg);
             builder.MoveTextPosition(atX, y - descentComp);
             builder.ShowText(t);
             builder.EndText();
@@ -227,6 +249,7 @@ public sealed partial class TextBuilder
     public void AppendParagraph(TextParagraph textParagraph)
     {
         var paragraph = textParagraph;
+        _page.IsolateContentLeavingMatrix();
         WriteParagraph(paragraph);
         paragraph.AttachedPage = _page;
         _page.RegisterAttachedParagraph(paragraph);
@@ -283,9 +306,9 @@ public sealed partial class TextBuilder
         {
             var st = seg.TextState;
             if (st is null || string.IsNullOrEmpty(seg.Text)) continue;
-            var fs = st is { FontSizeTouched: true, FontSize: > 0 }
-                ? (double)st.FontSize
-                : (fragFontSize > 0 ? fragFontSize : 12.0);
+            double fs;
+            if (st is { FontSizeTouched: true, FontSize: > 0 }) fs = (double)st.FontSize;
+            else fs = fragFontSize > 0 ? fragFontSize : 12.0;
             var fontName = st.Font is { } sf && !ReferenceEquals(sf, FontInfo.DefaultHelvetica)
                 ? sf.FontName ?? string.Empty
                 : fragment.TextState.Font?.FontName ?? string.Empty;
@@ -337,8 +360,9 @@ public sealed partial class TextBuilder
         var fontDict = GetOrCreateOwnFontDict();
         // Delegate the Type0/CIDFontType2 construction to the shared embedder. Pass the
         // font name through unchanged (stripSpaces:false) so the generator's /BaseFont
-        // stays byte-for-byte as before.
-        return Type0FontEmbedder.Embed(fontDict, fontData.TtfData!, fontData.FontName, text);
+        // stays byte-for-byte as before. Every page of the document files the one font
+        // the face was first embedded as, so its program travels once, not once per page.
+        return Type0FontEmbedder.Embed(fontDict, fontData.TtfData!, fontData.FontName, text, document: _page.Reader);
     }
 
     // ── Font resource registration ──────────────────────────────────

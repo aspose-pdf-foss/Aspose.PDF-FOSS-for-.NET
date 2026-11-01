@@ -106,15 +106,15 @@ public sealed partial class Page
                 double rRawFs = 0, rTmD = 1.0;
                 string rFontName = frag.TextState.FontName ?? "";
                 Text.FontInfo? rFont = frag.TextState.Font;
-                foreach (var seg in frag.Segments)
+                foreach (var textState in frag.Segments.Select(seg => seg.TextState))
                 {
-                    var rfs = seg.TextState.RawFontSize > 0 ? (double)seg.TextState.RawFontSize : (double)seg.TextState.FontSize;
+                    var rfs = textState.RawFontSize > 0 ? (double)textState.RawFontSize : (double)textState.FontSize;
                     if (rfs > rRawFs)
                     {
                         rRawFs = rfs;
-                        rTmD = Math.Abs(seg.TextState.TmD) > 0.001 ? Math.Abs(seg.TextState.TmD) : 1.0;
-                        rFontName = seg.TextState.FontName ?? rFontName;
-                        rFont = seg.TextState.Font ?? rFont;
+                        rTmD = Math.Abs(textState.TmD) > 0.001 ? Math.Abs(textState.TmD) : 1.0;
+                        rFontName = textState.FontName ?? rFontName;
+                        rFont = textState.Font ?? rFont;
                     }
                 }
                 if (rRawFs <= 0) rRawFs = frag.TextState.FontSize;
@@ -123,9 +123,9 @@ public sealed partial class Page
                 double rotH = ComputeBgRectHeight(rFontName, rFont, rRawFs, rTmD);
                 double rotDescent = rotH * 0.21;
 
-                fb.builder.SaveState();
+                SaveDecorationState(fb.builder, fb.inPageSpace);
                 fb.builder.SetFillColor(fb.fragBg.R / 255.0, fb.fragBg.G / 255.0, fb.fragBg.B / 255.0);
-                fb.builder.SetMatrix(ux, uy, -uy, ux, ox, oy);
+                SetAlongRun(fb.builder, frag, ux, uy, ox, oy);
                 fb.builder.Rectangle(0, -rotDescent, rotW, rotH);
                 fb.builder.Fill();
                 fb.builder.RestoreState();
@@ -140,14 +140,16 @@ public sealed partial class Page
                 // Tm (content-stream) space, then inverse-CTM the position.
                 double localFs = frag.TextState.FontSize / fb.ctmScaleX;
                 Text.FontInfo? fragFont = frag.TextState.Font;
-                foreach (var seg in frag.Segments)
-                    if (seg.TextState.Font is not null) { fragFont = seg.TextState.Font; break; }
+                var seg = frag.Segments.FirstOrDefault(seg => seg.TextState.Font is not null);
+                if (seg is not null) { fragFont = seg.TextState.Font; }
                 fragW = fragFont?.MeasureString(frag.Text, localFs)
                     ?? (frag.Text.Length * localFs * 0.5);
                 fragH = localFs * 1.1;
                 fragX = frag.Rectangle?.LLX ?? frag.PositionOrNull?.XIndent ?? 0;
                 fragY = frag.Rectangle?.LLY ?? frag.PositionOrNull?.YIndent ?? 0;
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
                 (fragX, fragY) = fb.ctm!.InverseTransformPoint(fragX, fragY);
+#pragma warning restore S8969
             }
             else
             {
@@ -161,15 +163,15 @@ public sealed partial class Page
                 double maxTmD = 1.0;
                 string maxFontName = frag.TextState.FontName ?? "";
                 Text.FontInfo? maxFont = frag.TextState.Font;
-                foreach (var seg in frag.Segments)
+                foreach (var segTextState in frag.Segments.Select(seg => seg.TextState))
                 {
-                    var rfs = seg.TextState.RawFontSize > 0 ? (double)seg.TextState.RawFontSize : (double)seg.TextState.FontSize;
+                    var rfs = segTextState.RawFontSize > 0 ? (double)segTextState.RawFontSize : (double)segTextState.FontSize;
                     if (rfs > maxRawFs)
                     {
                         maxRawFs = rfs;
-                        maxTmD = Math.Abs(seg.TextState.TmD) > 0.001 ? Math.Abs(seg.TextState.TmD) : 1.0;
-                        maxFontName = seg.TextState.FontName ?? maxFontName;
-                        maxFont = seg.TextState.Font ?? maxFont;
+                        maxTmD = Math.Abs(segTextState.TmD) > 0.001 ? Math.Abs(segTextState.TmD) : 1.0;
+                        maxFontName = segTextState.FontName ?? maxFontName;
+                        maxFont = segTextState.Font ?? maxFont;
                     }
                 }
                 if (maxRawFs <= 0) maxRawFs = frag.TextState.FontSize;
@@ -177,8 +179,8 @@ public sealed partial class Page
                 fragH = ComputeBgRectHeight(maxFontName, maxFont, maxRawFs, maxTmD);
             }
 
-            EmitBg(fb, fb.fragBg, fragX, fragY, fragW, fragH,
-                frag.Rectangle?.Height ?? fragH);
+            if (fb.hasCtm) EmitRunSpaceBox(fb, fb.fragBg, fragX, fragY, fragW, fragH);
+            else EmitBg(fb, fb.fragBg, fragX, fragY, fragW, fragH, frag.Rectangle?.Height ?? fragH);
             return true;
         }
         return false;
@@ -192,16 +194,17 @@ public sealed partial class Page
                 || frag.CapturedBackgroundSources is { Count: > 0 })
             && frag.PositionOrNull is { } inlinePos && frag.Rectangle is { } inlineRect)
         {
-            var inlineFs = frag.TextState.RawFontSize > 0
-                ? (double)frag.TextState.RawFontSize
-                : (frag.TextState.FontSize > 0 ? frag.TextState.FontSize : 12);
+            double inlineFs;
+            if (frag.TextState.RawFontSize > 0) inlineFs = (double)frag.TextState.RawFontSize;
+            else inlineFs = frag.TextState.FontSize > 0 ? frag.TextState.FontSize : 12;
             var inlineH = ComputeBgRectHeight(frag.TextState.FontName ?? "",
                 frag.TextState.Font, inlineFs,
                 Math.Abs(frag.TextState.TmD) > 0.001 ? Math.Abs(frag.TextState.TmD) : 1.0);
+            // Measured where the text was read - in the turned view of a page viewed turned - and laid in the page's own space.
             if (InsertBeforeTextObjectAt(
-                    DecorationBlock(fb.fragBg, inlinePos.XIndent, inlinePos.YIndent,
+                    DecorationBlockIn(frag.PositionFrame, fb.fragBg, inlinePos.XIndent, inlinePos.YIndent,
                         inlineRect.Width, inlineH),
-                    inlinePos.XIndent, inlinePos.YIndent))
+                    inlinePos.XIndent, inlinePos.YIndent, FromReadFrame(frag.PositionFrame)))
                 return true;
         }
         return false;

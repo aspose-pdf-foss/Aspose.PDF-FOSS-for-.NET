@@ -41,8 +41,8 @@ internal static class Code39Symbol
     internal static string Frame(string data)
     {
         var sb = new StringBuilder(data.Length + 2).Append(FrameCharacter);
-        foreach (char c in data.ToUpperInvariant())
-            if (c != FrameCharacter && Patterns.ContainsKey(c)) sb.Append(c);
+        foreach (char c in data.ToUpperInvariant().Where(c => c != FrameCharacter && Patterns.ContainsKey(c)))
+            sb.Append(c);
         return sb.Append(FrameCharacter).ToString();
     }
 

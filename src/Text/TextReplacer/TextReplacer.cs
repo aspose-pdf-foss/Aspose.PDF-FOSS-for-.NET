@@ -24,13 +24,11 @@ public sealed partial class TextReplacer
 
     private Regex? _regexPattern;
 
-    private bool _allowCrossOperator;
-
     /// <summary>When true, <see cref="Replace(Page,string,string,bool)"/> also matches search
     /// text that spans multiple text operators (a word drawn glyph-by-glyph). Off by default;
     /// the rectangle/fragment replace path turns it on and relies on <see cref="TargetY"/>/
     /// <see cref="TargetX"/> to keep the cross-operator replacement inside the target region.</summary>
-    internal bool AllowCrossOperator { get => _allowCrossOperator; set => _allowCrossOperator = value; }
+    internal bool AllowCrossOperator { get; set; }
 
     /// <summary>Number of replacements made in the last Replace call.</summary>
     public int ReplacementCount => _replacementCount;
@@ -101,7 +99,7 @@ public sealed partial class TextReplacer
     // that resolve the family are static; reset per replacement via ResetSwitchedFont.
     [ThreadStatic] private static string? s_switchedFontFamily;
 
-    internal string? SwitchedFontFamily => s_switchedFontFamily;
+    internal static string? SwitchedFontFamily => s_switchedFontFamily;
 
     internal static void ResetSwitchedFont() => s_switchedFontFamily = null;
 
@@ -190,18 +188,6 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>
-    /// Replace with cross-operator support enabled.
-    /// Used when the caller (e.g., TextFragment.Text setter) knows the text exists
-    /// as a cross-operator fragment.
-    /// </summary>
-    public void ReplaceWithCrossOperator(Page page, string search, string replacement)
-    {
-        _allowCrossOperator = true;
-        Replace(page, search, replacement, false);
-        _allowCrossOperator = false;
-    }
-
-    /// <summary>
     /// Replace occurrences of <paramref name="search"/> with <paramref name="replacement"/>
     /// in the given page's content stream(s). When <paramref name="isRegex"/> is <c>true</c>,
     /// <paramref name="search"/> is treated as a regular expression pattern.
@@ -211,7 +197,7 @@ public sealed partial class TextReplacer
         _replacementCount = 0;
         if (string.IsNullOrEmpty(search) && !MatchAnyOperator) return;
         _isRegex = isRegex;
-        _regexPattern = isRegex ? new Regex(search) : null;
+        _regexPattern = isRegex ? new Regex(search, RegexOptions.None, RegexManager.MatchTimeout) : null;
         var reader = page.Reader;
         var processedXObjects = new HashSet<int>();
 
@@ -241,6 +227,113 @@ public sealed partial class TextReplacer
 
         _isRegex = false;
         _regexPattern = null;
+    }
+
+    /// <summary>
+    /// Replace text across all pages of a document, including Form XObjects.
+    /// </summary>
+    public void Replace(Document document, string search, string replacement)
+        => Replace(document, search, replacement, false);
+
+    /// <summary>
+    /// Replace text across all pages of a document, including Form XObjects.
+    /// When <paramref name="isRegex"/> is true, <paramref name="search"/> is a .NET regex.
+    /// </summary>
+    public void Replace(Document document, string search, string replacement, bool isRegex)
+    {
+        _replacementCount = 0;
+        if (string.IsNullOrEmpty(search)) return;
+        _isRegex = isRegex;
+        _regexPattern = isRegex ? new Regex(search, RegexOptions.None, RegexManager.MatchTimeout) : null;
+        // Enable cross-operator replacement so matches that span separate
+        // Tj/TJ operators (decoded text crossing positioning operators) are
+        // not silently missed by the per-op matcher.
+        var prevAllowCross = AllowCrossOperator;
+        AllowCrossOperator = true;
+        var processedXObjects = new HashSet<int>(); // track by obj number to avoid double processing
+
+        try
+        {
+            foreach (var page in document.Pages)
+            {
+                if (ReplaceFirstOnly && _replacementCount > 0) break;
+                var reader = page.Reader;
+
+                // Walk page content first; XObjects are recursed via /Do.
+                var contentStreams = GetContentStreams(page, reader);
+                if (contentStreams.Count > 0)
+                {
+                    var combined = CombineStreams(contentStreams);
+                    var count = _replacementCount;
+                    var (rA, rB, rC, rD, rTx, rTy) = PageRotationSeed(page);
+                    var replaced = ReplaceInContentStream(combined, search, replacement,
+                        page.Dict, reader, processedXObjects, rA, rB, rC, rD, rTx, rTy);
+
+                    if (_replacementCount > count)
+                    {
+                        page.SetContentStream(WrapInGraphicsState(replaced));
+                    }
+                }
+
+                // Catch-all for XObjects not reached via /Do.
+                ReplaceInFormXObjects(page.Dict, reader, search, replacement, processedXObjects);
+            }
+        }
+        finally
+        {
+            _isRegex = false;
+            _regexPattern = null;
+            AllowCrossOperator = prevAllowCross;
+        }
+    }
+
+    /// <summary>
+    /// Replace text within a single Form XObject's own content stream (and any
+    /// Form XObjects nested in its resources). Used by the TextFragment.Text setter
+    /// for fragments extracted via TextFragmentAbsorber.Visit(XForm), which carry a
+    /// null SourcePage — the producing operator lives in the form, not the page.
+    /// </summary>
+    public void Replace(XForm form, string search, string replacement)
+    {
+        _replacementCount = 0;
+        if (form is null || string.IsNullOrEmpty(search)) return;
+        var reader = form.Reader;
+        var processed = new HashSet<int>();
+        // Cross-operator on: form text frequently spans separate Tj/TJ operators.
+        var prevAllowCross = AllowCrossOperator;
+        AllowCrossOperator = true;
+        // Clearing a form's text should leave an empty, re-extractable fragment
+        // (an emptied Typewriter-form field stays in place), so retain the
+        // empty show operator on full deletion only for this form path.
+        var prevKeepEmpty = KeepEmptyShowOperator;
+        KeepEmptyShowOperator = true;
+        try
+        {
+            // Nested Form XObjects first (identity CTM catch-all).
+            ReplaceInFormXObjects(form.StreamDict, reader, search, replacement, processed);
+            var decoded = form.DecodedBytes;
+            var replaced = ReplaceInContentStream(decoded, search, replacement,
+                form.StreamDict, reader, processed);
+            if (_replacementCount > 0)
+                form.SetDecodedContent(replaced);
+        }
+        finally
+        {
+            AllowCrossOperator = prevAllowCross;
+            KeepEmptyShowOperator = prevKeepEmpty;
+        }
+    }
+
+    /// <summary>
+    /// Replace with cross-operator support enabled.
+    /// Used when the caller (e.g., TextFragment.Text setter) knows the text exists
+    /// as a cross-operator fragment.
+    /// </summary>
+    public void ReplaceWithCrossOperator(Page page, string search, string replacement)
+    {
+        AllowCrossOperator = true;
+        Replace(page, search, replacement, false);
+        AllowCrossOperator = false;
     }
 
     /// <summary>Bracket replace-rewritten page content in a single q…Q pair to
@@ -277,101 +370,6 @@ public sealed partial class TextReplacer
         if (ops.Count == 0 && head.Length < content.Length)
             ops = ContentStreamOperatorParser.ParseOperators(content);
         return ops.Count >= 1 && ops[0] == "q";
-    }
-
-    /// <summary>
-    /// Replace text across all pages of a document, including Form XObjects.
-    /// </summary>
-    public void Replace(Document document, string search, string replacement)
-        => Replace(document, search, replacement, false);
-
-    /// <summary>
-    /// Replace text across all pages of a document, including Form XObjects.
-    /// When <paramref name="isRegex"/> is true, <paramref name="search"/> is a .NET regex.
-    /// </summary>
-    public void Replace(Document document, string search, string replacement, bool isRegex)
-    {
-        _replacementCount = 0;
-        if (string.IsNullOrEmpty(search)) return;
-        _isRegex = isRegex;
-        _regexPattern = isRegex ? new Regex(search) : null;
-        // Enable cross-operator replacement so matches that span separate
-        // Tj/TJ operators (decoded text crossing positioning operators) are
-        // not silently missed by the per-op matcher.
-        var prevAllowCross = _allowCrossOperator;
-        _allowCrossOperator = true;
-        var processedXObjects = new HashSet<int>(); // track by obj number to avoid double processing
-
-        try
-        {
-            foreach (var page in document.Pages)
-            {
-                if (ReplaceFirstOnly && _replacementCount > 0) break;
-                var reader = page.Reader;
-
-                // Walk page content first; XObjects are recursed via /Do.
-                var contentStreams = GetContentStreams(page, reader);
-                if (contentStreams.Count > 0)
-                {
-                    var combined = CombineStreams(contentStreams);
-                    var count = _replacementCount;
-                    var (rA, rB, rC, rD, rTx, rTy) = PageRotationSeed(page);
-                    var replaced = ReplaceInContentStream(combined, search, replacement,
-                        page.Dict, reader, processedXObjects, rA, rB, rC, rD, rTx, rTy);
-
-                    if (_replacementCount > count)
-                    {
-                        page.SetContentStream(WrapInGraphicsState(replaced));
-                    }
-                }
-
-                // Catch-all for XObjects not reached via /Do.
-                ReplaceInFormXObjects(page.Dict, reader, search, replacement, processedXObjects);
-            }
-        }
-        finally
-        {
-            _isRegex = false;
-            _regexPattern = null;
-            _allowCrossOperator = prevAllowCross;
-        }
-    }
-
-    /// <summary>
-    /// Replace text within a single Form XObject's own content stream (and any
-    /// Form XObjects nested in its resources). Used by the TextFragment.Text setter
-    /// for fragments extracted via TextFragmentAbsorber.Visit(XForm), which carry a
-    /// null SourcePage — the producing operator lives in the form, not the page.
-    /// </summary>
-    public void Replace(XForm form, string search, string replacement)
-    {
-        _replacementCount = 0;
-        if (form is null || string.IsNullOrEmpty(search)) return;
-        var reader = form.Reader;
-        var processed = new HashSet<int>();
-        // Cross-operator on: form text frequently spans separate Tj/TJ operators.
-        var prevAllowCross = _allowCrossOperator;
-        _allowCrossOperator = true;
-        // Clearing a form's text should leave an empty, re-extractable fragment
-        // (an emptied Typewriter-form field stays in place), so retain the
-        // empty show operator on full deletion only for this form path.
-        var prevKeepEmpty = KeepEmptyShowOperator;
-        KeepEmptyShowOperator = true;
-        try
-        {
-            // Nested Form XObjects first (identity CTM catch-all).
-            ReplaceInFormXObjects(form.StreamDict, reader, search, replacement, processed);
-            var decoded = form.DecodedBytes;
-            var replaced = ReplaceInContentStream(decoded, search, replacement,
-                form.StreamDict, reader, processed);
-            if (_replacementCount > 0)
-                form.SetDecodedContent(replaced);
-        }
-        finally
-        {
-            _allowCrossOperator = prevAllowCross;
-            KeepEmptyShowOperator = prevKeepEmpty;
-        }
     }
 
     /// <summary>

@@ -9,8 +9,8 @@ internal static partial class HtmlToPdfConverter
     private static Document? TryConvertSpecialHtmlForm(string html, HtmlLoadOptions? options)
     {
         var c0Controls = 0;
-        foreach (var bch in html)
-            if (bch < 0x20 && bch is not ('\t' or '\n' or '\r')) c0Controls++;
+        foreach (var bch in html.Where(bch => bch < 0x20 && bch is not ('\t' or '\n' or '\r')))
+            c0Controls++;
         if (c0Controls >= 4 && TryConvertBinaryText(html) is { } binaryDoc)
             return binaryDoc;
 
@@ -21,8 +21,8 @@ internal static partial class HtmlToPdfConverter
             return ConvertStlPositioned(html, options);
         if (IsPositionedSpanHtml(html) || stlPositioned)
         {
-            // The pdf-text dialect carries its geometry inline (always self-contained);
-            // the stl_ dialect only re-imports fixed when its stylesheet resolved.
+            // The pdf-text dialect carries its geometry inline (always self-contained); the
+            // stl_ dialect only re-imports fixed when its stylesheet resolved.
             if (!stlPositioned || stlCssResolvable)
             {
                 var fixedDoc = TryConvertPositionedFixedLayout(html, options);

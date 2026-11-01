@@ -16,6 +16,7 @@ public sealed class Metadata : IDictionary<string, XmpValue>
 {
     private static readonly Dictionary<string, string> _defaultNamespaces = new(StringComparer.Ordinal)
     {
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
         ["rdf"] = "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
         ["xmp"] = "http://ns.adobe.com/xap/1.0/",
         ["dc"] = "http://purl.org/dc/elements/1.1/",
@@ -25,6 +26,7 @@ public sealed class Metadata : IDictionary<string, XmpValue>
         ["pdfaid"] = "http://www.aiim.org/pdfa/ns/id/",
         ["pdfuaid"] = "http://www.aiim.org/pdfua/ns/id/",
         ["pdfe"] = "http://www.aiim.org/pdfe/ns/id/",
+#pragma warning restore S5332
     };
 
     /// <summary>Accessor mirroring the <c>Metadata.getData()</c> surface:
@@ -59,21 +61,27 @@ public sealed class Metadata : IDictionary<string, XmpValue>
     /// <inheritdoc />
     public bool IsReadOnly => false;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers may add and remove keys.</summary>
     public bool IsFixedSize => false;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers serialise their own access.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Sentinel object for ICollection.SyncRoot-style locking.</summary>
     public object SyncRoot { get; } = new();
 
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
     /// <summary>All property keys present in the bound metadata.</summary>
     public ICollection<string> Keys => _xmp.Keys.ToList();
 
     /// <summary>All property values present in the bound metadata.</summary>
     public ICollection<XmpValue> Values
         => _xmp.Keys.Select(k => new XmpValue(_xmp[k] ?? string.Empty)).ToList();
+#pragma warning restore S2365
 
     /// <summary>Live <see cref="XmlNamespaceManager"/> driving prefix → URI
     /// resolution. Updated by <see cref="RegisterNamespaceUri(string,string)"/>.</summary>
@@ -129,8 +137,8 @@ public sealed class Metadata : IDictionary<string, XmpValue>
     /// <summary>Add a key/value pair (IDictionary contract).</summary>
     public void Add(KeyValuePair<string, XmpValue> item) => Add(item.Key, item.Value);
 
-    /// <summary>Add a PDF/A extension property under <paramref name="prefix"/>.
-    /// Stored only.</summary>
+    /// <summary>Add a PDF/A extension property under <paramref name="prefix"/>: an extension property is described in
+    /// the packet's extension schema for the prefix's registered namespace.</summary>
     public void Add(string prefix, XmpPdfAExtensionObject value)
     {
         if (string.IsNullOrEmpty(prefix)) throw new ArgumentException("Prefix required.", nameof(prefix));
@@ -141,6 +149,8 @@ public sealed class Metadata : IDictionary<string, XmpValue>
             ExtensionFields[prefix] = schema;
         }
         schema.Objects.Add(value);
+        if (value is XmpPdfAExtensionProperty property)
+            _xmp.AddExtensionProperty(prefix, NamespaceManager.LookupNamespace(prefix), null, property);
     }
 
     /// <summary>Remove every property from the bound metadata.</summary>
@@ -164,8 +174,10 @@ public sealed class Metadata : IDictionary<string, XmpValue>
     /// <summary>Returns <c>true</c> if the XMP metadata contains a property with the given raw key (for example <c>dc:title</c>).</summary>
     public bool ContainsKey(string key) => _xmp.ContainsKey(key);
 
+#pragma warning disable S927 // public API: the published parameter name
     /// <summary>Copy all key/value pairs into <paramref name="array"/> starting at <paramref name="index"/>.</summary>
     public void CopyTo(KeyValuePair<string, XmpValue>[] array, int index)
+#pragma warning restore S927
     {
         if (array is null) throw new ArgumentNullException(nameof(array));
         if (index < 0) throw new ArgumentOutOfRangeException(nameof(index));
@@ -215,7 +227,7 @@ public sealed class Metadata : IDictionary<string, XmpValue>
                     new XmpPdfAExtensionSchemaDescription(prefix, namespaceUri ?? string.Empty, schemaDescription));
             // Persist on the backing store so the description is serialized to the
             // pdfaExtension block and survives save/reload.
-            _xmp.SetExtensionSchema(prefix, namespaceUri ?? string.Empty, schemaDescription!);
+            _xmp.SetExtensionSchema(prefix, namespaceUri ?? string.Empty, schemaDescription);
         }
     }
 

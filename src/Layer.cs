@@ -17,8 +17,8 @@ namespace Aspose.Pdf
     public class Layer
     {
         // Detached (authoring) state — used until the layer is attached to a page.
-        private string _id;
-        private string _name;
+        private readonly string _id;
+        private readonly string _name;
         private DefaultState _defaultState = DefaultState.Visible;
         private bool _locked;
         private readonly List<Operator> _contents = new();

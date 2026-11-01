@@ -216,6 +216,10 @@ if (doc.Form.FindByName("country") is ComboBoxField combo)
 doc.Save("filled-form.pdf");
 ```
 
+Assigning `Value` on a combo or list box selects the option it names: the
+selected index follows the value and the widget's appearance is drawn again, so
+the field shows the new choice.
+
 ### Bulk fill with the FormEditor facade
 
 `FormEditor.FillFields` accepts a name -> value dictionary and returns the

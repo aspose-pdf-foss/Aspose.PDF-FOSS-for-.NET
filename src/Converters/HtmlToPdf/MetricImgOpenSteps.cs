@@ -72,6 +72,42 @@ internal static partial class HtmlToPdfConverter
         }
     }
 
+    /// <summary>Sizes every picture declared as a percent of its cell to that share of the cell's
+    /// content box, its height following its own aspect - once, after the columns are solved.</summary>
+    /// <remarks>Idempotent: a second solve re-derives the share from the box and rescales the height by the
+    /// ratio, so a re-solved grid keeps the aspect.</remarks>
+    private static void ResolveMetricImgFractions(MetricTableState mt)
+    {
+        foreach (var r in mt.rows)
+            for (var c = 0; c < r.Count && c < mt.nCols; c++)
+            {
+                var mc = r[c];
+                if (mc.ImgWFrac <= 0 || mc.ImgWPt <= 0 || mc.ImgHPt <= 0) continue;
+                var boxW = mt.colW[c] + 2 * mt.p;
+                for (var k = 1; k < mc.ColSpan && c + k < mt.nCols; k++) boxW += mt.s + mt.colW[c + k] + 2 * mt.p;
+                var contentW = boxW - (mc.PadLeft >= 0 ? mc.PadLeft : mt.p) - (mc.PadRight >= 0 ? mc.PadRight : mt.p)
+                    - mc.BorderLeftW - mc.BorderRightW;
+                if (contentW <= 0) continue;
+                var w = contentW * mc.ImgWFrac;
+                mc.ImgHPt *= w / mc.ImgWPt;
+                mc.ImgWPt = w;
+            }
+    }
+
+    /// <summary>Where a cell's picture stands: the cell's text-align seats an inline picture at the left, the
+    /// centre or the right of the cell's content box; a picture made a block keeps the left.</summary>
+    private static double MetricCellImgX(MetricRowsState mr, double boxW)
+    {
+        var mc = mr.mc;
+        var padL = mc.PadLeft >= 0 ? mc.PadLeft : mr.p;
+        var x = mr.colX + mc.BorderLeftW + padL;
+        if (mc.ImgBlock || mc.Align is not (HorizontalAlignment.Right or HorizontalAlignment.Center)) return x;
+        var contentW = boxW - padL - (mc.PadRight >= 0 ? mc.PadRight : mr.p) - mc.BorderLeftW - mc.BorderRightW;
+        var free = contentW - mc.ImgWPt;
+        if (free <= 0) return x;
+        return x + (mc.Align == HorizontalAlignment.Right ? free : free / 2);
+    }
+
     /// <summary>The broken-image box a missing picture without alt text draws, in pt (probed: 34 × 34).</summary>
     /// <summary>ASPOSE_TRACE_CELL=1: the state an in-cell image opens with.</summary>
     private static void TraceImgOpen(MetricImgOpenState mi, string src, System.IO.TextWriter err)
@@ -94,13 +130,13 @@ internal static partial class HtmlToPdfConverter
     private static void ReadMetricImgJpegSource(MetricImgOpenState mi)
     {
         if (mi.tok.Attributes is { } iaJ && iaJ.TryGetValue("src", out var jsrc)
-            && Regex.Match(jsrc, @"^data:image/jpe?g;base64,(.+)$",
+            && SafeRegex.Match(jsrc, @"^data:image/jpe?g;base64,(.+)$",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline)
                 is { Success: true } jdm)
         {
             byte[]? jb = null;
-            try { jb = System.Convert.FromBase64String(jdm.Groups[1].Value); }
-            catch { }
+            try { jb = Base64Payload(jdm.Groups[1].Value); }
+            catch { /* malformed base64 - no image */ }
             if (jb is not null && JpegDims(jb) is { w: > 0, h: > 0 } jd)
             {
                 var jNatW = jd.w * PxPt;
@@ -118,16 +154,16 @@ internal static partial class HtmlToPdfConverter
         if (mi.mps.pendingAbsLeftFrac >= 0 && mi.mps.cell!.AbsPng is null
             && mi.tok.Attributes is { } iaP
             && iaP.TryGetValue("src", out var psrc)
-            && Regex.Match(psrc, @"^data:image/png;base64,(.+)$",
+            && SafeRegex.Match(psrc, @"^data:image/png;base64,(.+)$",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline)
                 is { Success: true } pdm)
         {
             try
             {
-                mi.mps.cell.AbsPng = System.Convert.FromBase64String(pdm.Groups[1].Value);
+                mi.mps.cell.AbsPng = Base64Payload(pdm.Groups[1].Value);
                 mi.mps.cell.AbsPngLeftFrac = mi.mps.pendingAbsLeftFrac;
             }
-            catch { }
+            catch { /* malformed base64 - no image */ }
         }
     }
 }

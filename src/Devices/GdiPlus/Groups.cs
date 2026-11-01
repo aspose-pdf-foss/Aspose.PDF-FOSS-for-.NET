@@ -64,6 +64,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// </summary>
     private void BlitImageMultiply(Bitmap bmp, GdiMatrix world, PointF[] dest)
     {
+        if (DeferToPageImage()) return;
         int w = _bitmap.Width, h = _bitmap.Height;
 
         // Device-space bounds of the destination parallelogram (3 given corners plus
@@ -80,7 +81,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         _blendScratch ??= new Bitmap(w, h, PixelFormat.Format32bppArgb);
         using (var sgfx = Graphics.FromImage(_blendScratch))
         {
-            sgfx.Clear(GdiColor.Transparent);
+            ClearScratch(sgfx, x0, y0, x1, y1);
             sgfx.InterpolationMode = InterpolationMode.HighQualityBicubic;
             sgfx.PixelOffsetMode = PagePom;
             sgfx.CompositingQuality = CompositingQuality.HighQuality;
@@ -120,8 +121,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                     if (sa == 0) continue;
                     double a = sa / 255.0;
                     // Overprint Multiply weighted by backdrop coverage, writing alpha. Over
-                    // bare paper (dn=0) the image keeps its own colour and raises coverage;
-                    // over content it multiplies. Without the alpha write it would vanish at
+                    // bare paper (dn=0) the image keeps its own colour and raises coverage; over
+                    // content it multiplies. Without the alpha write it would vanish at
                     // flatten on the coverage-alpha page.
                     double dn = drow[i + 3] / 255.0;
                     double outA = a + dn * (1 - a);
@@ -154,6 +155,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// </summary>
     private void BlitImageMasked(Bitmap bmp, GdiMatrix world, PointF[] dest, double alpha, byte[] softMask)
     {
+        if (DeferToPageImage()) return;
         int w = _bitmap.Width, h = _bitmap.Height;
         var corners = new[] { dest[0], dest[1], dest[2], new PointF(dest[1].X + dest[2].X - dest[0].X, dest[1].Y + dest[2].Y - dest[0].Y) };
         world.TransformPoints(corners);
@@ -166,7 +168,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         _blendScratch ??= new Bitmap(w, h, PixelFormat.Format32bppArgb);
         using (var sgfx = Graphics.FromImage(_blendScratch))
         {
-            sgfx.Clear(GdiColor.Transparent);
+            ClearScratch(sgfx, x0, y0, x1, y1);
             sgfx.InterpolationMode = InterpolationMode.HighQualityBicubic;
             sgfx.PixelOffsetMode = PagePom;
             sgfx.CompositingQuality = CompositingQuality.HighQuality;
@@ -307,7 +309,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
 
             if (gf.needsComposite)
             {
-                CompositeFormLayer(gf, hasInternalBlend);
+                if (!DeferToPageImage()) CompositeFormLayer(gf, hasInternalBlend);
             }
             else
                 RenderContentStream(gf.content, gf.effectiveCtm, gf.bboxClip, gf.state);
@@ -340,7 +342,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
 
     /// <summary>Natural-size target box for a note icon: the icon's own box
     /// anchored at the annotation rectangle's top-left corner.</summary>
-    private (double MinX, double MinY, double MaxX, double MaxY)? TextIconNaturalRect(PdfDictionary annot)
+    private static (double MinX, double MinY, double MaxX, double MaxY)? TextIconNaturalRect(PdfDictionary annot)
     {
         if (annot.Get("Rect") is not PdfArray rect || rect.Count < 4) return null;
         double rx1 = NumFrom(rect[0]), ry1 = NumFrom(rect[1]), rx2 = NumFrom(rect[2]), ry2 = NumFrom(rect[3]);

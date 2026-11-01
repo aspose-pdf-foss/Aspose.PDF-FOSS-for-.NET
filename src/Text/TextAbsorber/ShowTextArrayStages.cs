@@ -47,7 +47,7 @@ public sealed partial class TextAbsorber
                         tjCharXs[ri] = tj.tjRel[ri] * tjPageScale;
                 }
                 _pageRunSpans.Add(new RunSpan(_text.Length, tj.tjText.Length,
-                    xs.tmRotated ? (_pageRotDominant ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx : xs.tmE)
+                    xs.tmRotated ? RotatedRunX(xs)
                               : xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr,
                     tj.tjWidth * tjPageScale,
                     !tj.clipping && IsPureRtlRun(tj.tjText),
@@ -65,7 +65,9 @@ public sealed partial class TextAbsorber
     {
         if (xs.tmRotated && !_pageRotDominant && _pageCellWidth > 0 && !tj.clipping
             && tj.tjRelValid && tj.tjRel.Count == tj.tjText.Length
+#pragma warning disable S2692 // a match at index 0 is deliberately excluded here
             && tj.tjText.IndexOf(' ') > 0)
+#pragma warning restore S2692
         {
             var rsb = new StringBuilder(tj.tjText.Length + 8);
             var ci2 = 0;
@@ -106,7 +108,7 @@ public sealed partial class TextAbsorber
                 var after3 = ui + n3;
                 if (after3 >= tj.tjText.Length) { usb.Append(' ', n3); break; }
                 var gapAdv = tj.tjRel[after3] - tj.tjRel[ui];
-                if (gapAdv > xs.fontSize * xs.horizScale)
+                if (gapAdv > xs.fontSize * xs.horizScale && !KernFollowsWordSpace(tj, tj.tjRel[ui], tj.tjRel[after3]))
                 {
                     var penAfter = xs.tmE + (xs.tx + tj.tjRel[after3] - xs.tlmX) * xs.tmAr;
                     var pad3 = ColumnSpaces(gapAdv, 0, penAfter,
@@ -125,12 +127,25 @@ public sealed partial class TextAbsorber
         }
     }
 
+    /// <summary>Whether the gap between two pen positions was opened by a kern after a word's drawn space.</summary>
+    private static bool KernFollowsWordSpace(ShowTextArrayState tj, double from, double to) =>
+        tj.wordSpaceKerns is { } kerns && kerns.Exists(k => k >= from && k <= to);
+
+    /// <summary>Whether the spaces ending the array's text so far end a word drawn since its last
+    /// word-breaking kern: a space standing alone between two column gaps (a blank cell) ends none.</summary>
+    private static bool DrewWordBefore(System.Text.StringBuilder buf, int wordStart)
+    {
+        var i = buf.Length - 1;
+        while (i >= 0 && buf[i] == ' ') i--;
+        return i >= wordStart;
+    }
+
     /// <summary>One item of the array: a string is decoded, measured and buffered; a number kerns the pen.</summary>
-    private bool ShowTextArrayItem(ExtractState xs, ShowTextArrayState tj, string op, PdfObject item)
+    private bool ShowTextArrayItem(ExtractState xs, ShowTextArrayState tj, PdfObject item)
     {
         if (item is PdfString tjS)
         {
-            ShowTextArrayString(xs, tj, op, tjS);
+            ShowTextArrayString(xs, tj, tjS);
         }
         else
         {
@@ -157,6 +172,7 @@ public sealed partial class TextAbsorber
             : adj < -190 || (tj.tjSynthArmed && adj <= -130)
               || (!double.IsNaN(tj.tjLtrackMedian) && adj - tj.tjLtrackMedian <= -130
                   && (tj.tjLtrackMedian >= 0 || adj <= -250));
+        if (tjKernBreaks && KernLandsOnDrawnInk(xs, tj)) tjKernBreaks = false;
         var kernAfterSpace = tj.tjBuf.Length > 0 && tj.tjBuf[^1] == ' ';
         // Grid-pad only genuine column jumps (≥ ~1 em). A word-space
         // kern (0.2–0.6 em) stays a single space — proportional prose
@@ -167,8 +183,12 @@ public sealed partial class TextAbsorber
         // space, but a GRID column jump still pads to its target
         // column — the drawn space merely counts as one emitted
         // char toward it ("( )-1129.6(NAME)" lands NAME at the
-        // same column as "(*)-1129.6(NAME)").
-        if (tjKernBreaks && (!kernAfterSpace || gridKernPad))
+        // same column as "(*)-1129.6(NAME)"). Not after the space
+        // that ends a word of the same array: "(Put)( )-15000(=)"
+        // reads "Put =", the kern however wide adding nothing.
+        var kernAfterWordSpace = kernAfterSpace && DrewWordBefore(tj.tjBuf, tj.lastBreakAt);
+        if (kernAfterWordSpace) (tj.wordSpaceKerns ??= new List<double>()).Add(kernGapStart);
+        if (tjKernBreaks && (!kernAfterSpace || gridKernPad && !kernAfterWordSpace))
         {
             // Under the Pure grid a large intra-TJ kern is a column
             // gap like any other: pad to the grid column of the pen
@@ -193,6 +213,7 @@ public sealed partial class TextAbsorber
                 if (tj.tjRelValid) tj.tjRel.Add(kernGapStart);
             }
         }
+        if (tjKernBreaks) tj.lastBreakAt = tj.tjBuf.Length;
         if (tj.clipping)
         {
             // The synthesized word space sits at the current pen; emit it
@@ -205,8 +226,8 @@ public sealed partial class TextAbsorber
                       && (tj.tjLtrackMedian >= 0 || adj <= -250)))
             {
                 // Under LimitToPageBounds with no caller rectangle, searchRect
-                // is null while clipping is driven by the page-bounds clipRect;
-                // fall back to it so the in-window test doesn't dereference null.
+                // is null while clipping is driven by the page-bounds clipRect; fall
+                // back to it so the in-window test doesn't dereference null.
                 var win = xs.searchRect ?? xs.clipRect!;
                 var inWindow = tj.clipRot
                     ? xs.tmF + (tj.clipPen - xs.tlmX) * xs.tmBr is var pY
@@ -214,17 +235,17 @@ public sealed partial class TextAbsorber
                     : xs.tmOriginX + (tj.clipPen - xs.tmOriginX) * xs.tmA + xs.localCmTx is var pX
                         && pX >= win.LLX && pX <= win.URX;
                 if (inWindow && (tj.clipBuf!.Length == 0 || tj.clipBuf[^1] != ' '))
-                    tj.clipBuf!.Append(' ');
+                    tj.clipBuf.Append(' ');
             }
             tj.clipPen += advance;
         }
     }
 
     /// <summary>One string of the array: decoded, measured, clipped to the search rectangle and buffered.</summary>
-    private void ShowTextArrayString(ExtractState xs, ShowTextArrayState tj, string op, PdfString tjS)
+    private void ShowTextArrayString(ExtractState xs, ShowTextArrayState tj, PdfString tjS)
     {
         tj.hadString = true;
-        var tjDecoded = NormalizeDecoded(DecodeString(tjS.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine), foldNbsp: xs.searchRect is null);
+        var tjDecoded = NormalizeDecoded(DecodeString(tjS.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader), foldNbsp: xs.searchRect is null);
         tj.tjDbg?.Append('\'').Append(tjDecoded).Append('\'');
         tj.tjBuf.Append(tjDecoded);
         var tjItemW = ((xs.currentMetrics?.MeasureString(tjS.Value, xs.fontSize)
@@ -244,12 +265,12 @@ public sealed partial class TextAbsorber
             }
         }
         tj.tjWidth += tjItemW;
-        tj.tjDecodedLen += tjDecoded.Length;
+        tj.tjInkWidth = Math.Max(tj.tjInkWidth, tj.tjWidth);
         if (tj.clipRot)
             tj.clipPen = AppendClippedRunRot(xs, tj.clipBuf!, tjS.Value, tj.clipPen);
         else if (tj.clipping)
             (tj.clipPen, _) = AppendClippedRun(tj.clipBuf!, tjS.Value, xs.currentToUnicode, xs.currentFontDict,
-                xs.reader, xs.useFontEngine, xs.currentMetrics, xs.fontSize, xs.horizScale,
+                xs.reader, xs.currentMetrics, xs.fontSize, xs.horizScale,
                 xs.clipRect!, xs.tmOriginX, xs.tmA, xs.localCmTx, xs.cmLa, tj.clipPen, xs.charSpacing, xs.wordSpacing, xs.blankClip,
                 dropLeadingSpaces: xs.searchRect is not null && !xs.blankClip
                     && tj.clipBuf!.Length == 0 && (_text.Length == 0 || _text[^1] == '\n'));
@@ -299,7 +320,7 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>Arm the gap-space synthesis: the array's adjustment median decides whether its numbers are letter tracking or word gaps.</summary>
-    private void ArmShowTextArraySynth(ExtractState xs, ShowTextArrayState tj, PdfArray tjArr)
+    private static void ArmShowTextArraySynth(ExtractState xs, ShowTextArrayState tj, PdfArray tjArr)
     {
         tj.tjRelValid = !tj.clipping;
         tj.tjIsType0 = xs.currentFontDict?.GetName("Subtype") == "Type0";
@@ -319,12 +340,11 @@ public sealed partial class TextAbsorber
             foreach (var pre in tjArr)
             {
                 if (pre is not PdfString preS) continue;
-                var preDec = NormalizeDecoded(DecodeString(preS.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine));
+                var preDec = NormalizeDecoded(DecodeString(preS.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader));
                 if (preDec.Length >= 2) { tj.tjSynthArmed = true; tj.tjMultiGlyph = true; break; }
                 var preArm = false;
-                foreach (var preC in preDec)
-                    if (!char.IsUpper(preC) && !char.IsPunctuation(preC))
-                    { preArm = true; break; }
+                if (preDec.Any(preC => !char.IsUpper(preC) && !char.IsPunctuation(preC)))
+                { preArm = true; }
                 if (preArm) { tj.tjSynthArmed = true; break; }
             }
         tj.tjSynthArmed = tj.tjSynthArmed && tj.tjPieceCount >= 2
@@ -341,8 +361,8 @@ public sealed partial class TextAbsorber
         if (!tj.tjMultiGlyph && tj.tjAdjs.Count >= 3)
         {
             var deepList = new List<double>();
-            foreach (var a2 in tj.tjAdjs)
-                if (a2 <= -130) deepList.Add(a2);
+            foreach (var a2 in tj.tjAdjs.Where(a2 => a2 <= -130))
+                deepList.Add(a2);
             if (deepList.Count * 2 >= tj.tjAdjs.Count && deepList.Count > 0)
             {
                 tj.tjPositioningArray = true;
@@ -355,7 +375,7 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>The gap between this array and the run before it: a wide enough pen jump opens a space.</summary>
-    private void OpenShowTextArrayGap(ExtractState xs, ShowTextArrayState tj, string op, PdfArray tjArr)
+    private void OpenShowTextArrayGap(ExtractState xs, ShowTextArrayState tj)
     {
         if (!double.IsNaN(xs.lastRunEndX)
             && _text.Length > 0 && _text[^1] != '\n'
@@ -363,19 +383,20 @@ public sealed partial class TextAbsorber
                 || _prevShowHadTab
                 || (_pageCellWidth > 0 && tj.tjGapPre > _pageCellWidth)))
         {
-            var tjGap = tj.tjUseDev ? tj.tjRunDevX - xs.lastRunEndDevX
-                : tj.tjUsePage ? tj.tjStartPageX - xs.lastRunEndPageX
-                : xs.tx - xs.lastRunEndX;
+            double tjGap;
+            if (tj.tjUseDev) tjGap = tj.tjRunDevX - xs.lastRunEndDevX;
+            else if (tj.tjUsePage) tjGap = tj.tjStartPageX - xs.lastRunEndPageX;
+            else tjGap = xs.tx - xs.lastRunEndX;
             // Effective font size for the gap threshold. Upright pages
             // keep the page-space Tm scale (the calibrated rule); rotated
             // runs use the projected line size — their raw fontSize can be
             // Tm-scaled (fs 327 with tmA 0.027 is 8.85 pt on the page) and
             // an unprojected threshold swallows every real word gap.
-            var tjGapFs = tj.tjUsePage ? xs.fontSize * Math.Abs(xs.tmAr)
-                : _currentLineEffFs > 0 && !double.IsNaN(_currentLineEffFs)
-                ? _currentLineEffFs
-                : xs.tmRotated ? Math.Abs(xs.fontSize * xs.tmN)
-                : xs.fontSize;
+            double tjGapFs;
+            if (tj.tjUsePage) tjGapFs = xs.fontSize * Math.Abs(xs.tmAr);
+            else if (_currentLineEffFs > 0 && !double.IsNaN(_currentLineEffFs)) tjGapFs = _currentLineEffFs;
+            else if (xs.tmRotated) tjGapFs = Math.Abs(xs.fontSize * xs.tmN);
+            else tjGapFs = xs.fontSize;
             // A BACKWARD pen jump bigger than a grid cell means the
             // stream draws this row's columns out of X order: start a
             // new logical line and let the row merge re-order by column.
@@ -422,13 +443,13 @@ public sealed partial class TextAbsorber
     {
         if (_pageCellWidth > 0)
         {
-            // See the Tj-path note: device X for upright text;
-            // minority rotated runs grid at their device X too.
-            tj.tjRunPageX = xs.tmRotated
-                ? (_pageRotDominant
+            // See the Tj-path note: device X for upright text; minority
+            // rotated runs grid at their device X too.
+            if (xs.tmRotated)
+                tj.tjRunPageX = _pageRotDominant
                     ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx
-                    : xs.tmE)
-                : xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr;
+                    : xs.tmE;
+            else tj.tjRunPageX = xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr;
             // Whitespace-only detection from raw bytes (simple fonts:
             // every code 0x20; composite codes stay "visible").
             var tjAllSpaces = false;
@@ -438,12 +459,11 @@ public sealed partial class TextAbsorber
                 foreach (var pre0 in tjArr)
                 {
                     if (pre0 is not PdfString ps0) continue;
-                    foreach (var b0 in ps0.Value)
-                        if (b0 != 0x20) { tjAllSpaces = false; break; }
+                    if (ps0.Value.Any(b0 => b0 != 0x20)) { tjAllSpaces = false; }
                     if (!tjAllSpaces) break;
                 }
             }
-            TrackLineStart(tj.tjRunPageX, tjAllSpaces);
+            TrackLineStart(tj.tjRunPageX);
         }
     }
 }

@@ -20,7 +20,7 @@ public partial class ImageXObject
         ps.decoded = _reader.DecodeStream(_stream);
 
         // JPEG 2000 (JPXDecode): decode the codestream to raw samples.
-        if (IsJpeg2000 && IO.Filters.JpxDecoder.TryDecode(ps.decoded) is (var jp, var jw, var jh, var jc))
+        if (IsJpeg2000 && IO.Filters.JpxDecoder.TryDecode(ps.decoded) is (var jp, var jw, var _, var jc))
         {
             return (int x, int y) =>
             {
@@ -38,7 +38,7 @@ public partial class ImageXObject
         {
             try
             {
-                var (pj, pjw, pjh, pjc) = IO.Filters.JpegDecoder.Decode(ps.decoded);
+                var (pj, pjw, _, pjc) = IO.Filters.JpegDecoder.Decode(ps.decoded);
                 return (int x, int y) =>
                 {
                     int o = (y * pjw + x) * pjc;
@@ -51,6 +51,17 @@ public partial class ImageXObject
 
         (ps.indexedPalette, var paletteSize) = ResolveIndexedPalette();
         if (IndexedSource(ps, paletteSize) is { } indexed) return indexed;
+
+        // Samples the plain getters cannot read (see ExportSamples) are read to 8-bit first.
+        if (!IsOneBitGray && ExportSamples(ps.decoded, ps.w, Height, ps.bpc) is var (samples, channels))
+        {
+            return (int x, int y) =>
+            {
+                var o = ((long)y * ps.w + x) * channels;
+                if (o < 0 || o + channels > samples.Length) return (0, 0, 0);
+                return channels == 3 ? (samples[o], samples[o + 1], samples[o + 2]) : (samples[o], samples[o], samples[o]);
+            };
+        }
 
         if (OneBitSource(ps) is { } oneBit) return oneBit;
 
@@ -117,7 +128,11 @@ public partial class ImageXObject
     /// Export the image as PNG bytes.
     /// Works for all image types (JPEG, Flate, CCITT, etc.).
     /// </summary>
-    public byte[] ToPng()
+    public byte[] ToPng() => ToPng(IO.Filters.DeflateLevel.Fast);
+
+    /// <summary><see cref="ToPng()"/> with the deflate level chosen by the caller: a PNG that
+    /// only carries pixels to a decoder in the same process is stored, not deflated.</summary>
+    internal byte[] ToPng(IO.Filters.DeflateLevel level)
     {
         var decoded = _reader.DecodeStream(_stream);
         var w = Width;
@@ -126,7 +141,7 @@ public partial class ImageXObject
 
         // JPEG 2000 (JPXDecode): decode the codestream to raw samples.
         if (IsJpeg2000 && IO.Filters.JpxDecoder.TryDecode(decoded) is (var jp, var jw, var jh, var jc))
-            return IO.PngEncoder.Encode(jp, jw, jh, jc >= 3 ? 2 : 0, 8);
+            return IO.PngEncoder.Encode(jp, jw, jh, jc >= 3 ? 2 : 0, 8, level);
 
         // JPEG (DCTDecode): DecodeStream leaves the codestream encoded; decode it to
         // RGB/gray samples (JpegDecoder converts CMYK/YCCK to RGB and reports 3
@@ -136,7 +151,15 @@ public partial class ImageXObject
             try
             {
                 var (pj, pjw, pjh, pjc) = IO.Filters.JpegDecoder.Decode(decoded);
-                return IO.PngEncoder.Encode(pj, pjw, pjh, pjc >= 3 ? 2 : 0, 8);
+                var jpegComponents = pjc >= 3 ? 3 : 1;
+                // A soft mask is the picture's transparency whatever its codec: a masked logo
+                // exported without it is the opaque rectangle of its colour.
+                if (MaskAlpha(pjw, pjh) is { } jpegMask)
+                {
+                    var (withAlpha, alphaColorType) = InterleaveAlpha(pj, jpegMask, pjw, pjh, jpegComponents);
+                    return IO.PngEncoder.Encode(withAlpha, pjw, pjh, alphaColorType, 8, level);
+                }
+                return IO.PngEncoder.Encode(pj, pjw, pjh, jpegComponents == 3 ? 2 : 0, 8, level);
             }
             catch { /* fall through to the raw-sample path below */ }
         }
@@ -157,12 +180,26 @@ public partial class ImageXObject
                     rgb[dst + 2] = indexedPalette[src + 2];
                 }
             // (its soft mask is its alpha, as an RGB image's is below: what it masks out shows the page under it)
-            if (HasSoftMask && TryBuildSoftMaskAlpha(w, h) is { } mask)
+            if (MaskAlpha(w, h) is { } mask)
             {
                 var (withAlpha, alphaColorType) = InterleaveAlpha(rgb, mask, w, h, 3);
-                return IO.PngEncoder.Encode(withAlpha, w, h, alphaColorType, 8);
+                return IO.PngEncoder.Encode(withAlpha, w, h, alphaColorType, 8, level);
             }
-            return IO.PngEncoder.Encode(rgb, w, h, colorType: 2, bitDepth: 8);
+            return IO.PngEncoder.Encode(rgb, w, h, colorType: 2, bitDepth: 8, level: level);
+        }
+
+        // Samples the plain copies below cannot take - sub-byte or 16-bit components, a /Decode
+        // remap, an ICC CMYK, spot or Lab space - are read to 8-bit grey or RGB first: passed on
+        // as they are, a 4-bit RGB image became a PNG of filter bytes only and a spot image its
+        // raw tint plate.
+        if (!IsOneBitGray && ExportSamples(decoded, w, h, bpc) is var (samples, channels))
+        {
+            if (MaskAlpha(w, h) is { } exportAlpha)
+            {
+                var (withAlpha, alphaColorType) = InterleaveAlpha(samples, exportAlpha, w, h, channels);
+                return IO.PngEncoder.Encode(withAlpha, w, h, alphaColorType, 8, level);
+            }
+            return IO.PngEncoder.Encode(samples, w, h, channels == 3 ? 2 : 0, 8, level);
         }
 
         if (bpc == 1)
@@ -172,7 +209,7 @@ public partial class ImageXObject
             var decodeArr = _reader.Resolve(_stream.Dict.Get("Decode"));
             if (decodeArr is PdfArray da && da.Count >= 2)
             {
-                var first = da[0] is PdfInteger i ? i.Value : (da[0] is PdfReal r ? (long)r.Value : 0);
+                var first = da[0] switch { PdfInteger i => i.Value, PdfReal r => (long)r.Value, _ => 0 };
                 blackIs1 = first == 1;
             }
             // Also check BlackIs1 in DecodeParms
@@ -182,7 +219,7 @@ public partial class ImageXObject
                 var bi1 = parms.Get("BlackIs1");
                 if (bi1 is PdfBoolean b) blackIs1 = b.Value;
             }
-            return IO.PngEncoder.Encode1Bit(decoded, w, h, blackIs1);
+            return IO.PngEncoder.Encode1Bit(decoded, w, h, blackIs1, level);
         }
 
         var components = ComponentCount;
@@ -208,14 +245,14 @@ public partial class ImageXObject
         var bd = bpc > 8 ? 8 : bpc;
         byte[]? alpha = null;
         if (bd == 8 && colorType is 0 or 2 &&
-            ((HasSoftMask && (alpha = TryBuildSoftMaskAlpha(w, h)) is not null)
+            ((alpha = MaskAlpha(w, h)) is not null
              || (alpha = TryBuildColorKeyAlpha(decoded, w, h, colorType == 2 ? 3 : 1)) is not null))
         {
             var (withAlpha, alphaColorType) = InterleaveAlpha(decoded, alpha, w, h, colorType == 2 ? 3 : 1);
-            return IO.PngEncoder.Encode(withAlpha, w, h, alphaColorType, 8);
+            return IO.PngEncoder.Encode(withAlpha, w, h, alphaColorType, 8, level);
         }
 
-        return IO.PngEncoder.Encode(decoded, w, h, colorType, bd);
+        return IO.PngEncoder.Encode(decoded, w, h, colorType, bd, level);
     }
 
     /// <summary>Build a per-pixel alpha plane from a colour-key /Mask array
@@ -225,7 +262,7 @@ public partial class ImageXObject
     /// overlays drawn on a white ground.</summary>
     private byte[]? TryBuildColorKeyAlpha(byte[] decoded, int w, int h, int components)
     {
-        byte[] alpha = System.Array.Empty<byte>();
+        byte[] alpha;
         if (_reader.Resolve(_stream.Dict.Get("Mask")) is not PdfArray maskArr
             || maskArr.Count != components * 2)
             return null;
@@ -255,7 +292,7 @@ public partial class ImageXObject
     /// resampled to this image's dimensions (0=transparent, 255=opaque).</summary>
     private byte[]? TryBuildSoftMaskAlpha(int w, int h)
     {
-        byte[] alpha = System.Array.Empty<byte>();
+        byte[] alpha;
         (var raw, var mw, var mh) = Devices.SoftwarePageRenderer.ResolveSMaskAlpha(_stream.Dict.Get("SMask"), _reader);
         if (raw is null || mw <= 0 || mh <= 0) return null;
 
@@ -281,24 +318,26 @@ public partial class ImageXObject
         return alpha;
     }
 
+    // A 1-bit grey image: the bilevel paths read it, honouring /Decode and /BlackIs1.
+    private bool IsOneBitGray => BitsPerComponent == 1 && ComponentCount == 1;
+
     private static byte[] CmykToRgb(byte[] cmyk, int width, int height)
     {
+        // The renderers' CMYK conversion, so a saved image keeps the colours its page shows
+        // rather than the plain (1-C)(1-K), which cast greys and skin tones.
         var rgb = new byte[width * height * 3];
         var pixelCount = width * height;
+        var colours = new Devices.CmykToRgbLut.Memo();
         for (var i = 0; i < pixelCount; i++)
         {
             var srcIdx = i * 4;
             if (srcIdx + 3 >= cmyk.Length) break;
 
-            var c = cmyk[srcIdx] / 255.0;
-            var m = cmyk[srcIdx + 1] / 255.0;
-            var y = cmyk[srcIdx + 2] / 255.0;
-            var k = cmyk[srcIdx + 3] / 255.0;
-
+            var (r, g, b) = colours.Convert(cmyk[srcIdx], cmyk[srcIdx + 1], cmyk[srcIdx + 2], cmyk[srcIdx + 3]);
             var dstIdx = i * 3;
-            rgb[dstIdx] = (byte)(255 * (1 - c) * (1 - k));
-            rgb[dstIdx + 1] = (byte)(255 * (1 - m) * (1 - k));
-            rgb[dstIdx + 2] = (byte)(255 * (1 - y) * (1 - k));
+            rgb[dstIdx] = r;
+            rgb[dstIdx + 1] = g;
+            rgb[dstIdx + 2] = b;
         }
         return rgb;
     }
@@ -354,14 +393,9 @@ public partial class ImageXObject
             }
             else if (baseComps == 4)
             {
-                // CMYK → RGB
-                var c = lookup[src] / 255.0;
-                var m = lookup[src + 1] / 255.0;
-                var y = lookup[src + 2] / 255.0;
-                var k = src + 3 < lookup.Length ? lookup[src + 3] / 255.0 : 0;
-                r = (byte)(255 * (1 - c) * (1 - k));
-                g = (byte)(255 * (1 - m) * (1 - k));
-                b = (byte)(255 * (1 - y) * (1 - k));
+                // CMYK → RGB, as the renderers convert it
+                (r, g, b) = Devices.CmykToRgbLut.ConvertBytes(lookup[src], lookup[src + 1], lookup[src + 2],
+                    src + 3 < lookup.Length ? lookup[src + 3] : (byte)0);
             }
             else // 3
             {

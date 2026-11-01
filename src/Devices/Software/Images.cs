@@ -42,9 +42,16 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         var cs = csInfo.BaseName;
 
         byte[]? rgb = null; int rw = imgW, rh = imgH;
+        // 8-bit samples of a device space, remapped through the image's /Decode.
+        byte[] Direct(int comps) => IO.Filters.SampleDecode.Remap(decoded, imgW * imgH * comps, comps, dict.Get("Decode"), ctx.Reader) ?? decoded;
         if (decoded.Length > 2 && decoded[0] == 0xFF && decoded[1] == 0xD8)
         {
-            try { var j = IO.Filters.JpegDecoder.Decode(decoded, CmykDecodeInverts(dict)); rw = j.width; rh = j.height; rgb = j.components == 1 ? GrayToRgbBuf(j.pixels, rw, rh) : j.pixels; }
+            try
+            {
+                var j = IO.Filters.JpegDecoder.Decode(decoded, CmykDecodeInverts(dict)); rw = j.width; rh = j.height;
+                var pixels = DecodedJpegSamples(j.pixels, rw * rh, j.components, cs, dict.Get("Decode"), ctx.Reader);
+                rgb = j.components == 1 ? GrayToRgbBuf(pixels, rw, rh) : pixels;
+            }
             catch { return null; }
         }
         else if ((decoded.Length > 12 && decoded[0] == 0 && decoded[1] == 0 && decoded[2] == 0 && decoded[3] == 0x0C && decoded[4] == 0x6A && decoded[5] == 0x50)
@@ -54,17 +61,17 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
             {
                 rw = jw; rh = jh;
                 // Single-component JPX under /Indexed carries palette indices.
-                rgb = jc == 1 && csInfo.Palette is not null
-                    ? DecodeIndexedToRgb(jp, jw, jh, 8, csInfo)
-                    : jc >= 3 ? jp : GrayToRgbBuf(jp, jw, jh);
+                if (jc == 1 && csInfo.Palette is not null) rgb = DecodeIndexedToRgb(jp, jw, jh, 8, csInfo);
+                else if (jc >= 3) rgb = jp;
+                else rgb = GrayToRgbBuf(jp, jw, jh);
                 if (rgb is null) return null;
             }
             else return null;
         }
         else if (csInfo.Palette is not null) rgb = IndexedToRgbBuf(decoded, imgW, imgH, bpc, csInfo);
-        else if (cs == "DeviceRGB" && bpc == 8 && decoded.Length >= imgW * imgH * 3) rgb = decoded;
-        else if (cs == "DeviceCMYK" && bpc == 8 && decoded.Length >= imgW * imgH * 4) rgb = CmykToRgbBuf(decoded, imgW, imgH);
-        else if (cs == "DeviceGray" && bpc == 8 && decoded.Length >= imgW * imgH) rgb = GrayToRgbBuf(decoded, imgW, imgH);
+        else if (cs == "DeviceRGB" && bpc == 8 && decoded.Length >= imgW * imgH * 3) rgb = Direct(3);
+        else if (cs == "DeviceCMYK" && bpc == 8 && decoded.Length >= imgW * imgH * 4) rgb = CmykToRgbBuf(Direct(4), imgW, imgH);
+        else if (cs == "DeviceGray" && bpc == 8 && decoded.Length >= imgW * imgH) rgb = GrayToRgbBuf(Direct(1), imgW, imgH);
         else if (cs == "DeviceGray" && (bpc == 2 || bpc == 4)) rgb = GrayToRgbBuf(UnpackGraySamples(decoded, imgW, imgH, bpc, GrayDecodeInverts(dict)), imgW, imgH);
         else if (cs == "DeviceRGB" && bpc is 1 or 2 or 4) rgb = UnpackComponentSamples(decoded, imgW, imgH, bpc, 3);
         else if (csInfo.TintTransform is not null && bpc is 1 or 2 or 4 or 8) rgb = SeparationSamplesToRgb(decoded, imgW, imgH, bpc, BuildSeparationLut(csInfo, GrayDecodeInverts(dict)));
@@ -93,11 +100,12 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
     private static byte[] CmykToRgbBuf(byte[] d, int w, int h)
     {
         var o = new byte[w * h * 3];
+        var colours = new CmykToRgbLut.Memo();
         for (int i = 0, j = 0, k = 0; i < w * h; i++, j += 4, k += 3)
         {
             // Same ICC-style conversion as CMYK fills (CmykToRgbLut), so an image and
             // the flat tint beside it agree.
-            var (r, gg, b) = CmykToRgbLut.Convert(d[j] / 255.0, d[j + 1] / 255.0, d[j + 2] / 255.0, d[j + 3] / 255.0);
+            var (r, gg, b) = colours.Convert(d[j], d[j + 1], d[j + 2], d[j + 3]);
             o[k] = r; o[k + 1] = gg; o[k + 2] = b;
         }
         return o;
@@ -111,7 +119,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
             for (int x = 0; x < w; x++)
             {
                 var bi = y * rb + (x >> 3);
-                byte v = (byte)(bi < d.Length ? ((((d[(int)bi] >> (7 - (x & 7))) & 1) ^ inv) == 1 ? 255 : 0) : 255);
+                byte v = (byte)(bi >= d.Length || (((d[(int)bi] >> (7 - (x & 7))) & 1) ^ inv) == 1 ? 255 : 0);
                 var k = (y * w + x) * 3; o[k] = o[k + 1] = o[k + 2] = v;
             }
         return o;
@@ -129,7 +137,8 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
                 int idx;
                 if (bpc == 8) { var bi = rb + x; idx = bi < data.Length ? data[(int)bi] : 0; }
                 else { var bit = x * bpc; var bi = rb + bit / 8; idx = bi < data.Length ? (data[(int)bi] >> (8 - bpc - (bit & 7))) & ((1 << bpc) - 1) : 0; }
-                if (idx > maxIdx) idx = maxIdx; if (idx < 0) idx = 0;
+                if (idx > maxIdx) idx = maxIdx;
+                if (idx < 0) idx = 0;
                 var po = idx * pc; var k = (y * w + x) * 3;
                 if (pc >= 3 && po + 2 < pal.Length) { o[k] = pal[po]; o[k + 1] = pal[po + 1]; o[k + 2] = pal[po + 2]; }
                 else if (pc == 1 && po < pal.Length) { o[k] = o[k + 1] = o[k + 2] = pal[po]; }
@@ -190,7 +199,8 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
                         double v = (-rx * ctm[1] + ry * ctm[0]) * inv;
                         if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
                         int sx = (int)(u * srcW); if (sx >= srcW) sx = srcW - 1;
-                        int sy = (int)((1.0 - v) * srcH); if (sy >= srcH) sy = srcH - 1; if (sy < 0) sy = 0;
+                        int sy = (int)((1.0 - v) * srcH); if (sy >= srcH) sy = srcH - 1;
+                        if (sy < 0) sy = 0;
                         int o = (sy * srcW + sx) * 4;
                         ar += rgba[o]; ag += rgba[o + 1]; ab += rgba[o + 2]; aa += rgba[o + 3];
                         hit++;
@@ -227,8 +237,8 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         // of 0, takes its "degenerate, assume 1:1" fallback, and paints the image at
         // imgW x imgH POINTS. On a /Rotate 90 page that is ~4x oversized and unrotated,
         // and a report page built from a few hundred inline images turns into a wall of
-        // black. `Do` XObjects have had the affine path since the /Rotate 270 CCITT case;
-        // inline images take exactly the same route.
+        // black. `Do` XObjects have had the affine path since the /Rotate 270 CCITT case; inline
+        // images take exactly the same route.
         if (Math.Abs(ctm[1]) > 1e-4 || Math.Abs(ctm[2]) > 1e-4)
         {
             if (isMask && state.FillPatternName is not null)
@@ -255,15 +265,12 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         if (destH < 0.01) { destH = imgH; topPdfY = ctm[5] + destH; }
         var flipY = ctm[3] < 0;
         var flipX = ctm[0] < 0;
-        var px = (int)Math.Round((destX - ctx.MediaBox.LLX) * ctx.Scale);
-        var py = ctx.PixelH - (int)Math.Round((topPdfY - ctx.MediaBox.LLY) * ctx.Scale);
         // A rectangle that is non-empty in user space must cover at least one device
         // pixel. A raster logo exploded into ~2700 one-unit-tall inline scanline strips
         // (0.12 pt each under the page's 0.12 scale = 0.25 px at 150 dpi) rounded EVERY
         // strip to a height of zero and the whole logo silently vanished; GDI+ paints
         // each sliver's partial coverage instead. Clamp so a thin sliver still lands.
-        var pw = Math.Max(1, (int)Math.Round(destW * ctx.Scale));
-        var ph = Math.Max(1, (int)Math.Round(destH * ctx.Scale));
+        var (px, py, pw, ph) = DeviceImageRect(ctx, destX, topPdfY, destW, destH);
 
         if (isMask)
         {

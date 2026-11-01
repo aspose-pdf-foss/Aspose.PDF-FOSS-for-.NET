@@ -73,7 +73,7 @@ internal static partial class HtmlToPdfConverter
             + "<" + Compat.ToHexString(hex) + "> Tj ET"));
     }
 
-    private static void Centre(ClosingDisclosureState cd, int sheet, double x0, double x1, double baseline, double size,
+    private static void Centre(ClosingDisclosureState cd, double x0, double x1, double baseline, double size,
         byte[] ttf, string name, string s, Color c)
         => Run(cd, cd.sheet, (x0 + x1 - Measure(cd, ttf, name, s, size)) / 2, baseline, size,
             ttf, name, s, c);
@@ -88,9 +88,10 @@ internal static partial class HtmlToPdfConverter
         {
             var (cls, cells) = rows[ri];
             var head = cls.Contains("sec-header", StringComparison.OrdinalIgnoreCase);
-            var h = ri == 0 ? CdHeadRowPt
-                : ri == 1 ? CdSubRowPt
-                : head ? CdSectionRowPt : CdBlankRowPt;
+            double h = CdBlankRowPt;
+            if (ri == 0) h = CdHeadRowPt;
+            else if (ri == 1) h = CdSubRowPt;
+            else if (head) h = CdSectionRowPt;
             if (head) Fill(cd, 0, cd.colX[0], ry, cd.colX[6] - cd.colX[0], h, CdBand);
 
             var ci = 0;
@@ -101,14 +102,15 @@ internal static partial class HtmlToPdfConverter
                 if (text.Length > 0)
                 {
                     var bold = head;
-                    var drop = ci == 0 ? CdHeadTextDropPt
-                        : ri == 0 ? CdHeadCentreDropPt : CdSubCentreDropPt;
+                    double drop = CdSubCentreDropPt;
+                    if (ci == 0) drop = CdHeadTextDropPt;
+                    else if (ri == 0) drop = CdHeadCentreDropPt;
                     if (ci == 0)
                         Run(cd, 0, x0 + CdCellPadLeftPt, ry + drop, CdGridPt,
                             bold ? cd.arialB : cd.arial, bold ? "ArialBold" : "Arial",
                             text, CdBlack);
                     else
-                        Centre(cd, 0, x0, x1, ry + drop, CdGridPt,
+                        Centre(cd, x0, x1, ry + drop, CdGridPt,
                             bold ? cd.arialB : cd.arial, bold ? "ArialBold" : "Arial",
                             text, CdBlack);
                 }
@@ -141,8 +143,9 @@ internal static partial class HtmlToPdfConverter
         {
             var (text, lettered, amount) = heads[i];
             if (lettered && i > 0) sy += CdSumSectionGapPt;
-            var headH = !lettered ? CdSumPlainHeadPt
-                : i == 0 ? CdSumFirstHeadPt : CdSumLetterHeadPt;
+            double headH = CdSumLetterHeadPt;
+            if (!lettered) headH = CdSumPlainHeadPt;
+            else if (i == 0) headH = CdSumFirstHeadPt;
             if (lettered)
             {
                 if (amount)

@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextAbsorber
 {
     /// <summary>The stages of the OCR overlay rebuild: one recognised region, then one output line.</summary>
-    private void EmitOverlayLine(OcrOverlayState oo, int li)
+    private static void EmitOverlayLine(OcrOverlayState oo, int li)
     {
         var ys = new List<double>(oo.lines[li].Count);
         foreach (var w in oo.lines[li]) ys.Add(w.y);
@@ -18,7 +18,7 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>The stages of the OCR overlay rebuild: one recognised region, then one output line.</summary>
-    private void CollectOverlayRegion(OcrOverlayState oo, (string text, double x, double y, double fs, double width) r)
+    private static void CollectOverlayRegion(OcrOverlayState oo, (string text, double x, double y, double fs, double width) r)
     {
         if (oo.lines.Count > 0)
         {

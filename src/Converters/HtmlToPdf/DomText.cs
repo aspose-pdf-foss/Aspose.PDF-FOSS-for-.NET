@@ -14,11 +14,10 @@ internal static partial class HtmlToPdfConverter
             Text.GlyphOutlineParser? p2 = null; double upm2 = 1000;
             try
             {
-                var styled = faceName.EndsWith(" Bold", StringComparison.OrdinalIgnoreCase)
-                    ? (faceName[..^5], Text.FontStyles.Bold)
-                    : faceName.EndsWith(" Italic", StringComparison.OrdinalIgnoreCase)
-                    ? (faceName[..^7], Text.FontStyles.Italic)
-                    : ((string?)null, Text.FontStyles.Regular);
+                (string?, Text.FontStyles) styled;
+                if (faceName.EndsWith(" Bold", StringComparison.OrdinalIgnoreCase)) styled = (faceName[..^5], Text.FontStyles.Bold);
+                else if (faceName.EndsWith(" Italic", StringComparison.OrdinalIgnoreCase)) styled = (faceName[..^7], Text.FontStyles.Italic);
+                else styled = ((string?)null, Text.FontStyles.Regular);
                 if (styled.Item1 is { Length: > 0 } fam
                     && Text.FontRepository.FindFont(fam, styled.Item2, ignoreCase: true)
                         ?.SourceFontData?.TtfData is { } ttf2)
@@ -97,7 +96,9 @@ internal static partial class HtmlToPdfConverter
         bool wordFirst = false,
         // A hyphen is a break opportunity too, the hyphen staying on its line (probed on the
         // UA grid: `(866) 331-3925` in a 65.14 pt column draws `(866) 331-` over `3925`).
-        bool dashBreaks = false)
+        bool dashBreaks = false,
+        // The first line's own width where a text-indent gives it one (0 = the block's width).
+        double firstLineWidth = 0)
     {
         // Hard breaks (a cell's <br>) split first; each segment wraps on its own.
         if (text.Contains('\u0001'))
@@ -108,11 +109,12 @@ internal static partial class HtmlToPdfConverter
             return all.Count == 0 ? [""] : all.ToArray();
         }
         if (string.IsNullOrEmpty(text)) return [""];
-        if (MeasureFaceText(face, text, sizePt) <= maxWidth) return [text];
+        var firstCap = firstLineWidth > 0 ? firstLineWidth : maxWidth;
+        if (MeasureFaceText(face, text, sizePt) <= firstCap) return [text];
         // An all-whitespace run (an &nbsp; spacer chain) is ONE line box —
         // U+00A0 offers no break opportunity and blank ink never wraps.
         var allWs = true;
-        foreach (var ch in text) if (ch is not (' ' or '\u00A0')) { allWs = false; break; }
+        if (text.Any(ch => ch is not (' ' or '\u00A0'))) { allWs = false; }
         if (allWs) return [text];
         // Spaceless CJK runs and over-wide words break per character: pack
         // greedily to the width (the expected render char-splits long words
@@ -151,7 +153,7 @@ internal static partial class HtmlToPdfConverter
             // words continue on it.
             if (wordFirst && w > maxWidth)
             {
-                if (line.Length > 0) { result.Add(line.ToString()); line.Clear(); lineW = 0; }
+                if (line.Length > 0) { result.Add(line.ToString()); line.Clear(); }
                 var segs = MeasuredWordWrap(word, maxWidth, face, sizePt);
                 for (var si = 0; si < segs.Length - 1; si++) result.Add(segs[si]);
                 line.Append(segs[^1]);
@@ -159,7 +161,7 @@ internal static partial class HtmlToPdfConverter
                 continue;
             }
             var gap = line.Length > 0 && spaced ? spaceW : 0;
-            if (line.Length > 0 && lineW + gap + w > maxWidth)
+            if (line.Length > 0 && lineW + gap + w > (result.Count == 0 ? firstCap : maxWidth))
             {
                 result.Add(line.ToString());
                 line.Clear(); lineW = 0; gap = 0;
@@ -174,10 +176,11 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The metric flow's wrap of a block carrying emphasis runs: every word measured in
     /// the face its run draws it in (measured: a bold fund name inside a serif sentence ends its
     /// line where its BOLD advance does, `are as follows:` wrapping whole under it).</summary>
-    private static string[] MeasuredWordWrapRuns(Block block, double maxWidth, string face, double sizePt)
+    private static string[] MeasuredWordWrapRuns(Block block, double maxWidth, string face, double sizePt, double firstLineWidth = 0)
     {
         var text = block.Text;
-        if (text.Contains('\u0001') || !text.Contains(' ')) return MeasuredWordWrap(text, maxWidth, face, sizePt);
+        if (text.Contains('\u0001') || !text.Contains(' ')) return MeasuredWordWrap(text, maxWidth, face, sizePt, firstLineWidth: firstLineWidth);
+        var firstCap = firstLineWidth > 0 ? firstLineWidth : maxWidth;
         var result = new List<string>();
         var line = new StringBuilder();
         double lineW = 0;
@@ -186,7 +189,7 @@ internal static partial class HtmlToPdfConverter
         {
             var w = RunsMeasuredWidth(block, pos, word, face, sizePt);
             var gap = line.Length > 0 ? RunsMeasuredWidth(block, pos - 1, " ", face, sizePt) : 0;
-            if (line.Length > 0 && lineW + gap + w > maxWidth)
+            if (line.Length > 0 && lineW + gap + w > (result.Count == 0 ? firstCap : maxWidth))
             {
                 result.Add(line.ToString());
                 line.Clear(); lineW = 0; gap = 0;
@@ -233,6 +236,16 @@ internal static partial class HtmlToPdfConverter
     {
         foreach (var word in words)
         {
+            if (HasIdeograph(word))
+            {
+                var firstPiece = true;
+                foreach (var piece in IdeographSegments(word))
+                {
+                    yield return (piece, firstPiece);
+                    firstPiece = false;
+                }
+                continue;
+            }
             if (!dashBreaks || word.IndexOfAny(DashBreakChars) < 0 || word.Length < 2) { yield return (word, true); continue; }
             var first = true;
             foreach (var piece in DashSegments(word))
@@ -241,6 +254,36 @@ internal static partial class HtmlToPdfConverter
                 first = false;
             }
         }
+    }
+
+    // A line may not start with a closing mark or a small kana, nor end on an opening mark
+    // (the CJK line-start and line-end rules a browser's line breaker applies).
+    private const string CjkLineStartForbidden = "、。，．：；？！）］｝」』】〕〉》〗〙〛’”ー々ゝゞぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ・‥…，．：；？！）］｝｣";
+    private const string CjkLineEndForbidden = "（［｛「『【〔〈《〖〘〚‘“（［｛｢";
+
+    private static bool HasIdeograph(string word)
+    {
+        foreach (var ch in word) if (StlIdeograph(ch)) return true;
+        return false;
+    }
+
+    /// <summary>The unbreakable pieces of a space-free word that holds CJK text: a line may break
+    /// before or after every ideograph, kana or fullwidth form, as CJK text breaks between any
+    /// two of its characters, except before a closing mark and after an opening one.</summary>
+    private static IEnumerable<string> IdeographSegments(string word)
+    {
+        var start = 0;
+        for (var i = 1; i < word.Length; i++)
+        {
+            var prev = word[i - 1];
+            var cur = word[i];
+            if (!StlIdeograph(prev) && !StlIdeograph(cur)) continue;
+            if (CjkLineStartForbidden.IndexOf(cur) >= 0 || NoBreakBeforeChars.IndexOf(cur) >= 0
+                || CjkLineEndForbidden.IndexOf(prev) >= 0) continue;
+            yield return word[start..i];
+            start = i;
+        }
+        yield return word[start..];
     }
 
     /// <summary>Cut every table nested INSIDE the top-level table out of
@@ -262,7 +305,7 @@ internal static partial class HtmlToPdfConverter
         var hostClasses = new List<string[]?>();
         var sb = new StringBuilder(tableHtml.Length);
         var pos = 0; var depth = 0;
-        foreach (Match t in Regex.Matches(tableHtml, @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match t in SafeRegex.Matches(tableHtml, @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase))
         {
             var closing = t.Groups[1].Value.Length > 0;
             if (!closing)
@@ -297,20 +340,19 @@ internal static partial class HtmlToPdfConverter
         List<string>? found = null;
         var depth = 0;
         var cellDepth = 0;
-        foreach (Match m in Regex.Matches(html[..index], @"<(/?)(div|td|th)\b([^>]*)>", RegexOptions.IgnoreCase | RegexOptions.RightToLeft))
+        foreach (var groups in SafeRegex.Matches(html[..index], @"<(/?)(div|td|th)\b([^>]*)>", RegexOptions.IgnoreCase | RegexOptions.RightToLeft).Select(m => m.Groups))
         {
-            var tag = m.Groups[2].Value.ToLowerInvariant();
-            var closing = m.Groups[1].Value.Length > 0;
+            var tag = groups[2].Value.ToLowerInvariant();
+            var closing = groups[1].Value.Length > 0;
             // (a sibling grid's cells before the table are closed pairs; the first UNPAIRED cell
             //  opening is the host cell - the scan ends there)
-            if (tag != "div") { if (closing) cellDepth++; else if (cellDepth > 0) cellDepth--; else break; continue; }
+            if (tag != "div") { if (closing) cellDepth++; else if (cellDepth > 0) cellDepth--; else { break; } continue; }
             if (cellDepth > 0) continue;
             if (closing) { depth++; continue; }
             if (depth > 0) { depth--; continue; }
-            var cm = Regex.Match(m.Groups[3].Value, @"\bclass\s*=\s*(?:""([^""]*)""|'([^']*)'|([\w-]+))", RegexOptions.IgnoreCase);
+            var cm = SafeRegex.Match(groups[3].Value, @"\bclass\s*=\s*(?:""([^""]*)""|'([^']*)'|([\w-]+))", RegexOptions.IgnoreCase);
             if (!cm.Success) continue;
-            var names = (cm.Groups[1].Success ? cm.Groups[1].Value : cm.Groups[2].Success ? cm.Groups[2].Value : cm.Groups[3].Value)
-                .Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var names = AlternativeValue(cm).Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (names.Length == 0) continue;
             found ??= new List<string>();
             found.InsertRange(0, names);
@@ -326,14 +368,13 @@ internal static partial class HtmlToPdfConverter
     /// per character, so each ideograph is its own text fragment (a plain latin
     /// line stays one run).</summary>
     private static void EmitCellLineRuns(Page page, string fontRes, double fontSize,
-        double x, double y, string text, string measureFace, double shear = 0)
+        double x, double y, string text, string measureFace, double shear = 0, bool rtlParagraph = false)
     {
         var hasCjk = false;
-        if (Environment.GetEnvironmentVariable("ASPOSE_H4_NOCJKSPLIT") is null)
-        foreach (var ch in text) if (ch >= '⺀') { hasCjk = true; break; }
+        if (Environment.GetEnvironmentVariable("ASPOSE_H4_NOCJKSPLIT") is null && text.Any(ch => ch >= '⺀')) { hasCjk = true; }
         if (!hasCjk)
         {
-            EmitPositionedRun(page, fontRes, fontSize, x, y, text, shear);
+            EmitPositionedRun(page, fontRes, fontSize, x, y, text, shear, rtlParagraph);
             return;
         }
         var runX = x;
@@ -373,26 +414,26 @@ internal static partial class HtmlToPdfConverter
     {
         (var inner, var subs) = ExtractNestedTables(html);
         var p = 0.75;
-        var cpm = Regex.Match(inner, @"<table\b[^>]*\bcellpadding\s*=\s*[""']?(\d+(?:\.\d+)?)",
+        var cpm = SafeRegex.Match(inner, @"<table\b[^>]*\bcellpadding\s*=\s*[""']?(\d+(?:\.\d+)?)",
             RegexOptions.IgnoreCase);
         if (cpm.Success) p = double.Parse(cpm.Groups[1].Value,
             System.Globalization.CultureInfo.InvariantCulture) * 0.75;
         var h = 2 * p;
-        foreach (Match rm in Regex.Matches(inner,
+        foreach (Match rm in SafeRegex.Matches(inner,
             @"<tr\b[^>]*>([\s\S]*?)(?=<tr\b|</table)", RegexOptions.IgnoreCase))
         {
             double rowH = 0;
-            foreach (Match cm in Regex.Matches(rm.Groups[1].Value,
-                @"<t[dh]\b([^>]*)>([\s\S]*?)</t[dh]>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(rm.Groups[1].Value,
+                @"<t[dh]\b([^>]*)>([\s\S]*?)</t[dh]>", RegexOptions.IgnoreCase).Select(cm => cm.Groups))
             {
-                var wAttr = Regex.Match(cm.Groups[1].Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)");
+                var wAttr = SafeRegex.Match(groups[1].Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)");
                 var cw = wAttr.Success
                     ? double.Parse(wAttr.Groups[1].Value,
                         System.Globalization.CultureInfo.InvariantCulture) * 0.75
                     : fallbackW;
-                var brText = Regex.Replace(cm.Groups[2].Value, @"<br\s*/?\s*>",
+                var brText = SafeRegex.Replace(groups[2].Value, @"<br\s*/?\s*>",
                     "\u0001", RegexOptions.IgnoreCase);
-                var txt = CollapseWs(DecodeEntities(Regex.Replace(brText, "<[^>]+>", " "))).Trim();
+                var txt = CollapseWs(DecodeEntities(SafeRegex.Replace(brText, "<[^>]+>", " "))).Trim();
                 if (txt.Length == 0) continue;
                 rowH = Math.Max(rowH,
                     MeasuredWordWrap(txt, cw, face, fontSize).Length * rowPitch);
@@ -406,15 +447,15 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>Whether the wrapper's own cell (the first td under the table tag) is centred.</summary>
     private static bool WrapperCellCentred(string tableHtml)
-        => Regex.Match(tableHtml, @"<table\b[^>]*>[\s\S]*?<td\b([^>]*)>", RegexOptions.IgnoreCase) is { Success: true } wTd
-           && Regex.IsMatch(wTd.Groups[1].Value, @"\balign\s*=\s*[""']?center", RegexOptions.IgnoreCase);
+        => SafeRegex.Match(tableHtml, @"<table\b[^>]*>[\s\S]*?<td\b([^>]*)>", RegexOptions.IgnoreCase) is { Success: true } wTd
+           && SafeRegex.IsMatch(wTd.Groups[1].Value, @"\balign\s*=\s*[""']?center", RegexOptions.IgnoreCase);
 
     /// <summary>A centred wrapper cell centres a child grid narrower than its box: the
     /// child's left inset (the invoice's 958px grids sit 3 pt inside the 966px body box).</summary>
     private static double WrapperChildInset(string childHtml, bool centred, double avail)
     {
         if (!centred) return 0;
-        var childW = DeclaredTableWidthPt(Regex.Match(childHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value);
+        var childW = DeclaredTableWidthPt(SafeRegex.Match(childHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value);
         return childW > 0 && childW < avail ? (avail - childW) / 2 : 0;
     }
 
@@ -425,10 +466,10 @@ internal static partial class HtmlToPdfConverter
     {
         var depth = 0;
         var cells = 0;
-        foreach (Match t in Regex.Matches(body, @"<(/?)(table|tr|td)\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(body, @"<(/?)(table|tr|td)\b[^>]*>", RegexOptions.IgnoreCase).Select(t => t.Groups))
         {
-            var closing = t.Groups[1].Value.Length > 0;
-            var tag = t.Groups[2].Value.ToLowerInvariant();
+            var closing = groups[1].Value.Length > 0;
+            var tag = groups[2].Value.ToLowerInvariant();
             if (tag == "table") { depth += closing ? -1 : 1; continue; }
             if (depth > 0) continue;
             if (tag == "td" && !closing && ++cells > 1) return false;
@@ -441,16 +482,15 @@ internal static partial class HtmlToPdfConverter
     {
         string? wrapperAttrs = default;
         List<(string Html, bool NewCell)>? children = default;
-        wrapperAttrs = "";
         children = new List<(string, bool)>();
-        var open = Regex.Match(tableHtml, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
+        var open = SafeRegex.Match(tableHtml, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
         if (!open.Success) return null;
         wrapperAttrs = open.Groups[1].Value;
         // body of the OUTER table = up to its matching close
         var depth = 0;
         var bodyStart = open.Index + open.Length;
         var bodyEnd = -1;
-        foreach (Match t in Regex.Matches(tableHtml, @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match t in SafeRegex.Matches(tableHtml, @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase))
         {
             if (t.Groups[1].Value.Length == 0) depth++;
             else if (--depth == 0) { bodyEnd = t.Index; break; }
@@ -464,14 +504,13 @@ internal static partial class HtmlToPdfConverter
         var sawChild = false;
         while (true)
         {
-            var td = Regex.Match(body[pos..], @"<td\b[^>]*>", RegexOptions.IgnoreCase);
+            var td = SafeRegex.Match(body[pos..], @"<td\b[^>]*>", RegexOptions.IgnoreCase);
             if (!td.Success) break;
             var cellStart = pos + td.Index + td.Length;
             // find the matching </td> at table-depth 0
-            var scan = cellStart;
             var tDepth = 0;
             var cellEnd = -1;
-            foreach (Match t in Regex.Matches(body[cellStart..], @"<(/?)(table|td)\b[^>]*>", RegexOptions.IgnoreCase))
+            foreach (Match t in SafeRegex.Matches(body[cellStart..], @"<(/?)(table|td)\b[^>]*>", RegexOptions.IgnoreCase))
             {
                 var closing = t.Groups[1].Value.Length > 0;
                 var tag = t.Groups[2].Value.ToLowerInvariant();
@@ -489,10 +528,10 @@ internal static partial class HtmlToPdfConverter
             {
                 rest = rest.TrimStart();
                 if (rest.Length == 0) break;
-                var ct = Regex.Match(rest, @"^<table\b", RegexOptions.IgnoreCase);
+                var ct = SafeRegex.Match(rest, @"^<table\b", RegexOptions.IgnoreCase);
                 if (!ct.Success) { return null; }
                 var cDepth = 0; var cEnd = -1;
-                foreach (Match t in Regex.Matches(rest, @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase))
+                foreach (Match t in SafeRegex.Matches(rest, @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase))
                 {
                     if (t.Groups[1].Value.Length == 0) cDepth++;
                     else if (--cDepth == 0) { cEnd = t.Index + t.Length; break; }
@@ -504,7 +543,7 @@ internal static partial class HtmlToPdfConverter
                 rest = rest[cEnd..];
             }
             pos = cellEnd;
-            var closeTd = Regex.Match(body[pos..], @"</td\s*>", RegexOptions.IgnoreCase);
+            var closeTd = SafeRegex.Match(body[pos..], @"</td\s*>", RegexOptions.IgnoreCase);
             pos = closeTd.Success ? pos + closeTd.Index + closeTd.Length : body.Length;
         }
         // rows with more than one td disqualify: a second <td> before a </tr>
@@ -512,8 +551,8 @@ internal static partial class HtmlToPdfConverter
         // normal path. Approximate by requiring at least one child and NO bare
         // text between the wrapper's structural tags.
         if (!sawChild) { return null; }
-        var stripped = Regex.Replace(body, @"<table\b[\s\S]*", "", RegexOptions.IgnoreCase);
-        stripped = Regex.Replace(stripped, @"<[^>]+>", "");
+        var stripped = SafeRegex.Replace(body, @"<table\b[\s\S]*", "", RegexOptions.IgnoreCase);
+        stripped = SafeRegex.Replace(stripped, @"<[^>]+>", "");
         if (DecodeEntities(stripped).Trim().Length > 0) { return null; }
         return (wrapperAttrs, children);
     }
@@ -526,7 +565,6 @@ internal static partial class HtmlToPdfConverter
         double marginLeft, double contentWidth,
         List<(Page page, Aspose.Pdf.Rectangle rect, string url, string? text)> pendingLinks)
     {
-        const double PxPt = 0.75;
         var invc = System.Globalization.CultureInfo.InvariantCulture;
         cursor.y -= block.RowMarginTopPx * PxPt;
         var rowTop = cursor.y;
@@ -553,10 +591,12 @@ internal static partial class HtmlToPdfConverter
             g.Append("Q ");
         }
 
-        double RunBoxWidth(RowRun r) => r.ImgSrc is not null
-            ? r.ImgWPx * PxPt
-            : MeasureFaceText(r.Bold ? "Arial Bold" : "Arial", r.Text, r.FontPx * PxPt)
-              + (r.PadLeftPx + r.PadRightPx) * PxPt;
+        double RunBoxWidth(RowRun r)
+        {
+            if (r.ImgSrc is not null) return r.ImgWPx * PxPt;
+            return MeasureFaceText(r.Bold ? "Arial Bold" : "Arial", r.Text, r.FontPx * PxPt)
+                + (r.PadLeftPx + r.PadRightPx) * PxPt;
+        }
 
         double leftX = marginLeft + block.RowLeftPadPx * PxPt;
         if (block.RowCentered)
@@ -608,7 +648,7 @@ internal static partial class HtmlToPdfConverter
             }
 
             if (!string.IsNullOrEmpty(r.Url))
-                pendingLinks.Add((cursor.page, new Aspose.Pdf.Rectangle(x, baseline - 0.3 * fpt, x + boxW, baseline + fpt), r.Url!, r.Text));
+                pendingLinks.Add((cursor.page, new Aspose.Pdf.Rectangle(x, baseline - 0.3 * fpt, x + boxW, baseline + fpt), r.Url, r.Text));
 
             if (r.RightGroup) rightX += boxW + (r.MarginLeftPx + r.MarginRightPx) * PxPt;
             else leftX = x + boxW + r.MarginRightPx * PxPt;

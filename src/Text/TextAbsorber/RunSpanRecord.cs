@@ -14,7 +14,7 @@ public sealed partial class TextAbsorber
         {
             var spanScale = xs.horizScale * Math.Abs(xs.tmRotated ? xs.tmA : xs.tmAr);
             _pageRunSpans.Add(new RunSpan(_text.Length, decoded.Length,
-                xs.tmRotated ? (_pageRotDominant ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx : xs.tmE)
+                xs.tmRotated ? RotatedRunX(xs)
                           : xs.tmE + (txClip - xs.tlmX) * xs.tmAr,
                 (xs.currentMetrics?.MeasureString(tjStr.Value, xs.fontSize)
                  ?? (xs.fontSize * 0.5 * fullDecoded.Length)) * spanScale,
@@ -25,7 +25,7 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>Show text: the run's page-space X captured and the line's grid origin tracked.</summary>
-    private double TrackRunLineStart(ExtractState xs, string decoded, double txClip)
+    private double TrackRunLineStart(ExtractState xs, double txClip)
     {
         // In Pure mode, capture the current run's page-space X and keep the
         // per-line grid origin up to date before computing spacing.
@@ -38,17 +38,17 @@ public sealed partial class TextAbsorber
             // rotated-dominant page; a minority rotated run on an
             // upright page grids at its DEVICE x — the horizontal
             // position of its vertical baseline.
-            runPageX = xs.tmRotated
-                ? (_pageRotDominant
+            if (xs.tmRotated)
+                runPageX = _pageRotDominant
                     ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx
-                    : xs.tmE)
-                : xs.tmE + (txClip - xs.tlmX) * xs.tmAr;
+                    : xs.tmE;
+            else runPageX = xs.tmE + (txClip - xs.tlmX) * xs.tmAr;
             // An upside-down line (negative advance) reads from its RIGHT edge: its start
             // is tracked mirrored, so the leftmost-run rule finds the reading-order start
             // and the negative-origin rule gives it no leading grid column (the reference
             // extracts a 180-degree stamp's rows with no indent).
             if (!xs.tmRotated && xs.tmAr < 0) runPageX = -runPageX;
-            TrackLineStart(runPageX, string.IsNullOrWhiteSpace(decoded));
+            TrackLineStart(runPageX);
         }
         return runPageX;
     }

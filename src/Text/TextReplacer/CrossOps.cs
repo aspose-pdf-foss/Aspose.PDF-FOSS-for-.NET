@@ -114,11 +114,19 @@ public sealed partial class TextReplacer
         public bool IsHex;
         public int OpStart, OpEnd;
         public double TmA = 1, TmB, TmC, TmD = 1, TmTx, TmTy;
+        /// <summary>The line matrix's X when the op was shown: the seat a following
+        /// Td moves from, which is the op's own origin only when nothing was shown
+        /// between the last Td/Tm and this op.</summary>
+        public double TlmTx;
         public double CtmA = 1, CtmB, CtmC, CtmD = 1, CtmTx, CtmTy;
         public PdfDictionary? FontDict;
         public string? FontName;
         public Dictionary<int, string>? ToUnicode;
-        public double FontSize = 12, Tc, KernSum;
+        public double FontSize = 12, Tc, Tw, KernSum;
+        /// <summary>The page-space rectangle the op is clipped to (infinite when unclipped or
+        /// clipped by a path that is not one rectangle): the box a right-to-left paragraph
+        /// re-flows within, and the mark of which lines share a table cell.</summary>
+        public (double left, double bottom, double right, double top) Clip = NoClip;
         /// <summary>Each TJ kern paired with the byte offset it applies at, so a prefix
         /// of the run can be measured at the width it actually occupies.</summary>
         public List<(int byteIndex, double amount)>? KernAt;
@@ -126,6 +134,8 @@ public sealed partial class TextReplacer
         public bool TmPositioned;
         public int TmXTokStart, TmXTokEnd;
         public double TmXVal;
+        /// <summary>The span of the positioning Tm's <c>ty</c> operand (with <see cref="TmPositioned"/>).</summary>
+        public (int start, int end) TmYTok;
         /// <summary>The <c>tx</c> operand of the <c>Td</c>/<c>TD</c> that placed this op,
         /// when one did. A Td-chained line states each glyph RELATIVE to the last, so
         /// adding to this single number carries every later glyph with it - which is how
@@ -266,6 +276,11 @@ public sealed partial class TextReplacer
         // reference preserves the FAMILY: its replacement reads back as FangSong.
         var suffixCut = srcFamily?.IndexOf('_') ?? -1;
         if (suffixCut > 0) candidates.Add(srcFamily!.Substring(0, suffixCut));
+        // A PostScript name carries the foundry's tag ("Arial-BoldMT", "TimesNewRomanPSMT")
+        // that no installed face is named by; without it the same family and style resolve,
+        // so a bold sans run is replaced in bold sans rather than in the Times default.
+        if (WithoutFoundryTag(srcFamily) is { } untagged && untagged != srcFamily)
+            candidates.Add(untagged);
         // SimSun is the default Han substitute (even with
         // FangSong available in the SYSTEM, CJK replacements read back as SimSun); a
         // FangSong result comes from the source family above or from a
@@ -289,6 +304,31 @@ public sealed partial class TextReplacer
         return EmbedFirstCovering(pageDict, reader, text, candidates);
     }
 
+    // The foundry tags a PostScript font name ends with: Monotype's "MT" and the "PS" of
+    // the PostScript-flavoured faces, on the family and on the styled name alike.
+    private static readonly string[] FoundryTags = { "PSMT", "MT", "PS" };
+
+    /// <summary>The family name without its foundry tag, on both sides of the style
+    /// separator: "Arial-BoldMT" gives "Arial-Bold", "TimesNewRomanPS-BoldMT" gives
+    /// "TimesNewRoman-Bold". Null for an empty name.</summary>
+    private static string? WithoutFoundryTag(string? family)
+    {
+        if (string.IsNullOrEmpty(family)) return null;
+        var parts = family!.Split('-');
+        for (var i = 0; i < parts.Length; i++)
+        {
+            foreach (var tag in FoundryTags)
+            {
+                if (parts[i].Length > tag.Length && parts[i].EndsWith(tag, StringComparison.Ordinal))
+                {
+                    parts[i] = parts[i].Substring(0, parts[i].Length - tag.Length);
+                    break;
+                }
+            }
+        }
+        return string.Join("-", parts);
+    }
+
     /// <summary>Embed the first candidate family that resolves and covers every
     /// non-ASCII glyph of <paramref name="text"/> (first resolvable as best-effort
     /// when none covers), as a Type0/CID subset in the page's font dict.</summary>
@@ -306,16 +346,18 @@ public sealed partial class TextReplacer
         {
             if (string.IsNullOrEmpty(c)) continue;
             byte[]? t;
-            try { t = FontRepository.GetTtfDataForSubstitution(c!); } catch { t = null; }
+            try { t = FontRepository.GetTtfDataForSubstitution(c); } catch { t = null; }
             if (t is not { Length: > 12 }) continue;
-            if (firstAvail is null) { firstAvail = t; firstFamily = c!; }
+            if (firstAvail is null) { firstAvail = t; firstFamily = c; }
             // Prefer a face that actually covers every needed non-ASCII glyph —
             // the source family may be a Latin-only subset with no Hebrew/CJK.
             try
             {
                 var gp = new GlyphOutlineParser(t);
-                if (need.All(ch => gp.CMap.TryGetValue(ch, out var g) && g != 0))
-                { ttf = t; family = c!; break; }
+                // (an isolated Arabic form is covered by its letter: the face draws it so)
+                if (need.All(ch => (gp.CMap.TryGetValue(ch, out var g) && g != 0)
+                        || (ArabicShaper.BaseOfIsolated(ch) is var b and not '\0' && gp.CMap.ContainsKey(b))))
+                { ttf = t; family = c; break; }
             }
             catch { /* unparseable — skip */ }
         }
@@ -353,8 +395,8 @@ public sealed partial class TextReplacer
         {
             if (string.IsNullOrEmpty(fam)) continue;
             byte[]? t;
-            try { t = FontRepository.GetTtfData(fam!); } catch { t = null; }
-            if (t is { Length: > 12 }) { ttf = t; family = fam!; break; }
+            try { t = FontRepository.GetTtfData(fam); } catch { t = null; }
+            if (t is { Length: > 12 }) { ttf = t; family = fam; break; }
         }
         if (ttf is null) return null;
         try

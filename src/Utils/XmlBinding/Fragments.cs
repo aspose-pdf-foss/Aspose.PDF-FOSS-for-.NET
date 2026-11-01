@@ -43,6 +43,11 @@ internal static partial class XmlBinding
             pf.tf.HorizontalAlignment = ha;
         if (string.Equals(GetAttr(pf.fragNode, "IsInLineParagraph"), "true", StringComparison.OrdinalIgnoreCase))
             pf.tf.IsInLineParagraph = true;
+        // A local hyperlink is declared by its kind and the page it goes to.
+        if (GetAttr(pf.fragNode, "Hyperlink") == "LocalHyperlink"
+            && int.TryParse(GetAttr(pf.fragNode, "TargetPageNumber"), NumberStyles.Integer,
+                CultureInfo.InvariantCulture, out var targetPage) && targetPage > 0)
+            pf.tf.Hyperlink = new LocalHyperlink { TargetPageNumber = targetPage };
 
         pf.tf.TabStops = pf.tabStops;
         pf.tf.Margin = pf.margin ?? new MarginInfo();
@@ -103,6 +108,11 @@ internal static partial class XmlBinding
             if (textChild.NodeType is XmlNodeType.Text or XmlNodeType.CDATA
                 or XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace)
                 sb.Append(DecodeXmlEntities(textChild.Value ?? ""));
+            // A state element may WRAP the segment's text instead of standing beside it.
+            else if (textChild.NodeType == XmlNodeType.Element && textChild.LocalName == "TextState")
+                foreach (XmlNode wrapped in textChild.ChildNodes)
+                    if (wrapped.NodeType is XmlNodeType.Text or XmlNodeType.CDATA)
+                        sb.Append(DecodeXmlEntities(wrapped.Value ?? ""));
         }
         var text = sb.ToString();
         if (normalizeCellWhitespace)
@@ -112,7 +122,7 @@ internal static partial class XmlBinding
             // styled ones); the table engine has no pen to advance.
             text = text.Replace("#$TAB", " ");
             if (text.IndexOfAny(new[] { '\n', '\r', '\t' }) >= 0)
-                text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+                text = SafeRegex.Replace(text, @"\s+", " ").Trim();
             if (text.Length == 0 && sb.Length > 0 && sb.ToString().Contains("#$TAB"))
                 text = " ";
         }
@@ -181,7 +191,7 @@ internal static partial class XmlBinding
         if (ParseColorValue(GetAttr(node, "ForegroundColor")) is { } fg)
             style.Foreground = fg;
         // FontStyle: numeric bold/italic flags (1 = bold, 2 = italic, 3 = both).
-        if (GetAttr(node, "FontStyle") is { } fsAttr && int.TryParse(fsAttr, out var fsv))
+        if (GetAttr(node, "FontStyle") is { } fsAttr && int.TryParse(fsAttr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var fsv))
         {
             if ((fsv & 1) != 0) style.Bold = true;
             if ((fsv & 2) != 0) style.Italic = true;
@@ -234,6 +244,19 @@ internal static partial class XmlBinding
     /// token between texts breaks the line, a doubled or trailing token yields
     /// a blank spacer line (a month header with a doubled token shows the spacer).</summary>
     private static IEnumerable<TextFragment> BuildStyledTextFragments(XmlNode fragNode, BindContext ctx)
+    {
+        foreach (var line in BuildStyledFragmentLines(fragNode, ctx))
+            yield return line;
+        // A fragment nested in the fragment stacks under it as lines of its own, in its own style.
+        foreach (XmlNode nested in fragNode.ChildNodes)
+        {
+            if (nested.NodeType != XmlNodeType.Element || nested.LocalName != "TextFragment") continue;
+            foreach (var line in BuildStyledTextFragments(nested, ctx))
+                yield return line;
+        }
+    }
+
+    private static IEnumerable<TextFragment> BuildStyledFragmentLines(XmlNode fragNode, BindContext ctx)
     {
         var frag = BuildStyledTextFragment(fragNode, ctx);
         if (frag is null) yield break;
@@ -304,8 +327,8 @@ internal static partial class XmlBinding
             }
         }
         var textSegs = new List<TextSegment>();
-        foreach (var s in staged.Segments)
-            if (!string.IsNullOrEmpty(s.Text)) textSegs.Add(s);
+        foreach (var s in staged.Segments.Where(s => !string.IsNullOrEmpty(s.Text)))
+            textSegs.Add(s);
         if (textSegs.Count == 0) return null;
 
         // The common single-styled cell collapses to a PLAIN fragment carrying

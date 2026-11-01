@@ -17,8 +17,11 @@ private sealed class StampParagraphsState
     // PageInfo → the 90 pt Generator default), header top = 0 — a header
     // paragraph's first baseline hangs just below the physical page top.
     public double mTop;
-    /// <summary>The header's text members stacked so far: each one's box (size + leading), the next seats under them.</summary>
+    /// <summary>The header's members stacked so far - a text member's box (size + leading), an HTML
+    /// member's lines, an image's or a table's box: the next member seats under them.</summary>
     public double headerStackH;
+    /// <summary>The header's stack top: where its next member seats.</summary>
+    public double HeaderStackTop => pageHeight - mTop - headerStackH;
     public double mBottom;
     public double mLeft;
     // Footer band law (isolated on the plain Image/TextFragment
@@ -27,13 +30,17 @@ private sealed class StampParagraphsState
     // bottom margin; top 30 → 30). Scoped to the probed shape — a footer
     // whose Margin.Top was touched, whose Margin.Bottom is zero, and whose
     // members are only plain images and text fragments (no leading, no
-    // inline members); every other band keeps the legacy bottom-up stack.
+    // inline members) - or any footer holding an HTML member; every other band
+    // keeps the legacy bottom-up stack. In this band y is the stack's running TOP.
     // ⚠ The MODERN writer anchors the leaded/inline member seat at the
     // same bodyBottom − Margin.Top band top (probed: baselines
     // 44.899/44.07 = 62 − (fs+leading) + descent·fs), but the corpus
     // templates for that family bake the OLD era's placement — widening
     // this band to them fails their templates, so they stay legacy.
     public bool probedFooterBand;
+    /// <summary>The lowest ink of the stacked footer's HTML lines, whose descenders reach under
+    /// their line pitch: the band is lifted so this stays on the page.</summary>
+    public double footerInkBottom = double.MaxValue;
     public double bodyBottom;
     public double y;
     public double x;

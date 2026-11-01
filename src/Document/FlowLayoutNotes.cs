@@ -49,7 +49,7 @@ public sealed partial class Document
         {
             var footer = _startPage.Footer;
             var right = footer?.Margin is { RightTouched: true } fm ? fm.Right : _marginRight;
-            return _startPage.Width - right;
+            return _startPage.LayoutFrameWidth - right;
         }
 
         private readonly record struct BandGeometry(double Left, double Width, double Right,
@@ -62,7 +62,7 @@ public sealed partial class Document
         /// top margin (the gap between the band and its rule).</summary>
         private BandGeometry BandGeometryFor(double bandHeight)
         {
-            var pageW = _startPage.Width;
+            var pageW = _startPage.LayoutFrameWidth;
             var footer = _startPage.Footer;
             if (footer is not null && (footer.Paragraphs.Count > 0 || !string.IsNullOrEmpty(footer.Text)))
             {
@@ -103,8 +103,8 @@ public sealed partial class Document
             var groups = new List<List<BaseParagraph>>();
             // An empty XML fragment in a note lays nothing — except the note's
             // last paragraph, which closes the note with one empty line of its
-            // own size (a headnote document's notes stand one default line apart;
-            // an empty fragment between two note paragraphs adds nothing).
+            // own size (a headnote document's notes stand one default line apart; an
+            // empty fragment between two note paragraphs adds nothing).
             Text.TextFragment? closing = null;
             var paras = e.Note.Paragraphs;
             // The rule under a note runs the whole band only when the note OPENS
@@ -159,8 +159,7 @@ public sealed partial class Document
 
         private bool HasNotesBeyond(int rel)
         {
-            foreach (var n in _notes) if (n.Slot == EndNoteSlot || n.Slot + 1 > rel) return true;
-            return false;
+            return _notes.Select(n => n.Slot).Any(slot => slot == EndNoteSlot || slot + 1 > rel);
         }
 
         /// <summary>Install a dissolved box's band plan: each planned page (relative
@@ -192,7 +191,7 @@ public sealed partial class Document
         /// that carried the last mark it holds. The body re-wraps above the band
         /// each time, so a candidate is kept only when the marks it was sized for
         /// still land on its page and at least one body line stays above it.</summary>
-        internal DissolvedBandPlan PlanDissolvedBands(Func<DissolvedBandPlan, FlowLayout> runDry)
+        internal static DissolvedBandPlan PlanDissolvedBands(Func<DissolvedBandPlan, FlowLayout> runDry)
         {
             var plan = new DissolvedBandPlan();
             var spill = new List<BandLine>();
@@ -298,7 +297,7 @@ public sealed partial class Document
             var maxSlot = int.MinValue;
             foreach (var kv in bySlot) if (kv.Value.Count > 0 && kv.Key > maxSlot) maxSlot = kv.Key;
             while (maxSlot >= _overflowPages.Count)
-                _overflowPages.Add((System.Array.Empty<byte>(), _startPage.Width, _startPageHeight));
+                _overflowPages.Add((System.Array.Empty<byte>(), _startPage.LayoutFrameWidth, _startPageHeight));
             var prevHadBody = true;
             Trace($"finalise slots=[{string.Join(",", bySlot.Keys)}] bodies=[{string.Join(",", _slotBottomY.Keys)}] planned=[{string.Join(",", _bandPlanTop.Keys)}] overflow={_overflowPages.Count}");
             foreach (var (slot, lines) in bySlot)
@@ -480,8 +479,9 @@ public sealed partial class Document
         {
             foreach (var (slot, table, left, top) in _pendingBandTables)
             {
-                var target = slot < 0 ? _startPage :
-                    slot < overflowPageRefs.Count ? overflowPageRefs[slot] : null;
+                Page? target = null;
+                if (slot < 0) target = _startPage;
+                else if (slot < overflowPageRefs.Count) target = overflowPageRefs[slot];
                 if (target is null) continue;
                 table.FlowLeftOffset = left;
                 // The band hangs below the bottom margin, so the grid is given the
@@ -490,8 +490,8 @@ public sealed partial class Document
                 if (contents.Count > 0) target.AddContentStream(contents[0]);
                 if (table.LastImageDraws.Count > 0)
                     foreach (var (data, rect) in table.LastImageDraws[0])
-                        try { target.AddImage(data, rect); }
-                        catch (ArgumentException) { }
+                        try { target.AddLayoutImage(data, rect); }
+                        catch (ArgumentException) { /* an image the page cannot take is left out - the layout carries on */ }
             }
         }
 
@@ -543,7 +543,7 @@ public sealed partial class Document
         {
             if (borderWidth <= 0) return;
             var left = _marginLeft;
-            var right = _startPage.Width - _marginRight;
+            var right = _startPage.LayoutFrameWidth - _marginRight;
             if (right - left <= 0) return;
             var half = borderWidth / 2;
             var pageTop = _startPageHeight - _marginTop;
@@ -577,7 +577,7 @@ public sealed partial class Document
         {
             if (_overflowBuffer is { Count: > 0 })
             {
-                _overflowPages.Add((ConcatBlocks(_overflowBuffer), _startPage.Width, _startPage.Height));
+                _overflowPages.Add((ConcatBlocks(_overflowBuffer), _startPage.LayoutFrameWidth, _startPage.LayoutFrameHeight));
                 _overflowBuffer = null;
             }
         }

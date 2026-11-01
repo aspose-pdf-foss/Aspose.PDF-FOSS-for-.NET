@@ -27,7 +27,9 @@ public sealed partial class GraphicsAbsorber
 
     private static void AddSubpathPoint(GraphicsWalkState gw, double ux, double uy)
     {
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
         var (px, py) = gw.curCtm!.TransformPoint(ux, uy);
+#pragma warning restore S8969
         if (!gw.any) { gw.minX = gw.maxX = px; gw.minY = gw.maxY = py; gw.any = true; }
         else
         {
@@ -72,6 +74,16 @@ public sealed partial class GraphicsAbsorber
         if (gw.pendingRegion is not null) { gw.gs.Clip = gw.pendingRegion; gw.pendingRegion = null; }
     }
 
+    // Record the clip path's construction range so a later element move can translate the clip with the
+    // element (the clip takes effect at the path-ending op that follows).
+    private static void RecordClip(GraphicsWalkState gw, int i, bool evenOdd)
+    {
+        if (gw.depth == 0 && PathStart(gw) >= 0)
+            gw.pendingClip = new GraphicsClipInfo(PathStart(gw), i, new Aspose.Pdf.Matrix(gw.gs.Ctm));
+        if (CurrentPaths(gw) is { Count: > 0 } clipPaths)
+            gw.pendingRegion = new ClipRegion(clipPaths, evenOdd, gw.gs.Clip);
+    }
+
     /// <summary>The paths of the current path object, finished and in construction, each with its CTM.</summary>
     private static List<(Aspose.Pdf.Matrix Ctm, IReadOnlyList<Aspose.Pdf.Operator> Ops)> CurrentPaths(GraphicsWalkState gw)
     {
@@ -88,22 +100,22 @@ public sealed partial class GraphicsAbsorber
         switch (op)
         {
             case GSave: gw.stack.Push(gw.gs.Clone()); break;
-            case GRestore: if (gw.stack.Count > 0) gw.gs = gw.stack.Pop(); break;
+            case GRestore: if (gw.stack.Count > 0) { gw.gs = gw.stack.Pop(); } break;
             case ConcatenateMatrix cm: gw.gs.Ctm = cm.Matrix.Multiply(gw.gs.Ctm); break;
 
             case SetRGBColor rgb:
                 gw.gs.Fill = (rgb.R, rgb.G, rgb.B);
                 break;
-            case SetGray or SetCMYKColor or SetColor or SetAdvancedColor:
+            case SetColorOperator fill when fill is SetGray or SetCMYKColor or SetColor or SetAdvancedColor:
             {
-                var c = ((SetColorOperator)op).getColor();
+                var c = fill.getColor();
                 gw.gs.Fill = (c.R / 255.0, c.G / 255.0, c.B / 255.0);
                 break;
             }
-            case SetRGBColorStroke or SetGrayStroke or SetCMYKColorStroke
+            case SetColorOperator stroke when stroke is SetRGBColorStroke or SetGrayStroke or SetCMYKColorStroke
                 or SetColorStroke or SetAdvancedColorStroke:
             {
-                var c = ((SetColorOperator)op).getColor();
+                var c = stroke.getColor();
                 gw.gs.Stroke = (c.R / 255.0, c.G / 255.0, c.B / 255.0);
                 break;
             }
@@ -147,20 +159,13 @@ public sealed partial class GraphicsAbsorber
             case EOFillStroke or ClosePathEOFillStroke:
                 PaintSubpath(gw, op, fill: true, stroke: true, evenOdd: true); break;
 
-            case Clip or EOClip:
-                // Record the clip path's construction range so a later element
-                // move can translate the clip with the element (the clip takes
-                // effect at the path-ending op that follows).
-                if (gw.depth == 0 && PathStart(gw) >= 0)
-                    gw.pendingClip = new GraphicsClipInfo(PathStart(gw), i, new Aspose.Pdf.Matrix(gw.gs.Ctm));
-                if (CurrentPaths(gw) is { Count: > 0 } clipPaths)
-                    gw.pendingRegion = new ClipRegion(clipPaths, op is EOClip, gw.gs.Clip);
-                break;
+            case Clip: RecordClip(gw, i, evenOdd: false); break;
+            case EOClip: RecordClip(gw, i, evenOdd: true); break;
 
             case EndPath: DiscardSubpath(gw); break;   // n — clip / no-paint: drop the path
 
             case Do d when gw.depth < MaxFormDepth:
-                VisitForm(d, i, gw.resources, gw.reader, gw.gs, gw.elements, gw.depth, gw.editState);
+                VisitForm(d, i, gw.resources, gw.reader, gw.gs, gw.elements, gw.depth);
                 break;
 
             default: break;                    // colour/clip/text/etc. don't affect path geometry

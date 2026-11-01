@@ -114,10 +114,9 @@ public partial class Table
                 if (left is not null && ReferenceEquals(left, right)) continue;
                 var leftRule = left is null ? default : CellSideRule(left, ownerRow[r, j - 1]!, BorderSide.Right);
                 var rightRule = right is null ? default : CellSideRule(right, ownerRow[r, j]!, BorderSide.Left);
-                rules.Vertical[r, j] =
-                    j == 0 ? Wider(rightRule, TableSideRule(BorderSide.Left))
-                    : j == columns ? Wider(leftRule, TableSideRule(BorderSide.Right))
-                    : Wider(leftRule, rightRule);
+                if (j == 0) rules.Vertical[r, j] = Wider(rightRule, TableSideRule(BorderSide.Left));
+                else if (j == columns) rules.Vertical[r, j] = Wider(leftRule, TableSideRule(BorderSide.Right));
+                else rules.Vertical[r, j] = Wider(leftRule, rightRule);
             }
 
         for (var b = 0; b <= rows; b++)
@@ -128,10 +127,9 @@ public partial class Table
                 if (above is not null && ReferenceEquals(above, below)) continue;
                 var aboveRule = above is null ? default : CellSideRule(above, ownerRow[b - 1, c]!, BorderSide.Bottom);
                 var belowRule = below is null ? default : CellSideRule(below, ownerRow[b, c]!, BorderSide.Top);
-                rules.Horizontal[b, c] =
-                    b == 0 ? Wider(belowRule, TableSideRule(BorderSide.Top))
-                    : b == rows ? Wider(aboveRule, TableSideRule(BorderSide.Bottom))
-                    : Wider(aboveRule, belowRule);
+                if (b == 0) rules.Horizontal[b, c] = Wider(belowRule, TableSideRule(BorderSide.Top));
+                else if (b == rows) rules.Horizontal[b, c] = Wider(aboveRule, TableSideRule(BorderSide.Bottom));
+                else rules.Horizontal[b, c] = Wider(aboveRule, belowRule);
             }
 
         for (var r = 0; r < rows; r++)
@@ -341,7 +339,7 @@ public partial class Table
                 rules.HorizontalAt(boundary, column + 1), rightBelow, horizontal: true), y);
     }
 
-    private void DrawCollapsedVertical(ContentStreamBuilder builder, CollapsedRules rules,
+    private static void DrawCollapsedVertical(ContentStreamBuilder builder, CollapsedRules rules,
         int row, int boundary, double x, double y1, double y2)
     {
         if (row >= rules.Rows || boundary > rules.Columns) return;

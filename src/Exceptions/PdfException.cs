@@ -18,9 +18,11 @@ public class PdfException : Exception
     /// <summary>Initializes a new instance of the <see cref="PdfException"/> class wrapping the inner exception.</summary>
     public PdfException(Exception innerException) : base(string.Empty, innerException) { }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Write a crash report to disk per <paramref name="options"/>. Stored only —
     /// FOSS doesn't currently emit crash reports.</summary>
     public void GenerateCrashReport(CrashReportOptions options) { _ = options; }
+#pragma warning restore S2325
 }
 
 /// <summary>Configures crash-report emission for <see cref="PdfException.GenerateCrashReport"/>.</summary>
@@ -49,8 +51,10 @@ public class CrashReportOptions
     /// <summary>The exception that triggered the report.</summary>
     public Exception Exception { get; }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Version of Aspose.Pdf.Foss that emitted the report.</summary>
     public string LibraryVersion
+#pragma warning restore S2325
         => typeof(CrashReportOptions).Assembly.GetName().Version?.ToString() ?? "0.0.0";
 }
 

@@ -20,8 +20,8 @@ internal static partial class HtmlToPdfConverter
             // <table align="center"> centres its NATURAL box in the
             // standard box (the 物業地點 address card sits mid-page).
             if (tb.renderNatW > 0 && tb.renderNatW < table.UsableWidthOverride
-                && Regex.IsMatch(
-                    Regex.Match(tb.fhTableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value,
+                && SafeRegex.IsMatch(
+                    SafeRegex.Match(tb.fhTableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value,
                     @"align\s*=\s*[""']?center", RegexOptions.IgnoreCase))
             {
                 table.FlowLeftOffset = marginLeft

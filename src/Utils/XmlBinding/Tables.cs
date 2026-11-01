@@ -19,12 +19,17 @@ internal static partial class XmlBinding
     // ProcessTable and the nested BuildTable so styling is applied consistently.
     private static void ConfigureTable(Table table, XmlNode tableNode, BindContext ctx)
     {
+        if (GetId(tableNode) is { } tableId)
+        {
+            table.Id = tableId;
+            ctx.Document.RegisterXmlObject(tableId, table);
+        }
         var colWidths = GetAttr(tableNode, "ColumnWidths");
         if (colWidths is not null) table.ColumnWidths = colWidths;
 
         // Repeat the first row(s) at the top of every continuation page.
         var repeat = GetAttr(tableNode, "RepeatingRowsCount");
-        if (repeat is not null && int.TryParse(repeat, out var rc) && rc > 0)
+        if (repeat is not null && int.TryParse(repeat, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rc) && rc > 0)
             table.RepeatingRowsCount = rc;
         if (table.RepeatingRowsCount == 0 &&
             string.Equals(GetAttr(tableNode, "IsFirstRowRepeated"), "true", StringComparison.OrdinalIgnoreCase))
@@ -99,7 +104,7 @@ internal static partial class XmlBinding
                 foreach (Cell c in r.Cells)
                     foreach (var p in c.Paragraphs)
                         if (p is HtmlFragment hf
-                            && System.Text.RegularExpressions.Regex.Match(hf.HtmlContent ?? "",
+                            && SafeRegex.Match(hf.HtmlContent ?? "",
                                 @"font-size\s*:\s*([\d.]+)\s*px") is { Success: true } fs
                             && double.TryParse(fs.Groups[1].Value,
                                 System.Globalization.NumberStyles.Float,
@@ -107,10 +112,9 @@ internal static partial class XmlBinding
                             && pxSize > 0)
                         {
                             table.DefaultCellTextState.FontSize = (float)(pxSize * 0.75);
-                            goto cssSizeDone;
+                            return;
                         }
             }
-        cssSizeDone: ;
     }
 
     private static void ProcessTable(Page page, XmlNode tableNode, BindContext ctx)
@@ -126,6 +130,7 @@ internal static partial class XmlBinding
     private static void ProcessRow(Table table, XmlNode rowNode, BindContext ctx)
     {
         var row = table.Rows.Add();
+        if (GetId(rowNode) is { } rowId) ctx.Document.RegisterXmlObject(rowId, row);
 
         var bg = ParseColorValue(GetAttr(rowNode, "BackgroundColor"));
         if (bg is not null) row.BackgroundColor = bg;
@@ -172,7 +177,7 @@ internal static partial class XmlBinding
             // Resolve the effective cell font size from the table's DefaultCellTextState
             // (its authored size). The row's auto-initialised DefaultCellTextState defaults
             // to 10 pt whether or not the XML set it, so it can't be trusted to override.
-            var fs = table.DefaultCellTextState?.FontSize > 0 ? table.DefaultCellTextState!.FontSize : 10f;
+            var fs = table.DefaultCellTextState?.FontSize > 0 ? table.DefaultCellTextState.FontSize : 10f;
             var pad = row.DefaultCellPadding ?? table.DefaultCellPadding;
             var padV = (pad?.Top ?? 0) + (pad?.Bottom ?? 0);
             // Each blank line adds one cell line pitch; the cell leading is
@@ -214,8 +219,9 @@ internal static partial class XmlBinding
     private static void ProcessCell(Row row, XmlNode cellNode, BindContext ctx)
     {
         var cell = row.Cells.Add();
+        if (GetId(cellNode) is { } cellId) ctx.Document.RegisterXmlObject(cellId, cell);
         var colSpan = GetAttr(cellNode, "ColSpan");
-        if (colSpan is not null && int.TryParse(colSpan, out var cs) && cs > 0)
+        if (colSpan is not null && int.TryParse(colSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cs) && cs > 0)
             cell.ColSpan = cs;
 
         var bg = ParseColorValue(GetAttr(cellNode, "BackgroundColor"));

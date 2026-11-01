@@ -32,19 +32,19 @@ internal static partial class HtmlToPdfConverter
     private static bool ReadMonoReportHeadRow(MonoReportRenderState mr, Match rm)
     {
         var cells = new List<(string Text, Color? Bg)>();
-        foreach (Match cm in Regex.Matches(rm.Groups[1].Value,
-                     @"<t[dh]([^>]*)>([\s\S]*?)</t[dh]\s*>", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(rm.Groups[1].Value,
+                     @"<t[dh]([^>]*)>([\s\S]*?)</t[dh]\s*>", RegexOptions.IgnoreCase).Select(cm => cm.Groups))
         {
             // the cell's own background, however its unquoted style
             // attribute happens to be spelled
-            var bgM = Regex.Match(cm.Groups[1].Value,
+            var bgM = SafeRegex.Match(groups[1].Value,
                 @"back\s*ground\s*:\s*(#[0-9a-fA-F]{3,6})", RegexOptions.IgnoreCase);
-            cells.Add((MonoNobrText(cm.Groups[2].Value),
+            cells.Add((MonoNobrText(groups[2].Value),
                 bgM.Success ? ParseCssColor(bgM.Groups[1].Value) : null));
         }
         if (cells.Count > 0) mr.rows.Add(cells);
         return true;
     }
     private static string MonoNobrText(string markup) =>
-        DecodeEntities(Regex.Replace(markup, @"<[^>]+>", "")).Trim('\r', '\n', '\t');
+        DecodeEntities(SafeRegex.Replace(markup, @"<[^>]+>", "")).Trim('\r', '\n', '\t');
 }

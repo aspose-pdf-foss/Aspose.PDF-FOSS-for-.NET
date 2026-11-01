@@ -59,7 +59,6 @@ internal static partial class HtmlToPdfConverter
         double pageH = default;
         double bandH = default;
         double pageW = default;
-        pageW = 0;
         var pageInfo = options?.PageInfo;
         pageH = pageInfo?.Height is > 0 ? pageInfo.Height : 841.89;
         if (pageInfo?.LandscapeRequested == true && pageInfo.Width > pageH)
@@ -75,8 +74,8 @@ internal static partial class HtmlToPdfConverter
             ? model.BandPitchPt
             : bandBaseH - model.ContentTopPt - model.ContentBottomPt;
         if (bandH <= 0) return null;
-        // A dialect that measures its own pitch pins the band to the sheet's top margin;
-        // the clip's bottom edge is then whatever the sheet has left under it.
+        // A dialect that measures its own pitch pins the band to the sheet's top margin; the
+        // clip's bottom edge is then whatever the sheet has left under it.
         if (model.BandPitchPt > 0) model.ContentBottomPt = pageH - model.ContentTopPt - bandH;
 
         // Sheet width: 96 + the widest laid-out element + the dialect's right pad, over the
@@ -142,7 +141,7 @@ internal static partial class HtmlToPdfConverter
         {
             // Map the SVG's viewBox onto the page box: x right, y DOWN from
             // the sheet's content origin.
-            var vb2 = Regex.Match(replaySvgText,
+            var vb2 = SafeRegex.Match(replaySvgText,
                 @"viewBox=""(?<a>-?[\d.]+)\s+(?<b>-?[\d.]+)\s+(?<c>[\d.]+)\s+(?<d>[\d.]+)""");
             double vw = 0, vh = 0;
             if (vb2.Success)
@@ -163,9 +162,11 @@ internal static partial class HtmlToPdfConverter
         }
 
         var sb = new StringBuilder();
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var s in div.Spans)
+#pragma warning restore S3267
         {
-            if (!RenderFixedLayoutSpan(docFontDict, inv, div, s, page, sb, yOff, band, cum, bandH, pageH, model)) break;
+            if (!RenderFixedLayoutSpan(docFontDict, inv, s, page, sb, band, cum, bandH, pageH, model)) break;
         }
         if (sb.Length > 0)
             page.AddContentStream(Encoding.ASCII.GetBytes(sb.ToString()));
@@ -176,7 +177,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>One positioned span on the band: its face, its seat and the text it shows.</summary>
-    private static bool RenderFixedLayoutSpan(Core.PdfDictionary docFontDict, System.Globalization.CultureInfo inv, FixedPageDiv div, FixedSpan s, Page page, StringBuilder sb, double yOff, double band, double cum, double bandH, double pageH, FixedSheetModel model)
+    private static bool RenderFixedLayoutSpan(Core.PdfDictionary docFontDict, System.Globalization.CultureInfo inv, FixedSpan s, Page page, StringBuilder sb, double band, double cum, double bandH, double pageH, FixedSheetModel model)
     {
         if (s.Color is null) return true;   // selection-only text; the raster carries the pixels
         // Skip spans clearly outside this band (the clip still guards stragglers).

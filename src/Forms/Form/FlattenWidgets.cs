@@ -53,8 +53,10 @@ public sealed partial class Form
             {
                 double qx = m[0] * px + m[2] * py + m[4];
                 double qy = m[1] * px + m[3] * py + m[5];
-                if (qx < minX) minX = qx; if (qx > maxX) maxX = qx;
-                if (qy < minY) minY = qy; if (qy > maxY) maxY = qy;
+                if (qx < minX) minX = qx;
+                if (qx > maxX) maxX = qx;
+                if (qy < minY) minY = qy;
+                if (qy > maxY) maxY = qy;
             }
             tllx = minX; tlly = minY; tw = maxX - minX; th = maxY - minY;
         }
@@ -76,12 +78,12 @@ public sealed partial class Form
         var doc = OwnerDocument;
         if (reader is null || doc is null) return;
 
-        // The widget dicts this field contributes: a merged single-widget field is its own dict;
-        // otherwise each kid widget.
+        // The widget dicts this field contributes: a merged single-widget field is its own dict; otherwise
+        // each kid widget.
         var widgets = new List<PdfDictionary>();
         if (field.Dict.ContainsKey("Rect")) widgets.Add(field.Dict);
-        foreach (var kid in field.AllKids())
-            if (kid.ContainsKey("Rect") && !ReferenceEquals(kid, field.Dict)) widgets.Add(kid);
+        foreach (var kid in field.AllKids().Where(kid => kid.ContainsKey("Rect") && !ReferenceEquals(kid, field.Dict)))
+            widgets.Add(kid);
         if (widgets.Count == 0) return;
 
         // Refresh the appearance unless it carries a non-identity /Matrix (see
@@ -125,8 +127,8 @@ public sealed partial class Form
         if (reader.Resolve(acro?.Get("Fields")) is PdfArray fields)
         {
             var kept = new PdfArray();
-            foreach (var fr in fields)
-                if (!ReferenceEquals(reader.ResolveDict(fr), field.Dict)) kept.Add(fr);
+            foreach (var fr in fields.Where(fr => !ReferenceEquals(reader.ResolveDict(fr), field.Dict)))
+                kept.Add(fr);
             acro!.Set("Fields", kept);
         }
         _fields.Remove(field);
@@ -175,9 +177,9 @@ public sealed partial class Form
         // Use the caller's preferred name when free (field flatten assigns 1-based FRM{n}
         // in /Annots order); otherwise generate a unique FRM0, FRM1, … (annotation flatten).
         string name;
-        if (!string.IsNullOrEmpty(preferredName) && !xobjects.ContainsKey(preferredName!))
+        if (!string.IsNullOrEmpty(preferredName) && !xobjects.ContainsKey(preferredName))
         {
-            name = preferredName!;
+            name = preferredName;
         }
         else
         {
@@ -217,13 +219,10 @@ public sealed partial class Form
                 pageResources.Set(category, pageCatDict);
             }
 
-            foreach (var key in apCatDict.Keys)
+            foreach (var key in apCatDict.Keys.Where(key => !pageCatDict.ContainsKey(key)))
             {
-                if (!pageCatDict.ContainsKey(key))
-                {
-                    var val = apCatDict.Get(key);
-                    if (val is not null) pageCatDict.Set(key, val);
-                }
+                var val = apCatDict.Get(key);
+                if (val is not null) pageCatDict.Set(key, val);
             }
         }
     }

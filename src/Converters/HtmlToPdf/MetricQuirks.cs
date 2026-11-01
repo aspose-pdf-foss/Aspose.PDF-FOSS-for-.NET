@@ -23,9 +23,9 @@ internal static partial class HtmlToPdfConverter
     /// and limited-quirks modes, which share the line-height quirk.</summary>
     private static bool ReadsInQuirksMode(string html)
     {
-        var doctype = Regex.Match(html, @"<!DOCTYPE\b[^>]*>", RegexOptions.IgnoreCase);
+        var doctype = SafeRegex.Match(html, @"<!DOCTYPE\b[^>]*>", RegexOptions.IgnoreCase);
         return !doctype.Success
-            || Regex.IsMatch(doctype.Value, @"transitional|frameset|loose\.dtd", RegexOptions.IgnoreCase);
+            || SafeRegex.IsMatch(doctype.Value, @"transitional|frameset|loose\.dtd", RegexOptions.IgnoreCase);
     }
 
     /// <summary>A Transitional or Frameset doctype that names its system identifier: the calibrated quirks
@@ -36,10 +36,10 @@ internal static partial class HtmlToPdfConverter
 
     private static bool ReadsInLimitedQuirks(string html)
     {
-        var doctype = Regex.Match(html, @"<!DOCTYPE\b[^>]*>", RegexOptions.IgnoreCase);
+        var doctype = SafeRegex.Match(html, @"<!DOCTYPE\b[^>]*>", RegexOptions.IgnoreCase);
         return doctype.Success
-            && Regex.IsMatch(doctype.Value, @"transitional|frameset", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(doctype.Value, @"[""']\s*https?://", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(doctype.Value, @"transitional|frameset", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(doctype.Value, @"[""']\s*https?://", RegexOptions.IgnoreCase);
     }
 
     /// <summary>The host of the document's remote `&lt;base href>`, or null. The reference renders of such
@@ -58,7 +58,7 @@ internal static partial class HtmlToPdfConverter
 
     private static string? RemoteBaseHost(string html)
     {
-        var m = Regex.Match(html, @"<base\b[^>]*\bhref\s*=\s*[""']?https?://([^/""'\s>]+)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(html, @"<base\b[^>]*\bhref\s*=\s*[""']?https?://([^/""'\s>]+)", RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.ToLowerInvariant() : null;
     }
 
@@ -69,7 +69,7 @@ internal static partial class HtmlToPdfConverter
         if (_remoteBaseHost is null) return false;
         var s = src.Trim();
         if (s.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) return false;
-        var abs = Regex.Match(s, @"^https?://([^/\s]+)", RegexOptions.IgnoreCase);
+        var abs = SafeRegex.Match(s, @"^https?://([^/\s]+)", RegexOptions.IgnoreCase);
         return !abs.Success || abs.Groups[1].Value.Equals(_remoteBaseHost, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -79,7 +79,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (!mt.stdSerif || !_quirksRowStrut) return null;
         if (!mt.css.TryGetValue(selector, out var rule) || !rule.TryGetValue("font-size", out var v)) return null;
-        var m = Regex.Match(v.Trim(), @"^(\d+(?:\.\d+)?|\.\d+)\s*(em|%)$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(v.Trim(), @"^(\d+(?:\.\d+)?|\.\d+)\s*(em|%)$", RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         var n = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         return m.Groups[2].Value == "%" ? n / 100.0 * UaDefaultFontPt : n * UaDefaultFontPt;

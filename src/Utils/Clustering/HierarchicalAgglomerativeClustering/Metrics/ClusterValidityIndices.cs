@@ -97,7 +97,9 @@ namespace Aspose.Pdf.Utils.Clustering.HierarchicalAgglomerativeClustering.Metric
                     var d = Distance(centroids[i], centroids[j]);
                     if (d < min) min = d;
                 }
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
             return min == double.MaxValue ? 0 : min;
+#pragma warning restore S1244
         }
 
         /// <summary>Largest distance between any two cluster centroids.</summary>
@@ -200,7 +202,9 @@ namespace Aspose.Pdf.Utils.Clustering.HierarchicalAgglomerativeClustering.Metric
                             var d = Distance(x, y);
                             if (d < separation) separation = d;
                         }
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
             return separation == double.MaxValue ? 0 : separation / diameter;
+#pragma warning restore S1244
         }
     }
 
@@ -245,7 +249,9 @@ namespace Aspose.Pdf.Utils.Clustering.HierarchicalAgglomerativeClustering.Metric
                         mean /= foreign.Count;
                         if (mean < nearest) nearest = mean;
                     }
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
                     if (nearest == double.MaxValue) continue;
+#pragma warning restore S1244
 
                     var scale = Math.Max(within, nearest);
                     if (scale > 0) total += (nearest - within) / scale;
@@ -330,10 +336,12 @@ namespace Aspose.Pdf.Utils.Clustering.HierarchicalAgglomerativeClustering.Metric
         }
     }
 
+#pragma warning disable S101 // the index's own name, and the name the reference tests construct it by
     /// <summary>I-index: how much tighter the partition is than the undivided data set,
     /// spread over the clusters and stretched by the widest centroid separation.
     /// Infinite once every instance sits on its own centroid.</summary>
     internal class IIndex<T> : ClusterValidityIndexBase<T>
+#pragma warning restore S101
     {
         public IIndex(IDistanceMetric<T> distanceMetric, CentroidFunction<T> centroidFunc)
             : base(distanceMetric, centroidFunc) { }

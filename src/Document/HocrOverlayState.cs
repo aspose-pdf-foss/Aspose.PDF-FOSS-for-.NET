@@ -13,7 +13,7 @@ public sealed partial class Document
 /// invocation; never shared.</summary>
 private sealed class HocrOverlayState
 {
-    public System.Text.RegularExpressions.MatchCollection matches = null!;
+    public SafeMatchCollection matches = null!;
     public Rectangle rect = null!;
     public double pageWidth;
     public double pageHeight;

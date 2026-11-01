@@ -15,7 +15,6 @@ public partial class Table
 private sealed class RowPlanState
 {
     public Table.RowPlan plan = null!;
-    public MarginInfo? defaultPad;
     public double maxLineHeight;
     // Tight (no-leading) height of whatever set maxLineHeight. A block of n lines occupies
     // (n-1)·LineHeight + TightLine, so a single text line takes its glyph height (≈ FontSize)

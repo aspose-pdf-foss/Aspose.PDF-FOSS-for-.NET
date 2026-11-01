@@ -29,26 +29,36 @@ internal static partial class HtmlToPdfConverter
             // Per-side-touched defaults: an untouched side keeps the renderer
             // default (the caller authored only the sides they set).
             var uaPerSide = cv.marginsExplicit && (cv.pageMargin?.IsTouched ?? false)
-                && cv.pageMargin!.HtmlPerSideDefaults;
+                && cv.pageMargin.HtmlPerSideDefaults;
             // a zero body margin keeps the bare page margin — no 6pt body inset
             if (cv.profile.bodyZeroMargin && !cv.profile.bodySideOnlyZero) cv.bodyMarT = 0.0;
-            cv.marginLeft = (cv.marginsExplicit
-                ? (uaPerSide && !cv.pageMargin!.LeftTouched ? 90.0 : cv.pageMargin!.Left) : 90.0)
+            cv.marginLeft = (!cv.marginsExplicit || (uaPerSide && !cv.pageMargin!.LeftTouched) ? 90.0 : cv.pageMargin!.Left)
                 + (cv.profile.bodyZeroMargin ? 0.0 : 6.0);
-            cv.marginRight = (cv.marginsExplicit
-                ? (uaPerSide && !cv.pageMargin!.RightTouched ? 90.0 : cv.pageMargin!.Right) : 90.0)
+            cv.marginRight = (!cv.marginsExplicit || (uaPerSide && !cv.pageMargin!.RightTouched) ? 90.0 : cv.pageMargin!.Right)
                 // Edge-to-edge sheets get the UA body margin on the RIGHT too — a
                 // width:100% table ends exactly one body margin short of the edge.
                 + (cv.edgeToEdgeDoc ? 6.0 : 0.0);
-            cv.marginTop = cv.marginsExplicit
-                ? (uaPerSide && !cv.pageMargin!.TopTouched ? 72.0 : cv.pageMargin!.Top) : 72.0;
-            cv.marginBottom = cv.marginsExplicit
-                ? (uaPerSide && !cv.pageMargin!.BottomTouched ? 72.0 : cv.pageMargin!.Bottom) : 72.0;
+            if (cv.marginsExplicit) cv.marginTop = uaPerSide && !cv.pageMargin!.TopTouched ? 72.0 : cv.pageMargin!.Top;
+            else cv.marginTop = 72.0;
+            if (cv.marginsExplicit) cv.marginBottom = uaPerSide && !cv.pageMargin!.BottomTouched ? 72.0 : cv.pageMargin!.Bottom;
+            else cv.marginBottom = 72.0;
             // The body tag's OWN top and side margins, when its style attribute is the flow's
             // typography (MEASURED, the no-doctype evaluation form: `margin-top:1in; margin-right:1in`
             // on the tag - the H1 box opens at 72 + 72, the grids and the HR span 96..W-162; the
             // bottom margin is the document's, not the page's - page 1 fills to the page margin).
             cv.bodyMarginRightPt = UaBodyMarginPt;
+            // The body's authored box: its margin and padding are the content's inset inside the page
+            // margins where the UA 8 px stood (probed: body { margin: 30px } opens at 90 + 22.5 and its
+            // lines end 22.5 short of the right page margin; the top is spent on the first page only).
+            // (the standard-serif flow on the default margins already ends its text one UA margin short
+            // of the right page margin, so only the rest of the box moves the margin there)
+            if (AuthoredBodyBox(cv))
+            {
+                cv.bodyMarT = cv.bodyBox.Top;
+                cv.marginLeft += cv.bodyBox.Left - UaBodyMarginPt;
+                cv.marginRight += cv.bodyBox.Right - (cv.profile.uaStdSerif && !cv.marginsExplicit ? UaBodyMarginPt : 0.0);
+                cv.bodyMarginRightPt = cv.bodyBox.Right;
+            }
             if (cv.uaBodyFaceFromAttr && !cv.marginsExplicit && !cv.profile.bodyZeroMargin
                 && BodyTagStyleAttr(cv.html) is { } bodyAttrStyle)
             {
@@ -98,7 +108,7 @@ internal static partial class HtmlToPdfConverter
             // inset so the offset box still fits (measured:
             // MediaBox 601 = 595 + 6, body box 96..517 = 421 wide).
             cv.profile.bodyWidthFullDoc = !(cv.pageInfo?.WidthAssigned ?? false)
-                && Regex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])[^'""]*?(?<![-\w])width\s*:\s*100%[^'""]*\1",
+                && SafeRegex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])[^'""]*?(?<![-\w])width\s*:\s*100%[^'""]*\1",
                     RegexOptions.IgnoreCase).Success;
             if (cv.profile.bodyWidthFullDoc)
             {

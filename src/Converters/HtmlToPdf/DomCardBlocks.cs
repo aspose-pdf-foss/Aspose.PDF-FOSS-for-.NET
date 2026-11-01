@@ -14,7 +14,7 @@ internal static partial class HtmlToPdfConverter
     {
         // Pre-declaration templates carry a collapsed inline box (height:0) — skip.
         if (table.Attrs is not null && table.Attrs.TryGetValue("style", out var tst)
-            && Regex.IsMatch(tst, @"height\s*:\s*0"))
+            && SafeRegex.IsMatch(tst, @"height\s*:\s*0"))
             return null;
 
         HtmlNode? svgCell = null, listCell = null;
@@ -90,7 +90,7 @@ internal static partial class HtmlToPdfConverter
         static Color? CardColor(string? decl)
         {
             if (string.IsNullOrEmpty(decl)) return null;
-            var m = Regex.Match(decl, @"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)");
+            var m = SafeRegex.Match(decl, @"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)");
             if (m.Success)
                 return Color.FromRgbBytes(int.Parse(m.Groups[1].Value),
                     int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value));
@@ -156,8 +156,9 @@ internal static partial class HtmlToPdfConverter
                     foreach (var pc in p.Children)
                         if (pc.Tag == "b" && DomText(pc, css).Length > 0) { bold = true; break; }
                 var mt = ParsePxValue(DomDecl(p, "margin-top", css));
-                var kind = text.Length > 0 ? 0
-                    : p.Children.Any(pc => pc.Tag.Length > 0) ? 2 : 1;
+                int kind = 1;
+                if (text.Length > 0) kind = 0;
+                else if (p.Children.Any(pc => pc.Tag.Length > 0)) kind = 2;
                 into.Add((text, bold, mt, kind));
             }
         }
@@ -199,7 +200,7 @@ internal static partial class HtmlToPdfConverter
                 // match the url expression on the decoded text.
                 var rawStyle = d.Attrs is not null && d.Attrs.TryGetValue("style", out var rs) ? rs : null;
                 if (string.IsNullOrEmpty(rawStyle)) continue;
-                var um = Regex.Match(DecodeEntities(rawStyle),
+                var um = SafeRegex.Match(DecodeEntities(rawStyle),
                     @"background(?:-image)?\s*:\s*[^;]*?url\(\s*[""']?([^""')]+?)[""']?\s*\)",
                     RegexOptions.IgnoreCase);
                 if (!um.Success) continue;
@@ -208,7 +209,7 @@ internal static partial class HtmlToPdfConverter
                 if (iw <= 0 || ih <= 0) continue;
                 double rot = 0;
                 if (DomDecl(d, "transform", css) is { } tr
-                    && Regex.Match(tr, @"rotate\(\s*(-?[\d.]+)\s*deg", RegexOptions.IgnoreCase)
+                    && SafeRegex.Match(tr, @"rotate\(\s*(-?[\d.]+)\s*deg", RegexOptions.IgnoreCase)
                         is { Success: true } rm)
                     double.TryParse(rm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out rot);
@@ -247,7 +248,7 @@ internal static partial class HtmlToPdfConverter
             {
                 // Collapse without trimming: a "&copy; 2025 - " text node keeps its
                 // boundary spaces so adjacent link runs don't fuse with it.
-                var t = Regex.Replace(DecodeEntities(c.Text), @"[ \t\r\n\f]+", " ");
+                var t = SafeRegex.Replace(DecodeEntities(c.Text), @"[ \t\r\n\f]+", " ");
                 if (t.Trim().Length == 0) continue;
                 runs.Add(new RowRun { Text = t, FontPx = fontPx, Color = baseColor, Bold = DomBold(el, css) });
                 continue;

@@ -29,25 +29,57 @@ public sealed partial class Page
     // aspectFit: the file-path overload treats the rectangle as a bounding box (the
     // image keeps its own aspect ratio, centred); every other caller — the generator
     // flow, the HTML converter, direct byte[]/stream users — fills the rectangle
-    // exactly as given.
-    private void AddImage(byte[] imageData, Rectangle rect, bool blackWhite, bool aspectFit, Rectangle? clip = null)
+    // exactly as given. compensateRotation: a caller's rectangle is in the DISPLAYED page and
+    // is mapped through the page's /Rotate; the generator's is already in the media layout frame.
+    private void AddImage(byte[] imageData, Rectangle rect, bool blackWhite, bool aspectFit, Rectangle? clip = null,
+        bool compensateRotation = true)
     {
         var ia = new ImageAddState();
         ia.imageData = imageData;
         ia.rect = rect;
         ia.blackWhite = blackWhite;
-        if (ia.blackWhite && ImageStamp.FromBlackWhite(ia.imageData) is { } bwStamp)
+        if (ia.blackWhite && PlacedPicture(ia.imageData, BlackWhiteVariant, () => ImageStamp.FromBlackWhite(ia.imageData)) is { } bwStamp)
         {
             bwStamp.X = ia.rect.LLX;
             bwStamp.Y = ia.rect.LLY;
             bwStamp.DisplayWidth = ia.rect.Width;
             bwStamp.DisplayHeight = ia.rect.Height;
-            bwStamp.CompensatePageRotation = true;
+            bwStamp.CompensatePageRotation = compensateRotation;
             bwStamp.ClipBox = clip;
             bwStamp.ApplyTo(this);
             return;
         }
 
+        // Raw RGB samples are read at the rectangle's size, so their size is part of what they decode to.
+        var rawSize = ia.imageData.Length == (int)ia.rect.Width * (int)ia.rect.Height * RawRgbComponents
+            ? $"{(int)ia.rect.Width}x{(int)ia.rect.Height}" : string.Empty;
+        ia.stamp = PlacedPicture(ia.imageData, rawSize, () => DecodeAddedImage(ia))!;
+
+        ia.dx = ia.rect.LLX;
+        ia.dy = ia.rect.LLY;
+        ia.dw = ia.rect.Width;
+        ia.dh = ia.rect.Height;
+        if (aspectFit && ia.stamp.PixelWidth > 0 && ia.stamp.PixelHeight > 0 && ia.dw > 0 && ia.dh > 0)
+        {
+            var scale = System.Math.Min(ia.dw / ia.stamp.PixelWidth, ia.dh / ia.stamp.PixelHeight);
+            var fitW = ia.stamp.PixelWidth * scale;
+            var fitH = ia.stamp.PixelHeight * scale;
+            ia.dx += (ia.dw - fitW) / 2;
+            ia.dy += (ia.dh - fitH) / 2;
+            ia.dw = fitW; ia.dh = fitH;
+        }
+        ia.stamp.X = ia.dx;
+        ia.stamp.Y = ia.dy;
+        ia.stamp.DisplayWidth = ia.dw;
+        ia.stamp.DisplayHeight = ia.dh;
+        ia.stamp.CompensatePageRotation = compensateRotation;
+        ia.stamp.ClipBox = clip;
+        ia.stamp.ApplyTo(this);
+    }
+
+    /// <summary>The picture of an added image, decoded by the format its bytes announce.</summary>
+    private static ImageStamp DecodeAddedImage(ImageAddState ia)
+    {
         ia.isJpeg = ia.imageData.Length >= 2 && ia.imageData[0] == 0xFF && ia.imageData[1] == 0xD8;
         ia.isPng = ia.imageData.Length >= 4 && ia.imageData[0] == 0x89 && ia.imageData[1] == 0x50
                     && ia.imageData[2] == 0x4E && ia.imageData[3] == 0x47;
@@ -83,41 +115,22 @@ public sealed partial class Page
         {
             DecodeImageStamp(ia);
         }
-
-        ia.dx = ia.rect.LLX;
-        ia.dy = ia.rect.LLY;
-        ia.dw = ia.rect.Width;
-        ia.dh = ia.rect.Height;
-        if (aspectFit && ia.stamp.PixelWidth > 0 && ia.stamp.PixelHeight > 0 && ia.dw > 0 && ia.dh > 0)
-        {
-            var scale = System.Math.Min(ia.dw / ia.stamp.PixelWidth, ia.dh / ia.stamp.PixelHeight);
-            var fitW = ia.stamp.PixelWidth * scale;
-            var fitH = ia.stamp.PixelHeight * scale;
-            ia.dx += (ia.dw - fitW) / 2;
-            ia.dy += (ia.dh - fitH) / 2;
-            ia.dw = fitW; ia.dh = fitH;
-        }
-        ia.stamp.X = ia.dx;
-        ia.stamp.Y = ia.dy;
-        ia.stamp.DisplayWidth = ia.dw;
-        ia.stamp.DisplayHeight = ia.dh;
-        ia.stamp.CompensatePageRotation = true;
-        ia.stamp.ClipBox = clip;
-        ia.stamp.ApplyTo(this);
+        return ia.stamp;
     }
 
-    /// <summary>Place a pre-encoded CCITT Group 4 (1-bit) image at the given rectangle —
-    /// the <see cref="Image.IsBlackWhite"/> fast path that embeds a bilevel TIFF's G4
-    /// strip without re-encoding.</summary>
-    internal void AddCcittImage(byte[] g4Data, int pixelWidth, int pixelHeight, bool blackIs1, Rectangle rect)
-    {
-        var stamp = ImageStamp.FromCcittG4(g4Data, pixelWidth, pixelHeight, blackIs1);
-        stamp.X = rect.LLX;
-        stamp.Y = rect.LLY;
-        stamp.DisplayWidth = rect.Width;
-        stamp.DisplayHeight = rect.Height;
-        stamp.ApplyTo(this);
-    }
+    /// <summary>A stamp of the picture <paramref name="source"/> holds: one this document already decoded from the
+    /// same bytes when there is one, so placing it again draws the image XObject embedded the first time.</summary>
+    internal ImageStamp? PlacedPicture(byte[] source, string variant, Func<ImageStamp?> decode) =>
+        _reader.OwnerDocument is { } doc ? doc.PlacedPicture(source, variant, decode) : decode();
+
+    private const string BlackWhiteVariant = "bilevel";
+    private const int RawRgbComponents = 3;
+
+    /// <summary>Draw an image the generator laid out. Its rectangle is in the media layout frame
+    /// (see <see cref="LayoutFrameHeight"/>) like the text around it, so it is not re-mapped through
+    /// the page's /Rotate as a caller's displayed-page rectangle is.</summary>
+    internal void AddLayoutImage(byte[] imageData, Rectangle rect, bool blackWhite = false)
+        => AddImage(imageData, rect, blackWhite, aspectFit: false, compensateRotation: false);
 
     /// <summary>
     /// Add an image from a stream to this page at the specified position and size.
@@ -195,10 +208,24 @@ public sealed partial class Page
         AddImage(hocr, imageStream, imageRect);
     }
 
-    /// <summary>Fraction of the image's pixels that are not pure white (any
-    /// channel below max), on the image's own pixel grid — the metric
-    /// <see cref="IsBlank"/> uses. An inverting /Decode flips the interpretation.</summary>
-    private double NonWhiteImageFraction(PdfDictionary dict, byte[] data, bool inline)
+    /// <summary>Place a pre-encoded CCITT Group 4 (1-bit) image at the given rectangle —
+    /// the <see cref="Image.IsBlackWhite"/> fast path that embeds a bilevel TIFF's G4
+    /// strip without re-encoding.</summary>
+    internal void AddCcittImage(byte[] g4Data, int pixelWidth, int pixelHeight, bool blackIs1, Rectangle rect)
+    {
+        var stamp = ImageStamp.FromCcittG4(g4Data, pixelWidth, pixelHeight, blackIs1);
+        stamp.X = rect.LLX;
+        stamp.Y = rect.LLY;
+        stamp.DisplayWidth = rect.Width;
+        stamp.DisplayHeight = rect.Height;
+        stamp.ApplyTo(this);
+    }
+
+    /// <summary>Fraction of the image's pixels darker than near-white on some channel, on the
+    /// image's own pixel grid, read from its raw samples - the metric <see cref="IsBlank"/> takes
+    /// for an inline image, a stencil mask, and an image <see cref="ImageInkFraction"/> cannot
+    /// read. An inverting /Decode flips the interpretation.</summary>
+    private double NonWhiteImageFraction(PdfDictionary dict, byte[] data)
     {
         int W(string a, string b) => (int)(dict.Get(a) is not null ? dict.GetInt(a) : dict.GetInt(b));
         var w = W("Width", "W");
@@ -229,7 +256,7 @@ public sealed partial class Page
                 {
                     var o = i * n;
                     for (var c = 0; c < n; c++)
-                        if (px[o + c] < 255) { nonWhite++; break; }
+                        if (px[o + c] < NearWhiteLevel) { nonWhite++; break; }
                 }
                 break;
             }
@@ -243,7 +270,7 @@ public sealed partial class Page
                 {
                     var o = i * n;
                     for (var c = 0; c < n; c++)
-                        if (px[o + c] < 255) { nonWhite++; break; }
+                        if (px[o + c] < NearWhiteLevel) { nonWhite++; break; }
                 }
                 break;
             }
@@ -266,12 +293,11 @@ public sealed partial class Page
                 {
                     var rowLen = w * comps;
                     if ((long)rowLen * h > data.Length) return 0;
-                    var whiteVal = decodeInverts ? 0 : 255;
                     for (long i = 0; i < total; i++)
                     {
                         var o = i * comps;
                         for (var c = 0; c < comps; c++)
-                            if (data[o + c] != whiteVal) { nonWhite++; break; }
+                            if ((decodeInverts ? byte.MaxValue - data[o + c] : data[o + c]) < NearWhiteLevel) { nonWhite++; break; }
                     }
                 }
                 else if (bpc == 1 && comps == 1)

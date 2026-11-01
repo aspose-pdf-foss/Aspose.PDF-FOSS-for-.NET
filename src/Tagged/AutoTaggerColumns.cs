@@ -162,7 +162,7 @@ internal static partial class AutoTagger
             // of its title (under the indented lines of a list item), and reads on with its row - the rows read as they come.
             if (bounds.Count == 1 && pieces.Where(p => p.Any(x => x.Col == 0 && Texted(x.Piece))).ToList() is [var numbered]
                 && numbered.Where(x => x.Col == 0 && Texted(x.Piece)).ToList() is [var number]
-                && SectionNumber.IsMatch(string.Concat(number.Piece.Frags.Select(f => f.Text)).Trim())
+                && SafeRegex.IsMatch(SectionNumber, string.Concat(number.Piece.Frags.Select(f => f.Text)).Trim())
                 && numbered.Any(x => x.Col == 1 && Texted(x.Piece)))
             {
                 result.Add(rows[i]);
@@ -243,11 +243,20 @@ internal static partial class AutoTagger
             for (var k = 1; k < next.Count; k++)
                 if (next[k].L - next[k - 1].R >= gutter && TextLeft(k - 1) && TextRight(k))
                     gaps.Add((next[k - 1].R, next[k].L));
-            // The gap after a list's labels is no gutter: on every row with text left of it, that
-            // text is the row's label and the row's body starts where the gap ends.
-            gaps.RemoveAll(gap => Enumerable.Range(start, j - start + 1).All(r =>
-                !rows[r].Frags.Any(f => !string.IsNullOrWhiteSpace(f.Text) && (f.X + f.R) / 2 < gap.L)
-                || (ListBodyX(rows[r]) is { } bodyX && Math.Abs(bodyX - gap.R) <= AlignTolerance)));
+            // The gap after a list's labels is no gutter: on every row with text on both sides of it, the text left of
+            // it is the row's label and the row's body starts where the gap ends - or it is the row's heading label,
+            // set apart from the title at a tab stop (2. Titel:  Strafbehörden; Art. 13  Gerichte). A row with text on
+            // one side only - a paragraph's short last line over the labels, a label alone at the foot of a page, the
+            // item's text on the next - tells nothing of the gap; rows on one side each (a title beside a block of
+            // lines on baselines of their own) keep it.
+            gaps.RemoveAll(gap =>
+            {
+                bool Left(Line l) => l.Frags.Any(f => !string.IsNullOrWhiteSpace(f.Text) && (f.X + f.R) / 2 < gap.L);
+                bool Right(Line l) => l.Frags.Any(f => !string.IsNullOrWhiteSpace(f.Text) && (f.X + f.R) / 2 > gap.R);
+                bool Labelled(Line l) => (ListBodyX(l) is { } bodyX && Math.Abs(bodyX - gap.R) <= AlignTolerance) || LabelledLeft(l, gap.L);
+                var band = Enumerable.Range(start, j - start + 1).Select(r => rows[r]).ToList();
+                return band.Any(l => Left(l) && Right(l)) && band.All(l => !Left(l) || !Right(l) || Labelled(l));
+            });
             if (gaps.Count == 0)
             {
                 // Before the channel shows, the first rows may hold one column's text only
@@ -270,6 +279,17 @@ internal static partial class AutoTagger
         }
         return (j, channels, lead, false);
     }
+
+    // A heading's label set apart from its title at a tab stop: a few words ending in a colon (a chapter's kind and
+    // number - "2. Titel:"), or a number with a word before or after it (an article's - "Art. 13", "2 Satz").
+    private static readonly System.Text.RegularExpressions.Regex HeadingLabel = new(
+        @"^(?:\S+\s+){0,2}\S+:$|^(?:\p{L}{1,4}\.?\s*)?\d{1,3}[a-z]?\.?(?:\s+\p{L}+)?$",
+        System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
+
+    /// <summary>Whether the text of <paramref name="row"/> left of <paramref name="x"/> is a heading's label (see
+    /// <see cref="HeadingLabel"/>).</summary>
+    private static bool LabelledLeft(Line row, double x)
+        => SafeRegex.IsMatch(HeadingLabel, string.Join(" ", row.Frags.Where(f => (f.X + f.R) / 2 < x).Select(f => f.Text)).Trim());
 
     // Two sides are set in sizes of their own when their largest sizes differ by this much (points).
     private const double SizeApart = 1.0;

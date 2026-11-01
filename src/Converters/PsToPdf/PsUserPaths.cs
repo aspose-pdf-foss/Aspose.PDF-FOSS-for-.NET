@@ -46,7 +46,7 @@ internal static class PsUserPaths
         }
 
         var array = path.AsArray;
-        if (array is null) throw new PsErrorSignal("typecheck");
+        if (array is null) throw new PsErrorException("typecheck");
         if (TryBuildEncoded(i, array)) return;
         for (var k = 0; k < array.Length; k++)
         {

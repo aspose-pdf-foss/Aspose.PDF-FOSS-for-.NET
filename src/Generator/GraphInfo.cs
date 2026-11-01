@@ -87,7 +87,9 @@ public sealed class GraphInfo
 
     internal double[]? DashPattern
     {
+#pragma warning disable S2365 // a converted copy per read; callers do not hold it
         get => DashLengths ?? DashArray?.Select(d => (double)d).ToArray();
+#pragma warning restore S2365
         set => DashArray = value?.Select(d => (int)d).ToArray();
     }
 

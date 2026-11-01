@@ -15,7 +15,7 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
         {
             ol.flatItems.Add((item, ol.baseObjNum++));
             if (item.Children.Count > 0)
-                Flatten(ol, (IReadOnlyList<OutlineItem>)item.Children);
+                Flatten(ol, item.Children);
         }
     }
 
@@ -36,12 +36,12 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
 
         // Prev / Next siblings
         var siblings = parentItem is not null
-            ? (IReadOnlyList<OutlineItem>)parentItem.Children
+            ? parentItem.Children
             : (IReadOnlyList<OutlineItem>)_items!;
-        var idx = IndexOf(siblings!, item);
+        var idx = IndexOf(siblings, item);
         if (idx > 0)
-            dict.Set("Prev", new PdfIndirectRef(ol.objMap[siblings![idx - 1]], 0));
-        if (idx < siblings!.Count - 1)
+            dict.Set("Prev", new PdfIndirectRef(ol.objMap[siblings[idx - 1]], 0));
+        if (idx < siblings.Count - 1)
             dict.Set("Next", new PdfIndirectRef(ol.objMap[siblings[idx + 1]], 0));
 
         // First / Last children

@@ -14,12 +14,12 @@ private sealed class ReportRegionState
     // face's normal 17 px line = 12.75 pt. Every distance below is an empirical
     // constant of the dialect, holding on both fieldsets of the region:
     //   FsLegendDrop  — frame top → legend baseline: the browser opens the frame at
-    //                   the legend's mid-cap, so the border crosses its letters;
-    //   FsLegendToRow — legend baseline → first row baseline (the frame's padding
-    //                   plus one row seat);
-    //   FsPadBottom   — last row baseline → frame bottom (padding + descent);
-    //   FsGap         — frame bottom → the next frame's top (8 css px);
-    //   CheckRowPitch — a row holding an <input> takes the input's taller line box.
+    //                   the legend's mid-cap, so the border crosses its letters; FsLegendToRow
+    //   — legend baseline → first row baseline (the frame's padding
+    //                   plus one row seat); FsPadBottom
+    //   — last row baseline → frame bottom (padding + descent); FsGap
+    //   — frame bottom → the next frame's top (8 css px); CheckRowPitch
+    //   — a row holding an <input> takes the input's taller line box.
     public double fs;
     public double pitch;
     public bool draw;

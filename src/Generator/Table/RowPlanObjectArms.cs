@@ -17,8 +17,27 @@ public partial class Table
         var ri = new RowPlanImageState();
         if (ResolveImageSource(ri, cellImg, pc, rp, col, colWidths, svgFillHeight) is { } resolveImageSourceResult) return resolveImageSourceResult;
         ResolveImageDisplaySize(ri, cellImg, pc, svgFillHeight);
+        CapImageToBoxShare(ri, cellImg, pc);
         BookImageLines(ri, cellImg, pc, rp, col, row);
         return true;
+    }
+
+    /// <summary>A picture capped to a share of its cell's text box (`max-width: 100%`), or to a length, whose box
+    /// would draw wider shrinks to the cap, its height by the same factor. A vector letterboxed in its declared box
+    /// keeps the box's height: the box narrows to the cap, and the drawing shrinks only where it is wider
+    /// than the cap and stays centred in it.</summary>
+    private static void CapImageToBoxShare(RowPlanImageState ri, Image cellImg, RowPlanColumnState pc)
+    {
+        var cap = pc.availWidth * cellImg.BoxMaxWidthFraction;
+        if (cellImg.MaxDrawWidth > 0 && (cap <= 0 || cellImg.MaxDrawWidth < cap)) cap = cellImg.MaxDrawWidth;
+        var boxW = ri.dispW + 2 * ri.imgXOffset;
+        if (cap <= 0 || boxW <= cap) return;
+        if (ri.dispW > cap)
+        {
+            ri.dispH *= cap / ri.dispW;
+            ri.dispW = cap;
+        }
+        ri.imgXOffset = (cap - ri.dispW) / 2;
     }
 
     /// <summary>A picture riding a <see cref="FloatingBox"/> seated in a cell: out of the cell's flow, it books
@@ -42,20 +61,14 @@ public partial class Table
         // Generator dialect: the inner grid renders IN PLACE as a table of
         // its own (a logo grid's bordered cells and
         // image draw inside the host cell, starting at the host's inner
-        // corner). A measure pass at the host cell's inner box sizes it;
-        // one exact-height reserve line holds its place in the row.
-        if (GeneratorCellModel && _buildPage is not null)
-        {
-            if (PlanGeneratorCellInnerTable(inner, pc, rp, col, row) is { } planGeneratorCellInnerTableResult) return planGeneratorCellInnerTableResult;
-        }
+        // corner). A measure pass at the host cell's inner box sizes it; one
+        // exact-height reserve line holds its place in the row.
+        if (GeneratorCellModel && _buildPage is not null && PlanGeneratorCellInnerTable(inner, pc, rp, col, row) is { } planGeneratorCellInnerTableResult) return planGeneratorCellInnerTableResult;
         // The REAL slice pass (opt-in): measure the inner grid at the
         // cell's content width and reserve its height; the draw pass
         // renders it in place. Falls back to the legacy flatten when the
         // measurement cannot run.
-        if (NestedTableRender && _buildPage is not null)
-        {
-            if (PlanNestedRenderInnerTable(inner, pc, rp, col) is { } planNestedRenderInnerTableResult) return planNestedRenderInnerTableResult;
-        }
+        if (NestedTableRender && _buildPage is not null && PlanNestedRenderInnerTable(inner, pc, rp, col) is { } planNestedRenderInnerTableResult) return planNestedRenderInnerTableResult;
         var innerRows = inner.Rows;
         Consider(rp, pc.defaultFontSize * 1.2, pc.defaultFontSize);
         for (int ri = 0; ri < innerRows.Count; ri++)

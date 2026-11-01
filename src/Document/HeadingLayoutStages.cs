@@ -38,7 +38,7 @@ public sealed partial class Document : IDisposable
     /// <summary>The stages of the heading layout: the destination link and the outline copy.</summary>
     private void LinkHeadingDestination(HeadingLayoutState hl, double height)
     {
-        var linkRect = new Rectangle(hl.marginLeft, hl.headingY - height, hl.headingPage.Width - hl.marginRight, hl.headingY);
+        var linkRect = new Rectangle(hl.marginLeft, hl.headingY - height, hl.headingPage.LayoutFrameWidth - hl.marginRight, hl.headingY);
         var destPageIdx = 0;
         for (int pi = 1; pi <= PageCount; pi++)
         {

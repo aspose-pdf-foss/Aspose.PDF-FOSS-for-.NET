@@ -52,8 +52,8 @@ namespace Aspose.Pdf.Facades
         /// <summary>Image extraction strategy.</summary>
         public ExtractImageMode ExtractImageMode { get; set; } = ExtractImageMode.DefinedInResources;
 
-        /// <summary>Rendering resolution for image extraction (DPI). Stored
-        /// for API compatibility; the FOSS image-extraction stubs don't consult it.</summary>
+        /// <summary>Resolution (dpi) written as the density of each extracted image file; the pixels are
+        /// the image's own.</summary>
         public int Resolution { get; set; } = 150;
 
         /// <summary>True when the most recently extracted text contains a
@@ -151,7 +151,7 @@ namespace Aspose.Pdf.Facades
         /// <summary>Apply the facade's text post-processing (RTL line binding, ligature
         /// decomposition, symbol-PUA folding, control-char strip) — the same transform
         /// ExtractText runs, so GetNextPageText output matches the whole-document result.</summary>
-        private string PostProcess(string raw) =>
+        private static string PostProcess(string raw) =>
             StripControlChars(FoldSymbolPua(DecomposeLigatures(ReorderRtlLines(raw))));
 
         /// <summary>The facade removes control characters a glyph's ToUnicode may map to
@@ -162,13 +162,11 @@ namespace Aspose.Pdf.Facades
         {
             if (string.IsNullOrEmpty(text)) return text;
             bool has = false;
-            foreach (var c in text)
-                if (c < ' ' && c is not ('\t' or '\n' or '\r' or '\f')) { has = true; break; }
+            if (text.Any(c => c < ' ' && c is not ('\t' or '\n' or '\r' or '\f'))) { has = true; }
             if (!has) return text;
             var sb = new System.Text.StringBuilder(text.Length);
-            foreach (var c in text)
-                if (c >= ' ' || c is '\t' or '\n' or '\r' or '\f')
-                    sb.Append(c);
+            foreach (var c in text.Where(c => c >= ' ' || c is '\t' or '\n' or '\r' or '\f'))
+                sb.Append(c);
             return sb.ToString();
         }
 
@@ -191,6 +189,22 @@ namespace Aspose.Pdf.Facades
             _nextPageCursor = from;
         }
 
+        /// <summary>Extract text from the bound PDF and save it to the given file (UTF-16 LE bytes).</summary>
+        public void ExtractText(string outputFile)
+        {
+            ExtractText();
+            File.WriteAllBytes(outputFile, Encoding.Unicode.GetBytes(_extractedText!));
+        }
+
+        /// <summary>Extract text from the bound PDF using the given encoding.
+        /// The shape is <c>ExtractText(Encoding)</c>; the encoding
+        /// affects how bytes are written when calling <see cref="GetText(Stream)"/>.</summary>
+        public void ExtractText(Encoding encoding)
+        {
+            _getTextEncoding = encoding ?? Encoding.Unicode;
+            ExtractText();
+        }
+
         /// <summary>The facade renders symbol-font glyphs that decode into the
         /// U+F000–U+F0FF private-use mirror range (a symbolic TrueType cmap's
         /// 0xF0xx block — Wingdings/Symbol bullets and dingbats) as a plain
@@ -200,8 +214,7 @@ namespace Aspose.Pdf.Facades
         {
             if (string.IsNullOrEmpty(text)) return text;
             bool has = false;
-            foreach (var c in text)
-                if (c >= '' && c <= '') { has = true; break; }
+            if (text.Any(c => c >= '' && c <= '')) { has = true; }
             if (!has) return text;
             var sb = new System.Text.StringBuilder(text.Length);
             foreach (var c in text)
@@ -216,8 +229,7 @@ namespace Aspose.Pdf.Facades
         {
             if (string.IsNullOrEmpty(text)) return text;
             bool has = false;
-            foreach (var c in text)
-                if (c >= 'ﬀ' && c <= 'ﬆ') { has = true; break; }
+            if (text.Any(c => c >= 'ﬀ' && c <= 'ﬆ')) { has = true; }
             if (!has) return text;
             var sb = new System.Text.StringBuilder(text.Length + 16);
             foreach (var c in text)
@@ -249,8 +261,8 @@ namespace Aspose.Pdf.Facades
             // The absorber's line assembly now emits RTL lines in LOGICAL word order
             // already; reversing here would double-reverse them. What remains is a
             // neutral-binding correction: a colon that trails an RTL word visually
-            // (drawn to its left) surfaces glued to the FOLLOWING word ("שם :אורי");
-            // logically it binds to the preceding word ("שם: אורי").
+            // (drawn to its left) surfaces glued to the FOLLOWING word ("שם :אורי"); logically
+            // it binds to the preceding word ("שם: אורי").
             if (string.IsNullOrEmpty(text)) return text;
             var lines = text.Split('\n');
             var changed = false;
@@ -260,7 +272,7 @@ namespace Aspose.Pdf.Facades
                 var cr = line.EndsWith("\r", StringComparison.Ordinal) ? "\r" : "";
                 var core = cr.Length > 0 ? line[..^1] : line;
                 if (!BaseDirectionIsRtl(core)) continue;
-                var fixedCore = System.Text.RegularExpressions.Regex.Replace(
+                var fixedCore = SafeRegex.Replace(
                     core, @"(?<=\S) :(?=\S)", ": ");
                 if (!ReferenceEquals(fixedCore, core) && fixedCore != core)
                 {
@@ -287,35 +299,6 @@ namespace Aspose.Pdf.Facades
         private static bool IsStrongLtr(char c) =>
             char.IsLetter(c) && !Aspose.Pdf.Text.BidiReorderer.IsRtlChar(c);
 
-        /// <summary>A word is treated as left-to-right when its first strong-or-numeric
-        /// character is Latin/number; a word of only neutrals (punctuation) is not LTR, so
-        /// it flows with the RTL reversal.</summary>
-        private static bool WordIsLtr(string w)
-        {
-            foreach (var c in w)
-            {
-                if (Aspose.Pdf.Text.BidiReorderer.IsRtlChar(c)) return false;
-                if (IsStrongLtr(c) || (c >= '0' && c <= '9')) return true;
-            }
-            return false;
-        }
-
-        /// <summary>Extract text from the bound PDF and save it to the given file (UTF-16 LE bytes).</summary>
-        public void ExtractText(string outputFile)
-        {
-            ExtractText();
-            File.WriteAllBytes(outputFile, Encoding.Unicode.GetBytes(_extractedText!));
-        }
-
-        /// <summary>Extract text from the bound PDF using the given encoding.
-        /// The shape is <c>ExtractText(Encoding)</c>; the encoding
-        /// affects how bytes are written when calling <see cref="GetText(Stream)"/>.</summary>
-        public void ExtractText(Encoding encoding)
-        {
-            _getTextEncoding = encoding ?? Encoding.Unicode;
-            ExtractText();
-        }
-
         private Encoding _getTextEncoding = Encoding.Unicode;
 
         /// <summary>Writes the extracted text as bytes into <paramref name="outputStream"/>,
@@ -337,8 +320,8 @@ namespace Aspose.Pdf.Facades
             if (filterNotAscii)
             {
                 var sb = new System.Text.StringBuilder(text.Length);
-                foreach (var ch in text)
-                    if (ch < 128) sb.Append(ch);
+                foreach (var ch in text.Where(ch => ch < 128))
+                    sb.Append(ch);
                 text = sb.ToString();
             }
             var bytes = _getTextEncoding.GetBytes(text);
@@ -444,6 +427,23 @@ namespace Aspose.Pdf.Facades
             _imageCursor = 0;
         }
 
+        /// <summary>Extract every image to the given directory, naming files
+        /// <c>image_N.jpg</c> for JPEG sources and <c>image_N.png</c> otherwise.</summary>
+        public void ExtractImage(string outputDirectory)
+        {
+            ExtractImage();
+            if (!string.IsNullOrEmpty(outputDirectory) && !Directory.Exists(outputDirectory))
+                Directory.CreateDirectory(outputDirectory);
+            var idx = 0;
+            while (HasNextImage())
+            {
+                var img = _extractedImages![_imageCursor];
+                var ext = img.IsJpeg ? "jpg" : "png";
+                var path = Path.Combine(outputDirectory ?? string.Empty, $"image_{idx++}.{ext}");
+                GetNextImage(path);
+            }
+        }
+
         /// <summary>Split a resource dictionary's /XObject entries into forms and images, in dict order.</summary>
         private static (System.Collections.Generic.List<(string name, Core.PdfStream stream)> forms,
                         System.Collections.Generic.List<(string name, Core.PdfStream stream)> images)
@@ -521,8 +521,8 @@ namespace Aspose.Pdf.Facades
             if (patternDict is null) return;
             foreach (var key in patternDict.Keys)
             {
-                // Tiling patterns are streams (PatternType 1) with /Resources;
-                // shading patterns (PatternType 2) resolve to null and are skipped.
+                // Tiling patterns are streams (PatternType 1) with /Resources; shading
+                // patterns (PatternType 2) resolve to null and are skipped.
                 var pat = reader.ResolveStream(patternDict.Get(key));
                 if (pat is null || !seen.Add(pat)) continue;
                 var pres = reader.ResolveDict(pat.Dict.Get("Resources"));
@@ -606,23 +606,6 @@ namespace Aspose.Pdf.Facades
             }
         }
 
-        /// <summary>Extract every image to the given directory, naming files
-        /// <c>image_N.jpg</c> for JPEG sources and <c>image_N.png</c> otherwise.</summary>
-        public void ExtractImage(string outputDirectory)
-        {
-            ExtractImage();
-            if (!string.IsNullOrEmpty(outputDirectory) && !Directory.Exists(outputDirectory))
-                Directory.CreateDirectory(outputDirectory);
-            var idx = 0;
-            while (HasNextImage())
-            {
-                var img = _extractedImages![_imageCursor];
-                var ext = img.IsJpeg ? "jpg" : "png";
-                var path = Path.Combine(outputDirectory ?? string.Empty, $"image_{idx++}.{ext}");
-                GetNextImage(path);
-            }
-        }
-
         /// <summary>True while <see cref="GetNextImage(string)"/> has a remaining image to write.</summary>
         public bool HasNextImage() =>
             _extractedImages is not null && _imageCursor < _extractedImages.Count;
@@ -631,7 +614,7 @@ namespace Aspose.Pdf.Facades
         public bool GetNextImage(Stream outputStream)
         {
             if (!HasNextImage()) return false;
-            _extractedImages![_imageCursor++].Save(outputStream);
+            _extractedImages![_imageCursor++].SaveAtResolution(outputStream, null, Resolution);
             return true;
         }
 
@@ -639,14 +622,14 @@ namespace Aspose.Pdf.Facades
         public bool GetNextImage(string outputFile)
         {
             if (!HasNextImage()) return false;
-            _extractedImages![_imageCursor++].Save(outputFile);
+            _extractedImages![_imageCursor++].SaveAtResolution(outputFile, Resolution);
             return true;
         }
 
         public bool GetNextImage(Stream outputStream, System.Drawing.Imaging.ImageFormat format)
         {
             if (!HasNextImage()) return false;
-            _extractedImages![_imageCursor++].Save(outputStream, format);
+            _extractedImages![_imageCursor++].SaveAtResolution(outputStream, format, Resolution);
             return true;
         }
 
@@ -654,7 +637,7 @@ namespace Aspose.Pdf.Facades
         {
             if (!HasNextImage()) return false;
             using var fs = File.Create(outputFile);
-            _extractedImages![_imageCursor++].Save(fs, format);
+            _extractedImages![_imageCursor++].SaveAtResolution(fs, format, Resolution);
             return true;
         }
 
@@ -683,9 +666,9 @@ namespace Aspose.Pdf.Facades
             var seen = new System.Collections.Generic.HashSet<Aspose.Pdf.Core.PdfDictionary>(
                 System.Collections.Generic.ReferenceEqualityComparer.Instance);
             foreach (var f in list) seen.Add(f.Dict);
-            foreach (var page in _document.Pages)
+            foreach (var annotations in _document.Pages.Select(page => page.Annotations))
             {
-                var annots = page.Annotations;
+                var annots = annotations;
                 for (var i = 1; i <= annots.Count; i++)
                 {
                     if (annots[i] is Aspose.Pdf.Annotations.FileAttachmentAnnotation fa
@@ -768,7 +751,9 @@ namespace Aspose.Pdf.Facades
             {
                 var data = f.GetData();
                 if (data is null) continue;
-                var raw = f.Name ?? string.Empty;
+                // The Unicode name is the file's name where the document gives one: /F may be
+                // only its single-byte stand-in, with a dot for every letter it cannot spell.
+                var raw = string.IsNullOrEmpty(f.UnicodeName) ? f.Name ?? string.Empty : f.UnicodeName!;
                 // Normalise separators so Path.GetFileName picks up both '/'
                 // and '\' authored prefixes; then strip any remaining dotted
                 // path navigation that snuck through Path.GetFileName's logic.

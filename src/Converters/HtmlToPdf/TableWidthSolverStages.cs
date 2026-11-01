@@ -37,8 +37,8 @@ internal static partial class HtmlToPdfConverter
                         // …and the row floors at the pre box (lines + both
                         // margins) — a bottom margin alone does not grow it
                         var preLines = 0;
-                        foreach (var prePar in pc.Paragraphs)
-                            if (prePar is Text.TextFragment) preLines++;
+                        foreach (var prePar in pc.Paragraphs.Where(prePar => prePar is Text.TextFragment))
+                            preLines++;
                         // (short boxes only: a page-spanning pre must keep its
                         // natural height so the row can still paginate)
                         if (preLines is > 0 and <= 4)
@@ -110,6 +110,10 @@ internal static partial class HtmlToPdfConverter
         {
             FillDeclaredColumnWidths(ws, cw);
         }
+        else if (TryPinFixedLayoutColumns(ws))
+        {
+            // A fixed-layout table whose cells break their words lays out on its declared box alone.
+        }
         else if (ws.availWidthPt > 0 && ws.colModel.colMaxW.Count == ws.colModel.maxCols && ws.colModel.colMaxW.Count > 0
             && (ws.dwFormCells || ws.colModel.colMaxW.TrueForAll(w => w > 0)))
         {
@@ -119,6 +123,42 @@ internal static partial class HtmlToPdfConverter
         {
             ShareSheetEvenly(ws);
         }
+    }
+
+    /// <summary>CSS fixed table layout, taken where a cell breaks its words: a table declaring
+    /// <c>table-layout: fixed</c> and an absolute width lays its columns out on that box alone -
+    /// a declared column keeps its width, the others share the rest evenly, and no content floors
+    /// them (probed: a 100 px fixed table holds a 264 pt word in its one cell, broken into four
+    /// lines where the cell says break-word, left whole on one where it does not).</summary>
+    private static bool TryPinFixedLayoutColumns(TableWidthSolveState ws)
+    {
+        if (ws.colModel.colWidthsPt is not null || !ws.colModel.tableWidthDeclaredAbs
+            || ws.colModel.tableWidthDeclAbsPt <= 0 || ws.colModel.maxCols <= 0
+            || !ws.tblStyle.TryGetValue("table-layout", out var layout)
+            || !layout.Contains("fixed", StringComparison.OrdinalIgnoreCase)
+            || ws.colModel.colPctW.Exists(p => p > 0)
+            || !ws.table.Rows.Any(r => r.Cells.Any(c => c.HtmlBreakWord)))
+            return false;
+        var n = ws.colModel.maxCols;
+        var inner = ws.colModel.tableWidthDeclAbsPt - (n + 1) * ws.colModel.tblCellSpacingPt;
+        var widths = new double[n];
+        var declaredSum = 0.0;
+        var autoCols = 0;
+        for (var i = 0; i < n; i++)
+        {
+            widths[i] = i < ws.colModel.colDeclW.Count && ws.colModel.colDeclW[i] > 0
+                ? ws.colModel.colDeclW[i] + ws.colModel.cellExtraPt : 0;
+            if (widths[i] > 0) declaredSum += widths[i];
+            else autoCols++;
+        }
+        var share = autoCols > 0 ? Math.Max(0, inner - declaredSum) / autoCols : 0;
+        for (var i = 0; i < n; i++)
+            if (widths[i] <= 0) widths[i] = share;
+        ws.table.ColumnWidths = string.Join(" ",
+            widths.Select(w => w.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)));
+        ws.naturalWidthPt = ws.colModel.tableWidthDeclAbsPt;
+        ws.table.HtmlPreferredWidthPt = ws.colModel.tableWidthDeclAbsPt;
+        return true;
     }
 
     /// <summary>Percent and colgroup width models: when no explicit column widths exist, the declared percentages, the content minima and the available width settle the columns and the natural sheet width.</summary>
@@ -182,7 +222,7 @@ internal static partial class HtmlToPdfConverter
         // auto-widen. Squeeze it back inside — but in two tiers so a wide CONTENT
         // column is protected the way a browser's auto layout protects it:
         //   1. reclaim WASTE first — the width a column holds above its own
-        //      max-content (an empty spacer column allocated a few % it never fills);
+        //      max-content (an empty spacer column allocated a few % it never fills),
         //   2. only if that is not enough, squeeze the remaining above-min slack
         //      proportionally (the legacy behaviour).
         // Without tier 1 the big body column (huge %, huge slack-above-min) absorbs
@@ -243,13 +283,13 @@ internal static partial class HtmlToPdfConverter
         for (var i = 0; i < ws.colModel.maxCols; i++)
         {
             if (i > 0) sb.Append(' ');
-            var share = nestedAbsorb
-                ? (ws.colModel.nestedTableCols!.Contains(i)
+            double share;
+            if (nestedAbsorb)
+                share = (ws.colModel.nestedTableCols!.Contains(i)
                     ? Math.Max(0.01, (absorbBoxW - sumLabelMins) / absorbBoxW / ws.colModel.nestedTableCols.Count)
-                    : ws.colModel.colMinW[i] / absorbBoxW) * ws.colModel.tableWidthFrac * 100.0
-                : minShares
-                ? ws.colModel.tableWidthFrac * 100.0 * ws.colModel.colMinW[i] / sumMinCols
-                : ws.colModel.tableWidthFrac * 100.0 / ws.colModel.maxCols;
+                    : ws.colModel.colMinW[i] / absorbBoxW) * ws.colModel.tableWidthFrac * 100.0;
+            else if (minShares) share = ws.colModel.tableWidthFrac * 100.0 * ws.colModel.colMinW[i] / sumMinCols;
+            else share = ws.colModel.tableWidthFrac * 100.0 / ws.colModel.maxCols;
             sb.Append(share.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)).Append('%');
         }
         ws.table.ColumnWidths = sb.ToString();
@@ -261,7 +301,7 @@ internal static partial class HtmlToPdfConverter
         ws.sumMax = 0; foreach (var w in ws.colModel.colMaxW) ws.sumMax += w;
         ws.minPref = new List<double>(ws.colModel.colMinW);
         ws.sumPref = 0;
-        for (var i = 0; i < ws.minPref.Count; i++) { if (ws.colModel.colHdrW[i] > ws.minPref[i]) ws.minPref[i] = ws.colModel.colHdrW[i]; ws.sumPref += ws.minPref[i]; }
+        for (var i = 0; i < ws.minPref.Count; i++) { if (ws.colModel.colHdrW[i] > ws.minPref[i]) { ws.minPref[i] = ws.colModel.colHdrW[i]; } ws.sumPref += ws.minPref[i]; }
         ws.chosenMin = (ws.sumPref <= ws.availWidthPt) ? ws.minPref : ws.colModel.colMinW;
         ws.chosen = (ws.availWidthPt <= 0 || ws.sumMax <= ws.availWidthPt) ? ws.colModel.colMaxW : ws.chosenMin;
         // A declared cell width is honoured only while the table FITS its box — the
@@ -476,15 +516,16 @@ internal static partial class HtmlToPdfConverter
             if (i > 0) ws.sb.Append(' ');
             if (ws.emitPctCols)
             {
-                var share = ws.fillCol >= 0
-                    ? (i == ws.fillCol
+                double share;
+                if (ws.fillCol >= 0)
+                    share = i == ws.fillCol
                         ? Math.Max(0.01, 1.0 - ws.sumOtherMins / ws.emitBoxW)
-                        : ws.chosen[i] / ws.emitBoxW)
-                    : ws.lastAbsorbs
-                    ? (i == ws.chosen.Count - 1
+                        : ws.chosen[i] / ws.emitBoxW;
+                else if (ws.lastAbsorbs)
+                    share = i == ws.chosen.Count - 1
                         ? Math.Max(0.01, 1.0 - SumPrev(ws.chosen, i) / ws.emitBoxW)
-                        : ws.chosen[i] / ws.emitBoxW)
-                    : ws.chosen[i] / ws.sumChosenAll;
+                        : ws.chosen[i] / ws.emitBoxW;
+                else share = ws.chosen[i] / ws.sumChosenAll;
                 ws.sb.Append((share * 100.0 * ws.colModel.tableWidthFrac)
                     .ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)).Append('%');
             }
@@ -496,8 +537,8 @@ internal static partial class HtmlToPdfConverter
         // A chain-rule percent width (the `.Budget > table { width: 100% }`
         // idiom) resolves against its box at layout time and never sizes the
         // sheet — the reported natural is the PLAIN min-content floor sum
-        // (the multi-word `Period / Cost type` header wraps;
-        // single-word headers hold their width because one word
+        // (the multi-word `Period / Cost type` header wraps; single-word
+        // headers hold their width because one word
         // cannot wrap), the same rule the percent-column grids apply above.
         ws.table.HtmlPreferredWidthPt = ws.naturalWidthPt;
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_TABLEW") == "1")

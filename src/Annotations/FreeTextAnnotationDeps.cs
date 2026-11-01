@@ -34,8 +34,10 @@ public enum FreeTextIntent
 [System.Flags]
 public enum RichTextFontStyles
 {
+#pragma warning disable S2346 // public API: the published zero member
     /// <summary>No styles applied; clears existing styles when used as the only flag.</summary>
     ClearExisting = 0,
+#pragma warning restore S2346
 
     /// <summary>Bold weight.</summary>
     Bold = 1 << 0,

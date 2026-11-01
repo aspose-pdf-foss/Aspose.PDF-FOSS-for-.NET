@@ -83,14 +83,14 @@ public sealed partial class Document
                 Description = $"Font '{baseFont}' is not embedded.",
             });
 
-        var ttf = Text.SystemFontResolver.Resolve(baseFont);
-        if (ttf is null or { Length: 0 })
+        var ttf = CoveringFace(Text.SystemFontResolver.ResolveDocumentFont(baseFont), type0Dict, cidFont);
+        if (ttf is null)
         {
             var decoded = DecodeCjkBaseFontName(baseFont, type0Dict, cidFont);
             if (decoded != baseFont)
-                ttf = Text.SystemFontResolver.Resolve(decoded);
+                ttf = CoveringFace(Text.SystemFontResolver.ResolveDocumentFont(decoded), type0Dict, cidFont);
         }
-        if (ttf is null or { Length: 0 }) return;
+        if (ttf is null) return;
 
         try
         {
@@ -100,6 +100,33 @@ public sealed partial class Document
         catch { /* best-effort: leave the font as-is if embedding fails */ }
     }
 
+    /// <summary>The resolved face when it can draw the CID font's character collection, else null. A
+    /// name is not a face: "Gothic" under Adobe-Japan1 is a Japanese gothic, and the Latin Century
+    /// Gothic its file name leads to has none of its characters - every CID mapped to glyph 0 and the
+    /// text vanished. A collection is checked by one character of its script, and only where the
+    /// font's CMap selects its CIDs: under Identity-H/V the CIDs are the face's own glyph ids and the
+    /// collection a label.</summary>
+    private byte[]? CoveringFace(byte[]? ttf, PdfDictionary type0Dict, PdfDictionary cidFont)
+    {
+        if (ttf is null or { Length: 0 }) return null;
+        if (type0Dict.GetName("Encoding") is "Identity-H" or "Identity-V") return ttf;
+        var csi = _reader.ResolveDict(cidFont.Get("CIDSystemInfo"));
+        var ordering = csi?.Get("Ordering") switch { PdfString os => os.ToText(), PdfName on => on.Value, _ => null };
+        var probe = ordering switch
+        {
+            "Japan1" => JapaneseProbe,
+            "GB1" or "CNS1" => ChineseProbe,
+            "Korea1" or "KR" => KoreanProbe,
+            _ => null,
+        };
+        return probe is null || Text.FontRepository.CoversText(ttf, probe) ? ttf : null;
+    }
+
+    /// <summary>A character every face of the Japanese, Chinese and Korean collections draws.</summary>
+    private const string JapaneseProbe = "あ";
+    private const string ChineseProbe = "中";
+    private const string KoreanProbe = "가";
+
     /// <summary>Decode a legacy-codepage-mojibake /BaseFont ("ËÎÌå") to its script-native
     /// name (宋体) via the font's CMap codepage, then map the common CJK display names to
     /// their host font families (宋体 → SimSun). Returns the input unchanged when it has no
@@ -107,8 +134,7 @@ public sealed partial class Document
     private string DecodeCjkBaseFontName(string baseFont, PdfDictionary type0Dict, PdfDictionary cidFont)
     {
         var hasHigh = false;
-        foreach (var c in baseFont)
-            if (c > 0x7F) { hasHigh = true; break; }
+        if (baseFont.Any(c => c > 0x7F)) { hasHigh = true; }
         if (!hasHigh) return baseFont;
 
         var cp = Text.CidFontInfo.CodepageForCMapName(type0Dict.GetName("Encoding"));
@@ -116,17 +142,17 @@ public sealed partial class Document
         {
             var csi = _reader.ResolveDict(cidFont.Get("CIDSystemInfo"));
             var orderingObj = csi?.Get("Ordering");
-            var ordering = orderingObj is PdfString os ? os.ToText()
-                : (orderingObj is PdfName on ? on.Value : null);
+            var ordering = orderingObj switch { PdfString os => os.ToText(), PdfName on => on.Value, _ => null };
             cp = ordering switch { "CNS1" => 950, "GB1" => 936, "Japan1" => 932, "Korea1" or "KR" => 949, _ => 0 };
         }
         if (cp == 0) return baseFont;
 
         var sb = new System.Text.StringBuilder();
-        for (var i = 0; i < baseFont.Length; i++)
+        var i = 0;
+        while (i < baseFont.Length)
         {
             var c = baseFont[i];
-            if (c <= 0x7F || i + 1 >= baseFont.Length) { sb.Append(c); continue; }
+            if (c <= 0x7F || i + 1 >= baseFont.Length) { sb.Append(c); i++; continue; }
             var code = (c << 8) | (baseFont[i + 1] & 0xFF);
             if (Text.CidFontInfo.LegacyLookup(cp, code) is int u)
             {
@@ -134,6 +160,7 @@ public sealed partial class Document
                 i++;
             }
             else sb.Append(c);
+            i++;
         }
         var native = sb.ToString();
         return native switch
@@ -402,7 +429,9 @@ public sealed partial class Document
         pu.content = Compat.Latin1.GetString(pu.contentBytes);
 
         pu.converted = 0;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var key in pu.fonts.Keys.ToList())
+#pragma warning restore S3267
         {
             if (!ConvertPuaSymbolicFont(pu, key)) break;
         }

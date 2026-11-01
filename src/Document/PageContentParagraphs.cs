@@ -28,10 +28,18 @@ public sealed partial class Document : IDisposable
         lc.pl.fontName = null;
         lc.pl.pageMargin = lc.page.PageInfo?.Margin;
         lc.pl.docMargin = PageInfo?.Margin;
-        lc.pl.marginTop = lc.pl.pageMargin?.TopTouched    == true ? lc.pl.pageMargin!.Top    : lc.pl.docMargin?.TopTouched    == true ? lc.pl.docMargin!.Top    : 72;
-        lc.pl.marginBottom = lc.pl.pageMargin?.BottomTouched == true ? lc.pl.pageMargin!.Bottom : lc.pl.docMargin?.BottomTouched == true ? lc.pl.docMargin!.Bottom : 72;
-        lc.pl.marginLeft = lc.pl.pageMargin?.LeftTouched   == true ? lc.pl.pageMargin!.Left   : lc.pl.docMargin?.LeftTouched   == true ? lc.pl.docMargin!.Left   : 90;
-        lc.pl.marginRight = lc.pl.pageMargin?.RightTouched  == true ? lc.pl.pageMargin!.Right  : lc.pl.docMargin?.RightTouched  == true ? lc.pl.docMargin!.Right  : 90;
+        if (lc.pl.pageMargin?.TopTouched    == true) lc.pl.marginTop = lc.pl.pageMargin.Top;
+        else if (lc.pl.docMargin?.TopTouched    == true) lc.pl.marginTop = lc.pl.docMargin.Top;
+        else lc.pl.marginTop = 72;
+        if (lc.pl.pageMargin?.BottomTouched == true) lc.pl.marginBottom = lc.pl.pageMargin.Bottom;
+        else if (lc.pl.docMargin?.BottomTouched == true) lc.pl.marginBottom = lc.pl.docMargin.Bottom;
+        else lc.pl.marginBottom = 72;
+        if (lc.pl.pageMargin?.LeftTouched   == true) lc.pl.marginLeft = lc.pl.pageMargin.Left;
+        else if (lc.pl.docMargin?.LeftTouched   == true) lc.pl.marginLeft = lc.pl.docMargin.Left;
+        else lc.pl.marginLeft = 90;
+        if (lc.pl.pageMargin?.RightTouched  == true) lc.pl.marginRight = lc.pl.pageMargin.Right;
+        else if (lc.pl.docMargin?.RightTouched  == true) lc.pl.marginRight = lc.pl.docMargin.Right;
+        else lc.pl.marginRight = 90;
         lc.pl.layoutTopY = lc.page.LayoutFrameHeight;
         PrepareLayout(lc);
         lc.pl.tocTopY = null;
@@ -40,14 +48,14 @@ public sealed partial class Document : IDisposable
         lc.pl.tocColCount = 1;
         lc.pl.tocColLefts = System.Array.Empty<double>();
         lc.pl.tocColWidths = System.Array.Empty<double>();
-        LayoutTocHeader(lc.page, lc.pc, lc.pl);
+        LayoutTocHeader(lc.page, lc.pl);
 
         lc.pl.flow = new FlowLayout(lc.page, lc.pc.overflowPages, lc.pl.marginLeft, lc.pl.marginRight, lc.pl.marginTop, lc.pl.marginBottom, lc.pl.curY, EnableNotificationLogging);
         lc.pl.flowSlotStart = lc.pc.overflowPages.Count;
         if (lc.page.ColumnInfo is { ColumnCount: > 1 } columns)
         {
             var (lefts, widths) = BuildColumnGeometry(columns, lc.pl.marginLeft,
-                lc.page.Width - lc.pl.marginLeft - lc.pl.marginRight);
+                lc.page.LayoutFrameWidth - lc.pl.marginLeft - lc.pl.marginRight);
             lc.pl.flow.BeginColumns(lefts, widths);
         }
         // A page with an OnBeforePageGenerate handler: every page the flow
@@ -76,7 +84,8 @@ public sealed partial class Document : IDisposable
         lc.pl.tb = new Text.TextBuilder(lc.page);
         lc.pl.pendingInlineLineHeight = 0;
         lc.pl.renderedTables = new HashSet<Table>(ReferenceEqualityComparer.Instance);
-        lc.pl.paraList = lc.page.Paragraphs.ToList();
+        lc.pl.paraList = InZIndexOrder(lc.page.Paragraphs);
+        if (lc.pl.paraList.Count > 0) lc.page.LaidParagraphsTopZIndex = lc.pl.paraList[lc.pl.paraList.Count - 1].ZIndex;
         for (lc.paraIdx = 0; lc.paraIdx < lc.pl.paraList.Count; lc.paraIdx++)
         {
             if (!LayoutParagraphAt(lc)) break;
@@ -101,5 +110,16 @@ public sealed partial class Document : IDisposable
         if (lc.pl.flow.CurrentSlot < 0)
             lc.page.LayoutCursorY = lc.pl.flow.CurrentY;
         lc.page.Paragraphs.Clear();
+    }
+
+    /// <summary>The page's paragraphs in the order they are laid out and painted: ascending
+    /// <see cref="BaseParagraph.ZIndex"/>, added order among equals. A page where no index was
+    /// set keeps its added order without sorting.</summary>
+    private static List<BaseParagraph> InZIndexOrder(Paragraphs paragraphs)
+    {
+        var list = paragraphs.ToList();
+        if (list.TrueForAll(p => p.ZIndex == 0)) return list;
+        // OrderBy is stable: equal indices keep the order they were added in.
+        return list.OrderBy(p => p.ZIndex).ToList();
     }
 }

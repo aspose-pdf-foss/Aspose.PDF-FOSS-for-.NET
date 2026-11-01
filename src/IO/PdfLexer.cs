@@ -38,7 +38,9 @@ internal sealed class PdfLexer
     /// <summary>Drops the source buffer so it can be collected once the owning document is disposed.</summary>
     internal void ReleaseBuffer() => _data = Array.Empty<byte>();
 
+#pragma warning disable S2292 // the scanner cursor: the hot loop reads and bumps the field directly
     public long Position
+#pragma warning restore S2292
     {
         get => _pos;
         set => _pos = value;
@@ -47,6 +49,14 @@ internal sealed class PdfLexer
     public int Length => _data.Length;
 
     public byte ByteAt(long index) => _data[index];
+
+    /// <summary>A copy of <paramref name="count"/> bytes from <paramref name="start"/>.</summary>
+    internal byte[] CopyBytes(long start, int count)
+    {
+        var bytes = new byte[count];
+        Array.Copy(_data, start, bytes, 0, count);
+        return bytes;
+    }
 
     public Token NextToken()
     {
@@ -496,7 +506,7 @@ internal sealed class PdfLexer
 
         var wordLength = (int)(_pos - startPos);
         // Safety: if no characters were consumed but we're not at EOF, the current byte is
-        // a delimiter not handled by the outer switch (e.g. '}', ')' outside a string).
+        // a delimiter the outer switch does not handle - a closing brace or parenthesis outside a string.
         // Advance past it to prevent an infinite loop.
         if (wordLength == 0 && _pos < _data.Length)
             _pos++;

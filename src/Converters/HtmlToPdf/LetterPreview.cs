@@ -43,10 +43,10 @@ internal static partial class HtmlToPdfConverter
     private static Document? TryRenderLetterPreview(ConvertState cv)
     {
         var html = cv.html;
-        if (!Regex.IsMatch(html, "<table\\b[^>]*class\\s*=\\s*['\"]letterPreview['\"]", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "<td\\b[^>]*class\\s*=\\s*['\"]main['\"]", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "id\\s*=\\s*['\"]content['\"]", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "id\\s*=\\s*['\"]tdHeader1['\"]", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(html, "<table\\b[^>]*class\\s*=\\s*['\"]letterPreview['\"]", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "<td\\b[^>]*class\\s*=\\s*['\"]main['\"]", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "id\\s*=\\s*['\"]content['\"]", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "id\\s*=\\s*['\"]tdHeader1['\"]", RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor(LpFace) is not { } tm) return null;
         var lp = new LetterPreviewState
@@ -77,17 +77,17 @@ internal static partial class HtmlToPdfConverter
     private static bool LpParseLetter(LetterPreviewState lp)
     {
         var s = lp.html;
-        var thead = Regex.Match(s, "<thead\\b[^>]*>([\\s\\S]*?)</thead>", RegexOptions.IgnoreCase);
+        var thead = SafeRegex.Match(s, "<thead\\b[^>]*>([\\s\\S]*?)</thead>", RegexOptions.IgnoreCase);
         if (!thead.Success) return false;
-        foreach (Match th in Regex.Matches(thead.Groups[1].Value, "<th\\b([^>]*)>([\\s\\S]*?)</th>", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(thead.Groups[1].Value, "<th\\b([^>]*)>([\\s\\S]*?)</th>", RegexOptions.IgnoreCase).Select(th => th.Groups))
         {
-            var pct = Regex.Match(th.Groups[1].Value, "width\\s*:\\s*(\\d+(?:\\.\\d+)?)\\s*%", RegexOptions.IgnoreCase);
-            lp.thead.Add((LpFlat(th.Groups[2].Value),
+            var pct = SafeRegex.Match(groups[1].Value, "width\\s*:\\s*(\\d+(?:\\.\\d+)?)\\s*%", RegexOptions.IgnoreCase);
+            lp.thead.Add((LpFlat(groups[2].Value),
                 pct.Success ? double.Parse(pct.Groups[1].Value, lp.invc) / 100.0 : 0));
         }
-        var foot = Regex.Match(s, "<td\\b[^>]*id\\s*=\\s*['\"]tdFooter['\"][^>]*>([\\s\\S]*?)</td>", RegexOptions.IgnoreCase);
+        var foot = SafeRegex.Match(s, "<td\\b[^>]*id\\s*=\\s*['\"]tdFooter['\"][^>]*>([\\s\\S]*?)</td>", RegexOptions.IgnoreCase);
         lp.footer = foot.Success ? LpFlat(foot.Groups[1].Value) : "";
-        var content = Regex.Match(s, "<div\\b[^>]*id\\s*=\\s*['\"]content['\"][^>]*>", RegexOptions.IgnoreCase);
+        var content = SafeRegex.Match(s, "<div\\b[^>]*id\\s*=\\s*['\"]content['\"][^>]*>", RegexOptions.IgnoreCase);
         if (!content.Success) return false;
         var start = content.Index + content.Length;
         var inner = s[start..DivClose(s, start)];
@@ -95,14 +95,14 @@ internal static partial class HtmlToPdfConverter
         return lp.items.Count > 0;
     }
 
-    private static readonly Regex LpItemOpenRx = new("<(div|br|hr|table)\\b([^>]*)>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex LpItemOpenRx = new("<(div|br|hr|table)\\b([^>]*)>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static void LpParseContent(LetterPreviewState lp, string inner)
     {
         var pos = 0;
         while (pos < inner.Length)
         {
-            var m = LpItemOpenRx.Match(inner, pos);
+            var m = SafeRegex.Match(LpItemOpenRx, inner, pos);
             if (!m.Success) break;
             var tag = m.Groups[1].Value.ToLowerInvariant();
             var attrs = m.Groups[2].Value;
@@ -110,7 +110,7 @@ internal static partial class HtmlToPdfConverter
             if (tag == "br")
             {
                 // the clearing br ends the empty line beside the floats; only the next opens a line
-                if (!Regex.IsMatch(attrs, "clear\\s*:", RegexOptions.IgnoreCase)) lp.items.Add(new LpItem { Kind = LpKind.Br });
+                if (!SafeRegex.IsMatch(attrs, "clear\\s*:", RegexOptions.IgnoreCase)) lp.items.Add(new LpItem { Kind = LpKind.Br });
                 pos = after;
             }
             else if (tag == "hr") { lp.items.Add(new LpItem { Kind = LpKind.Hr }); pos = after; }
@@ -131,9 +131,9 @@ internal static partial class HtmlToPdfConverter
 
     private static void LpParseDiv(LetterPreviewState lp, string attrs, string body)
     {
-        var id = Regex.Match(attrs, "id\\s*=\\s*['\"]?([^'\"\\s>]+)", RegexOptions.IgnoreCase).Groups[1].Value;
-        var cls = Regex.Match(attrs, "class\\s*=\\s*['\"]?([^'\"\\s>]+)", RegexOptions.IgnoreCase).Groups[1].Value;
-        var hdr = Regex.Match(id, "^tdHeader([1-4])$");
+        var id = SafeRegex.Match(attrs, "id\\s*=\\s*['\"]?([^'\"\\s>]+)", RegexOptions.IgnoreCase).Groups[1].Value;
+        var cls = SafeRegex.Match(attrs, "class\\s*=\\s*['\"]?([^'\"\\s>]+)", RegexOptions.IgnoreCase).Groups[1].Value;
+        var hdr = SafeRegex.Match(id, "^tdHeader([1-4])$");
         var baseFs = LpFsAt(LpContentDepth);
         if (hdr.Success)
         {
@@ -148,13 +148,13 @@ internal static partial class HtmlToPdfConverter
         if (id == "divTTO") { LpParseTto(lp, body); return; }
         if (cls is "paragraph" or "paragraphOptional") { LpParseParagraph(lp, body); return; }
         // a styled div: centred at its inline em size, its own margin and padding when the style zeroes them
-        var em = Regex.Match(attrs, "font-size\\s*:\\s*(\\d+(?:\\.\\d+)?)\\s*em", RegexOptions.IgnoreCase);
-        var zeroBox = Regex.IsMatch(attrs, "margin\\s*:\\s*0", RegexOptions.IgnoreCase);
+        var em = SafeRegex.Match(attrs, "font-size\\s*:\\s*(\\d+(?:\\.\\d+)?)\\s*em", RegexOptions.IgnoreCase);
+        var zeroBox = SafeRegex.IsMatch(attrs, "margin\\s*:\\s*0", RegexOptions.IgnoreCase);
         lp.items.Add(new LpItem
         {
             Kind = LpKind.CenterDiv, Text = LpFlat(body),
             Fs = em.Success ? baseFs * double.Parse(em.Groups[1].Value, lp.invc) : baseFs * LpEmStep,
-            Bold = Regex.IsMatch(attrs, "font-weight\\s*:\\s*bold", RegexOptions.IgnoreCase),
+            Bold = SafeRegex.IsMatch(attrs, "font-weight\\s*:\\s*bold", RegexOptions.IgnoreCase),
             MarginTop = zeroBox ? 0 : LpDivMargin, Pad = zeroBox ? 0 : LpDivPad,
         });
     }
@@ -162,20 +162,20 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A titled section: div.paragraph > div.content > span.title + text with br lines.</summary>
     private static void LpParseParagraph(LetterPreviewState lp, string body)
     {
-        var content = Regex.Match(body, "<div\\b[^>]*class\\s*=\\s*['\"]content['\"][^>]*>", RegexOptions.IgnoreCase);
+        var content = SafeRegex.Match(body, "<div\\b[^>]*class\\s*=\\s*['\"]content['\"][^>]*>", RegexOptions.IgnoreCase);
         var innerStart = content.Success ? content.Index + content.Length : 0;
         var inner = content.Success ? body[innerStart..DivClose(body, innerStart)] : body;
-        var title = Regex.Match(inner, "<span\\b[^>]*class\\s*=\\s*['\"]title['\"][^>]*>([\\s\\S]*?)</span>", RegexOptions.IgnoreCase);
+        var title = SafeRegex.Match(inner, "<span\\b[^>]*class\\s*=\\s*['\"]title['\"][^>]*>([\\s\\S]*?)</span>", RegexOptions.IgnoreCase);
         var rest = title.Success ? inner[(title.Index + title.Length)..] : inner;
         var item = new LpItem { Kind = LpKind.Paragraph, Text = title.Success ? LpFlat(title.Groups[1].Value) : "" };
-        var lead = Regex.Match(rest, "^\\s*<br\\s*/?>", RegexOptions.IgnoreCase);
+        var lead = SafeRegex.Match(rest, "^\\s*<br\\s*/?>", RegexOptions.IgnoreCase);
         item.TitleAlone = lead.Success;
         if (lead.Success) rest = rest[lead.Length..];
         item.Segments = LpSegments(rest);
         if (!item.TitleAlone && item.Segments.Count > 0)
         {
             // the text on the title's line keeps its leading space
-            var first = Regex.Replace(DecodeEntities(Regex.Replace(Regex.Split(rest, "<br\\s*/?>", RegexOptions.IgnoreCase)[0], "<[^>]+>", "")), "[ \\t\\r\\n]+", " ");
+            var first = SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(SafeRegex.Split(rest, "<br\\s*/?>", RegexOptions.IgnoreCase)[0], "<[^>]+>", "")), "[ \\t\\r\\n]+", " ");
             item.Segments[0] = first.TrimEnd(' ');
         }
         lp.items.Add(item);
@@ -184,12 +184,12 @@ internal static partial class HtmlToPdfConverter
     private static void LpParseTto(LetterPreviewState lp, string body)
     {
         var item = new LpItem { Kind = LpKind.TtoDiv };
-        var h2 = Regex.Match(body, "<h2\\b[^>]*>([\\s\\S]*?)</h2>", RegexOptions.IgnoreCase);
+        var h2 = SafeRegex.Match(body, "<h2\\b[^>]*>([\\s\\S]*?)</h2>", RegexOptions.IgnoreCase);
         item.H2 = h2.Success ? LpFlat(h2.Groups[1].Value) : "";
-        var tbl = Regex.Match(body, "<table\\b", RegexOptions.IgnoreCase);
+        var tbl = SafeRegex.Match(body, "<table\\b", RegexOptions.IgnoreCase);
         if (tbl.Success)
             item.Table = LpParseTable(body[tbl.Index..LpTableClose(body, tbl.Index)], LpContentDepth + 3, null);
-        var auth = Regex.Match(body, "<div\\b[^>]*id\\s*=\\s*['\"]authoriseTTO['\"][^>]*>", RegexOptions.IgnoreCase);
+        var auth = SafeRegex.Match(body, "<div\\b[^>]*id\\s*=\\s*['\"]authoriseTTO['\"][^>]*>", RegexOptions.IgnoreCase);
         if (auth.Success)
         {
             var s = auth.Index + auth.Length;

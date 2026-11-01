@@ -118,4 +118,20 @@ public class DocumentTests
         }
         Assert.Equal(1, count);
     }
+
+    [Fact]
+    public void Save_SeekableStream_HoldsTheDocumentAloneFromItsStart()
+    {
+        var data = PdfBuilder.BuildMinimal();
+        using var doc = Document.Open(data);
+        using var output = new MemoryStream();
+        output.Write(new byte[100], 0, 100); // what the stream held before is replaced
+        doc.Save(output);
+
+        Assert.Equal(0, output.Position);
+        Assert.Equal("%PDF-", System.Text.Encoding.ASCII.GetString(output.ToArray(), 0, 5));
+        using var copy = new MemoryStream();
+        output.CopyTo(copy); // the idiom `doc.Save(ms); ms.CopyTo(file)` copies the document
+        Assert.Equal(output.Length, copy.Length);
+    }
 }

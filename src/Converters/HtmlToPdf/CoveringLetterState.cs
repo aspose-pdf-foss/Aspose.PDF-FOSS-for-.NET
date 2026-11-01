@@ -23,7 +23,7 @@ private sealed class CoveringLetterState
     public System.Text.RegularExpressions.Match justM = null!;
     public System.Text.RegularExpressions.Match addrM = null!;
     public List<string> h2Lines = null!;
-    public System.Text.RegularExpressions.MatchCollection addrTds = null!;
+    public SafeMatchCollection addrTds = null!;
     public string addrName = null!;
     public List<string> addrLeft = null!;
     // ── the flow: .justify children in order ──

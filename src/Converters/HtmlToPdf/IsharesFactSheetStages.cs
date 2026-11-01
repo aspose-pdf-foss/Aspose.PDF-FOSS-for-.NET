@@ -19,8 +19,8 @@ internal static partial class HtmlToPdfConverter
         MeasureIfsHangWidth(ix);
         ix.valueW = 0;
         foreach (var hl in ix.col.ValueHead)
-            ix.valueW = Math.Max(ix.valueW, MW(ix, hl.Pre + hl.Ins, 8, "Arial Italic")
-                + (hl.Sup.Length > 0 ? MW(ix, hl.Sup, IfsSupFs, "Arial Italic") : 0));
+            ix.valueW = Math.Max(ix.valueW, MW(hl.Pre + hl.Ins, 8, "Arial Italic")
+                + (hl.Sup.Length > 0 ? MW(hl.Sup, IfsSupFs, "Arial Italic") : 0));
         if (ix.isAllo2) { ix.labelW = IfsAllo2LabelW; ix.valueW = IfsAllo2ValueW; ix.hangW = ix.tableW - ix.labelW - ix.valueW; }
         else ix.labelW = ix.tableW - ix.valueW - ix.hangW;
         ix.labelRight = ix.x0 + ix.labelW;
@@ -30,7 +30,7 @@ internal static partial class HtmlToPdfConverter
             $"q 0.463 0.737 0.129 rg {ix.x0:F2} {IfsPageH - IfsBandBottomTd:F2} {ix.tableW:F2} {IfsBandBottomTd - IfsBandTopTd:F2} re f Q"));
         Run(ix, "F9", 10, ix.x0, IfsTitleBaseTd, ix.col.Title);
         if (ix.col.TitleSup.Length > 0)
-            Run(ix, "F9", 8.33, ix.x0 + MW(ix, ix.col.Title, 10, "Arial Bold"), IfsTitleBaseTd - 4.16, ix.col.TitleSup);
+            Run(ix, "F9", 8.33, ix.x0 + MW(ix.col.Title, 10, "Arial Bold"), IfsTitleBaseTd - 4.16, ix.col.TitleSup);
         HRule(ix, ix.x0, ix.x1, IfsBandBottomTd, 0.5);
 
         ix.headBase = IfsBandBottomTd + (ix.isAllo2 ? IfsAllo2HeadLine1Off : IfsHeadLine1Off);
@@ -42,9 +42,9 @@ internal static partial class HtmlToPdfConverter
             var ybNat = ix.headBase + i * ix.headPitch;
             ix.lastHeadBase = ybNat;
             var yb = hl.Ins.Length > 0 ? ybNat + IfsInsSeat : ybNat;
-            var wPre = MW(ix, hl.Pre, 8, "Arial Italic");
-            var wIns = MW(ix, hl.Ins, 8, "Arial Italic");
-            var supW = hl.Sup.Length > 0 ? MW(ix, hl.Sup, IfsSupFs, "Arial Italic") : 0;
+            var wPre = MW(hl.Pre, 8, "Arial Italic");
+            var wIns = MW(hl.Ins, 8, "Arial Italic");
+            var supW = hl.Sup.Length > 0 ? MW(hl.Sup, IfsSupFs, "Arial Italic") : 0;
             var xh = ix.valueRight - wPre - wIns - supW;
             Run(ix, "F10", 8, xh, yb, hl.Pre + hl.Ins);
             if (hl.Delta) Delta(ix, xh + wPre, yb);
@@ -58,7 +58,7 @@ internal static partial class HtmlToPdfConverter
         HRule(ix, ix.x0, ix.x1, ix.ruleTd, 0.5);
         HRule(ix, ix.x0, ix.labelRight, ix.ruleTd + 0.13, 0.25);
 
-        ix.dotW = MW(ix, ".", 8.0);
+        ix.dotW = MW(".", 8.0);
         ix.yRow = ix.ruleTd + IfsRowStartOff;
         for (var ri = 0; ri < ix.col.Rows.Count; ri++)
         {
@@ -91,40 +91,40 @@ internal static partial class HtmlToPdfConverter
     private static bool ParseIfsColumn(IsharesFactSheetState ix, Match colM)
     {
         var seg = colM.Groups[1].Value;
-        var tblM = Regex.Match(seg,
+        var tblM = SafeRegex.Match(seg,
             @"<table class=""Table col3""(?:[^>]*?\bsubtype\s*=\s*""([^""]*)"")?[^>]*>([\s\S]*?)</table>",
             RegexOptions.IgnoreCase);
         if (!tblM.Success) return true;
         var col = new IfsColumn { Subtype = tblM.Groups[1].Value };
-        var headP = Regex.Match(seg, @"<p class=""centerhead""[^>]*>([\s\S]*?)</p>",
+        var headP = SafeRegex.Match(seg, @"<p class=""centerhead""[^>]*>([\s\S]*?)</p>",
             RegexOptions.IgnoreCase);
         if (headP.Success)
         {
             var t = headP.Groups[1].Value;
-            var supM = Regex.Match(t, @"<sup[^>]*>([\s\S]*?)</sup>", RegexOptions.IgnoreCase);
+            var supM = SafeRegex.Match(t, @"<sup[^>]*>([\s\S]*?)</sup>", RegexOptions.IgnoreCase);
             if (supM.Success) { col.TitleSup = IfsFlat(supM.Groups[1].Value); t = t.Remove(supM.Index, supM.Length); }
             col.Title = IfsFlat(t);
         }
-        var thead = Regex.Match(tblM.Groups[2].Value, @"<thead>([\s\S]*?)</thead>",
+        var thead = SafeRegex.Match(tblM.Groups[2].Value, @"<thead>([\s\S]*?)</thead>",
             RegexOptions.IgnoreCase);
         if (thead.Success)
-            foreach (Match hm in Regex.Matches(thead.Groups[1].Value,
-                @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(thead.Groups[1].Value,
+                @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(hm => hm.Groups))
             {
-                var clsM = Regex.Match(hm.Groups[1].Value, @"class\s*=\s*""([^""]*)""",
+                var clsM = SafeRegex.Match(groups[1].Value, @"class\s*=\s*""([^""]*)""",
                     RegexOptions.IgnoreCase);
                 var cls = clsM.Success ? clsM.Groups[1].Value : "";
-                var inner = hm.Groups[2].Value;
+                var inner = groups[2].Value;
                 if (cls.Contains("Heading1"))
                 {
                     // the TSR_Allo2 title is a colspan thead row, not a centerhead p
-                    var supM = Regex.Match(inner, @"<sup[^>]*>([\s\S]*?)</sup>",
+                    var supM = SafeRegex.Match(inner, @"<sup[^>]*>([\s\S]*?)</sup>",
                         RegexOptions.IgnoreCase);
                     if (supM.Success) { col.TitleSup = IfsFlat(supM.Groups[1].Value); inner = inner.Remove(supM.Index, supM.Length); }
                     col.Title = IfsFlat(inner);
                 }
                 else if (cls.Contains("hasHangColumn"))
-                    ParseIfsHeadCell(StripMarkers(ix, inner), col.ValueHead, IfsFlat);
+                    ParseIfsHeadCell(StripMarkers(inner), col.ValueHead, IfsFlat);
                 else if (cls.Contains("hangColumn"))
                 {
                     // the head hang cell carries only a superscript marker; it
@@ -135,31 +135,31 @@ internal static partial class HtmlToPdfConverter
                 else if (cls.StartsWith("Head", StringComparison.Ordinal))
                     col.LabelHead = IfsFlat(inner);
             }
-        foreach (Match rm in Regex.Matches(tblM.Groups[2].Value,
+        foreach (Match rm in SafeRegex.Matches(tblM.Groups[2].Value,
             @"<tr class=""CalcSheetSectionItem""[^>]*>([\s\S]*?)</tr>", RegexOptions.IgnoreCase))
         {
             var row = new IfsRow();
-            foreach (Match cm in Regex.Matches(rm.Groups[1].Value,
-                @"<td class=""([^""]*)""[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase))
+            foreach (var cmGroups in SafeRegex.Matches(rm.Groups[1].Value,
+                @"<td class=""([^""]*)""[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(cm => cm.Groups))
             {
-                var cls = cm.Groups[1].Value;
-                var inner = cm.Groups[2].Value;
+                var cls = cmGroups[1].Value;
+                var inner = cmGroups[2].Value;
                 if (cls.Contains("categoryhead")) row.Label = IfsFlat(inner);
                 else if (cls.Contains("hasHangColumn"))
                 {
-                    row.ValueIns = Regex.IsMatch(inner, @"<ins\b", RegexOptions.IgnoreCase);
+                    row.ValueIns = SafeRegex.IsMatch(inner, @"<ins\b", RegexOptions.IgnoreCase);
                     row.ValueDelta = inner.Contains("DeltaSymbol", StringComparison.Ordinal);
-                    row.Value = IfsFlat(StripMarkers(ix, inner));
+                    row.Value = IfsFlat(StripMarkers(inner));
                 }
                 else if (cls.Contains("hangColumn"))
-                    foreach (Match sm in Regex.Matches(inner,
-                        @"<(span|sup)\b([^>]*)>([\s\S]*?)</\1>", RegexOptions.IgnoreCase))
+                    foreach (var smGroups in SafeRegex.Matches(inner,
+                        @"<(span|sup)\b([^>]*)>([\s\S]*?)</\1>", RegexOptions.IgnoreCase).Select(sm => sm.Groups))
                     {
-                        var txt = IfsFlat(sm.Groups[3].Value);
+                        var txt = IfsFlat(smGroups[3].Value);
                         if (txt.Length > 0)
                             row.Hang.Add((txt,
-                                sm.Groups[1].Value.Equals("sup", StringComparison.OrdinalIgnoreCase),
-                                sm.Groups[2].Value.Contains("number-suffix=\"percent\"",
+                                smGroups[1].Value.Equals("sup", StringComparison.OrdinalIgnoreCase),
+                                smGroups[2].Value.Contains("number-suffix=\"percent\"",
                                     StringComparison.Ordinal)));
                     }
             }
@@ -178,8 +178,10 @@ internal static partial class HtmlToPdfConverter
         {
             double w = 0;
             foreach (var (t, sup, pct) in ix.col.Rows[ri].Hang)
-                w += pct && ri > 0 ? MW(ix, t, 8.0) - IfsHiddenPctMargin
-                    : MW(ix, t, sup ? IfsSupFs : 8.0);
+            {
+                if (pct && ri > 0) w += MW(t, 8.0) - IfsHiddenPctMargin;
+                else w += MW(t, sup ? IfsSupFs : 8.0);
+            }
             ix.hangW = Math.Max(ix.hangW, w);
         }
     }

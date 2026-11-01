@@ -110,9 +110,12 @@ public sealed class GifDevice : ImageDevice
         byte[]? palette = default;
         int colorCount = default;
         int pixelCount = width * height;
-        // Composite over white and pack RGB into an int key.
-        var packed = new int[pixelCount];
-        var histogram = new Dictionary<int, int>();
+        // Composite over white and pack RGB into an int key. Each pixel is kept as the
+        // number of its colour in order of first appearance, and the colours with their
+        // populations in that same order.
+        var colorOf = new int[pixelCount];
+        var colorNumber = new Dictionary<int, int>();
+        var colors = new List<(int rgb, int count)>();
         for (int p = 0; p < pixelCount; p++)
         {
             int si = p * 4;
@@ -125,13 +128,16 @@ public sealed class GifDevice : ImageDevice
                 b = (b * a + 255 * (255 - a)) / 255;
             }
             int key = (r << 16) | (g << 8) | b;
-            packed[p] = key;
-            histogram[key] = histogram.TryGetValue(key, out var c) ? c + 1 : 1;
+            if (colorNumber.TryGetValue(key, out var n))
+                colors[n] = (key, colors[n].count + 1);
+            else
+            {
+                n = colors.Count;
+                colorNumber[key] = n;
+                colors.Add((key, 1));
+            }
+            colorOf[p] = n;
         }
-
-        // Unique colours, each with its population.
-        var colors = new List<(int rgb, int count)>(histogram.Count);
-        foreach (var kv in histogram) colors.Add((kv.Key, kv.Value));
 
         const int maxColors = 256;
         List<(int rgb, int count)>[] boxes;
@@ -149,9 +155,9 @@ public sealed class GifDevice : ImageDevice
 
         colorCount = boxes.Length;
         palette = new byte[colorCount * 3];
-        // Map a packed colour to its palette index. Colours that landed in a box
-        // resolve directly; everything else falls back to nearest-palette search.
-        var exact = new Dictionary<int, int>();
+        // The boxes partition the colours, so every colour has its palette entry: the
+        // entry is noted per colour number and each pixel reads its own off that.
+        var entryOf = new byte[colors.Count];
         for (int i = 0; i < colorCount; i++)
         {
             long sr = 0, sg = 0, sb = 0, sw = 0;
@@ -161,7 +167,7 @@ public sealed class GifDevice : ImageDevice
                 sg += ((rgb >> 8) & 0xFF) * (long)count;
                 sb += (rgb & 0xFF) * (long)count;
                 sw += count;
-                exact[rgb] = i;
+                entryOf[colorNumber[rgb]] = (byte)i;
             }
             if (sw == 0) sw = 1;
             palette[i * 3] = (byte)(sr / sw);
@@ -169,33 +175,9 @@ public sealed class GifDevice : ImageDevice
             palette[i * 3 + 2] = (byte)(sb / sw);
         }
 
-        // Build the per-pixel index map, caching nearest-colour lookups by colour.
-        var cache = new Dictionary<int, byte>(exact.Count);
         var indices = new byte[pixelCount];
-        for (int p = 0; p < pixelCount; p++)
-        {
-            int key = packed[p];
-            if (!cache.TryGetValue(key, out var idx))
-            {
-                idx = exact.TryGetValue(key, out var ei) ? (byte)ei : Nearest(palette, colorCount, key);
-                cache[key] = idx;
-            }
-            indices[p] = idx;
-        }
+        for (int p = 0; p < pixelCount; p++) indices[p] = entryOf[colorOf[p]];
         return (indices, palette, colorCount);
-    }
-
-    private static byte Nearest(byte[] palette, int colorCount, int rgb)
-    {
-        int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
-        int best = 0; long bestDist = long.MaxValue;
-        for (int i = 0; i < colorCount; i++)
-        {
-            int dr = r - palette[i * 3], dg = g - palette[i * 3 + 1], db = b - palette[i * 3 + 2];
-            long d = (long)dr * dr + (long)dg * dg + (long)db * db;
-            if (d < bestDist) { bestDist = d; best = i; if (d == 0) break; }
-        }
-        return (byte)best;
     }
 
     /// <summary>Median-cut colour quantisation: repeatedly split the box with the
@@ -218,7 +200,7 @@ public sealed class GifDevice : ImageDevice
             if (bestBox < 0) break; // nothing splittable
 
             var box = boxes[bestBox];
-            int shift = bestAxis == 0 ? 16 : bestAxis == 1 ? 8 : 0;
+            int shift = bestAxis switch { 0 => 16, 1 => 8, _ => 0 };
             box.Sort((a, b) => ((a.rgb >> shift) & 0xFF).CompareTo((b.rgb >> shift) & 0xFF));
             long total = 0; foreach (var c in box) total += c.count;
             long half = total / 2, acc = 0; int split = 1;
@@ -244,9 +226,12 @@ public sealed class GifDevice : ImageDevice
         foreach (var (rgb, _) in box)
         {
             int r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
-            if (r < rMin) rMin = r; if (r > rMax) rMax = r;
-            if (g < gMin) gMin = g; if (g > gMax) gMax = g;
-            if (b < bMin) bMin = b; if (b > bMax) bMax = b;
+            if (r < rMin) rMin = r;
+            if (r > rMax) rMax = r;
+            if (g < gMin) gMin = g;
+            if (g > gMax) gMax = g;
+            if (b < bMin) bMin = b;
+            if (b > bMax) bMax = b;
         }
         rRange = rMax - rMin; gRange = gMax - gMin; bRange = bMax - bMin;
         return (rRange, gRange, bRange);

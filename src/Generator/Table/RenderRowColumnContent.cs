@@ -25,7 +25,7 @@ public partial class Table
         // implicit horizontal padding ("x" seats 5 pt in from a
         // 5 pt border, not 5+2); explicit padding still applies.
         if (!SeatCellLineRange(rc)) return;
-        if (!(rc.firstLine < rc.lastLine)) return;
+        if (rc.firstLine >= rc.lastLine) return;
         ScanCellLineKinds(rc);
 
         if (rc.hasOption)
@@ -36,7 +36,8 @@ public partial class Table
                 rc.cellX + rc.padLeft, rc.slice.TopY - rc.contentTop, rc.slice.Plan.LineHeight, rc.fontName, rc.optionSink, rc.checkboxSink,
                 rc.slice.TopY - rc.slice.Height + (rc.padding?.Bottom ?? 0), rc.page);
         }
-        else if (rc.anyNonLeft || rc.anyType0 || rc.cssCell || rc.anyBoxes || rc.anyLinks || rc.xmlMixedSizes)
+        else if (rc.anyNonLeft || rc.anyType0 || rc.cssCell || rc.anyBoxes || rc.anyLinks || rc.xmlMixedSizes
+                 || rc.anyDeclaredUnderline)
         {
             RenderStyledCellLines(rc);
         }

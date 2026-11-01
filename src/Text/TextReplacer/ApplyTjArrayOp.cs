@@ -45,13 +45,13 @@ public sealed partial class TextReplacer
         {
             Text = sb.ToString(), Bytes = byteBuf.ToArray(), IsHex = isHex,
             OpStart = ct.ops2[0].startPos, OpEnd = ep,
-            TmA = ct.tmA, TmB = ct.tmB, TmC = ct.tmC, TmD = ct.tmD, TmTx = ct.tmTx, TmTy = ct.tmTy,
+            TmA = ct.tmA, TmB = ct.tmB, TmC = ct.tmC, TmD = ct.tmD, TmTx = ct.tmTx, TmTy = ct.tmTy, TlmTx = ct.tlmTx,
             CtmA = ct.ctmA, CtmB = ct.ctmB, CtmC = ct.ctmC, CtmD = ct.ctmD, CtmTx = ct.ctmTx, CtmTy = ct.ctmTy,
             FontDict = ct.curFontDict, FontName = ct.curFontName, ToUnicode = ct.curToUnicode,
-            FontSize = ct.curFontSize, Tc = ct.curTc, KernSum = kernSum, KernAt = kernAt,
+            FontSize = ct.curFontSize, Tc = ct.curTc, Tw = ct.curTw, Clip = ct.clip, KernSum = kernSum, KernAt = kernAt,
             BtStart = ct.curBtStart,
             TmPositioned = ct.pendingTm.has, TmXTokStart = ct.pendingTm.xStart,
-            TmXTokEnd = ct.pendingTm.xEnd, TmXVal = ct.pendingTm.xVal,
+            TmXTokEnd = ct.pendingTm.xEnd, TmXVal = ct.pendingTm.xVal, TmYTok = ct.pendingTmY,
             TdPositioned = ct.pendingTd.has, TdXTokStart = ct.pendingTd.xStart,
             TdXTokEnd = ct.pendingTd.xEnd, TdXVal = ct.pendingTd.xVal,
         });

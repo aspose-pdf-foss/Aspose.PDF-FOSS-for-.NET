@@ -49,32 +49,37 @@ public sealed partial class Page
                 // SEPARATE one the replacement never moved. That piece is not ours to
                 // re-lay: it keeps the span AND THE BAND the source gave it, because the
                 // run under it still sits where it always did. Redrawing it in the
-                // library's band moves a rule whose text did not move.
-                tailX = frag.SourceUnderlineRunEndX;
+                // library's band moves a rule whose text did not move - unless a shift of
+                // the rest of the line moved that run, when the rule goes with it.
+                tailX = frag.SourceUnderlineRunEndX + frag.FollowersShiftedBy;
                 tailW = tailRule.Urx - frag.SourceUnderlineRunEndX;
                 tailBottom = tailRule.Lly;
                 tailThick = tailRule.Ury - tailRule.Lly;
             }
+            // The pieces are measured where the text was read - in the turned view of a page viewed
+            // turned - and laid in the page's own space, through any turns baked since.
+            var frame = frag.PositionFrame;
+            var fromRead = FromReadFrame(frame);
             var placedInline = InsertBeforeTextObjectAt(
-                DecorationBlock(afg, ul.fragPos.XIndent, ulBottom, ul.w, ul.ulThick),
-                ul.fragPos.XIndent, ul.fragPos.YIndent);
+                DecorationBlockIn(frame, afg, ul.fragPos.XIndent, ulBottom, ul.w, ul.ulThick),
+                ul.fragPos.XIndent, ul.fragPos.YIndent, fromRead);
             if (placedInline)
             {
                 if (headW > 0.5)
                     InsertBeforeTextObjectAt(
-                        DecorationBlock(afg, headX, ulBottom, headW, ul.ulThick),
-                        headX, ul.fragPos.YIndent);
+                        DecorationBlockIn(frame, afg, headX, ulBottom, headW, ul.ulThick),
+                        headX, ul.fragPos.YIndent, fromRead);
                 if (tailW > 0)
                     InsertBeforeTextObjectAt(
-                        DecorationBlock(afg, tailX, tailBottom, tailW, tailThick),
-                        tailX, ul.fragPos.YIndent);
+                        DecorationBlockIn(frame, afg, tailX, tailBottom, tailW, tailThick),
+                        tailX, ul.fragPos.YIndent, fromRead);
                 foreach (var comp in frag.CompanionRules ?? Enumerable.Empty<(double X, double W, Aspose.Pdf.Color Colour)>())
                     InsertBeforeTextObjectAt(
-                        DecorationBlock(comp.Colour, comp.X, ulBottom, comp.W, ul.ulThick),
-                        comp.X, ul.fragPos.YIndent);
+                        DecorationBlockIn(frame, comp.Colour, comp.X, ulBottom, comp.W, ul.ulThick),
+                        comp.X, ul.fragPos.YIndent, fromRead);
                 return true;
             }
-            ul.builder.SaveState();
+            SaveDecorationState(ul.builder, RuleMatrix(ul, frame, fromRead, inRunSpace: false));
             ul.builder.SetFillColor(afg?.R / 255.0 ?? 0, afg?.G / 255.0 ?? 0, afg?.B / 255.0 ?? 0);
             if (headW > 0.5) { ul.builder.Rectangle(headX, ulBottom, headW, ul.ulThick); ul.builder.Fill(); }
             ul.builder.Rectangle(ul.fragPos.XIndent, ulBottom, ul.w, ul.ulThick);

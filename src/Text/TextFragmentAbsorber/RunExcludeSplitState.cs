@@ -19,7 +19,6 @@ private sealed class RunExcludeSplitState
     public double ascentHeight;
     public double bandLly;
     public double bandUry;
-    public double bandH;
     public double tol;
     public bool dbg;
     public List<Aspose.Pdf.Rectangle> active = null!;

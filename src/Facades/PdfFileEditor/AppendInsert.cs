@@ -19,10 +19,12 @@ public sealed partial class PdfFileEditor
     public byte[] Append(byte[] inputPdf, byte[] portPdf, int startPage, int endPage)
         => Append(inputPdf, new[] { portPdf }, startPage, endPage);
 
+#pragma warning disable S2368 // public API: the published signature
     /// <summary>
     /// Append pages from multiple source PDFs to an input PDF.
     /// </summary>
     public byte[] Append(byte[] inputPdf, byte[][] portPdfs, int startPage, int endPage)
+#pragma warning restore S2368
     {
         // When the destination and at least one appended source both carry an XFA
         // template, go through Concatenate: the page-import path below keeps the
@@ -51,6 +53,46 @@ public sealed partial class PdfFileEditor
         return destDoc.ToArray();
     }
 
+    /// <summary>Append pages from source stream(s) to input stream and write to output.</summary>
+    public bool Append(Stream inputStream, Stream[] portStreams, int startPage, int endPage, Stream outputStream)
+    {
+        var input = ReadStream(inputStream);
+        var ports = portStreams.Select(ReadStream).ToArray();
+        var result = Append(input, ports, startPage, endPage);
+        outputStream.Write(result, 0, result.Length);
+        return true;
+    }
+
+    /// <summary>Append pages from a single source stream to input stream and write to output.</summary>
+    public bool Append(Stream inputStream, Stream portStream, int startPage, int endPage, Stream outputStream)
+    {
+        var result = Append(ReadStream(inputStream), ReadStream(portStream), startPage, endPage);
+        outputStream.Write(result, 0, result.Length);
+        return true;
+    }
+
+    /// <summary>
+    /// Append pages from multiple source PDF files to an input PDF and write to output file.
+    /// </summary>
+    public bool Append(string inputFile, string[] portFiles, int startPage, int endPage, string outputFile)
+    {
+        _corrupted.Clear();
+        var input = File.ReadAllBytes(inputFile);
+        var namedPorts = portFiles.Select<string, (byte[], string?)>(f => (File.ReadAllBytes(f), f)).ToList();
+        var ports = FilterCorruptedInputs(namedPorts).ToArray();
+        var result = Append(input, ports, startPage, endPage);
+        File.WriteAllBytes(outputFile, result);
+        return true;
+    }
+
+    /// <summary>
+    /// Append pages from a single source PDF file to an input PDF and write to output file.
+    /// </summary>
+    public bool Append(string inputFile, string portFile, int startPage, int endPage, string outputFile)
+    {
+        return Append(inputFile, new[] { portFile }, startPage, endPage, outputFile);
+    }
+
     /// <summary>
     /// Insert pages from a source PDF into a destination PDF at a given position.
     /// </summary>
@@ -74,21 +116,22 @@ public sealed partial class PdfFileEditor
         if (pos == 0)
         {
             // Prepend: extracted + inputPdf
-            return Concatenate(extracted, inputPdf);
+            return Concatenate(new[] { extracted, inputPdf });
         }
 
         if (pos >= destCount)
         {
             // Append: inputPdf + extracted
-            return Concatenate(inputPdf, extracted);
+            return Concatenate(new[] { inputPdf, extracted });
         }
 
         // Split the destination into before and after the insert position
         var before = Extract(inputPdf, 1, pos);
         var after = Extract(inputPdf, pos + 1, destCount);
-        return Concatenate(before, extracted, after);
+        return Concatenate(new[] { before, extracted, after });
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Insert specific pages from a source PDF into a destination PDF at a given position.
     /// </summary>
@@ -97,6 +140,7 @@ public sealed partial class PdfFileEditor
     /// <param name="portPdf">Source PDF bytes.</param>
     /// <param name="pageNumbers">1-based page numbers from the source to insert.</param>
     public byte[] Insert(byte[] inputPdf, int insertLocation, byte[] portPdf, int[] pageNumbers)
+#pragma warning restore S2325
     {
         if (pageNumbers.Length == 0) return inputPdf;
 
@@ -105,8 +149,8 @@ public sealed partial class PdfFileEditor
         var portTotal = portDoc.PageCount;
 
         var portPages = new List<Page>();
-        foreach (var pn in pageNumbers)
-            if (pn >= 1 && pn <= portTotal) portPages.Add(portDoc.Pages[pn]);
+        foreach (var pn in pageNumbers.Where(pn => pn >= 1 && pn <= portTotal))
+            portPages.Add(portDoc.Pages[pn]);
         if (portPages.Count == 0) return inputPdf;
 
         // Insert the port pages directly through the document's page collection so shared
@@ -116,28 +160,13 @@ public sealed partial class PdfFileEditor
         // "insert before" index the page collection expects.
         var destCount = destDoc.PageCount;
         var pos = Math.Max(0, Math.Min(insertLocation, destCount));
-        int insertBefore = pos <= 0 ? 1 : pos >= destCount ? destCount + 1 : pos + 1;
+        int insertBefore;
+        if (pos <= 0) insertBefore = 1;
+        else if (pos >= destCount) insertBefore = destCount + 1;
+        else insertBefore = pos + 1;
 
         destDoc.Pages.Insert(insertBefore, portPages.ToArray());
         return destDoc.ToArray();
-    }
-
-    /// <summary>Append pages from source stream(s) to input stream and write to output.</summary>
-    public bool Append(Stream inputStream, Stream[] portStreams, int startPage, int endPage, Stream outputStream)
-    {
-        var input = ReadStream(inputStream);
-        var ports = portStreams.Select(ReadStream).ToArray();
-        var result = Append(input, ports, startPage, endPage);
-        outputStream.Write(result, 0, result.Length);
-        return true;
-    }
-
-    /// <summary>Append pages from a single source stream to input stream and write to output.</summary>
-    public bool Append(Stream inputStream, Stream portStream, int startPage, int endPage, Stream outputStream)
-    {
-        var result = Append(ReadStream(inputStream), ReadStream(portStream), startPage, endPage);
-        outputStream.Write(result, 0, result.Length);
-        return true;
     }
 
     /// <summary>Insert pages from source stream into input stream at given position.</summary>
@@ -178,27 +207,5 @@ public sealed partial class PdfFileEditor
         var result = Insert(input, insertLocation, port, pageNumber);
         File.WriteAllBytes(outputFile, result);
         return true;
-    }
-
-    /// <summary>
-    /// Append pages from multiple source PDF files to an input PDF and write to output file.
-    /// </summary>
-    public bool Append(string inputFile, string[] portFiles, int startPage, int endPage, string outputFile)
-    {
-        _corrupted.Clear();
-        var input = File.ReadAllBytes(inputFile);
-        var namedPorts = portFiles.Select(f => (File.ReadAllBytes(f), (string?)f)).ToList();
-        var ports = FilterCorruptedInputs(namedPorts).ToArray();
-        var result = Append(input, ports, startPage, endPage);
-        File.WriteAllBytes(outputFile, result);
-        return true;
-    }
-
-    /// <summary>
-    /// Append pages from a single source PDF file to an input PDF and write to output file.
-    /// </summary>
-    public bool Append(string inputFile, string portFile, int startPage, int endPage, string outputFile)
-    {
-        return Append(inputFile, new[] { portFile }, startPage, endPage, outputFile);
     }
 }

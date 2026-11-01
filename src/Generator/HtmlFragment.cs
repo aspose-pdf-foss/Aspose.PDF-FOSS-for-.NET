@@ -71,18 +71,18 @@ public class HtmlFragment : BaseParagraph
         if (string.IsNullOrEmpty(html)) return "";
 
         // Remove script and style blocks
-        var result = Regex.Replace(html, @"<(script|style)[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase);
+        var result = SafeRegex.Replace(html, @"<(script|style)[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase);
 
         // Replace <br>, <p>, <div>, <li> with newlines
-        result = Regex.Replace(result, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
-        result = Regex.Replace(result, @"</(p|div|li|tr|h[1-6])>", "\n", RegexOptions.IgnoreCase);
+        result = SafeRegex.Replace(result, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
+        result = SafeRegex.Replace(result, @"</(p|div|li|tr|h[1-6])>", "\n", RegexOptions.IgnoreCase);
 
         // Replace <img> tags with their alt text
-        result = Regex.Replace(result, @"<img\b[^>]*\balt=['""]([^'""]*)['""][^>]*>",
+        result = SafeRegex.Replace(result, @"<img\b[^>]*\balt=['""]([^'""]*)['""][^>]*>",
             "$1", RegexOptions.IgnoreCase);
 
         // Remove all remaining tags
-        result = Regex.Replace(result, @"<[^>]+>", "");
+        result = SafeRegex.Replace(result, @"<[^>]+>", "");
 
         // Decode common HTML entities
         result = result.Replace("&amp;", "&")
@@ -94,8 +94,8 @@ public class HtmlFragment : BaseParagraph
             .Replace("&nbsp;", " ");
 
         // Normalize whitespace
-        result = Regex.Replace(result, @"[ \t]+", " ");
-        result = Regex.Replace(result, @"\n{3,}", "\n\n");
+        result = SafeRegex.Replace(result, @"[ \t]+", " ");
+        result = SafeRegex.Replace(result, @"\n{3,}", "\n\n");
 
         return result.Trim();
     }
@@ -157,12 +157,16 @@ public sealed class HtmlLoadOptions : LoadOptions
     /// <summary>How the generated PDF page layout reacts to wide HTML content. Stored only.</summary>
     public HtmlPageLayoutOption PageLayoutOption { get; set; } = HtmlPageLayoutOption.None;
 
-    /// <summary>Caller-supplied delegate that resolves external resources referenced by the HTML.
-    /// Stored only — the FOSS HTML loader does not currently dispatch through this hook.</summary>
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
+    /// <summary>Caller-supplied delegate that resolves external resources referenced by the HTML. It is
+    /// asked first, with the URL a browser would request; a result it returns is used (a cancelled or empty
+    /// one leaves the resource unloaded), and only a null result lets the converter read or fetch it.</summary>
     public LoadOptions.ResourceLoadingStrategy? CustomLoaderOfExternalResources;
 
-    /// <summary>Credentials used when fetching external resources over the network. Stored only.</summary>
+    /// <summary>Credentials that answer an authentication challenge when external resources are fetched
+    /// over http(s).</summary>
     public System.Net.ICredentials? ExternalResourcesCredentials;
+#pragma warning restore S1104
 
     /// <summary>
     /// Page descriptor (size, margins) applied to the generated PDF. Tests use

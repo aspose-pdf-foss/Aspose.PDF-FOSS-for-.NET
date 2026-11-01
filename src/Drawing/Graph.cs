@@ -50,14 +50,11 @@ public sealed class Graph : BaseParagraph
     /// <summary>Default stroke/fill settings inherited by shapes added to this graph.</summary>
     public Aspose.Pdf.GraphInfo GraphInfo { get; set; } = new();
 
-    /// <summary>Z-index for layering; higher draws on top.</summary>
-    public new int ZIndex { get; set; }
-
     /// <summary>Optional title rendered above the graph. Stored only.</summary>
     public Aspose.Pdf.Text.TextFragment? Title { get; set; }
 
     /// <summary>The list of shapes inside this graph. Alias for <see cref="Add"/>.</summary>
-    public BoundsCheckableList<Shape> Shapes { get; set; } = new();
+    public BoundsCheckableList<Shape> Shapes { get; set; }
 
     /// <summary>Creates an empty graph area of the given width and height in points.</summary>
     public Graph(double width, double height)
@@ -139,7 +136,9 @@ public sealed class Graph : BaseParagraph
         // …and the scaling rates last: the order is translate, then rotation,
         // then ONE `sx 0 0 sy 0 0 cm` (measured 2026-08-26 with each rate alone and both
         // together, with and without a rotation).
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
         if (GraphInfo.ScalingRateX != 1 || GraphInfo.ScalingRateY != 1)
+#pragma warning restore S1244
             builder.SetMatrix(GraphInfo.ScalingRateX, 0, 0, GraphInfo.ScalingRateY, 0, 0);
         foreach (var shape in Shapes)
         {
@@ -148,6 +147,8 @@ public sealed class Graph : BaseParagraph
             // rather than inheriting the previous shape's stroke colour.
             builder.SaveState();
             shape.Render(builder, page);
+            // (the shape's label is drawn over it, in the graph's frame)
+            ShapeLabel.Render(builder, page, shape);
             builder.RestoreState();
         }
         // The border paints over the shapes.

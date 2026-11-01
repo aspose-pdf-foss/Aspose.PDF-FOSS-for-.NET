@@ -11,11 +11,11 @@ namespace Aspose.Pdf.Forms.Xfa;
 /// they do not fire when a form is flattened server-side. Calculates are run to a fixpoint (a few
 /// passes) so ordering dependencies between them resolve without an explicit dependency graph.
 /// </summary>
-internal sealed class XfaScriptRunner
+internal sealed partial class XfaScriptRunner
 {
     private readonly XfaFormModel _model;
     private readonly XfaNode _root;
-    private readonly Dictionary<XmlElement, List<XStmt>> _astCache = new();
+    private readonly Dictionary<XmlElement, List<IXStmt>> _astCache = new();
 
     private XfaScriptRunner(XfaFormModel model) { _model = model; _root = model.Root; }
 
@@ -33,15 +33,28 @@ internal sealed class XfaScriptRunner
     public static void RunCalculates(XfaFormModel model, HashSet<string>? pinnedOwners = null)
     {
         try { new XfaScriptRunner(model).RunCalculatesInternal(pinnedOwners); }
-        catch { }
+        catch { /* a calculate script the runner cannot run leaves the values as they were */ }
     }
 
     // Each calculate execution records the rawValues it READ; it is only re-run when one of those
-    // inputs changes. This mirrors XFA's dependency-triggered recalculation: an unconditional
+    // inputs was changed since. This mirrors XFA's dependency-triggered recalculation: an unconditional
     // "block control" calculate that reads only its own constant value runs once, while a
     // page-control calculate that reads a value another calculate computes re-runs after that value
-    // settles — so the dependent (later) write wins, matching the engine's calculation waves.
-    private List<(XfaNode node, string? val)>? _reads;
+    // settles — so the dependent (later) write wins, matching the engine's calculation waves. A change
+    // counts even when a later script restored the value the calculate had read: a selection page's
+    // calculate that resets a flag the proceed button's calculate sets again runs once more after it.
+    private List<(XfaNode node, int writes)>? _reads;
+
+    /// <summary>The run a render takes its presence and values from: the events a viewer fires while it
+    /// opens the form (initialize, calculate, form ready, layout ready, document ready), evaluated
+    /// strictly - a script that reads what the runner cannot resolve decides nothing.</summary>
+    public static XfaScriptRunner? RunForRender(XfaFormModel model)
+    {
+        var runner = new XfaScriptRunner(model) { _render = true };
+        try { runner.RunRenderInternal(); }
+        catch { /* a script the runner cannot run leaves the form as the template declares it */ }
+        return runner;
+    }
 
     private void RunInternal()
     {
@@ -56,14 +69,14 @@ internal sealed class XfaScriptRunner
 
     private void RunCalculatesInternal(HashSet<string>? pinnedOwners)
     {
-        var calcs = new List<(XfaNode node, List<XStmt> ast)>();
+        var calcs = new List<(XfaNode node, List<IXStmt> ast)>();
         foreach (var n in _model.All)
         {
             if (pinnedOwners is not null && pinnedOwners.Contains(n.Name)) continue;
             foreach (var ast in Scripts(n, initialize: false))
                 calcs.Add((n, ast));
         }
-        var lastReads = new Dictionary<int, List<(XfaNode, string?)>>();
+        var lastReads = new Dictionary<int, List<(XfaNode, int)>>();
 
         for (int pass = 0; pass < 24; pass++)
         {
@@ -71,7 +84,7 @@ internal sealed class XfaScriptRunner
             for (int i = 0; i < calcs.Count; i++)
             {
                 if (lastReads.TryGetValue(i, out var prev) && !ReadsChanged(prev)) continue;
-                _reads = new List<(XfaNode, string?)>();
+                _reads = new List<(XfaNode, int)>();
                 Exec(calcs[i].ast, calcs[i].node);
                 lastReads[i] = _reads;
                 _reads = null;
@@ -81,15 +94,15 @@ internal sealed class XfaScriptRunner
         }
     }
 
-    private static bool ReadsChanged(List<(XfaNode node, string? val)> prev)
+    private static bool ReadsChanged(List<(XfaNode node, int writes)> prev)
     {
-        foreach (var (node, val) in prev)
-            if (node.RawValue != val) return true;
+        foreach (var (node, writes) in prev)
+            if (node.Writes != writes) return true;
         return false;
     }
 
     /// <summary>Parsed scripts of a node for the requested phase (cached).</summary>
-    private IEnumerable<List<XStmt>> Scripts(XfaNode node, bool initialize)
+    private IEnumerable<List<IXStmt>> Scripts(XfaNode node, bool initialize)
     {
         foreach (XmlNode c in node.Template.ChildNodes)
         {
@@ -105,17 +118,17 @@ internal sealed class XfaScriptRunner
             foreach (XmlNode sc in c.ChildNodes)
             {
                 if (sc.NodeType != XmlNodeType.Element || sc.LocalName != "script") continue;
-                if (sc is XmlElement se) yield return GetAst(se);
+                if (sc is XmlElement se && (!_render || IsJavaScript(se))) yield return GetAst(se);
             }
         }
     }
 
-    private List<XStmt> GetAst(XmlElement scriptEl)
+    private List<IXStmt> GetAst(XmlElement scriptEl)
     {
         if (_astCache.TryGetValue(scriptEl, out var cached)) return cached;
-        List<XStmt> ast;
-        try { ast = new XParser(new XLexer(scriptEl.InnerText).Tokenize()).ParseProgram(); }
-        catch { ast = new List<XStmt>(); }
+        List<IXStmt> ast;
+        try { ast = new XParser(new XLexer(scriptEl.InnerText, _render).Tokenize(), _render).ParseProgram(); }
+        catch { ast = new List<IXStmt>(); }
         _astCache[scriptEl] = ast;
         return ast;
     }
@@ -125,45 +138,60 @@ internal sealed class XfaScriptRunner
     // -----------------------------------------------------------------------------------------
     // Statement execution
     // -----------------------------------------------------------------------------------------
-    private sealed class BreakSignal : Exception { }
+#pragma warning disable S3871 // internal control-flow signal: caught inside the interpreter, never escapes
+    private class BreakException : Exception { }
+#pragma warning restore S3871
 
-    private void Exec(List<XStmt> body, XfaNode self)
+    private void Exec(List<IXStmt> body, XfaNode self)
     {
         var scope = new Dictionary<string, object?>();
+        _tainted = false;                        // each script starts understood
+        if (_render) Hoist(body, scope, null);
         foreach (var s in body)
         {
             try { ExecStmt(s, self, scope); }
-            catch (BreakSignal) { break; }
+            catch (BreakException) { break; }
             catch { /* skip a failing statement, keep going */ }
         }
     }
 
-    private void ExecBlock(List<XStmt> body, XfaNode self, Dictionary<string, object?> scope)
+    private void ExecBlock(List<IXStmt> body, XfaNode self, Dictionary<string, object?> scope)
     {
         foreach (var s in body)
         {
             try { ExecStmt(s, self, scope); }
-            catch (BreakSignal) { throw; }
-            catch { }
+            catch (BreakException) { throw; }
+            catch { /* a script statement that fails is skipped and the script carries on - break still leaves the loop */ }
         }
     }
 
-    private void ExecStmt(XStmt s, XfaNode self, Dictionary<string, object?> scope)
+    private void ExecStmt(IXStmt s, XfaNode self, Dictionary<string, object?> scope)
     {
         switch (s)
         {
             case XNop: break;
-            case XExprStmt es: Eval(es.Expr, self, scope); break;
-            case XVar v: scope[v.Name] = v.Init is null ? null : Eval(v.Init, self, scope); break;
+            case XExprStmt es:
+                _unknown = false;
+                Eval(es.Expr, self, scope);
+                // A call made for its effect alone decides nothing, whatever it could not resolve.
+                if (es.Expr is not XCall) NoteUnknown();
+                break;
+            case XVar v: scope[v.Name] = v.Init is null ? null : EvalDeciding(v.Init, self, scope); break;
             case XBlock b: ExecBlock(b.Body, self, scope); break;
-            case XBreak: throw new BreakSignal();
+            case XBreak: throw new BreakException();
+            case XTry t: ExecTry(t, self, scope); break;
+            case XSkipped: if (_render) _tainted = true; break;
+            case XFunc f: if (_render && f.Name.Length > 0) scope[f.Name] = new Callable(f, _module); break;
+            case XReturn r: if (_render) throw new ReturnException { Value = r.Value is null ? null : EvalDeciding(r.Value, self, scope) }; break;
+            case XContinue: if (_render) throw new ContinueException(); break;
+            case XFor loop: if (_render) ExecLoop(loop, self, scope); break;
             case XIf i:
-                if (Truthy(Eval(i.Test, self, scope))) ExecBlock(i.Then, self, scope);
+                if (Truthy(EvalDeciding(i.Test, self, scope))) ExecBlock(i.Then, self, scope);
                 else ExecBlock(i.Else, self, scope);
                 break;
             case XSwitch sw:
                 {
-                    var d = Eval(sw.Disc, self, scope);
+                    var d = EvalDeciding(sw.Disc, self, scope);
                     bool matched = false;
                     try
                     {
@@ -174,7 +202,7 @@ internal sealed class XfaScriptRunner
                             if (matched) ExecBlock(cbody, self, scope);
                         }
                     }
-                    catch (BreakSignal) { }
+                    catch (BreakException ex) when (ex is not ReturnException and not ContinueException) { /* break leaves the switch */ }
                     break;
                 }
         }
@@ -187,7 +215,7 @@ internal sealed class XfaScriptRunner
     private static readonly object XfaLayout = new();       // `xfa.layout`
     private sealed class InstanceMgr { public XfaNode Node = default!; }
 
-    private object? Eval(XNode e, XfaNode self, Dictionary<string, object?> scope)
+    private object? Eval(IXNode e, XfaNode self, Dictionary<string, object?> scope)
     {
         switch (e)
         {
@@ -206,6 +234,16 @@ internal sealed class XfaScriptRunner
                 }
             case XBinary b: return EvalBinary(b, self, scope);
             case XAssign a: return EvalAssign(a, self, scope);
+            case XIncDec inc: return EvalIncDec(inc, self, scope);
+            case XIndex ix: return EvalIndex(ix, self, scope);
+            case XFunc fn: return new Callable(fn, _module);
+            case XUnknown: return Unknown();
+            case XArray arr:
+                {
+                    var items = new List<object?>(arr.Items.Count);
+                    foreach (var item in arr.Items) items.Add(Eval(item, self, scope));
+                    return items;
+                }
         }
         return null;
     }
@@ -214,12 +252,16 @@ internal sealed class XfaScriptRunner
     {
         if (name == "xfa") return XfaGlobal;
         if (name == "$" || name == "$form" || name == "$record") return _root;
+        if (name == "$data" && _render && _model.Data is { } data) return new DataRef(data);
         if (scope.TryGetValue(name, out var v)) return v;               // script-local var wins
+        if (_render && ModuleMember(name, out var shared)) return shared;
         if (name == _root.Name) return _root;
         // XFA unqualified reference: resolve the bare name as a SOM node by searching from `self`
         // up its ancestors (descendant search at each level). This is how e.g. a footer script
         // reads `MyPresentPageCount.rawValue` — a field declared higher in the form.
-        return ResolveUnqualified(self, name);
+        var node = ResolveUnqualified(self, name);
+        if (node is null && _render) return InstanceManagerOf(self, name, upward: true) ?? NamedObject(name) ?? Unknown();
+        return node;
     }
 
     /// <summary>Resolve an unqualified SOM name from a context node (walk up ancestors, descendant
@@ -253,24 +295,28 @@ internal sealed class XfaScriptRunner
                 case "presence": return n.Presence;
                 case "access": return n.Access;
                 case "rawValue":
-                case "value": _reads?.Add((n, n.RawValue)); return n.RawValue;
+                case "value": _reads?.Add((n, n.Writes)); return n.RawValue;
                 case "name":
                 case "somExpression": return n.Name;
                 case "instanceManager": return new InstanceMgr { Node = n };
                 case "resolveNode": return new BoundMethod(n, "resolveNode");
-                default: return n.Child(name);           // child navigation (null if none)
+                default: return _render ? RenderMember(n, name) : n.Child(name);   // child navigation (null if none)
             }
         }
         if (ReferenceEquals(o, XfaGlobal))
         {
             switch (name)
             {
+                // A render's scripts read the data itself: a form names its data apart from its fields.
+                case "data" when _render && _model.Data is { } data: return new DataRef(data);
+                case "datasets" when _render && _model.Data?.ParentNode is XmlElement datasets: return new DataRef(datasets);
                 case "form":
                 case "record":
                 case "data":
                 case "datasets": return _root;
                 case "layout": return XfaLayout;
                 case "resolveNode": return new BoundMethod(XfaGlobal, "resolveNode");
+                case "resolveNodes": return _render ? new BoundMethod(XfaGlobal, name) : null;
                 default: return null;
             }
         }
@@ -278,6 +324,9 @@ internal sealed class XfaScriptRunner
             return name == "count" ? (double)Occurrences(im.Node) : null;
         if (ReferenceEquals(o, XfaLayout))
             return new BoundMethod(XfaLayout, name);          // page/pageCount/… → callable
+        if (o is DataRef dataNode) return DataMember(dataNode, name);
+        if (_render && ValueMember(o, name, _self ?? _root, out var member)) return member;
+        _unknown = true;                                      // a member of nothing, or one the value does not have
         return null;                                          // null / unknown → tolerant
     }
 
@@ -285,31 +334,47 @@ internal sealed class XfaScriptRunner
 
     private object? EvalCall(XCall c, XfaNode self, Dictionary<string, object?> scope)
     {
+        if (_render && BuiltInCall(c, self, scope, out var builtIn)) return builtIn;
+        _self = self;
         // Evaluate callee (may be a BoundMethod) and args.
         var callee = Eval(c.Callee, self, scope);
         var args = new List<object?>(c.Args.Count);
         foreach (var a in c.Args) args.Add(Eval(a, self, scope));
 
+        if (callee is Callable function) return Invoke(function, args, self);
         if (callee is BoundMethod bm)
         {
+            if (bm.Target is string or double or List<object?> or XRegex) return ValueMethod(bm, args);
+            if (bm.Name == "resolveNodes") return ResolveNodes(bm.Target as XfaNode ?? _root, args.Count > 0 ? ToStr(args[0]) : "");
+            if (_pageNum > 0 && ReferenceEquals(bm.Target, XfaLayout) && LayoutAnswer(bm.Name) is { } answer) return answer;
             if (bm.Name == "resolveNode")
             {
                 var som = args.Count > 0 ? ToStr(args[0]) : "";
                 var baseNode = bm.Target as XfaNode ?? _root;
-                return ResolveSom(baseNode, som);
+                return _render ? ResolveNodeForRender(baseNode, som) : ResolveSom(baseNode, som);
             }
+            // node.execEvent("click") fires a user event's scripts: a conversion does not click, and the
+            // sections a box's click script hides for an unticked box are laid out all the same (measured).
+            if (bm.Name == ExecEventMethod && bm.Target is XfaNode) return null;
+            _unknown = true;                                  // nothing below is known to a render
             if (bm.Name is "page" or "pageCount" or "absPage" or "sheet" or "pageCountInBatch")
                 return 1d;                                    // single-context layout stub
             // instanceManager mutators / unknown layout calls → no-op
             return null;
         }
         // bare / unknown function (script objects like GlobalVariableDefinition.CallCommonVariables) → no-op
+        _unknown = true;
         return null;
     }
 
     private object? EvalUnary(XUnary u, XfaNode self, Dictionary<string, object?> scope)
     {
-        if (u.Op == "typeof") { var v = Eval(u.Operand, self, scope); return TypeOf(v); }
+        if (u.Op == "typeof")
+        {
+            var v = Eval(u.Operand, self, scope);
+            // The empty value of a field is null, which the language types as an object.
+            return _render && v is null ? "object" : TypeOf(v);
+        }
         var x = Eval(u.Operand, self, scope);
         return u.Op switch
         {
@@ -325,6 +390,7 @@ internal sealed class XfaScriptRunner
     {
         var l = Eval(b.L, self, scope);
         var r = Eval(b.R, self, scope);
+        if (_render && RenderBinary(b.Op, l, r, out var decided)) return decided;
         switch (b.Op)
         {
             case "==": return LooseEq(l, r);
@@ -356,20 +422,40 @@ internal sealed class XfaScriptRunner
         return val;
     }
 
-    private void AssignTo(XNode target, object? val, XfaNode self, Dictionary<string, object?> scope)
+    private void AssignTo(IXNode target, object? val, XfaNode self, Dictionary<string, object?> scope)
     {
-        if (target is XIdent id) { scope[id.Name] = val; return; }
+        if (target is XIdent id)
+        {
+            // A name the running function does not declare itself is its script object's variable, when that has one.
+            if (_module is not null && !scope.ContainsKey(id.Name) && _module.Vars.ContainsKey(id.Name)) _module.Vars[id.Name] = val;
+            else scope[id.Name] = val;
+            return;
+        }
         if (target is XMember m)
         {
             var o = Eval(m.Obj, self, scope);
+            if (o is CaptionRef caption && m.Name is "text" or "value")
+            {
+                if (!_tainted && !_unknown) caption.Node.CaptionText = ToStr(val);
+                return;
+            }
             if (o is XfaNode n)
             {
+                // A script that read something a render could not resolve decides nothing.
+                if (_render && (_tainted || _unknown))
+                {
+                    if (m.Name is "rawValue" or "value") n.RawWriteDropped = true;
+                    return;
+                }
                 switch (m.Name)
                 {
                     case "presence": n.Presence = ToStr(val); return;
                     case "access": n.Access = ToStr(val); return;
                     case "rawValue":
-                    case "value": n.RawValue = Nullify(ToStr(val)); return;
+                    case "value": n.RawValue = Nullify(ToStr(val)); n.RawAssigned = true; return;
+                    case "w" or "h" or "x" or "y" or "minW" or "minH" or "maxW" or "maxH" when _render:
+                        (n.Geometry ??= new Dictionary<string, string>(StringComparer.Ordinal))[m.Name] = ToStr(val);
+                        return;
                     default:
                         // `parent.child = value` shorthand → set the child field's rawValue
                         var child = n.Child(m.Name);
@@ -389,8 +475,9 @@ internal sealed class XfaScriptRunner
         if (string.IsNullOrEmpty(som)) return baseNode;
         som = som.Trim();
         // Strip leading engine roots; they all mean "the form root".
-        foreach (var prefix in new[] { "xfa.form.", "xfa.record.", "xfa.datasets.", "xfa.data.", "$form.", "$record.", "$." })
-            if (som.StartsWith(prefix, StringComparison.Ordinal)) { som = som.Substring(prefix.Length); baseNode = _root; break; }
+        var prefix = new[] { "xfa.form.", "xfa.record.", "xfa.datasets.", "xfa.data.", "$form.", "$record.", "$." }
+            .FirstOrDefault(prefix => som.StartsWith(prefix, StringComparison.Ordinal));
+        if (prefix is not null) { som = som.Substring(prefix.Length); baseNode = _root; }
         if (som is "xfa.form" or "xfa.record" or "$form" or "$record") return _root;
 
         var cur = baseNode;
@@ -403,7 +490,8 @@ internal sealed class XfaScriptRunner
             while (i < som.Length && som[i] != '.' && som[i] != '[') i++;
             var seg = som.Substring(start, i - start);
             // skip an index [n]
-            if (i < som.Length && som[i] == '[') { while (i < som.Length && som[i] != ']') i++; if (i < som.Length) i++; }
+            if (i < som.Length && som[i] == '[') { while (i < som.Length && som[i] != ']') i++;
+            if (i < som.Length) i++; }
             if (i < som.Length && som[i] == '.') i++;
             if (seg.Length == 0) continue;
             if (seg == _root.Name && cur == baseNode && !descendant) { continue; }   // leading root name
@@ -460,7 +548,9 @@ internal sealed class XfaScriptRunner
     private static string ToStr(object? v) => v switch
     {
         null => "",
+#pragma warning disable S1244 // integrality test - exact by definition
         double d => d == Math.Floor(d) && !double.IsInfinity(d) ? ((long)d).ToString(CultureInfo.InvariantCulture) : d.ToString(CultureInfo.InvariantCulture),
+#pragma warning restore S1244
         bool b => b ? "true" : "false",
         string s => s,
         XfaNode n => n.RawValue ?? "",
@@ -482,7 +572,9 @@ internal sealed class XfaScriptRunner
     {
         if (IsNullish(a) && IsNullish(b)) return true;
         if (IsNullish(a) || IsNullish(b)) return false;
+#pragma warning disable S1244 // the script language compares numbers exactly - exact by specification
         if (a is double || b is double || a is bool || b is bool) return Num(a) == Num(b);
+#pragma warning restore S1244
         return ToStr(a) == ToStr(b);
     }
 
@@ -491,7 +583,9 @@ internal sealed class XfaScriptRunner
         if (a is null && b is null) return true;
         if (a is null || b is null) return false;
         if (a is string sa && b is string sb) return sa == sb;
+#pragma warning disable S1244 // the script language compares numbers exactly - exact by specification
         if (a is double da && b is double db) return da == db;
+#pragma warning restore S1244
         if (a is bool ba && b is bool bb) return ba == bb;
         if (a is XfaNode na && b is XfaNode nb) return ReferenceEquals(na, nb);
         return false;

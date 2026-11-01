@@ -112,9 +112,9 @@ public partial class Table
         // legitimately sits at the page foot.
         if (i == 0 && mp.footStart && mp.currentY < mp.fullPageTopY - 1e-3)
         {
-            var h0 = mp.plan.LineCount == 0
-                ? mp.plan.MinBlankHeight
-                : (mp.plan.CssContentH > 0 ? CssRowContentH(mp.plan) : mp.plan.TightLine) + mp.plan.VertPadding;
+            double h0;
+            if (mp.plan.LineCount == 0) h0 = mp.plan.MinBlankHeight;
+            else h0 = (mp.plan.CssContentH > 0 ? CssRowContentH(mp.plan) : mp.plan.TightLine) + mp.plan.VertPadding;
             if (MinRowFloor(mp.plan) > h0) h0 = MinRowFloor(mp.plan);
             if (mp.currentY - h0 < mp.contentBottomMargin - 1e-3)
                 mp.forceBreak = true;
@@ -152,11 +152,10 @@ public partial class Table
             for (var r = i; r < bEnd; r++)
             {
                 var hp = mp.rowPlans[r];
-                var contentH = hp.LineCount == 0
-                    ? hp.MinBlankHeight
-                    : hp.CssContentH > 0
-                        ? CssRowContentH(hp)
-                        : (hp.LineCount - 1) * hp.LineHeight + hp.TightLine;
+                double contentH;
+                if (hp.LineCount == 0) contentH = hp.MinBlankHeight;
+                else if (hp.CssContentH > 0) contentH = CssRowContentH(hp);
+                else contentH = (hp.LineCount - 1) * hp.LineHeight + hp.TightLine;
                 var hRow = hp.LineCount == 0 || hp.IsBlankRow ? contentH : contentH + hp.VertPadding;
                 if (MinRowFloor(hp) > hRow) hRow = MinRowFloor(hp);
                 need += hRow;
@@ -231,8 +230,8 @@ public partial class Table
             (mp.sliceContentH, mp.imageDeferred) = GeneratorImageSliceH(mp.plan, mp.lineIdx, mp.take,
                 mp.currentY - mp.pageBottom - mp.plan.VertPadding);
         // A nested-reserve row's partial slice is the exact sum of the taken
-        // lines' own heights (the whole-row case takes ExactTotalH below);
-        // the uniform grid would price a 14 pt reserve share at the row pitch.
+        // lines' own heights (the whole-row case takes ExactTotalH below); the
+        // uniform grid would price a 14 pt reserve share at the row pitch.
         CommitRowSlice(mp, i);
         mp.currentY -= mp.sliceH + mp.rowGap;
         mp.brokeWithoutProgress = false;   // a slice landed: the break made progress
@@ -324,9 +323,9 @@ public partial class Table
         if (mp.footStartCandidate && mp.rowPlans.Count > 0)
         {
             var p0 = mp.rowPlans[0];
-            var h0 = p0.LineCount == 0
-                ? p0.MinBlankHeight
-                : (p0.CssContentH > 0 ? CssRowContentH(p0) : p0.TightLine) + p0.VertPadding;
+            double h0;
+            if (p0.LineCount == 0) h0 = p0.MinBlankHeight;
+            else h0 = (p0.CssContentH > 0 ? CssRowContentH(p0) : p0.TightLine) + p0.VertPadding;
             if (MinRowFloor(p0) > h0) h0 = MinRowFloor(p0);
             // Foot-start means the table's OWN top margin drove it there (the
             // caller asked for a block anchored at the page foot) — a table that
@@ -461,9 +460,12 @@ public partial class Table
         // A resolved collapsed grid's first line stands half its widest left-edge
         // rule inside the box, not half the skeleton rule.
         mp.tableX += mp.tableBorderWidth + CollapsedLeftShift(mp.colWidths.Length);
-        mp.tableTopY = (Top > 0 ? mp.pageHeight - Top - mp.marginTop
-            : mp.startY > 0 ? mp.startY
-            : mp.pageHeight - mp.marginTop) - mp.tableBorderWidth;
+        mp.tableTopY = ((Top, mp.startY) switch
+        {
+            (> 0, _) => mp.pageHeight - Top - mp.marginTop,
+            (_, > 0) => mp.startY,
+            _ => mp.pageHeight - mp.marginTop,
+        }) - mp.tableBorderWidth;
         mp.bandTop = mp.topMargin > 0 ? mp.topMargin : mp.marginTop;
         mp.fullPageTopY = mp.pageHeight - (Top > 0 ? Math.Min(Top + mp.marginTop, mp.bandTop) : mp.bandTop);
         mp.pageBottom = mp.bottomMargin;
@@ -605,14 +607,11 @@ public partial class Table
                     }
                     catch { ct.Slices = null; }
                 }
-        mp.sliceContentH = (mp.plan.LineCount == 0)
-            // (a UA-boxed row holding no line at all has no height - the browser lays no line box in an empty cell)
-            ? (UaCellBoxes ? 0 : mp.plan.MinBlankHeight)
-            : mp.plan.CssContentH > 0 && mp.lineIdx == 0 && mp.take == mp.plan.LineCount
-                ? CssRowContentH(mp.plan)
-                : GeneratorCellModel && EngineStackCell(mp.plan) is { } stack
-                    ? EngineStackH(stack, mp.lineIdx, mp.take)
-                    : (mp.take - 1) * mp.plan.LineHeight + mp.plan.TightLine;
+        // (a UA-boxed row holding no line at all has no height - the browser lays no line box in an empty cell)
+        if (mp.plan.LineCount == 0) mp.sliceContentH = UaCellBoxes ? 0 : mp.plan.MinBlankHeight;
+        else if (mp.plan.CssContentH > 0 && mp.lineIdx == 0 && mp.take == mp.plan.LineCount) mp.sliceContentH = CssRowContentH(mp.plan);
+        else if (GeneratorCellModel && EngineStackCell(mp.plan) is { } stack) mp.sliceContentH = EngineStackH(stack, mp.lineIdx, mp.take);
+        else mp.sliceContentH = (mp.take - 1) * mp.plan.LineHeight + mp.plan.TightLine;
     }
 
     /// <summary>The tallest HTML-engine cell stack of the row (every line an engine line with
@@ -710,8 +709,8 @@ public partial class Table
                         Height = hSliceH,
                         RowIndex = h,
                     });
-                    // (…and its gap follows the repeated band as it follows every row;
-                    // the HTML row gap is left as it was here)
+                    // (…and its gap follows the repeated band as it follows every row; the
+                    // HTML row gap is left as it was here)
                     mp.currentY -= hSliceH + CellSpacingV;
                 }
             }
@@ -795,9 +794,8 @@ public partial class Table
         //  page ends on the SWIFT line with the column's 15 px pad below it on the next page)
         if (UaCellBoxes && mp.plan.LineCount > 0)
             mp.usable = mp.currentY - mp.pageBottom - (mp.lineIdx == 0 ? mp.plan.TopPad : 0);
-        mp.linesFit = mp.plan.LineCount == 0
-            ? 1
-            : (mp.plan.LineHeight > 0 ? (int)Math.Floor(mp.usable / mp.plan.LineHeight) : mp.plan.LineCount);
+        if (mp.plan.LineCount == 0) mp.linesFit = 1;
+        else mp.linesFit = mp.plan.LineHeight > 0 ? (int)Math.Floor(mp.usable / mp.plan.LineHeight) : mp.plan.LineCount;
         // A slice that CONTINUES overleaf may not spend the LEADING of the line
         // it cuts at: the leading rides above its glyphs, so the cut has to fall
         // below them and that much of the budget is not available to fill.
@@ -869,13 +867,14 @@ public partial class Table
             mp.linesFit = 0;
         mp.atFreshPage = mp.currentY >= mp.fullPageTopY - 1e-3;
         if (mp.linesFit <= 0 && mp.atFreshPage) mp.linesFit = Math.Max(1, mp.plan.LineCount - mp.lineIdx);
-        mp.rowFullH = mp.plan.LineCount == 0
-            ? mp.plan.MinBlankHeight
-            : (mp.plan.ExactTotalH > 0 && mp.plan.CellTables is not null
-                ? mp.plan.ExactTotalH
-                : mp.plan.CssContentH > 0
-                ? CssRowContentH(mp.plan)
-                : (mp.plan.LineCount - 1) * mp.plan.LineHeight + mp.plan.TightLine)
-              + mp.plan.VertPadding;
+        if (mp.plan.LineCount == 0) mp.rowFullH = mp.plan.MinBlankHeight;
+        else
+            mp.rowFullH = ((mp.plan.ExactTotalH, mp.plan.CellTables, mp.plan.CssContentH) switch
+            {
+                (> 0, not null, _) => mp.plan.ExactTotalH,
+                (_, _, > 0) => CssRowContentH(mp.plan),
+                _ => (mp.plan.LineCount - 1) * mp.plan.LineHeight + mp.plan.TightLine,
+            })
+                + mp.plan.VertPadding;
     }
 }

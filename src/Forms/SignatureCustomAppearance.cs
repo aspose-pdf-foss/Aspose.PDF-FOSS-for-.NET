@@ -42,7 +42,7 @@ public class SignatureCustomAppearance
     public string DigitalSignedLabel { get; set; } = "Digitally signed by";
 
     /// <summary>Label for the date-signed-at line.</summary>
-    public string DateSignedAtLabel { get; set; } = "Date signed at";
+    public string DateSignedAtLabel { get; set; } = "Date";
 
     /// <summary>Label for the contact-info line.</summary>
     public string ContactInfoLabel { get; set; } = "Contact";
@@ -56,11 +56,11 @@ public class SignatureCustomAppearance
     /// <summary>Culture used when formatting the date string.</summary>
     public System.Globalization.CultureInfo? Culture { get; set; }
 
-    /// <summary>Standard date-time format string.</summary>
-    public string DateTimeFormat { get; set; } = "yyyy-MM-dd HH:mm:ss";
+    /// <summary>Format of the signing date when it is no local time (set outright).</summary>
+    public string DateTimeFormat { get; set; } = "yyyy.MM.dd HH:mm:ss";
 
-    /// <summary>Locale-aware date-time format string.</summary>
-    public string DateTimeLocalFormat { get; set; } = "F";
+    /// <summary>Format of the signing date when it is a local time (the signing moment): with its offset.</summary>
+    public string DateTimeLocalFormat { get; set; } = "yyyy.MM.dd HH:mm:ss zzz";
 
     /// <summary>When true, the signer DN is decomposed into the elements
     /// listed in <see cref="DigitalSubjectFormat"/> instead of being

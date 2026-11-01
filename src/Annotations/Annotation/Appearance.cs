@@ -58,7 +58,7 @@ public partial class Annotation
             }
         }
 
-        if (!_appearance!.ContainsKey("N")) AddEmptyNormalAppearanceToDrawInto();
+        if (!_appearance.ContainsKey("N")) AddEmptyNormalAppearanceToDrawInto();
     }
 
     /// <summary>Give a freshly made watermark an empty normal appearance for its maker to draw into.
@@ -133,28 +133,28 @@ public partial class Annotation
 
         var daStr = ResolveInheritedDa();
         if (string.IsNullOrEmpty(daStr)) return;
-        var fontName = ParseDaFontToken(daStr!);
+        var fontName = ParseDaFontToken(daStr);
         if (string.IsNullOrEmpty(fontName)) return;
 
         var res = _reader.ResolveDict(stream.Dict.Get("Resources"));
         if (res is null) { res = new PdfDictionary(); stream.Dict.Set("Resources", res); }
         var fonts = _reader.ResolveDict(res.Get("Font"));
         if (fonts is null) { fonts = new PdfDictionary(); res.Set("Font", fonts); }
-        if (fonts.ContainsKey(fontName!)) return;
+        if (fonts.ContainsKey(fontName)) return;
 
-        if (StandardDaAlias.TryGetValue(fontName!, out var baseFont))
+        if (StandardDaAlias.TryGetValue(fontName, out var baseFont))
         {
             var f = new PdfDictionary();
             f.Set("Type", new PdfName("Font"));
             f.Set("Subtype", new PdfName("Type1"));
             f.Set("BaseFont", new PdfName(baseFont));
             f.Set("Encoding", new PdfName("WinAnsiEncoding"));
-            fonts.Set(fontName!, f);
+            fonts.Set(fontName, f);
             return;
         }
 
-        var drFont = AcroFormDrFont(fontName!);
-        if (drFont is not null) fonts.Set(fontName!, drFont);
+        var drFont = AcroFormDrFont(fontName);
+        if (drFont is not null) fonts.Set(fontName, drFont);
     }
 
     /// <summary>The effective /DA for this widget: its own, else inherited from an AcroForm
@@ -340,7 +340,16 @@ public partial class Annotation
     internal static bool CanSynthesiseAppearance(Annotation annotation) =>
         annotation is SquareAnnotation or CircleAnnotation or TextAnnotation
                    or HighlightAnnotation or PolyAnnotation or LineAnnotation
-                   or InkAnnotation;
+                   or InkAnnotation or UnderlineAnnotation or StrikeOutAnnotation or SquigglyAnnotation;
+
+    /// <summary>Give an annotation stored without an /AP the appearance a viewer would draw
+    /// for it, where the library can: a figure from its geometry, a free text from its
+    /// /DA, text and rectangle. Without it the flattened annotation leaves nothing behind.</summary>
+    internal void SynthesiseMissingAppearance()
+    {
+        if (this is FreeTextAnnotation freeText) freeText.GenerateAppearance();
+        else if (CanSynthesiseAppearance(this)) UpdateAppearances();
+    }
 
     private PdfStream? ResolveAppearanceStream()
     {
@@ -384,13 +393,27 @@ public partial class Annotation
         }
         // Attach after seeding so the initial population doesn't echo back into /MK.
         c.WriteThrough = SetMkColor;
+        c.RotateChanged = OnCharacteristicsRotated;
         return c;
     }
+
+    /// <summary>A rotation set on the characteristics; an annotation whose appearance it turns draws it again.</summary>
+    private protected virtual void OnCharacteristicsRotated() { }
 
     /// <summary>Write an appearance-characteristics colour into the annotation's
     /// /MK dictionary as an RGB triple. A fully transparent colour removes the
     /// entry (the /MK convention for "no colour").</summary>
     private void SetMkColor(string key, System.Drawing.Color color)
+    {
+        WriteMkColor(key, color);
+        OnCharacteristicsColorChanged();
+    }
+
+    /// <summary>A border or background colour set on the characteristics; a form field draws its appearance
+    /// again with it.</summary>
+    private protected virtual void OnCharacteristicsColorChanged() { }
+
+    private void WriteMkColor(string key, System.Drawing.Color color)
     {
         var mk = _reader.ResolveDict(_dict.Get("MK"));
         if (color.A == 0)

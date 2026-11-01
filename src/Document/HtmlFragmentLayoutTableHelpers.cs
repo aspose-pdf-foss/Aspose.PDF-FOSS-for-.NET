@@ -18,7 +18,7 @@ public sealed partial class Document
     // The break's own line box, by ITS position: the wrapper
     // font's UNROUNDED Verdana-12 line inside the div, the
     // serif default's rounded 13.5 outside it.
-    private static double VgBrBoxPt(HtmlFragmentLayoutState hl, int vgWrapClose, int at) => at < vgWrapClose
+    private static double VgBrBoxPt(int vgWrapClose, int at) => at < vgWrapClose
         ? Converters.HtmlToPdfConverter.FormGridBasePt
             * Converters.HtmlToPdfConverter.VerdanaWinLineRatio
         : Converters.HtmlToPdfConverter.PxLinePt(
@@ -32,32 +32,34 @@ public sealed partial class Document
     // (bbox 505.21..518.49 inside the 505.08 line).
     private static bool TryVgFlowText(HtmlFragmentLayoutState hl, int vgWrapClose, string chunkV, int at)
     {
-        var dm = System.Text.RegularExpressions.Regex.Match(
+        var dm = SafeRegex.Match(
             chunkV, @"<div[^>]*>([^<]+)</div>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (!dm.Success || dm.Groups[1].Value.Trim().Length == 0) return false;
         var restV = chunkV.Remove(dm.Index, dm.Length);
-        if (System.Text.RegularExpressions.Regex.Replace(restV,
+        if (SafeRegex.Replace(restV,
                 @"<br\s*/?>|</\s*(?:font|div)\s*>|\s+", "",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase).Length != 0)
             return false;
         var serifFont = Text.FontRepository.TryFindFont("Times New Roman");
         var serifTtf = serifFont?.SourceFontData?.TtfData;
         if (serifTtf is null) return false;
-        foreach (System.Text.RegularExpressions.Match brm in
-            System.Text.RegularExpressions.Regex.Matches(chunkV, @"<br\s*/?>",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-            if (brm.Index < dm.Index) hl.flow.AdvanceY(VgBrBoxPt(hl, vgWrapClose, at + brm.Index));
+        foreach (var index in
+            SafeRegex.Matches(chunkV, @"<br\s*/?>",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase).Select(brm => brm.Index))
+            if (index < dm.Index) hl.flow.AdvanceY(VgBrBoxPt(vgWrapClose, at + index));
         var vgfPt = Converters.HtmlToPdfConverter.FormGridBasePt;
         var vgfBox = Converters.HtmlToPdfConverter.PxLinePt(vgfPt,
             Converters.HtmlToPdfConverter.SerifWinLineRatio);
-        var vgfText = System.Text.RegularExpressions.Regex.Replace(
+        var vgfText = SafeRegex.Replace(
             dm.Groups[1].Value, @"\s+", " ").Trim();
         var vgfShaped = Text.ArabicTextShaper.ContainsArabic(vgfText)
             ? Text.ArabicTextShaper.Shape(vgfText) : vgfText;
         var vgfDict = Table.ResolvePageFontDict(hl.flow.CurrentPage);
         var (vgfRes, vgfHex) = Text.Type0FontEmbedder.Embed(
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
             vgfDict, serifTtf, serifFont!.FontName, vgfShaped,
+#pragma warning restore S8969
             stripSpacesInBaseFont: true);
         var vgfAsc = vgfPt * Converters.HtmlToPdfConverter.SerifWinAscent;
         var vgfDesc = vgfPt * Converters.HtmlToPdfConverter.SerifWinDescent;
@@ -71,10 +73,10 @@ public sealed partial class Document
         vgfNb.RestoreState();
         hl.flow.InjectContentAtCursor(vgfNb.Build());
         hl.flow.AdvanceY(vgfBox);
-        foreach (System.Text.RegularExpressions.Match brm in
-            System.Text.RegularExpressions.Regex.Matches(chunkV, @"<br\s*/?>",
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-            if (brm.Index > dm.Index) hl.flow.AdvanceY(VgBrBoxPt(hl, vgWrapClose, at + brm.Index));
+        foreach (var brmIndex in
+            SafeRegex.Matches(chunkV, @"<br\s*/?>",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase).Select(brm => brm.Index))
+            if (brmIndex > dm.Index) hl.flow.AdvanceY(VgBrBoxPt(vgWrapClose, at + brmIndex));
         return true;
     }
 
@@ -86,12 +88,12 @@ public sealed partial class Document
     {
         var sheet = Converters.HtmlToPdfConverter.ParseStyleSheet(fragmentHtml);
         if (sheet.Count == 0) return null;
-        var id = System.Text.RegularExpressions.Regex.Match(chunk, @"<table\b[^>]*\bid\s*=\s*[""']?([\w-]+)",
+        var id = SafeRegex.Match(chunk, @"<table\b[^>]*\bid\s*=\s*[""']?([\w-]+)",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase).Groups[1].Value;
         if (id.Length == 0) return sheet;
         foreach (var key in sheet.Keys.ToList())
         {
-            var m = System.Text.RegularExpressions.Regex.Match(key, @"^table#" + System.Text.RegularExpressions.Regex.Escape(id) + @"(?:\s+(.+))?$",
+            var m = SafeRegex.Match(key, @"^table#" + System.Text.RegularExpressions.Regex.Escape(id) + @"(?:\s+(.+))?$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (!m.Success) continue;
             foreach (var alias in TableRuleAliases(m.Groups[1].Value.Trim()))
@@ -109,7 +111,7 @@ public sealed partial class Document
         if (rest.Length == 0) { yield return "table"; yield break; }
         yield return "table " + rest;
         yield return rest;
-        var cm = System.Text.RegularExpressions.Regex.Match(rest, @"^t[dh]\.([\w-]+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var cm = SafeRegex.Match(rest, @"^t[dh]\.([\w-]+)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (cm.Success) yield return "." + cm.Groups[1].Value;
     }
 }

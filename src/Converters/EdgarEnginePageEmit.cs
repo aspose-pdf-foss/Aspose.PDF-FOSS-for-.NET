@@ -54,7 +54,7 @@ internal static partial class EdgarHtmlRenderer
                     sb.Append("BT\n/").Append(res).Append(' ').Append(run.Run.Size.ToString("0.###", ic)).Append(" Tf\n");
                     sb.Append(F(r)).Append(' ').Append(F(g)).Append(' ').Append(F(b)).Append(" rg\n");
                     sb.Append("1 0 0 -1 ").Append(F(run.X)).Append(' ').Append(F(run.BaselineTd)).Append(" Tm\n");
-                    sb.Append(BuildKernedTj(face, text, hex, run.Run.Size));
+                    sb.Append(BuildKernedTj(face, text, hex));
                     sb.Append("0 g\nET\n");
                 }
 
@@ -67,7 +67,7 @@ internal static partial class EdgarHtmlRenderer
                     {
                         page.AddImage(img.Data, new Rectangle(img.X, PageH - img.TopTd - img.H, img.X + img.W, PageH - img.TopTd));
                     }
-                    catch { }
+                    catch { /* an image the page cannot take is left out - the layout carries on */ }
                 }
             }
         }

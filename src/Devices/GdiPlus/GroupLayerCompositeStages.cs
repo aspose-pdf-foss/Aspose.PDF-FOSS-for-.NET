@@ -17,7 +17,7 @@ namespace Aspose.Pdf.Devices;
 public sealed partial class GdiPlusPageRenderer
 {
     /// <summary>The stages of the group-layer composite: one pixel row.</summary>
-    private bool CompositeGroupRow(GroupLayerCompositeState cg, int y)
+    private static bool CompositeGroupRow(GroupLayerCompositeState cg, int y)
     {
         cg.dRow = cg.dst.Scan0.ToInt64() + (long)y * cg.dst.Stride + (long)cg.x0 * 4;
         cg.sRow = cg.src.Scan0.ToInt64() + (long)y * cg.src.Stride + (long)cg.x0 * 4;
@@ -36,22 +36,18 @@ public sealed partial class GdiPlusPageRenderer
     }
 
     /// <summary></summary>
-    private bool CompositeGroupPixel(GroupLayerCompositeState cg, int y, int x)
+    private static bool CompositeGroupPixel(GroupLayerCompositeState cg, int y, int x)
     {
         cg.i = (x - cg.x0) * 4;
         if (cg.krow is not null)
         {
-            {
-            CompositeKnockoutPixel(cg, y, x);
-            return true;
-        }
+        CompositeKnockoutPixel(cg, y, x);
+        return true;
         }
         if (cg.stampMask is not null && cg.stampMask[y * cg.w + x] != 0)
         {
-            {
-            CompositeStampMaskedPixel(cg, y, x);
-            return true;
-        }
+        CompositeStampMaskedPixel(cg, y, x);
+        return true;
         }
         cg.sca = cg.covWeight is not null ? cg.covWeight[y * cg.w + x] : cg.srow[cg.i + 3] / 255.0;
         if (cg.sca <= 0.0) return true;
@@ -88,7 +84,7 @@ public sealed partial class GdiPlusPageRenderer
     }
 
     /// <summary></summary>
-    private void CompositeStampMaskedPixel(GroupLayerCompositeState cg, int y, int x)
+    private static void CompositeStampMaskedPixel(GroupLayerCompositeState cg, int y, int x)
     {
         // Replace-semantics for a stamped nested-footprint pixel.
         double aEff = cg.ga;
@@ -120,14 +116,14 @@ public sealed partial class GdiPlusPageRenderer
     }
 
     /// <summary></summary>
-    private void CompositeKnockoutPixel(GroupLayerCompositeState cg, int y, int x)
+    private static void CompositeKnockoutPixel(GroupLayerCompositeState cg, int y, int x)
     {
         // Knockout element: the blend mode acts against the group's frozen
         // INITIAL backdrop, never against earlier siblings
         // (PDF 32000 §11.4.5). Q_KO selects what happens to the sibling
         // pixels underneath: "replace" = spec knockout (element over b0
-        // replaces the accumulated pixel wherever it has coverage);
-        // default = blend-vs-b0 but alpha-composite over the accumulated
+        // replaces the accumulated pixel wherever it has coverage); default
+        // = blend-vs-b0 but alpha-composite over the accumulated
         // result, which keeps sibling AA at fractional-coverage edges.
         double ka = (cg.covWeight is not null ? cg.covWeight[y * cg.w + x] : cg.srow[cg.i + 3] / 255.0) * cg.ga;
         if (cg.softMask is not null) ka *= cg.softMask[y * cg.w + x] / 255.0;

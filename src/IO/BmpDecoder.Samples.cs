@@ -218,7 +218,10 @@ internal static partial class BmpDecoder
             {
                 for (var i = 0; i < count; i++, x++)
                 {
-                    var v = eight ? value : i % 2 == 0 ? value >> 4 : value & 0x0f;
+                    int v;
+                    if (eight) v = value;
+                    else if (i % 2 == 0) v = value >> 4;
+                    else v = value & 0x0f;
                     if (x < width) indices[y * width + x] = (byte)v;
                 }
                 continue;
@@ -241,7 +244,10 @@ internal static partial class BmpDecoder
                     for (var i = 0; i < value && p + (eight ? i : i / 2) < d.Length; i++, x++)
                     {
                         var b = d[p + (eight ? i : i / 2)];
-                        var v = eight ? b : i % 2 == 0 ? b >> 4 : b & 0x0f;
+                        int v;
+                        if (eight) v = b;
+                        else if (i % 2 == 0) v = b >> 4;
+                        else v = b & 0x0f;
                         if (x < width && y < height) indices[y * width + x] = (byte)v;
                     }
                     p += bytes + (bytes & 1);
@@ -281,7 +287,10 @@ internal static partial class BmpDecoder
             for (var x = 0; x < s.Width; x++)
             {
                 var b = s.Samples[y * rowBytes + (s.BitCount == 8 ? x : x / 2)];
-                var idx = s.BitCount == 8 ? b : x % 2 == 0 ? b >> 4 : b & 0x0f;
+                int idx;
+                if (s.BitCount == 8) idx = b;
+                else if (x % 2 == 0) idx = b >> 4;
+                else idx = b & 0x0f;
                 if (idx * 3 + 2 >= s.Palette.Length) continue;
                 var to = (y * s.Width + x) * 3;
                 rgb[to] = s.Palette[idx * 3];

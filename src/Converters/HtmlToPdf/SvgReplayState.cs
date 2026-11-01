@@ -17,9 +17,11 @@ private sealed class SvgReplayState
     // coordinates, independent of the group transforms active at their USE site.
     public double[] rootTotal = null!;
     // Luminosity masks (<mask id> holding one raster): id → the def's user-space
-    // rect and its grayscale png. Their spans are excluded from the content scan.
+    // rect and its grayscale png.
     public Dictionary<string, (double X, double Y, double W, double H, byte[] Png)> maskDefs = null!;
-    public List<(int Start, int End)> maskSpans = null!;
+    // The spans of the definitions (<mask>, <clipPath>): referenced, never painted,
+    // so the content scan passes over the shapes inside them.
+    public List<(int Start, int End)> defSpans = null!;
     public Stack<(double[] M, double Alpha, string? MaskId)> stack = null!;
     public double alpha;
     public string? maskId;

@@ -1,4 +1,4 @@
-using Aspose.Pdf.Security;
+﻿using Aspose.Pdf.Security;
 
 namespace Aspose.Pdf.Facades;
 
@@ -12,8 +12,6 @@ public sealed class PdfFileSecurity : IDisposable
     private bool _ownsDoc;
     private Stream? _outputStream;
     private string? _outputFile;
-    private Stream? _inputStream;
-    private string? _inputFile;
     // Raw bytes of the bound source, captured even when the PDF is encrypted and
     // can't be opened without a password — DecryptFile/ChangePassword re-open these.
     private byte[]? _sourceBytes;
@@ -62,7 +60,6 @@ public sealed class PdfFileSecurity : IDisposable
     /// <summary>Bind from a stream and save to a stream.</summary>
     public PdfFileSecurity(Stream inputStream, Stream outputStream)
     {
-        _inputStream = inputStream;
         _outputStream = outputStream;
         // Capture the raw source so DecryptFile/ChangePassword can re-open the
         // original (still-encrypted) bytes rather than a re-serialised copy.
@@ -79,7 +76,6 @@ public sealed class PdfFileSecurity : IDisposable
     /// <summary>Bind from a path and save to a path.</summary>
     public PdfFileSecurity(string inputFile, string outputFile)
     {
-        _inputFile = inputFile;
         _outputFile = outputFile;
         // Capture the raw source so DecryptFile/ChangePassword can re-open the
         // original (still-encrypted) bytes rather than a re-serialised copy.
@@ -97,11 +93,13 @@ public sealed class PdfFileSecurity : IDisposable
     /// <summary>Alias for <see cref="Dispose"/>.</summary>
     public void Close() => Dispose();
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always true and cannot be changed — the direct (non-Try) methods
     /// always propagate exceptions; the <c>Try*</c> variants always capture the
     /// last exception in <see cref="LastException"/> and return false. The
     /// setter throws <see cref="NotSupportedException"/>.</summary>
     public bool AllowExceptions
+#pragma warning restore S2325
     {
         get => true;
         set => throw new NotSupportedException(
@@ -111,12 +109,13 @@ public sealed class PdfFileSecurity : IDisposable
     /// <summary>Last exception captured by a Try* method, or null.</summary>
     public Exception? LastException { get; private set; }
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>Set the input file path used by stateful operations.</summary>
     public string InputFile
+#pragma warning restore S2376
     {
         set
         {
-            _inputFile = value;
             if (_ownsDoc && _doc is not null) _doc.Dispose();
             _sourceBytes = File.ReadAllBytes(value);
             _doc = TryBindOpen(_sourceBytes);
@@ -124,12 +123,13 @@ public sealed class PdfFileSecurity : IDisposable
         }
     }
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>Set the input stream used by stateful operations.</summary>
     public Stream InputStream
+#pragma warning restore S2376
     {
         set
         {
-            _inputStream = value;
             if (_ownsDoc && _doc is not null) _doc.Dispose();
             using (var ms = new MemoryStream())
             {
@@ -142,14 +142,18 @@ public sealed class PdfFileSecurity : IDisposable
         }
     }
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>Route the next Save to this file.</summary>
     public string OutputFile
+#pragma warning restore S2376
     {
         set => _outputFile = value;
     }
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>Route the next Save to this stream.</summary>
     public Stream OutputStream
+#pragma warning restore S2376
     {
         set => _outputStream = value;
     }
@@ -239,7 +243,8 @@ public sealed class PdfFileSecurity : IDisposable
         // sees the encryption immediately.
         var encryptedBytes = _doc.ToArray();
         if (_ownsDoc) _doc.Dispose();
-        _doc = Document.Open(encryptedBytes, ownerPassword);
+        // With no owner password given, the one written is random: the user password opens it.
+        _doc = Document.Open(encryptedBytes, string.IsNullOrEmpty(ownerPassword) ? userPassword : ownerPassword);
         _ownsDoc = true;
         _sourceBytes = encryptedBytes;
         // The re-opened document decrypts its content in memory and carries no pending
@@ -254,6 +259,19 @@ public sealed class PdfFileSecurity : IDisposable
     public bool EncryptFile(string userPassword, string ownerPassword,
         DocumentPrivilege privilege, KeySize keySize)
         => EncryptFile(userPassword, ownerPassword, privilege, keySize, Algorithm.AES);
+
+#pragma warning disable S2325 // public API: the published instance member
+    /// <summary>
+    /// Encrypt a PDF with the specified passwords and algorithm.
+    /// </summary>
+    public byte[] EncryptFile(byte[] input, string userPassword, string ownerPassword,
+#pragma warning restore S2325
+        DocumentPrivilege? permissions = null, CryptoAlgorithm algorithm = Aspose.Pdf.CryptoAlgorithm.AESx128)
+    {
+        using var doc = Document.Open(input);
+        doc.Encrypt(userPassword, ownerPassword, permissions, algorithm);
+        return doc.ToArray();
+    }
 
     /// <summary>Try-variant of <see cref="EncryptFile(string,string,DocumentPrivilege,KeySize,Algorithm)"/>.
     /// On exception, captures it in <see cref="LastException"/> and returns false.</summary>
@@ -310,6 +328,19 @@ public sealed class PdfFileSecurity : IDisposable
         return true;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
+    /// <summary>
+    /// Remove encryption from a PDF using the correct password.
+    /// </summary>
+    public byte[] DecryptFile(byte[] input, string password)
+#pragma warning restore S2325
+    {
+        using var doc = Document.Open(input, password);
+        // A save keeps the encryption the document was opened with unless it is removed.
+        doc.Decrypt();
+        return doc.ToArray();
+    }
+
     /// <summary>Try-variant of <see cref="DecryptFile(string)"/>.</summary>
     public bool TryDecryptFile(string ownerPassword)
         => Try(() => DecryptFile(ownerPassword));
@@ -333,6 +364,7 @@ public sealed class PdfFileSecurity : IDisposable
                 throw new PdfException("Pdf document is not encrypted, so don't provide password to get access.");
             return false;
         }
+        RequireOwner(opened, ownerPassword);
         if (_ownsDoc) _doc?.Dispose();
         _doc = opened;
         _ownsDoc = true;
@@ -366,6 +398,7 @@ public sealed class PdfFileSecurity : IDisposable
                 throw new PdfException("Pdf document is not encrypted, so don't provide password to get access.");
             return false;
         }
+        RequireOwner(opened, ownerPassword);
         if (_ownsDoc) _doc?.Dispose();
         _doc = opened;
         _ownsDoc = true;
@@ -373,6 +406,15 @@ public sealed class PdfFileSecurity : IDisposable
         _doc.Encrypt(newUserPassword, newOwnerPassword, privilege, crypto);
         SaveBound();
         return true;
+    }
+
+    /// <summary>The passwords are the owner's to change: a password that opens the file only as its user
+    /// changes nothing.</summary>
+    private static void RequireOwner(Document opened, string ownerPassword)
+    {
+        if (opened.AuthenticatesAsOwner(ownerPassword)) return;
+        opened.Dispose();
+        throw new PdfException(Document.NotOwnerPasswordMessage);
     }
 
     /// <summary>Try-variant of <see cref="ChangePassword(string,string,string)"/>.</summary>
@@ -416,31 +458,12 @@ public sealed class PdfFileSecurity : IDisposable
         };
     }
 
-    /// <summary>
-    /// Encrypt a PDF with the specified passwords and algorithm.
-    /// </summary>
-    public byte[] EncryptFile(byte[] input, string userPassword, string ownerPassword,
-        DocumentPrivilege? permissions = null, CryptoAlgorithm algorithm = Aspose.Pdf.CryptoAlgorithm.AESx128)
-    {
-        using var doc = Document.Open(input);
-        doc.Encrypt(userPassword, ownerPassword, permissions, algorithm);
-        return doc.ToArray();
-    }
-
-    /// <summary>
-    /// Remove encryption from a PDF using the correct password.
-    /// </summary>
-    public byte[] DecryptFile(byte[] input, string password)
-    {
-        using var doc = Document.Open(input, password);
-        // Save without encryption
-        return doc.ToArray();
-    }
-
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Change the passwords on an encrypted PDF.
     /// </summary>
     public byte[] ChangePasswords(byte[] input, string oldOwnerPassword,
+#pragma warning restore S2325
         string newUserPassword, string newOwnerPassword,
         CryptoAlgorithm algorithm = Aspose.Pdf.CryptoAlgorithm.AESx128)
     {

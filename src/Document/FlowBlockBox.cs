@@ -105,10 +105,10 @@ public sealed partial class Document
             var box = new Rectangle(boxLeft, _curY, boxLeft + boxWidth, _currentSlot == startSlot ? boxTop : ContentTop);
             var options = tf.TextState.FormattingOptions;
             var fill = options is { BlockBackground: true } ? tf.TextState.BackgroundColor : null;
-            var fillAlpha = fill is null ? null
-                : options?.BackgroundOpacity is { } opacity
-                ? Text.TextParagraph.EnsureAlphaExtGState(_startPage, opacity, strokeToo: false)
-                : Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, fill.AByte);
+            string? fillAlpha;
+            if (fill is null) fillAlpha = null;
+            else if (options?.BackgroundOpacity is { } opacity) fillAlpha = Text.TextParagraph.EnsureAlphaExtGState(_startPage, opacity, strokeToo: false);
+            else fillAlpha = Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, fill.AByte);
             var pictures = BackgroundPicturePainter.Prepare(tf.BlockBackgroundPictures, _startPage, box,
                 (bl, bb, br, bt), tf.BlockPadding);
             var paint = BuildBlockPaint(tf.BlockBorder, box, fill,
@@ -175,8 +175,11 @@ public sealed partial class Document
         /// its own stroke width when the side draws, else nothing.</summary>
         internal static (double Left, double Bottom, double Right, double Top) BorderBands(BorderInfo border)
         {
-            double Band(BorderSide side, bool assigned, GraphInfo? gi) =>
-                border.Side.HasFlag(side) || assigned ? Math.Max(0, gi?.LineWidth > 0 ? gi.LineWidth : border.Width) : 0;
+            double Band(BorderSide side, bool assigned, GraphInfo? gi)
+            {
+                if (border.Side.HasFlag(side) || assigned) return Math.Max(0, gi?.LineWidth > 0 ? gi.LineWidth : border.Width);
+                return 0;
+            }
             return (Band(BorderSide.Left, border.LeftAssigned, border.RawLeft),
                 Band(BorderSide.Bottom, border.BottomAssigned, border.RawBottom),
                 Band(BorderSide.Right, border.RightAssigned, border.RawRight),

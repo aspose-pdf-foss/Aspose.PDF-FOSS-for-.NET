@@ -12,13 +12,13 @@ internal static partial class HtmlToPdfConverter
     // fonts), px-height spacer divs, unfetchable images rendering their ALT text,
     // and a padded background-color box holding a two-column label table whose
     // label class declares nowrap + paddings and whose rows draw 1px (white)
-    // bottom borders. The whole ladder is formula-driven from the win metrics;
-    // the only measured constants are the broken-image line box and its baseline.
+    // bottom borders. The whole ladder is formula-driven from the win metrics; the
+    // only measured constants are the broken-image line box and its baseline.
     //
     // Geometry (all measured):
-    //   page = 96 + bodyPx + 90 wide; content x = 96.75 (one cell padding);
-    //   broken-img alt line box 20.63 with its baseline 17.55 below the top;
-    //   the box div's padding insets its table; label rows pitch at
+    //   page = 96 + bodyPx + 90 wide; content x = 96.75 (one cell padding); broken-img
+    //   alt line box 20.63 with its baseline 17.55 below the top; the
+    //   box div's padding insets its table; label rows pitch at
     //   padTop + line + padBottom with the border stroke on the row bottom.
 
     private const double RcBrokenImgLineBoxPt = 20.63;   // measured: alt line box
@@ -32,7 +32,7 @@ internal static partial class HtmlToPdfConverter
         rc.html = html;
         rc.css = css;
         rc.pageHeight = pageHeight;
-        rc.bodyM = Regex.Match(rc.html,
+        rc.bodyM = SafeRegex.Match(rc.html,
             @"<body\b[^>]*style\s*=\s*(['""])[^'""]*?width\s*:\s*(\d+(?:\.\d+)?)\s*px[^'""]*\1",
             RegexOptions.IgnoreCase);
         if (!rc.bodyM.Success) return null;
@@ -46,12 +46,11 @@ internal static partial class HtmlToPdfConverter
                 && props.ContainsKey("padding-top"))
             { rc.labelCls = props; rc.labelClsName = sel[1..]; break; }
         if (rc.labelCls is null || rc.labelClsName is null) return null;
-        rc.boxM = Regex.Match(rc.html,
+        rc.boxM = SafeRegex.Match(rc.html,
             @"<div\b[^>]*style\s*=\s*(['""])(?=[^'""]*width\s*:\s*(\d+(?:\.\d+)?)px)(?=[^'""]*background-color\s*:\s*(#[0-9a-fA-F]{3,6}))(?=[^'""]*padding\s*:\s*(\d+(?:\.\d+)?)px)[^'""]*\1[^>]*>",
             RegexOptions.IgnoreCase);
         if (!rc.boxM.Success) return null;
 
-        const double PxPt = 0.75;
         rc.pageWidth = 96.0 + rc.bodyPx * PxPt + 90.0;
         rc.doc = Document.Create();
         rc.docFontDict = new Core.PdfDictionary();
@@ -63,21 +62,20 @@ internal static partial class HtmlToPdfConverter
         rc.contentX = 96.0 + 0.75;                   // one cell padding inside the margin
         rc.contentW = rc.bodyPx * PxPt;
         rc.arial = WinMetricsFor("Arial") ?? (0.905, 1.117);
-        rc.serif = WinMetricsFor("Times New Roman") ?? (0.891, 1.107);
 
         rc.sb = new StringBuilder();
         rc.inv = System.Globalization.CultureInfo.InvariantCulture;
         rc.y = 72.0;                                 // body margin-top:0 → raw content top
 
-        rc.body = Regex.Match(rc.html, @"<body\b[^>]*>([\s\S]*)</body>", RegexOptions.IgnoreCase) is
+        rc.body = SafeRegex.Match(rc.html, @"<body\b[^>]*>([\s\S]*)</body>", RegexOptions.IgnoreCase) is
             { Success: true } bm ? bm.Groups[1].Value : rc.html;
         rc.boxStart = rc.body.IndexOf(rc.boxM.Value, StringComparison.Ordinal);
         if (rc.boxStart < 0) return null;
 
         // 1. leading img alt line (the logo). alt='' images draw nothing.
-        foreach (Match im in Regex.Matches(rc.body[..rc.boxStart], @"<img\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match im in SafeRegex.Matches(rc.body[..rc.boxStart], @"<img\b[^>]*>", RegexOptions.IgnoreCase))
         {
-            var alt = Regex.Match(im.Value, @"alt\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+            var alt = SafeRegex.Match(im.Value, @"alt\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
             if (alt.Success && alt.Groups[1].Value.Trim().Length > 0)
             {
                 Run(rc, "F5", 12, rc.contentX, rc.y + RcBrokenImgBaselinePt, alt.Groups[1].Value.Trim());
@@ -100,11 +98,11 @@ internal static partial class HtmlToPdfConverter
 
         rc.boxHtml = rc.body[rc.boxStart..];
         rc.rows = new List<(string label, string value)>();
-        foreach (Match rm in Regex.Matches(rc.boxHtml, @"<tr>([\s\S]*?)</tr>", RegexOptions.IgnoreCase))
+        foreach (Match rm in SafeRegex.Matches(rc.boxHtml, @"<tr>([\s\S]*?)</tr>", RegexOptions.IgnoreCase))
         {
-            var cells = Regex.Matches(rm.Groups[1].Value, @"<td\b[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase);
+            var cells = SafeRegex.Matches(rm.Groups[1].Value, @"<td\b[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase);
             if (cells.Count < 2) continue;
-            string CellText(Match c) => CollapseWs(DecodeEntities(Regex.Replace(c.Groups[1].Value, @"<[^>]+>", " ")));
+            string CellText(Match c) => CollapseWs(DecodeEntities(SafeRegex.Replace(c.Groups[1].Value, @"<[^>]+>", " ")));
             rc.rows.Add((CellText(cells[0]), CellText(cells[1])));
         }
         if (rc.rows.Count == 0) return null;

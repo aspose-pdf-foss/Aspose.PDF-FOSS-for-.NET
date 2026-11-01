@@ -54,15 +54,15 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     // Strokes composite in straight sRGB on every page: stroke AA blends
     // linearly in byte space — a K-black stroke edge over
     // yellow lands at the linear lerp, ~40 levels darker than the gamma-corrected mix.
-    private bool StrokeLinear => true;
+    private static bool StrokeLinear => true;
 
     // Glyph fills composite in straight sRGB (like strokes) instead of the page's
     // gamma-corrected blend. Gamma-corrected coverage renders sub-pixel stems at
     // roughly HALF the expected ink (measured on a small-size CJK newspaper
     // page: 6.6% ink under the gamma blend vs 14.3% and 12.2% from two
     // independent rasterisers of the SAME imported document; per-inked-pixel
-    // luma equal) — the classic pale-text anemia of linear-light blending;
-    // mature rasterisers blend in byte space. Straight sRGB lands that page at
+    // luma equal) — the classic pale-text anemia of linear-light blending; mature
+    // rasterisers blend in byte space. Straight sRGB lands that page at
     // 13.0%. Q_TEXTLIN=0 restores the gamma blend for A/B. (An earlier
     // measurement had linear text losing on scanned-book exact-mode pages, but
     // exact-mode pages now take the PaintGlyphOpaque route above this switch.)
@@ -95,8 +95,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     private static readonly int SsCoverage = int.TryParse(Environment.GetEnvironmentVariable("Q_SSCOV"), out var ssk) ? ssk : 0;
 
     // Outer-blend mask mode for backdrop-copy groups. Default "bin2": nested-group
-    // footprints stamp binary center-cell coverage and composite with replace-semantics;
-    // direct content keeps fractional
+    // footprints stamp binary center-cell coverage and composite with replace-semantics; direct
+    // content keeps fractional
     // anti-aliased coverage with backdrop removal. Q_OBM overrides for experiments
     // ("off" = pre-stamp behaviour; "bin"/"nal"/"alias"/"raw" = earlier variants).
     private static readonly string? ObMode = Environment.GetEnvironmentVariable("Q_OBM") ?? "bin2";
@@ -139,6 +139,9 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     // group re-initialises just its BBox sub-rect, so stale content elsewhere is
     // never read (the composite is BBox-bound).
     private readonly Stack<Bitmap> _layerPool = new();
+    // The images the cells of one tiling-pattern fill draw, by image and what the decode reads of the
+    // state (see TilingCellImage); null outside a fill.
+    private Dictionary<(PdfStream, int, bool, double, double, double, double), Bitmap?>? _tilingCellImages;
 
     private PdfReader _reader = null!;
 
@@ -149,6 +152,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     private readonly Dictionary<PdfDictionary, int[]?> _encGidMaps = new(ReferenceEqualityComparer.Instance);
 
     private readonly Dictionary<PdfDictionary, bool[]?> _undefinedCodes = new(ReferenceEqualityComparer.Instance);
+
+    private readonly Dictionary<PdfDictionary, byte[]?> _dingbatCodes = new(ReferenceEqualityComparer.Instance);
 
     private double _scale;          // horizontal pixels per PDF point
 
@@ -209,6 +214,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// <summary>Render the page's natural pixel grid for the given resolution.</summary>
     internal RgbaBuffer RenderPage(Page page, int xDpi, int yDpi)
     {
+        ImageDevice.LayOutPendingParagraphs(page);
         // Size to the crop box (clipped to the media box), not the media box: the
         // rasterizer presents only the cropped region. Rotation swaps the
         // visible dimensions exactly as it does for the media box.
@@ -286,7 +292,6 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
 
         _reader = gp.page.Reader;
         gp.cachedBefore = _reader.CachedObjects();
-        gp.rawMb = gp.page.MediaBox;
         gp.crop = SoftwarePageRenderer.EffectiveCropRect(gp.page);
 
         gp.rot = ((gp.page.RotateDegrees % 360) + 360) % 360;
@@ -421,11 +426,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                 if (eg.Get("ca") is { } ca && NumFrom(ca) < 1) return true;
                 if (eg.Get("CA") is { } sa && NumFrom(sa) < 1) return true;
             }
-        foreach (var xo in SoftwarePageRenderer.ResolveAllXObjects(resources, _reader).Values)
-            if (xo.Dict.GetName("Subtype") == "Form"
-                && ResourcesCanComposite(_reader.ResolveDict(xo.Dict.Get("Resources")), depth + 1, visited))
-                return true;
-        return false;
+        return SoftwarePageRenderer.ResolveAllXObjects(resources, _reader).Values.Any(xo => xo.Dict.GetName("Subtype") == "Form"
+                && ResourcesCanComposite(_reader.ResolveDict(xo.Dict.Get("Resources")), depth + 1, visited));
     }
 
     private Scope BuildScope(PdfDictionary? resources)
@@ -466,8 +468,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         {
             // q/Q save & restore the GDI+ clip and transform alongside the parser's
             // own graphics-state stack so clipping round-trips correctly.
-            if (op == "q") _gdiStateStack.Push(_g.Save());
-            else if (op == "Q" && _gdiStateStack.Count > 0) _g.Restore(_gdiStateStack.Pop());
+            if (op == "q") _gdiStateStack.Push(SaveSurface());
+            else if (op == "Q" && _gdiStateStack.Count > 0) RestoreSurface(_gdiStateStack.Pop());
             // Text rendering modes 4-7 (PDF 32000 §9.3.3) add the shown glyphs to the
             // clipping path. The glyph outlines are accumulated (in device space) across
             // the text object and intersected into the clip at ET, so subsequent content
@@ -511,12 +513,26 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         parser.OnMarkedContentEnd += () => { if (_ocgHiddenStack.Count > 0) _ocgHiddenStack.Pop(); };
 
         if (initialCtm is not null) parser.State.Ctm = (double[])initialCtm.Clone();
-        if (initialClip is not null) _g.SetClip(initialClip, CombineMode.Intersect);
+        // The bounding-box clip is in device space, set under the identity the surface holds here.
+        if (initialClip is not null) IntersectClip(initialClip, null);
 
         parser.Parse(content, _scope.Fonts, null, _scope.ExtGStates, _scope.ColorSpaces, _scope.Properties, _scope.Patterns);
     }
 
-    private readonly Stack<GdiState> _gdiStateStack = new();
+    private readonly Stack<SavedSurface> _gdiStateStack = new();
+
+    /// <summary>One <c>q</c>'s saved surface state: GDI+'s own save of it where the surface's
+    /// native handle is reachable, else <see cref="Graphics.Save"/> (see <see cref="NativeGraphicsState"/>).</summary>
+    private readonly record struct SavedSurface(GdiState? Managed, uint Native);
+
+    private SavedSurface SaveSurface()
+        => NativeGraphicsState.TrySave(_g, out var native) ? new SavedSurface(null, native) : new SavedSurface(_g.Save(), 0);
+
+    private void RestoreSurface(SavedSurface saved)
+    {
+        if (saved.Managed is not null) _g.Restore(saved.Managed);
+        else NativeGraphicsState.Restore(_g, saved.Native);
+    }
 
     // Text rendering mode of the current show operation (PDF 32000 §9.3.3); modes 4-7
     // add glyphs to the clip path. _textClip accumulates those outlines (device space)
@@ -640,7 +656,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
 
     private bool IsContentHidden
     {
-        get { foreach (var h in _ocgHiddenStack) if (h) return true; return false; }
+        get { return _ocgHiddenStack.Contains(true); }
     }
 
     private static void SafeDraw(System.Action a)

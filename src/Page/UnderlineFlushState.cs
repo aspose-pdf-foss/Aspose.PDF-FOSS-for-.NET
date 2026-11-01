@@ -17,6 +17,9 @@ private sealed class UnderlineFlushState
     public Content.ContentStreamBuilder builder = null!;
     public byte[] bytes = null!;
     public Aspose.Pdf.Text.Position fragPos = null!;
+    // The rules are appended to the content, drawn under the matrix it leaves in force at its end (see
+    // AppendedDecorationMatrix); false when a caller seats them in a stream of its own.
+    public bool appended;
     public float fs;
     // Width: prefer fragment's Rectangle width (computed during absorption),
     // fall back to MeasureString.

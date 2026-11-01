@@ -64,7 +64,7 @@ internal static partial class HtmlToPdfConverter
             {
                 ctl.Kind = FbControlKind.TextArea;
                 ctl.Value = DomText(el, fb.css);
-                var rows = FbAttr(el, "rows") is { } rs && int.TryParse(rs.Trim(), out var rn) && rn > 0 ? rn : FbUaTextAreaRows;
+                var rows = FbAttr(el, "rows") is { } rs && int.TryParse(rs.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var rn) && rn > 0 ? rn : FbUaTextAreaRows;
                 var padV = p.PadDeclared ? p.Pad.V : 2 * FbUaInputPadPx * FbPxPt;
                 var borderV = p.HasVisibleBorder ? p.Border.V : 2 * FbUaTextAreaBorderPx * FbPxPt;
                 w = p.WidthAuto ? FbUaTextColumns * FbUaTextColumnEm * st.Pt : p.WidthPt;

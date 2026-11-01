@@ -10,13 +10,12 @@ namespace Aspose.Pdf.Devices;
 
 public sealed partial class SoftwarePageRenderer
 {
-    private static void DrawFormXObject(RenderContext ctx, PdfStream formStream, GraphicsState state, Dictionary<string, PdfDictionary>? extGStates)
+    private static void DrawFormXObject(RenderContext ctx, PdfStream formStream, GraphicsState state)
     {
         var fo = new FormXObjectDrawState();
         fo.ctx = ctx;
         fo.formStream = formStream;
         fo.state = state;
-        fo.extGStates = extGStates;
         // A form hidden by the default optional-content configuration renders as
         // if absent (e.g. a print-only /Background layer wrapping the page scan).
         if (IsOcHidden(fo.formStream.Dict.Get("OC"), fo.ctx.Reader, fo.ctx.OcgHidden)) return;
@@ -88,7 +87,15 @@ public sealed partial class SoftwarePageRenderer
         for (var i = 0; i < dst.Length; i += 4)
         {
             var sa = scratch[i + 3];
-            if (sa == 0) continue;
+            if (sa == 0)
+            {
+                // A run of untouched pixels - all four bytes zero, most of a group's
+                // page-sized buffer - is passed over in one search.
+                var next = Compat.IndexOfNonZero(scratch, i + 4);
+                if (next < 0) break;
+                i = (next & ~3) - 4;
+                continue;
+            }
             // The /SMask that was active at the `Do` masks the GROUP as a whole (PDF 32000
             // §11.6.6): the group renders to its own buffer and that buffer composites
             // through the mask. Ignoring it here let a whole group land at full strength —
@@ -103,6 +110,16 @@ public sealed partial class SoftwarePageRenderer
                 if (sa == 0) continue;
             }
             int sr = scratch[i], sg = scratch[i + 1], sb = scratch[i + 2];
+            // An opaque pixel composited Normally at full group alpha replaces what is under
+            // it: the weighted sum below works out to exactly its own colour, fully opaque.
+            if (sa == 255 && ga == 255 && !knockout && mode == Rasterizer.BlendMode.Normal)
+            {
+                dst[i] = (byte)sr;
+                dst[i + 1] = (byte)sg;
+                dst[i + 2] = (byte)sb;
+                dst[i + 3] = 255;
+                continue;
+            }
             int dr = dst[i], dg = dst[i + 1], db = dst[i + 2];
 
             // The destination may itself be transparent - a group nested inside another
@@ -193,18 +210,14 @@ public sealed partial class SoftwarePageRenderer
                 // group flooded with black - fully transparent - outside its own content.
                 var bc = reader.Resolve(smInfo.Dict.Get("BC")) as PdfArray;
                 var (br, bg, bb) = SampleBackdropRgb(bc);
-                for (var i = 0; i < scratchPixels.Length; i += 4)
-                {
-                    scratchPixels[i] = br;
-                    scratchPixels[i + 1] = bg;
-                    scratchPixels[i + 2] = bb;
-                    scratchPixels[i + 3] = 255;
-                }
+                // The backdrop pixel's four bytes written as one 32-bit value across the buffer.
+                var backdrop = System.Runtime.InteropServices.MemoryMarshal.Read<uint>(new byte[] { br, bg, bb, 255 });
+                System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(scratchPixels.AsSpan()).Fill(backdrop);
             }
 
             var scratchCtx = new RenderContext(scratchPixels, pixelW, pixelH, scale, mediaBox, reader);
             var maskState = new GraphicsState { Ctm = (double[])smInfo.Ctm.Clone() };
-            DrawFormXObject(scratchCtx, groupStream, maskState, null);
+            DrawFormXObject(scratchCtx, groupStream, maskState);
 
             var alphaBuf = new byte[pixelW * pixelH];
             if (smInfo.Subtype == "Alpha")
@@ -286,7 +299,13 @@ public sealed partial class SoftwarePageRenderer
 
         for (var i = 0; i < scratch.Length; i += 4)
         {
-            if (scratch[i + 3] == 0) continue;
+            if (scratch[i + 3] == 0)
+            {
+                var next = Compat.IndexOfNonZero(scratch, i + 4);
+                if (next < 0) break;
+                i = (next & ~3) - 4;
+                continue;
+            }
             // Rec.601 luminance: Y = 0.299R + 0.587G + 0.114B (integer fixed-point).
             var y = (byte)((scratch[i] * 299 + scratch[i + 1] * 587 + scratch[i + 2] * 114 + 500) / 1000);
             scratch[i] = y;
@@ -336,12 +355,15 @@ public sealed partial class SoftwarePageRenderer
             var ty = effectiveCtm[1] * cx + effectiveCtm[3] * cy + effectiveCtm[5];
             var px = (tx - ctx.MediaBox.LLX) * ctx.Scale;
             var py = ctx.PixelH - (ty - ctx.MediaBox.LLY) * ctx.Scale;
-            if (px < pxLo) pxLo = px; if (px > pxHi) pxHi = px;
-            if (py < pyLo) pyLo = py; if (py > pyHi) pyHi = py;
+            if (px < pxLo) pxLo = px;
+            if (px > pxHi) pxHi = px;
+            if (py < pyLo) pyLo = py;
+            if (py > pyHi) pyHi = py;
         }
         // If the BBox AABB covers the whole drawable viewport, the form's BBox clip is
         // a no-op and we can skip the expensive per-form mask allocation+fill.
-        if (pxLo <= 0 && pxHi >= ctx.PixelW && pyLo <= 0 && pyHi >= ctx.PixelH)
+        var o = DeviceOriginOffset;
+        if (pxLo <= o && pxHi >= ctx.PixelW + o && pyLo <= o && pyHi >= ctx.PixelH + o)
             return outer;
 
         var segments = new List<PathCommand>

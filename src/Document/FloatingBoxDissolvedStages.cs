@@ -38,14 +38,8 @@ public sealed partial class Document
         db.nextInline = innerIdx + 1 < db.innerList.Count
             && InlineOf(db.innerList[innerIdx + 1]);
 
-        if (db.inner is Heading innerHeading)
-        {
-            if (CollectDissolvedHeading(db, innerIdx, innerHeading, flow, page, tocEntries, pl, headingAutoCounters, marginLeft)) return true;
-        }
-        if (db.inner is Text.TextFragment innerTf)
-        {
-            if (CollectDissolvedFragment(db, innerIdx, innerTf, flow)) return true;
-        }
+        if (db.inner is Heading innerHeading && CollectDissolvedHeading(db, innerIdx, innerHeading, flow, page, tocEntries, pl, headingAutoCounters, marginLeft)) return true;
+        if (db.inner is Text.TextFragment innerTf && CollectDissolvedFragment(db, innerIdx, innerTf, flow)) return true;
         if (db.inner is Image lineImg && (db.nextInline || (InlineOf(lineImg) && db.styRuns.Count > 0)))
         {
             // A picture that shares its line with text — either it is itself
@@ -54,7 +48,7 @@ public sealed partial class Document
             // the line advances by the text's pitch, the picture overhanging
             // below it (probed on the era generator).
             if (!InlineOf(lineImg)) FlushStyled(db, flow);
-            if (LoadFlowImage(lineImg, page.Width - marginLeft - marginRight, flow.ContentTop - marginBottom) is (var liData, var liW, var liH))
+            if (LoadFlowImage(lineImg, page.LayoutFrameWidth - marginLeft - marginRight, flow.ContentTop - marginBottom) is (var liData, var liW, var liH))
             {
                 db.styLastChild = innerIdx;
                 db.styRuns.Add(new FlowLayout.StyledRun
@@ -68,25 +62,19 @@ public sealed partial class Document
         {
             // A flow Graph in a dissolved box (a chapter rule):
             // draw at the cursor and advance past it.
-            LayoutGraphParagraph(innerGraph, flow, page, marginLeft, 0, marginBottom);
+            LayoutGraphParagraph(innerGraph, flow, marginLeft);
             return true;
         }
         if (db.inner is Image innerImage)
         {
             // A block Image in a dissolved box draws at the flow
             // cursor and advances the flow below it.
-            if (LoadFlowImage(innerImage, page.Width - marginLeft - marginRight, flow.ContentTop - marginBottom) is (var fbImgBytes, var fbIw, var fbIh))
+            if (LoadFlowImage(innerImage, page.LayoutFrameWidth - marginLeft - marginRight, flow.ContentTop - marginBottom) is (var fbImgBytes, var fbIw, var fbIh))
                 flow.PlaceImageBlock(fbImgBytes, fbIw, fbIh);
             return true;
         }
-        if (db.inner is HtmlFragment innerHtml)
-        {
-            if (LayoutDissolvedHtml(innerHtml, flow)) return true;
-        }
-        if (db.inner is Table innerTable)
-        {
-            if (LayoutDissolvedTable(innerTable, flow, overflowPages, marginLeft, marginBottom)) return true;
-        }
+        if (db.inner is HtmlFragment innerHtml && LayoutDissolvedHtml(innerHtml, flow)) return true;
+        if (db.inner is Table innerTable && LayoutDissolvedTable(innerTable, flow, overflowPages, marginLeft, marginBottom)) return true;
         return true;
     }
 
@@ -100,8 +88,9 @@ public sealed partial class Document
         // margin like any flow table (not at the bare page top).
         innerTable.FlowLeftOffset = marginLeft;
         var fbPage = flow.CurrentPage;
-        var fbSpillTop = fbPage.PageInfo?.Margin is { TopTouched: true } fbPm ? fbPm.Top
-            : PageInfo?.Margin is { TopTouched: true } fbDm ? fbDm.Top : 72;
+        double fbSpillTop = 72;
+        if (fbPage.PageInfo?.Margin is { TopTouched: true } fbPm) fbSpillTop = fbPm.Top;
+        else if (PageInfo?.Margin is { TopTouched: true } fbDm) fbSpillTop = fbDm.Top;
         // Bottom limit is the flow's own, not a flat 36: a page declaring a
         // 72 pt bottom margin had its box's table run 36 pt past it. Taking
         // it from the flow (rather than the caller's page margin) keeps a
@@ -119,7 +108,7 @@ public sealed partial class Document
         var innerImgs = innerTable.LastImageDraws;
         if (!flow.HasOverflowed && innerImgs.Count > 0)
             foreach (var (data, rect) in innerImgs[0])
-                flow.CurrentPage.AddImage(data, rect);
+                flow.CurrentPage.AddLayoutImage(data, rect);
         // A single-slice table consumes exactly its height so
         // following children continue below it on this page.
         if (innerContents.Count == 1)
@@ -136,7 +125,7 @@ public sealed partial class Document
             for (var pi = 1; pi < innerContents.Count - 1; pi++)
             {
                 flow.RecordBodyOnSlot(overflowPages.Count, marginBottom);
-                overflowPages.Add((innerContents[pi], flow.CurrentPage.Width, flow.CurrentPage.Height));
+                overflowPages.Add((innerContents[pi], flow.CurrentPage.LayoutFrameWidth, flow.CurrentPage.LayoutFrameHeight));
             }
             var innerSlot = flow.ContinueOnPrebuiltSpill(
                 innerContents[innerContents.Count - 1], innerTable.LastPageEndY);
@@ -146,7 +135,7 @@ public sealed partial class Document
     }
 
     /// <summary>An HTML fragment child laid out through the flow at the box's width.</summary>
-    private bool LayoutDissolvedHtml(HtmlFragment innerHtml, FlowLayout flow)
+    private static bool LayoutDissolvedHtml(HtmlFragment innerHtml, FlowLayout flow)
     {
         // A dissolved box renders its HTML as blocks, not as one
         // tag-stripped run: each block is its own paragraph, drawn in
@@ -216,7 +205,7 @@ public sealed partial class Document
     }
 
     /// <summary>A heading child: inline-joined or styled headings become runs of the styled paragraph, a plain one writes itself with its TOC entry.</summary>
-    private bool CollectDissolvedHeading(DissolvedBoxState db, int innerIdx, Heading innerHeading, FlowLayout flow, Page page, System.Collections.Generic.List<(Heading h, int pageIdx)> tocEntries, PageLayoutState pl, Dictionary<int, int> headingAutoCounters, double marginLeft)
+    private static bool CollectDissolvedHeading(DissolvedBoxState db, int innerIdx, Heading innerHeading, FlowLayout flow, Page page, System.Collections.Generic.List<(Heading h, int pageIdx)> tocEntries, PageLayoutState pl, Dictionary<int, int> headingAutoCounters, double marginLeft)
     {
         // A TOC-page-authored heading inside the box is a TOC
         // entry (same rule as the page-level branch); anything

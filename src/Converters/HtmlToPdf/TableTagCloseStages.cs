@@ -13,10 +13,9 @@ internal static partial class HtmlToPdfConverter
             if (ps.boldDepth > 0)
             {
                 ps.boldDepth--;
-                // Form-grid: the bold run CLOSES here - mark the boundary so
-                // the tail of the line returns to the regular face.
-                if ((cfg.formGridDialect || cfg.wordMailCells || (ps.uaCellBoxes)) && ps.lineRunMarks is not null)
-                    ps.lineRunMarks.Add((ps.line.Length, ps.boldDepth > 0));
+                // The bold run CLOSES here - mark the boundary so the tail of
+                // the line returns to the regular face.
+                ps.lineRunMarks?.Add((ps.line.Length, ps.boldDepth > 0));
                 if (cfg.widenProbe && ps.cell is not null) ps.line.Append('\uE001');
             }
         }

@@ -102,8 +102,8 @@ public sealed class FormattedText
 {
     private readonly List<TextLine> _lines = new();
 
-    // The parameterless ctor seeds an empty placeholder line so Text/TextWidth behave;
-    // the first AddNewLineText must replace it (not append after it), or stamps built
+    // The parameterless ctor seeds an empty placeholder line so Text/TextWidth behave; the
+    // first AddNewLineText must replace it (not append after it), or stamps built
     // from `new FormattedText()` + AddNewLineText start with a spurious blank line.
     private bool _seedLineIsPlaceholder;
 

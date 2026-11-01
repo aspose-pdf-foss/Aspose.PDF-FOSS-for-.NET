@@ -9,9 +9,11 @@ namespace Aspose.Pdf.Facades;
 /// </summary>
 public class ViewerPreference
 {
+#pragma warning disable S1118 // public API: the published constructor
     /// <summary>Default constructor matches the public reflection
     /// signature; the class carries no instance state.</summary>
     public ViewerPreference() { }
+#pragma warning restore S1118
 
     // ── PageMode values (mutually exclusive, bits 0-7) ──────────────────────
     /// <summary>Neither document outline nor thumbnail images visible.</summary>

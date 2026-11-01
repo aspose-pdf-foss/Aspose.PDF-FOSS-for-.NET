@@ -27,5 +27,10 @@ private sealed class SvgRenderState
     // Path current point in USER coordinates (needed by the v operator).
     public double curX;
     public double curY;
+    // A W or W* seen on the pending path: it becomes the clip once the path is painted or ended.
+    public bool clipPending;
+    public bool clipEvenOdd;
+    // The conversion's web fonts, which the Tf operator picks the page's face from.
+    public Aspose.Pdf.Devices.SvgDevice.SvgFontFaces faces = null!;
 }
 }

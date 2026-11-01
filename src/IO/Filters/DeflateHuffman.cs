@@ -47,25 +47,25 @@ internal static class DeflateHuffman
         var nodeCount = symbols * 2;
         var weight = new long[nodeCount];
         var parent = new int[nodeCount];
-        var active = new List<int>();
+        var active = new LightestFirst(weight, nodeCount);
         for (var i = 0; i < symbols; i++)
         {
             if (freq[i] == 0) continue;
             weight[i] = freq[i];
-            active.Add(i);
+            active.Push(i);
         }
         var next = symbols;
         while (active.Count > 1)
         {
-            var first = TakeLightest(active, weight);
-            var second = TakeLightest(active, weight);
+            var first = active.Pop();
+            var second = active.Pop();
             weight[next] = weight[first] + weight[second];
             parent[first] = next;
             parent[second] = next;
-            active.Add(next);
+            active.Push(next);
             next++;
         }
-        var root = active[0];
+        var root = active.Pop();
         var depth = new byte[nodeCount];
         for (var node = next - 1; node >= symbols; node--)
             if (node != root) depth[node] = (byte)(depth[parent[node]] + 1);
@@ -75,19 +75,51 @@ internal static class DeflateHuffman
         return lengths;
     }
 
-    private static int TakeLightest(List<int> active, long[] weight)
+    /// <summary>The active nodes, the lightest first and the lower node number first among
+    /// equal weights - the order a scan of the list took them in, kept by a binary heap so
+    /// that a tree costs a logarithm per node instead of a scan and a shift of the rest.</summary>
+    private sealed class LightestFirst
     {
-        var best = 0;
-        for (var i = 1; i < active.Count; i++)
+        private readonly long[] _weight;
+        private readonly int[] _nodes;
+        public int Count { get; private set; }
+
+        public LightestFirst(long[] weight, int capacity)
         {
-            var candidate = active[i];
-            var chosen = active[best];
-            if (weight[candidate] < weight[chosen] || (weight[candidate] == weight[chosen] && candidate < chosen))
-                best = i;
+            _weight = weight;
+            _nodes = new int[capacity];
         }
-        var result = active[best];
-        active.RemoveAt(best);
-        return result;
+
+        private bool Lighter(int a, int b) => _weight[a] < _weight[b] || (_weight[a] == _weight[b] && a < b);
+
+        public void Push(int node)
+        {
+            var i = Count++;
+            while (i > 0 && Lighter(node, _nodes[(i - 1) / 2]))
+            {
+                _nodes[i] = _nodes[(i - 1) / 2];
+                i = (i - 1) / 2;
+            }
+            _nodes[i] = node;
+        }
+
+        public int Pop()
+        {
+            var top = _nodes[0];
+            var last = _nodes[--Count];
+            var i = 0;
+            while (true)
+            {
+                var child = 2 * i + 1;
+                if (child >= Count) break;
+                if (child + 1 < Count && Lighter(_nodes[child + 1], _nodes[child])) child++;
+                if (!Lighter(_nodes[child], last)) break;
+                _nodes[i] = _nodes[child];
+                i = child;
+            }
+            if (Count > 0) _nodes[i] = last;
+            return top;
+        }
     }
 
     /// <summary>Canonical codes: within a length, codes ascend with the symbol.</summary>

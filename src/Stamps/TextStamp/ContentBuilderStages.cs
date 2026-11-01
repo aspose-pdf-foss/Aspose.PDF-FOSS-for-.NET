@@ -36,6 +36,7 @@ public partial class TextStamp
                 .SetFillColor(cb.color.R / 255.0, cb.color.G / 255.0, cb.color.B / 255.0)
                 .SetFont(cb.fontResName, cb.fontSize);
             ApplyStampSpacing(cb);
+            ApplyStampOutline(cb);
             for (var li = 0; li < cb.rows.Count; li++)
                 cb.builder.SetTextMatrix(1, 0, 0, 1, RowLocalX(cb, li), RowLocalY(cb, li))
                        .ShowTextBytes(cb.rows[li]);
@@ -54,6 +55,27 @@ public partial class TextStamp
             cb.builder.SetCharSpacing(cs);
         if (TextState?.WordSpacing is { } ws and not 0f)
             cb.builder.SetWordSpacing(ws);
+    }
+
+    // Text drawn as glyph outlines filled and stroked, so the outline opacity applies to the stroke.
+    private const int FillAndStrokeTextRenderMode = 2;
+
+    // The outline width a drawn stamp strokes with when none is given (the width an
+    // outlined stamp is seen with in the wild).
+    private const double DefaultOutlineWidth = 1.0;
+
+    /// <summary>Whether the stamp's glyphs are stroked as well as filled: a drawn stamp whose
+    /// caller gave the outline a width, or made the fill fully transparent so that only the
+    /// outline can show. A stamp with the default opacities keeps its plain filled text.</summary>
+    private bool DrawsOutline => Draw && OutlineOpacity > 0 && (OutlineWidth > 0 || Opacity <= 0);
+
+    /// <summary>The stroke colour and render mode of an outlined stamp, inside the text object.</summary>
+    private void ApplyStampOutline(StampContentState cb)
+    {
+        if (!DrawsOutline) return;
+        var stroke = TextState?.StrokingColor ?? Color.Black;
+        cb.builder.SetStrokeColor(stroke.R / 255.0, stroke.G / 255.0, stroke.B / 255.0);
+        cb.builder.SetTextRenderingMode(FillAndStrokeTextRenderMode);
     }
 
     /// <summary>A row's left edge within the (un-scaled) block per TextAlignment; the cm
@@ -113,6 +135,7 @@ public partial class TextStamp
                 .SetFont(cb.fontResName, cb.fontSize)
                 .SetFillColor(cb.color.R / 255.0, cb.color.G / 255.0, cb.color.B / 255.0);
             ApplyStampSpacing(cb);
+            ApplyStampOutline(cb);
             cb.builder.SetTextMatrix(1, 0, 0, 1, x, y).ShowTextBytes(bytes).EndText();
             cb.builder.RestoreState();
         }
@@ -125,16 +148,14 @@ public partial class TextStamp
         {
             var advExtent = cb.scaledBlockWidth;                                                // page-Y span
             var crossExtent = (cb.rows.Count - 1) * cb.lineHeight + (cb.hasBg ? 1.1 : 1.0) * cb.fontSize; // page-X span
-            var pageXMin = HorizontalAlignment == HorizontalAlignment.Right
-                ? cb.mb.Width - RightMargin - crossExtent
-                : HorizontalAlignment == HorizontalAlignment.Center
-                    ? (cb.mb.Width - crossExtent) / 2
-                    : (XIndent > 0 ? XIndent : LeftMargin);
-            var pageYMin = VerticalAlignment == VerticalAlignment.Top
-                ? cb.mb.Height - TopMargin - advExtent
-                : VerticalAlignment == VerticalAlignment.Center
-                    ? (cb.mb.Height - advExtent) / 2
-                    : (YIndent > 0 ? YIndent : BottomMargin);
+            double pageXMin;
+            if (HorizontalAlignment == HorizontalAlignment.Right) pageXMin = cb.mb.Width - RightMargin - crossExtent;
+            else if (HorizontalAlignment == HorizontalAlignment.Center) pageXMin = (cb.mb.Width - crossExtent) / 2;
+            else pageXMin = XIndent > 0 ? XIndent : LeftMargin;
+            double pageYMin;
+            if (VerticalAlignment == VerticalAlignment.Top) pageYMin = cb.mb.Height - TopMargin - advExtent;
+            else if (VerticalAlignment == VerticalAlignment.Center) pageYMin = (cb.mb.Height - advExtent) / 2;
+            else pageYMin = YIndent > 0 ? YIndent : BottomMargin;
             cb.originX = pageXMin + crossExtent;                          // rows map to X in [pageXMin, pageXMin+cross]
             cb.cmY = cb.rotQuarter == 90 ? pageYMin : pageYMin + advExtent;  // advance spans [pageYMin, pageYMin+adv]
         }
@@ -143,19 +164,17 @@ public partial class TextStamp
             // A 180-flipped block runs its (horizontal) advance and rows in the negative
             // direction from the corner anchor — HAlign.Left would push the text off the
             // left/top edge. Re-anchor so the flipped page-space box honours alignment
-            // inside the unrotated MediaBox (advance along page X, rows down page Y).
+            // inside the stamp frame (advance along page X, rows down page Y).
             var advExtent = cb.scaledBlockWidth;                                                // page-X span
             var crossExtent = (cb.rows.Count - 1) * cb.lineHeight + (cb.hasBg ? 1.1 : 1.0) * cb.fontSize; // page-Y span
-            var pageXMin = HorizontalAlignment == HorizontalAlignment.Right
-                ? cb.mb.Width - RightMargin - advExtent
-                : HorizontalAlignment == HorizontalAlignment.Center
-                    ? (cb.mb.Width - advExtent) / 2
-                    : (XIndent > 0 ? XIndent : LeftMargin);
-            var pageYMin = VerticalAlignment == VerticalAlignment.Top
-                ? cb.mb.Height - TopMargin - crossExtent
-                : VerticalAlignment == VerticalAlignment.Center
-                    ? (cb.mb.Height - crossExtent) / 2
-                    : (YIndent > 0 ? YIndent : BottomMargin);
+            double pageXMin;
+            if (HorizontalAlignment == HorizontalAlignment.Right) pageXMin = cb.mb.Width - RightMargin - advExtent;
+            else if (HorizontalAlignment == HorizontalAlignment.Center) pageXMin = (cb.mb.Width - advExtent) / 2;
+            else pageXMin = XIndent > 0 ? XIndent : LeftMargin;
+            double pageYMin;
+            if (VerticalAlignment == VerticalAlignment.Top) pageYMin = cb.mb.Height - TopMargin - crossExtent;
+            else if (VerticalAlignment == VerticalAlignment.Center) pageYMin = (cb.mb.Height - crossExtent) / 2;
+            else pageYMin = YIndent > 0 ? YIndent : BottomMargin;
             cb.originX = pageXMin + advExtent;    // page X spans [pageXMin, pageXMin+adv]
             cb.cmY = pageYMin + crossExtent;      // page Y spans [pageYMin, pageYMin+cross]
         }
@@ -184,27 +203,32 @@ public partial class TextStamp
             }
             // X is anchored by the rotated box overhang; Y stays on the baseline
             // (TreatYIndentAsBaseLine), which needs no re-anchoring.
-            cb.builder.SetMatrix(cb.cos * cb.scaleX, cb.sin * cb.scaleX, -cb.sin, cb.cos, cb.originX - minX, cb.cmY);
+            SetPlacement(cb.builder, cb.page, cb.cos * cb.scaleX, cb.sin * cb.scaleX, -cb.sin, cb.cos, cb.originX - minX, cb.cmY);
         }
         else if (Math.Abs(cb.rotateDeg) > 0.01)
         {
-            cb.builder.SetMatrix(cb.cos * cb.scaleX, cb.sin * cb.scaleX, -cb.sin, cb.cos, cb.originX, cb.cmY);
+            SetPlacement(cb.builder, cb.page, cb.cos * cb.scaleX, cb.sin * cb.scaleX, -cb.sin, cb.cos, cb.originX, cb.cmY);
         }
         else
         {
-            cb.builder.SetMatrix(cb.scaleX, 0, 0, 1, cb.originX, cb.cmY);
+            SetPlacement(cb.builder, cb.page, cb.scaleX, 0, 0, 1, cb.originX, cb.cmY);
         }
     }
 
     /// <summary></summary>
     private void LayoutRows(StampContentState cb)
     {
-        cb.wrapWidth = WrapWidth > 0
-            ? WrapWidth
-            : (WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap
+        // The WordWrap flag wraps at a width the caller gave (Width or MaxRowWidth) as a wrap
+        // mode does: it used to leave the text on one row that the Width then squeezed by a
+        // horizontal scale. Without such a width the flag keeps the row whole, as the
+        // reference does; only a wrap mode falls back to the page's extent.
+        var modeWraps = WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap;
+        if (WrapWidth > 0) cb.wrapWidth = WrapWidth;
+        else
+            cb.wrapWidth = modeWraps
                 ? Math.Max(0.0, cb.advanceDim - cb.wrapLead - cb.wrapTrail)
-                : 0.0);
-        cb.rows = (cb.wrapWidth > 0 && WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap)
+                : 0.0;
+        cb.rows = (cb.wrapWidth > 0 && (modeWraps || WordWrap))
             ? WrapEncoded(cb.encoded, cb.baseFontName, cb.fontSize, cb.wrapWidth)
             : SplitRows(cb.encoded);
 
@@ -231,14 +255,25 @@ public partial class TextStamp
         cb.builder = new ContentStreamBuilder();
         cb.builder.SaveState();
 
-        if (Opacity < 1.0)
+        if (DrawsOutline)
+        {
+            // The fill and the outline each carry their own opacity, and the outline its width.
+            var gs = new Content.ExtGState
+            {
+                FillAlpha = Opacity,
+                StrokeAlpha = OutlineOpacity,
+                LineWidth = OutlineWidth > 0 ? OutlineWidth : DefaultOutlineWidth,
+            };
+            cb.builder.SetExtGState(SharedGraphicsState(cb.page, gs));
+        }
+        else if (Opacity < 1.0)
         {
             var gs = new Content.ExtGState
             {
                 FillAlpha = Opacity,
                 StrokeAlpha = Opacity,
             };
-            var gsName = cb.page.AddExtGState(gs);
+            var gsName = SharedGraphicsState(cb.page, gs);
             cb.builder.SetExtGState(gsName);
         }
 
@@ -262,9 +297,13 @@ public partial class TextStamp
     /// <summary></summary>
     private byte[]? TryBuildSpecialForm(StampContentState cb)
     {
-        if (AutoFitToBox && Width > 0 && Height > 0)
+        if (AutoFitToBox)
         {
-            cb.fontSize = ComputeAutoFitFontSize(cb.baseFontName, cb.encoded);
+            // The box the text must fit: the stamp's own, or the page's where the stamp declares
+            // none (a boxless stamp fits the page exactly as one sized to the page rectangle).
+            var boxW = Width > 0 ? Width : cb.page.Width;
+            var boxH = Height > 0 ? Height : cb.page.Height;
+            cb.fontSize = ComputeAutoFitFontSize(cb.baseFontName, cb.encoded, boxW, boxH);
             FontSize = (float)cb.fontSize;
         }
 
@@ -297,7 +336,14 @@ public partial class TextStamp
             && TryResolveUnicodeFallback() is { } auto)
             return BuildCidStamp(cb.page, auto.ttf, auto.name, cb.fontSize, cb.color);
 
-        cb.fontResName = EnsureFontResource(cb.page, cb.baseFontName, cb.diffMap);
+        // Text no single-byte glyph name reaches - Greek, Cyrillic, Arabic, Hebrew - was written as
+        // '?' for every letter: draw it in the stamp's own face embedded as a Type0 font, as CJK is.
+        if (cb.replacement is null && HasUnencodableGlyphs(Text, cb.encoded) && IsUprightStamp()
+            && TryResolveStampFace() is { } face)
+            return BuildCidStamp(cb.page, face.ttf, face.name, cb.fontSize, cb.color);
+
+        cb.fontResName = EnsureEmbeddedFontResource(cb.page, cb.baseFontName, cb.diffMap)
+            ?? EnsureFontResource(cb.page, cb.baseFontName, cb.diffMap);
 
         cb.wrapping = WordWrap || WordWrapMode != TextFormattingOptions.WordWrapMode.NoWrap;
 
@@ -316,7 +362,7 @@ public partial class TextStamp
 
         cb.bgEarly = TextState?.BackgroundColor;
         if (!Scale && cb.wrapping && Width > 0 && cb.bgEarly is { IsEmpty: false })
-            return BuildWrappedBackgroundBox(cb.page, cb.encoded, cb.baseFontName, cb.fontResName, cb.fontSize, cb.color, cb.bgEarly!);
+            return BuildWrappedBackgroundBox(cb.page, cb.encoded, cb.baseFontName, cb.fontResName, cb.fontSize, cb.color, cb.bgEarly);
         return null;
     }
 }

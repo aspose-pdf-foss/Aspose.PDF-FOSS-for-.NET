@@ -56,8 +56,8 @@ private sealed class CjkOrderReportState
             var j = i;
             while (j < text.Length && (text[j] >= 0x2E80) == cjk) j++;
             var seg = text[i..j];
-            w += cjk ? MeasureF(simsun!, "SimSun", seg, fs)
-                : MeasureF(bold ? arialBold! : arial!, bold ? "ArialBold" : "Arial", seg, fs);
+            if (cjk) w += MeasureF(simsun!, "SimSun", seg, fs);
+            else w += MeasureF(bold ? arialBold! : arial!, bold ? "ArialBold" : "Arial", seg, fs);
             i = j;
         }
         return w;

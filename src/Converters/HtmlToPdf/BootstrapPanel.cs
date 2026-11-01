@@ -17,7 +17,7 @@ internal static partial class HtmlToPdfConverter
         bs.pos = end;
         Advance(bs, 0);
         var panelTop = bs.yTd;
-        var headM = Regex.Match(panel,
+        var headM = SafeRegex.Match(panel,
             @"<div\b[^>]*class\s*=\s*['""]panel-heading['""][^>]*>", RegexOptions.IgnoreCase);
         var headH = 0.0;
         string headBody = "";
@@ -26,7 +26,7 @@ internal static partial class HtmlToPdfConverter
             var hEnd = FindDivClose(panel, headM.Index + headM.Length);
             headBody = panel[(headM.Index + headM.Length)..hEnd];
         }
-        var bodM = Regex.Match(panel,
+        var bodM = SafeRegex.Match(panel,
             @"<div\b[^>]*class\s*=\s*['""]panel-body['""][^>]*>", RegexOptions.IgnoreCase);
         string bodBody = "";
         if (bodM.Success)
@@ -35,7 +35,7 @@ internal static partial class HtmlToPdfConverter
             bodBody = panel[(bodM.Index + bodM.Length)..bEnd];
         }
         // heading: measure first (the fill draws before the text)
-        var headRow = Regex.Match(headBody,
+        var headRow = SafeRegex.Match(headBody,
             @"<div\b[^>]*class\s*=\s*['""]row['""][^>]*>", RegexOptions.IgnoreCase);
         // draw the heading band behind, then its content
         var headTop = panelTop + 0.75;
@@ -54,19 +54,19 @@ internal static partial class HtmlToPdfConverter
                 bs.contentR - bs.contentL - 2.2, headH - 0.7, 0.75);
             RenderRow(bs, hRowBody, headContentTop, hBoxL, hBoxR, headFg: true);
         }
-        else if (Flat(bs, headBody).Length > 0)
+        else if (Flat(headBody).Length > 0)
         {
             headH = 2 * BrHeadPadY + BrLineH;
             Fill(bs, BrHeadBg, bs.contentL + 0.75, headTop, bs.contentR - bs.contentL - 1.5, headH);
             EmitRun(bs, "FB", BrFontPt, bs.contentL + BrColPad, headContentTop + bs.drop,
-                Flat(bs, headBody), BrHeadFg);
+                Flat(headBody), BrHeadFg);
         }
         // body: its paragraphs (an empty .multiline keeps only its margin)
         var byTd = headTop + headH + BrBodyPad;
-        foreach (Match pm in Regex.Matches(bodBody, @"<p\b[^>]*>(?<t>[\s\S]*?)</p>",
+        foreach (Match pm in SafeRegex.Matches(bodBody, @"<p\b[^>]*>(?<t>[\s\S]*?)</p>",
             RegexOptions.IgnoreCase))
         {
-            var pt2 = Flat(bs, pm.Groups["t"].Value);
+            var pt2 = Flat(pm.Groups["t"].Value);
             foreach (var ln in MeasuredWordWrap(pt2, bs.contentR - bs.contentL - 2 * BrBodyPad, bs.face, BrFontPt))
             {
                 if (ln.Length == 0) continue;

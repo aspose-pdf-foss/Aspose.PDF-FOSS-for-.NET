@@ -16,6 +16,8 @@ private sealed class MendPngDecodeState
     public int height;
     public int bitDepth;
     public int colorType;
+    // Adam7 (IHDR interlace method 1): the rows are seven passes, not the image's rows.
+    public bool interlaced;
     public byte[]? palette;
     public byte[]? trns;
     public System.IO.MemoryStream idatData = null!;

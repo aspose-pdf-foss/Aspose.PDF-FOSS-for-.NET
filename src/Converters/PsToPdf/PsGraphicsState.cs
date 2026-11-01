@@ -254,5 +254,7 @@ internal readonly struct PsColor
 
     /// <summary>Whether two colours would emit the same operands.</summary>
     public bool SameAs(PsColor other) =>
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
         Red == other.Red && Green == other.Green && Blue == other.Blue;
+#pragma warning restore S1244
 }

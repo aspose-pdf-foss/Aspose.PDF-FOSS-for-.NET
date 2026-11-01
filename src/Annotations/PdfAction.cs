@@ -59,7 +59,9 @@ public class PdfAction : IAppointment
 
     /// <summary>For JavaScript actions, returns the embedded script; otherwise an empty string.</summary>
     public string GetECMAScriptString()
+#pragma warning disable S3060 // the type test is the rule itself; moving it into the subclasses would scatter it
         => this is JavascriptAction js ? js.Script : string.Empty;
+#pragma warning restore S3060
 
     /// <summary>Run this action against the document. The base action has no
     /// runtime effect; JavaScript actions interpret their embedded script.</summary>
@@ -67,6 +69,22 @@ public class PdfAction : IAppointment
 
     internal PdfDictionary Dict => _dict;
     internal PdfReader Reader => _reader;
+
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, throwOnInvalidBytes: true);
+    private const string ByteOrderMark = "\uFEFF";
+
+    /// <summary>The text of a /URI entry. A URI is ASCII by the specification, and producers that
+    /// write other characters write them as UTF-8: bytes that are well-formed UTF-8 are read as
+    /// that, and anything else (a byte-order mark, a single-byte encoding) as the text string it is.</summary>
+    internal static string UriText(PdfString uri)
+    {
+        try
+        {
+            var text = StrictUtf8.GetString(uri.Value);
+            return text.StartsWith(ByteOrderMark, StringComparison.Ordinal) ? uri.ToText() : text;
+        }
+        catch (DecoderFallbackException) { return uri.ToText(); }
+    }
 
     /// <summary>Low-level view of the action's underlying PDF dictionary
     /// (HasKey / indexer / ToDictionary chains over the stored entries).</summary>
@@ -263,8 +281,7 @@ public sealed class GoToAction : PdfAction
     {
         var dict = new PdfDictionary();
         dict.Set("S", new PdfName("GoTo"));
-        // ExplicitDestination.ToPdfArray emits page index in 0-based form.
-        dict.Set("D", destination.ToPdfArrayPublic());
+        dict.Set("D", destination.ToLocalPdfArray());
         return dict;
     }
 
@@ -278,6 +295,9 @@ public sealed class GoToAction : PdfAction
         dest.Add(new PdfInteger((page?.Number ?? 1) - 1));
         dest.Add(new PdfName("Fit"));
         dict.Set("D", dest);
+        // The page is known here, so the destination follows it: pages inserted before it
+        // later move its index, not the page the action goes to.
+        if (page is not null) page.OwnerDocument?.PendingDestinationPages.Add((dest, page));
         return dict;
     }
 
@@ -316,8 +336,8 @@ public sealed class GoToAction : PdfAction
         set
         {
             if (value is null) Dict.Remove("D");
-            else if (value is Annotations.ExplicitDestination ed) Dict.Set("D", ed.ToPdfArrayPublic());
-            // Other IAppointment kinds aren't currently serialised — stored as no-op.
+            else if (value is Annotations.ExplicitDestination ed) Dict.Set("D", ed.ToLocalPdfArray());
+            else if (value is NamedDestination named) Dict.Set("D", named.ToNameString());
         }
     }
 
@@ -375,7 +395,7 @@ public sealed class GoToAction : PdfAction
             {
                 var pageDict = Reader.ResolveDict(pageRef);
                 if (pageDict is not null)
-                    return FindPageIndex(pageDict, indRef.ObjectNumber);
+                    return FindPageIndex(indRef.ObjectNumber);
             }
 
             return -1;
@@ -394,7 +414,7 @@ public sealed class GoToAction : PdfAction
         }
     }
 
-    private int FindPageIndex(PdfDictionary targetPageDict, int targetObjNum)
+    private int FindPageIndex(int targetObjNum)
     {
         // Walk the page tree to find the index of the target page
         var catalog = Reader.Catalog;
@@ -474,16 +494,18 @@ public sealed class UriAction : PdfAction
         get
         {
             var obj = Reader.Resolve(Dict.Get("URI"));
-            return obj is PdfString s ? s.ToText() : null;
+            return obj is PdfString s ? UriText(s) : null;
         }
     }
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>
 /// Alias for UriAction, matching the public API name.
 /// Creates a URI action (GoTo URI) that navigates to a web URL.
 /// </summary>
 public sealed class GoToURIAction : PdfAction
+#pragma warning restore S101
 {
     /// <summary>
     /// Create a new GoToURIAction targeting the specified URI.
@@ -500,9 +522,9 @@ public sealed class GoToURIAction : PdfAction
         get
         {
             var obj = Reader?.Resolve(Dict.Get("URI"));
-            if (obj is PdfString s) return s.ToText();
+            if (obj is PdfString s) return UriText(s);
             // For newly created actions where Reader is null, read directly
-            return Dict.Get("URI") is PdfString ps ? ps.ToText() : null;
+            return Dict.Get("URI") is PdfString ps ? UriText(ps) : null;
         }
         set
         {
@@ -543,7 +565,11 @@ public sealed class GoToRemoteAction : PdfAction
     /// <summary>When the action should open the destination in a new viewer window.</summary>
     public ExtendedBoolean NewWindow
     {
-        get => Dict.Get("NewWindow") is PdfBoolean b ? (b.Value ? ExtendedBoolean.True : ExtendedBoolean.False) : ExtendedBoolean.Undefined;
+        get
+        {
+            if (Dict.Get("NewWindow") is PdfBoolean b) return b.Value ? ExtendedBoolean.True : ExtendedBoolean.False;
+            return ExtendedBoolean.Undefined;
+        }
         set
         {
             switch (value)
@@ -567,18 +593,14 @@ public sealed class GoToRemoteAction : PdfAction
         return dict;
     }
 
-    /// <summary>The target file specification (/F entry).</summary>
+    /// <summary>The target file specification (/F entry). Its name reads as a path of the platform.</summary>
     public FileSpecification? File
     {
         get
         {
-            var fObj = Reader?.Resolve(Dict.Get("F")) ?? Dict.Get("F");
-            return fObj switch
-            {
-                PdfString s => FileSpecification.CreateFromName(s.ToText()),
-                PdfDictionary fsDict => FileSpecification.FromExistingDict(fsDict, Reader),
-                _ => null,
-            };
+            var file = StoredFile;
+            if (file is not null) file.NamesExternalFile = true;
+            return file;
         }
         set
         {
@@ -587,18 +609,40 @@ public sealed class GoToRemoteAction : PdfAction
         }
     }
 
+    /// <summary>The target file specification with its name as the action stores it.</summary>
+    internal FileSpecification? StoredFile
+    {
+        get
+        {
+            var fObj = Reader?.Resolve(Dict.Get("F")) ?? Dict.Get("F");
+            return fObj switch
+            {
+                PdfString s => FileSpecification.CreateFromName(s.ToText(), Dict),
+                PdfDictionary fsDict => FileSpecification.FromExistingDict(fsDict, Reader),
+                _ => null,
+            };
+        }
+    }
+
     /// <summary>The destination within the target file.</summary>
     public Annotations.IAppointment? Destination
     {
         get
         {
-            var d = Reader?.Resolve(Dict.Get("D"));
-            return d is PdfArray arr ? Annotations.ExplicitDestination.FromArray(arr, Reader) : null;
+            // A name (string or name object) is a destination of the other file: it stays a name here.
+            return (Reader is null ? Dict.Get("D") : Reader.Resolve(Dict.Get("D"))) switch
+            {
+                PdfArray arr => Annotations.ExplicitDestination.FromArray(arr, Reader, local: false),
+                PdfString s => new NamedDestination(s.ToText()),
+                PdfName n => new NamedDestination(n.Value),
+                _ => null,
+            };
         }
         set
         {
             if (value is null) Dict.Remove("D");
             else if (value is Annotations.ExplicitDestination ed) Dict.Set("D", ed.ToPdfArrayPublic());
+            else if (value is NamedDestination named) Dict.Set("D", named.ToNameString());
         }
     }
 }
@@ -668,7 +712,11 @@ public sealed class LaunchAction : PdfAction
     /// <summary>When the action should open the file in a new viewer window.</summary>
     public ExtendedBoolean NewWindow
     {
-        get => Dict.Get("NewWindow") is PdfBoolean b ? (b.Value ? ExtendedBoolean.True : ExtendedBoolean.False) : ExtendedBoolean.Undefined;
+        get
+        {
+            if (Dict.Get("NewWindow") is PdfBoolean b) return b.Value ? ExtendedBoolean.True : ExtendedBoolean.False;
+            return ExtendedBoolean.Undefined;
+        }
         set
         {
             switch (value)
@@ -837,7 +885,7 @@ public sealed class JavascriptAction : PdfAction
     //   this.getField("NAME").fillColor = color.NAME
     private static readonly System.Text.RegularExpressions.Regex FieldColorAssign = new(
         @"getField\s*\(\s*""([^""]*)""\s*\)\s*\.\s*(textColor|fillColor)\s*=\s*color\.(\w+)",
-        System.Text.RegularExpressions.RegexOptions.Compiled);
+        System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Interpret the supported subset of Acrobat form JavaScript — field
     /// text/fill colour assignments through <c>getField(...)</c> — and apply the
@@ -845,11 +893,11 @@ public sealed class JavascriptAction : PdfAction
     internal override void Execute(Document document)
     {
         if (document?.Form is not { } form) return;
-        foreach (System.Text.RegularExpressions.Match m in FieldColorAssign.Matches(Script))
+        foreach (var groups in SafeRegex.Matches(FieldColorAssign, Script).Select(m => m.Groups))
         {
-            if (form.FindField(m.Groups[1].Value) is not { } field) continue;
-            if (JsColor(m.Groups[3].Value) is not { } color) continue;
-            if (m.Groups[2].Value == "textColor")
+            if (form.FindField(groups[1].Value) is not { } field) continue;
+            if (JsColor(groups[3].Value) is not { } color) continue;
+            if (groups[2].Value == "textColor")
                 field.Color = Aspose.Pdf.Color.FromRgb(color);
             else
                 field.Characteristics.Background = color;
@@ -873,133 +921,4 @@ public sealed class JavascriptAction : PdfAction
         "transparent" => System.Drawing.Color.Transparent,
         _ => null,
     };
-}
-
-/// <summary>
-/// Submit-form action — sends form field data to a URL or remote file
-/// (PDF 32000-1:2008 §12.7.5.2).
-/// </summary>
-public sealed class SubmitFormAction : PdfAction
-{
-    /// <summary>Treat the listed field array as an exclude-list rather than
-    /// an include-list (bit 1 of /Flags per PDF spec table 237).</summary>
-    public const int Exclude = 1;
-
-    /// <summary>Submit empty fields as well as filled ones
-    /// (bit 2 of /Flags).</summary>
-    public const int IncludeNoValueFields = 2;
-
-    /// <summary>Submit field names and values in HTML form-encoded
-    /// format (bit 3 of /Flags).</summary>
-    public const int ExportFormat = 4;
-
-    /// <summary>Use HTTP GET instead of POST when submitting the form
-    /// (bit 4 of /Flags).</summary>
-    public const int GetMethod = 8;
-
-    /// <summary>Include the submit-button click coordinates with the
-    /// posted data (bit 5 of /Flags).</summary>
-    public const int SubmitCoordinates = 16;
-
-    /// <summary>Submit the field data as XFDF rather than FDF
-    /// (bit 6 of /Flags). Spelled "Xfdf" to match the public member
-    /// name; the wire format is uppercase XFDF.</summary>
-    public const int Xfdf = 32;
-
-    /// <summary>Include incremental-save update entries in the FDF
-    /// payload (bit 7 of /Flags).</summary>
-    public const int IncludeAppendSaves = 64;
-
-    /// <summary>Include markup annotations in the FDF payload
-    /// (bit 8 of /Flags).</summary>
-    public const int IncludeAnnotations = 128;
-
-    /// <summary>Submit the entire PDF as the request body
-    /// (bit 9 of /Flags). Spelled "SubmitPdf" to match the public
-    /// member name.</summary>
-    public const int SubmitPdf = 256;
-
-    /// <summary>Convert dates to standard PDF canonical format before
-    /// submission (bit 10 of /Flags).</summary>
-    public const int CanonicalFormat = 512;
-
-    /// <summary>Exclude non-user-edited markup annotations when
-    /// /IncludeAnnotations is set (bit 11 of /Flags).</summary>
-    public const int ExclNonUserAnnots = 1024;
-
-    /// <summary>Exclude the /F (font) entry from each annotation when
-    /// /IncludeAnnotations is set (bit 12 of /Flags).</summary>
-    public const int ExclFKey = 2048;
-
-    /// <summary>Embed the PDF inside the submitted FDF payload
-    /// (bit 14 of /Flags).</summary>
-    public const int EmbedForm = 8192;
-
-    internal SubmitFormAction(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
-
-    /// <summary>Create an empty SubmitForm action. The Url and Flags
-    /// must be set before the action is attached to a button.</summary>
-    public SubmitFormAction() : base(BuildDict()) { }
-
-    private static PdfDictionary BuildDict()
-    {
-        var dict = new PdfDictionary();
-        dict.Set("S", new PdfName("SubmitForm"));
-        return dict;
-    }
-
-    /// <summary>The destination URL/file specification (/F entry).</summary>
-    public FileSpecification? Url
-    {
-        get
-        {
-            var fObj = Reader?.Resolve(Dict.Get("F")) ?? Dict.Get("F");
-            return fObj switch
-            {
-                PdfString s => FileSpecification.CreateFromName(s.ToText()),
-                PdfDictionary fsDict => FileSpecification.FromExistingDict(fsDict, Reader),
-                _ => null,
-            };
-        }
-        set
-        {
-            if (value is null) Dict.Remove("F");
-            else Dict.Set("F", value.Dict);
-        }
-    }
-
-    /// <summary>The flags integer (/Flags entry) — bitwise OR of
-    /// submit-form flags per PDF spec table 237.</summary>
-    public int Flags
-    {
-        get
-        {
-            var obj = Reader?.Resolve(Dict.Get("Flags")) ?? Dict.Get("Flags");
-            return obj is PdfInteger n ? (int)n.Value : 0;
-        }
-        set => Dict.Set("Flags", new PdfInteger(value));
-    }
-}
-
-/// <summary>An import-data action (/S /ImportData): imports field data from the
-/// FDF/XFDF file identified by the action's /F file specification.</summary>
-public sealed class ImportDataAction : PdfAction
-{
-    internal ImportDataAction(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
-
-    /// <summary>The file specification (/F) naming the data file to import.
-    /// Accepts both the literal-string and the /Filespec-dictionary forms.</summary>
-    public FileSpecification? Data
-    {
-        get
-        {
-            var f = Reader?.Resolve(Dict.Get("F")) ?? Dict.Get("F");
-            return f switch
-            {
-                PdfDictionary fd => FileSpecification.FromExistingDict(fd, Reader),
-                PdfString ps => FileSpecification.CreateFromName(ps.ToText()),
-                _ => null,
-            };
-        }
-    }
 }

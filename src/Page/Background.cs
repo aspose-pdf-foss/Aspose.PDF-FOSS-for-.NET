@@ -40,11 +40,18 @@ public sealed partial class Page
     /// prepending puts it under content the source already painted (a highlight vanished
     /// behind the source's own), and appending puts it over the text it is supposed to sit
     /// behind. Returns false when no text object draws there, so the caller can fall back to
-    /// its historic placement.</summary>
+    /// its historic placement. A place read in another frame - before turns were baked into the
+    /// content, or in the turned view of a page viewed turned - is sought in that frame:
+    /// <paramref name="fromRead"/> carries it to the page now, and each run origin is taken back
+    /// through it, so each tolerance stays on its axis there; the block, drawn inside the content,
+    /// turns with it.</summary>
     internal bool InsertBeforeTextObjectAt(System.Collections.Generic.IList<Operator> block,
-        double pageX, double pageY, double tolX = 2.0, double tolY = 3.0)
+        double pageX, double pageY, Matrix? fromRead = null, double tolX = 2.0, double tolY = 3.0)
     {
         if (block.Count == 0) return false;
+        Matrix? back;
+        try { back = fromRead?.Inverse(); }
+        catch (InvalidOperationException) { return false; }   // turns that collapse the page leave no run to find
         var ops = Contents;
         var list = ops.ToList();
         double ctmA = 1, ctmB = 0, ctmC = 0, ctmD = 1, ctmE = 0, ctmF = 0;
@@ -108,6 +115,7 @@ public sealed partial class Page
                     if (btIndex < 0) continue;
                     double px = ctmA * tmE + ctmC * tmF + ctmE;
                     double py = ctmB * tmE + ctmD * tmF + ctmF;
+                    if (back is not null) (px, py) = back.TransformPoint(px, py);
                     if (Math.Abs(px - pageX) <= tolX && Math.Abs(py - pageY) <= tolY)
                     {
                         ops.Insert(btIndex + 1, block);   // Insert is 1-based
@@ -128,7 +136,7 @@ public sealed partial class Page
         var text = Compat.Latin1.GetString(bytes);
         double r = 0, g = 0, b = 0;
         var colorSet = false;
-        double reX = 0, reY = 0, reW = 0, reH = 0;
+        double reW = 0, reH = 0;
         var haveRect = false;
         var nums = new System.Collections.Generic.List<double>();
         foreach (var tokRaw in text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
@@ -147,7 +155,7 @@ public sealed partial class Page
                 case "g" when nums.Count >= 1:
                     r = g = b = nums[^1]; colorSet = true; break;
                 case "re" when nums.Count >= 4:
-                    reX = nums[^4]; reY = nums[^3]; reW = nums[^2]; reH = nums[^1];
+                    reW = nums[^2]; reH = nums[^1];
                     haveRect = true; break;
                 case "f" or "f*" or "B" or "b":
                     if (colorSet && haveRect && reW >= mb.Width * 0.9 && reH >= mb.Height * 0.9)

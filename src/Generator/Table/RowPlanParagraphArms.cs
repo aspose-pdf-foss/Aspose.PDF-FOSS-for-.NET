@@ -11,7 +11,15 @@ namespace Aspose.Pdf;
 public partial class Table
 {
     /// <summary>A fragment's inline boxes are registered against the lines they sit on.</summary>
-    private void PlanInlineBoxes(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc)
+    /// <summary>A CSS line's baseline offset in its box: the run box's own, else the fragment size when the
+    /// line has a box at all.</summary>
+    private static double CssLineBaseOff(RowPlanParagraphState pp)
+    {
+        if (pp.runBoxH > 0) return CssRunBaseOff(pp.runBoxH, pp.fragFontSize, pp.fragCssAsc, pp.fragCssDesc);
+        return pp.htmlCssBoxPx > 0 || pp.ownBoxH > 0 ? pp.fragFontSize : 0;
+    }
+
+    private static void PlanInlineBoxes(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc)
     {
         if (paragraph is TextFragment { InlineBoxes: { Count: > 0 } fragBoxes }
             && pc.lines.Count > pp.linesBeforeFrag)
@@ -64,12 +72,12 @@ public partial class Table
                 && pc.cell.IsWordWrapped && estWidth > pc.availWidth + wrapSlack)
             {
                 foreach (var l in WrapText(segment, pp.fragFontSize, pc.availWidth + wrapSlack, pp.genMeas, noBreakBefore: HtmlNoBreakBeforePunct,
-                             overflowLongWords: HtmlLayoutWrap, hangingBreakSpace: pp.fragHangingBreakSpace))
-                    pc.lines.Add(new CellLine { Text = StripZeroWidth(l), FontSize = pp.fragFontSize, ForegroundColor = pp.color, Bold = pp.fragBold, BaseFont = pp.fragBaseFont, Hyperlink = pp.fragLink, LinkRuns = TakeAnchorRuns(pp, l, s => MeasureWidth(s, pp.fragFontSize)), Align = pp.lineAlign, CssAsc = pp.fragCssAsc, CssForce = pp.fragCssForce, CssDesc = pp.fragCssDesc, BoxH = pp.runBoxH > 0 ? pp.runBoxH : pp.htmlCssBoxPx > 0 ? Math.Round(pp.htmlCssBoxPx * 1.15) * 0.75 : pp.ownBoxH, BaseOff = pp.runBoxH > 0 ? CssRunBaseOff(pp.runBoxH, pp.fragFontSize, pp.fragCssAsc, pp.fragCssDesc) : pp.htmlCssBoxPx > 0 || pp.ownBoxH > 0 ? pp.fragFontSize : 0 });
+                             overflowLongWords: HtmlLayoutWrap && !pc.cell.HtmlBreakWord, hangingBreakSpace: pp.fragHangingBreakSpace))
+                    pc.lines.Add(new CellLine { Text = StripZeroWidth(l), FontSize = pp.fragFontSize, ForegroundColor = pp.color, Bold = pp.fragBold, BaseFont = pp.fragBaseFont, Hyperlink = pp.fragLink, LinkRuns = TakeAnchorRuns(pp, l, s => MeasureWidth(s, pp.fragFontSize)), Align = pp.lineAlign, CssAsc = pp.fragCssAsc, CssForce = pp.fragCssForce, CssDesc = pp.fragCssDesc, BoxH = (pp.runBoxH, pp.htmlCssBoxPx) switch { (> 0, _) => pp.runBoxH, (_, > 0) => Math.Round(pp.htmlCssBoxPx * 1.15) * 0.75, _ => pp.ownBoxH }, BaseOff = CssLineBaseOff(pp) });
             }
             else
             {
-                pc.lines.Add(new CellLine { Text = StripZeroWidth(segment), FontSize = pp.fragFontSize, ForegroundColor = pp.color, Bold = pp.fragBold, BaseFont = pp.fragBaseFont, Hyperlink = pp.fragLink, LinkRuns = TakeAnchorRuns(pp, segment, s => MeasureWidth(s, pp.fragFontSize)), Align = pp.lineAlign, CssAsc = pp.fragCssAsc, CssForce = pp.fragCssForce, CssDesc = pp.fragCssDesc, BoxH = pp.runBoxH > 0 ? pp.runBoxH : pp.htmlCssBoxPx > 0 ? Math.Round(pp.htmlCssBoxPx * 1.15) * 0.75 : pp.ownBoxH, BaseOff = pp.runBoxH > 0 ? CssRunBaseOff(pp.runBoxH, pp.fragFontSize, pp.fragCssAsc, pp.fragCssDesc) : pp.htmlCssBoxPx > 0 || pp.ownBoxH > 0 ? pp.fragFontSize : 0 });
+                pc.lines.Add(new CellLine { Text = StripZeroWidth(segment), FontSize = pp.fragFontSize, ForegroundColor = pp.color, Bold = pp.fragBold, BaseFont = pp.fragBaseFont, Hyperlink = pp.fragLink, LinkRuns = TakeAnchorRuns(pp, segment, s => MeasureWidth(s, pp.fragFontSize)), Align = pp.lineAlign, CssAsc = pp.fragCssAsc, CssForce = pp.fragCssForce, CssDesc = pp.fragCssDesc, BoxH = (pp.runBoxH, pp.htmlCssBoxPx) switch { (> 0, _) => pp.runBoxH, (_, > 0) => Math.Round(pp.htmlCssBoxPx * 1.15) * 0.75, _ => pp.ownBoxH }, BaseOff = CssLineBaseOff(pp) });
             }
         }
     }
@@ -78,7 +86,7 @@ public partial class Table
     private bool PlanGeneratorCellText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Row row)
     {
         if (GeneratorCellModel && paragraph is TextFragment gtf
-            && ResolveGeneratorCellFace(gtf, pc.cell, row) is { } genFaceName
+            && GeneratorCellDrawFace(gtf, pc.cell, row) is { } genFaceName
             && !ContainsCjk(pp.text!)
             && !Aspose.Pdf.Text.ArabicTextShaper.ContainsArabic(pp.text)
             && GeneratorCellTtf(gtf, pc.cell, row, pp.fragBold, pp.fragItalic) is { } genTtf)
@@ -96,7 +104,9 @@ public partial class Table
             // only and would clip the token to one line.
             var genOverWide = false;
             if (genWrapBudget > 0)
-                foreach (var gw in pp.text!.Split(' ', '\n'))
+#pragma warning disable S3878 // the explicit array keeps the call off Split(char, int, options)
+                foreach (var gw in pp.text!.Split(new[] { ' ', '\n' }))
+#pragma warning restore S3878
                     if (gw.Length > 0 && MeasGen(gw) > genWrapBudget) { genOverWide = true; break; }
             if (!genOverWide)
             {
@@ -106,7 +116,11 @@ public partial class Table
                 var genLines = pc.cell.IsWordWrapped && MeasGen(rawSeg) > genWrapBudget
                     ? WrapLinesWithFont(rawSeg, pp.fragFontSize, genTtf, genWrapBudget, pp.fragHangingBreakSpace)
                     : new List<string> { rawSeg };
+                var genTypeName = genRealVariant ? CellFaceName(genFaceName, pp.fragBold, pp.fragItalic) : genFaceName;
                 foreach (var l in genLines)
+                {
+                    // Characters the face lacks draw in a face that has them, run by run.
+                    var covering = CoveringStyleRuns(l, genTtf, genTypeName, gtf.TextState.Font);
                     pc.lines.Add(new CellLine
                     {
                         Text = l,
@@ -116,11 +130,13 @@ public partial class Table
                         LinkRuns = TakeAnchorRuns(pp, l, MeasGen),
                         Align = pp.lineAlign,
                         Type0Ttf = genTtf,
-                        Type0FontName = genRealVariant
-                            ? CellFaceName(genFaceName, pp.fragBold, pp.fragItalic) : genFaceName,
+                        Type0FontName = genTypeName,
+                        StyleRuns = covering,
                         // (a hanging break space paints nothing and does not count toward the line)
-                        KernedWidth = MeasGen(l.TrimEnd(' ')),
+                        KernedWidth = covering is null ? MeasGen(l.TrimEnd(' '))
+                            : covering.Select((r, k) => MeasureWidthKerned(k == covering.Count - 1 ? r.Text.TrimEnd(' ') : r.Text, pp.fragFontSize, r.Ttf)).Sum(),
                     });
+                }
             }
             return true;
             }
@@ -129,7 +145,7 @@ public partial class Table
     }
 
     /// <summary>A fragment honouring the cell's TrueType face lays through its embedded program; true when handled here.</summary>
-    private bool PlanCellTtfFaceText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Row row)
+    private bool PlanCellTtfFaceText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc)
     {
         if (HonorCellTtfFaces && paragraph is TextFragment ftf
             && ftf.TextState.Font?.FontName is { Length: > 0 } cellFaceName
@@ -140,24 +156,21 @@ public partial class Table
             // Mixed bold runs on ONE line (the owner band's 'Owner Team:
             // <b>bv Designers</b>'): one CellLine whose StyleRuns the render
             // draws sequentially, each in its own face variant.
-            if (pp.fragGridRuns is { Count: > 1 })
+            if (pp.fragGridRuns is { Count: > 1 }
+                && CellStyleRuns(pp.fragGridRuns, cellFaceName, pp.fragBold, pp.fragItalic) is { } runCells)
             {
-                var runCells = new List<(string Text, byte[] Ttf, string Name)>();
                 var runsW = 0.0;
-                var runsOk = true;
-                foreach (var (runText, runBold) in pp.fragGridRuns)
-                {
-                    var runTtf = CellFaceTtf(cellFaceName, runBold || pp.fragBold, pp.fragItalic);
-                    if (runTtf is null) { runsOk = false; break; }
-                    runCells.Add((runText, runTtf,
-                        CellFaceName(cellFaceName, runBold || pp.fragBold, pp.fragItalic)));
-                    runsW += MeasureWidthKerned(runText, pp.fragFontSize, runTtf);
-                }
-                if (runsOk)
-                {
+                foreach (var (runText, runTtf, _) in runCells) runsW += MeasureWidthKerned(runText, pp.fragFontSize, runTtf);
+                // (…on as many lines as its cell needs, where the grid wraps its runs - a line that carries
+                //  colour runs, input boxes or decorations placed on its whole text keeps that line)
+                var runLines = HtmlWrapStyleRuns && !pc.cell.HtmlNoWrap && pc.availWidth > 0 && runsW > pc.availWidth
+                    && ftf.HtmlColorRuns is not { Count: > 0 } && ftf.InlineInputBoxes is not { Count: > 0 } && ftf.HtmlDecors is not { Count: > 0 }
+                    ? WrapStyleRuns(runCells, pp.fragFontSize, pc.availWidth)
+                    : new List<StyleRunLine> { new(runCells, pp.text!, runsW) };
+                foreach (var runLine in runLines)
                     pc.lines.Add(new CellLine
                     {
-                        Text = pp.text!,
+                        Text = runLine.Text,
                         FontSize = pp.fragFontSize,
                         ForegroundColor = pp.color,
                         Align = pp.lineAlign,
@@ -165,31 +178,29 @@ public partial class Table
                         CssDesc = pp.fragCssDesc,
                         Type0Ttf = cellFaceTtf,
                         Type0FontName = CellFaceName(cellFaceName, pp.fragBold, pp.fragItalic),
-                        StyleRuns = runCells,
+                        StyleRuns = runLine.Runs,
                         Decors = ftf.HtmlDecors,
                         InputBoxes = ftf.InlineInputBoxes,
                         ColorRuns = ftf.HtmlColorRuns,
                         OwnLinePt = ftf.CssLineHeightPt, OwnDeclared = ftf.CssLineHeightDeclared,
                         KernTj = true,
-                        KernedWidth = runsW,
+                        KernedWidth = runLine.Width,
                         // Form-grid lines are CSS boxes: their own line box and
                         // the measured baseline seat within it.
                         BoxH = FormGridCells && pp.fragLineH > 0 ? pp.fragLineH : 0,
                         BaseOff = FormGridCells ? ftf.CssBaseDrop : 0,
                     });
-                    return true;
-                }
+                return true;
             }
             double MeasFace(string s) => MeasureWidthKerned(s, pp.fragFontSize, cellFaceTtf);
             // pt-styled fragment: the paragraph's own margins inset the
             // wrap box ('Prijs p/ stuk' wraps inside them).
-            var faceWrapW = pc.cell.HtmlNoWrap
-                // A nowrap cell keeps its whole line and overflows the
-                // column (the results row draws past its box).
-                ? double.MaxValue
-                : HtmlWrapInsetsCellMargins && ftf.HtmlWrapInsetPt > 0
-                ? Math.Max(8.0, pc.availWidth - ftf.HtmlWrapInsetPt)
-                : pc.availWidth;
+            double faceWrapW;
+            // A nowrap cell keeps its whole line and overflows the
+            // column (the results row draws past its box).
+            if (pc.cell.HtmlNoWrap) faceWrapW = double.MaxValue;
+            else if (HtmlWrapInsetsCellMargins && ftf.HtmlWrapInsetPt > 0) faceWrapW = Math.Max(8.0, pc.availWidth - ftf.HtmlWrapInsetPt);
+            else faceWrapW = pc.availWidth;
             foreach (var segment in pp.text!.Split('\n'))
             {
                 if (segment.Length == 0) continue;
@@ -268,7 +279,7 @@ public partial class Table
     }
 
     /// <summary>A bold fragment with CSS ascent metrics lays at those metrics; true when handled here.</summary>
-    private bool PlanBoldCssText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Row row)
+    private bool PlanBoldCssText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc)
     {
         if (paragraph is TextFragment btf && btf.TextState.IsBold && pp.fragCssAsc > 0
             // …unless the real-face cell pipeline owns this table: it
@@ -365,11 +376,13 @@ public partial class Table
                         pc.availWidth, cjkTtf, "MSGothic"))
                     {
                         var runs = SegmentByCoverageChain(lineText, cjkTtf, "MSGothic");
-                        var lineTtf = runs is { Count: > 0 } ? runs[0].Ttf
-                            : cjkTtf ?? (chainFallback.Count > 0 ? chainFallback[0].Bytes : null);
-                        var lineFace = runs is { Count: > 0 } ? runs[0].Name
-                            : cjkTtf is not null ? "MSGothic"
-                            : chainFallback.Count > 0 ? chainFallback[0].Name : "MSGothic";
+                        byte[]? lineTtf;
+                        if (runs is { Count: > 0 }) lineTtf = runs[0].Ttf;
+                        else lineTtf = cjkTtf ?? (chainFallback.Count > 0 ? chainFallback[0].Bytes : null);
+                        string lineFace = "MSGothic";
+                        if (runs is { Count: > 0 }) lineFace = runs[0].Name;
+                        else if (cjkTtf is not null) lineFace = "MSGothic";
+                        else if (chainFallback.Count > 0) lineFace = chainFallback[0].Name;
                         if (lineTtf is null) continue;
                         pc.lines.Add(new CellLine
                         {
@@ -451,7 +464,7 @@ public partial class Table
     }
 
     /// <summary>Arabic text is shaped and laid right to left through its embedded face; true when handled here.</summary>
-    private bool PlanArabicText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Row row)
+    private bool PlanArabicText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc)
     {
         if (Aspose.Pdf.Text.ArabicTextShaper.ContainsArabic(pp.text))
         {
@@ -463,16 +476,13 @@ public partial class Table
             var arabicFont = Aspose.Pdf.Text.FontRepository.TryFindFont(
                 FormGridCells ? "Times New Roman" : "Arial");
             var arabicTtf = arabicFont?.SourceFontData?.TtfData;
-            if (arabicTtf is not null)
-            {
-                if (PlanArabicShapedText(pp, paragraph, pc, row, arabicFont, arabicTtf)) return true;
-            }
+            if (arabicTtf is not null && PlanArabicShapedText(pp, paragraph, pc, arabicFont, arabicTtf)) return true;
         }
         return false;
     }
 
     /// <summary>An empty paragraph still takes its line pitch; true when nothing more is laid.</summary>
-    private bool PlanEmptyText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Row row)
+    private bool PlanEmptyText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc)
     {
         if (pp.text!.Length == 0)
         {
@@ -505,7 +515,7 @@ public partial class Table
     }
 
     /// <summary>An HTML fragment paragraph supplies the cell text, its block metrics and its faces; true when the fragment was drawn directly.</summary>
-    private bool PlanHtmlFragmentSource(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, RowPlanState rp, Row row)
+    private bool PlanHtmlFragmentSource(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, RowPlanState rp)
     {
         if (paragraph is HtmlFragment html)
         {
@@ -516,7 +526,7 @@ public partial class Table
             // the text sets bold at the declared size, and the row
             // occupies the CSS normal line box plus the border above and
             // below (probed: fs 14 header cells pitch ≈ 14×1.2 + 2×0.7).
-            var boxedDiv = Regex.Match(html.HtmlContent ?? "",
+            var boxedDiv = SafeRegex.Match(html.HtmlContent ?? "",
                 @"<div\s[^>]*style\s*=\s*""[^""]*border\s*:[^""]*""[^>]*>\s*<div\s[^>]*style\s*=\s*""[^""]*font-size\s*:\s*([\d.]+)\s*[;""]",
                 RegexOptions.IgnoreCase);
             if (boxedDiv.Success
@@ -525,9 +535,9 @@ public partial class Table
             {
                 pp.fragFontSize = boxedFs;
                 pp.htmlBoxedDivLineH = boxedFs * CssNormalLineHeight + 2 * HtmlThinBorderPt;
-                pp.fragBold = Regex.IsMatch(html.HtmlContent ?? "",
+                pp.fragBold = SafeRegex.IsMatch(html.HtmlContent ?? "",
                     @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase);
-                var bg = Regex.Match(html.HtmlContent ?? "",
+                var bg = SafeRegex.Match(html.HtmlContent ?? "",
                     @"background-color\s*:\s*([-\w#]+)", RegexOptions.IgnoreCase);
                 if (bg.Success && pc.cell.BackgroundColor is null)
                 {
@@ -543,7 +553,7 @@ public partial class Table
             }
             else
             {
-            if (PlanHtmlFragmentBlocks(pp, pc, rp, row, html)) return true;
+            if (PlanHtmlFragmentBlocks(pp, pc, rp, html)) return true;
             }
         }
         return false;
@@ -570,22 +580,32 @@ public partial class Table
                 foreach (var fseg in tf.Segments)
                     if (fseg.TextState.IsBold && !string.IsNullOrEmpty(fseg.Text))
                     { pp.fragBold = true; break; }
-            pp.fragItalic = tf.TextState.IsItalic;
+            // An italic the cell's (row's, table's) default state declares reaches a text that
+            // draws in the built-in face, whose oblique member is picked below; a named face
+            // keeps the fragment's own style.
+            pp.fragItalic = tf.TextState.IsItalic
+                || (DeclaredCellItalic(pc.cell, row) && ResolveGeneratorCellFace(tf, pc.cell, row) is null);
             pp.fragGridRuns = tf.FormGridRuns;
             pp.fragLink = tf.HyperlinkValue;
             pp.fragAnchors = tf.HtmlAnchors;
             pp.fragUnderline = tf.HtmlUnderline;
             pp.fragEmbeddedTtf = tf.TextState.Font?.SourceFontData?.TtfData;
             pp.fragEmbeddedName = tf.TextState.Font?.FontName;
-            pp.fragBaseFont = NamedStandard14Face(tf, pp.fragBold, pp.fragItalic);
+            pp.fragBaseFont = NamedStandard14Face(tf, pp.fragBold, pp.fragItalic)
+                ?? AssignedStandard14Face(tf, pc.cell, row, pp.fragBold, pp.fragItalic);
+            // An italic cell text in the table's built-in face draws in that face's oblique
+            // member (its bold member is picked the same way at draw time); it used to draw
+            // upright, the italic lost.
+            if (pp.fragBaseFont is null && pp.fragItalic && pp.fragEmbeddedTtf is null
+                && ResolveGeneratorCellFace(tf, pc.cell, row) is null)
+                pp.fragBaseFont = pp.fragBold ? "Helvetica-BoldOblique" : "Helvetica-Oblique";
             // A segment opting into NoCharacterAction.UseCustomReplacementFont NAMES the
             // face that carries the characters its own font lacks. Its declared face (a
             // Latin one, for CJK text) covers none of them, so the replacement font is the
             // face this text is actually written in. Without honouring it the CJK arm
             // below falls through to the generic installed substitute and the saved
             // document names a font the caller never asked for.
-            if (pp.fragEmbeddedTtf is null || !CjkCoveredBy(pp.text, pp.fragEmbeddedTtf))
-                if (DeclaredReplacementFace(tf) is { } repl)
+            if ((pp.fragEmbeddedTtf is null || !CjkCoveredBy(pp.text, pp.fragEmbeddedTtf)) && DeclaredReplacementFace(tf) is { } repl)
                 {
                     pp.fragEmbeddedTtf = repl.Ttf;
                     pp.fragEmbeddedName = repl.Name;
@@ -600,15 +620,16 @@ public partial class Table
     }
 
     /// <summary>An HTML fragment without a boxed div lays its blocks as the cell's text lines; true when the blocks were drawn directly.</summary>
-    private bool PlanHtmlFragmentBlocks(RowPlanParagraphState pp, RowPlanColumnState pc, RowPlanState rp, Row row, HtmlFragment html)
+    private bool PlanHtmlFragmentBlocks(RowPlanParagraphState pp, RowPlanColumnState pc, RowPlanState rp, HtmlFragment html)
     {
         // HTML-engine cell: markup in the b/strong/small/div/br family lays
         // out as serif CSS line boxes (pixel-quantized leading, mixed bold/
         // small runs per line, kerned TJ output — see ParseHtmlEngineCell).
-        // A fragment carrying its OWN TextState sizes the HTML from it (the
-        // face does not follow — HTML text takes its family from CSS, so an
-        // Arial TextState still sets in the UA serif). IsBreakWords lets a
-        // word wider than the column break inside itself.
+        // A fragment carrying its OWN TextState sizes the HTML from it, and a
+        // face the state names by its family sets the text no element gives
+        // a family (an "Arial Bold" face is no family name: the UA serif
+        // stays). IsBreakWords lets a word wider than the column break
+        // inside itself.
         // The generator dialect hands EVERY HtmlFragment to the HTML
         // engine, markup or not: a plain-text fragment sets in the UA
         // serif at 12 pt on 13.5 pt line boxes (probed 2026-08-23), and
@@ -618,7 +639,7 @@ public partial class Table
         var genPlainHtml = GeneratorCellModel
             && (html.HtmlContent?.IndexOf('<') ?? 0) < 0;
         if (ParseHtmlEngineCell(html.HtmlContent, pc.availWidth, genHtmlSize,
-                html.IsBreakWords, plainText: GeneratorCellModel) is { } engineLines)
+                html.IsBreakWords, plainText: GeneratorCellModel, EngineRootFont(html)) is { } engineLines)
         {
             // Only the PLAIN-TEXT dialect reshapes the block: its last
             // line ends ON its baseline and its lines join the exact
@@ -630,9 +651,11 @@ public partial class Table
             // exactly as a plain one (probed: a <p>, a heading and a bold run in cells).
             if (GeneratorCellModel)
                 foreach (var gel in engineLines) gel.GenEngineExact = true;
+            // The fragment's own colour wins over the cell's, as on the page.
+            var engineColor = html.TextState?.ExplicitForegroundColor ?? pc.textState?.ForegroundColor;
             foreach (var el in engineLines)
             {
-                el.ForegroundColor = pc.textState?.ForegroundColor;
+                el.ForegroundColor = engineColor;
                 el.Align = ParseHtmlAlignment(html.HtmlContent);
                 // The engine's lines are CSS line BOXES: the row's grid has
                 // to step at the box, not at the bare font size, or the row
@@ -665,7 +688,7 @@ public partial class Table
         // A block-level (div/p) text-align rule in the fragment's own
         // stylesheet wins over alignment hits from unrelated selectors
         // elsewhere in the sheet.
-        var blockRule = Regex.Match(html.HtmlContent ?? "",
+        var blockRule = SafeRegex.Match(html.HtmlContent ?? "",
             @"(?:^|[,{}\s])(?:div|p)\s*(?:,[^{]*)?\{[^}]*text-align\s*:\s*(left|right|center)",
             RegexOptions.IgnoreCase);
         if (blockRule.Success)
@@ -675,7 +698,7 @@ public partial class Table
                 "center" => HorizontalAlignment.Center,
                 _ => HorizontalAlignment.Left,
             };
-        var cssPx = Regex.Match(html.HtmlContent ?? "", @"font-size\s*:\s*([\d.]+)\s*px",
+        var cssPx = SafeRegex.Match(html.HtmlContent ?? "", @"font-size\s*:\s*([\d.]+)\s*px",
             RegexOptions.IgnoreCase);
         if (blockRule.Success && cssPx.Success
             && double.TryParse(cssPx.Groups[1].Value, NumberStyles.Float,
@@ -689,7 +712,7 @@ public partial class Table
     }
 
     /// <summary>Arabic text shaped through its embedded face is laid right to left in the cell; true when handled here.</summary>
-    private bool PlanArabicShapedText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Row row, Aspose.Pdf.Text.Font? arabicFont, byte[] arabicTtf)
+    private bool PlanArabicShapedText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Aspose.Pdf.Text.Font? arabicFont, byte[] arabicTtf)
     {
         // Form-grid measure path: the wrap runs on the BASE
         // face's advances with every non-WinAnsi char at the '?'
@@ -697,10 +720,10 @@ public partial class Table
         // the shaped serif line is far narrower than the measure, so
         // the name row breaks two words earlier than a shaped-width
         // wrap would.
-        var fgBaseTtf = FormGridCells
-            ? CellFaceTtf((paragraph as TextFragment)?.TextState.Font?.FontName
-                is { Length: > 0 } fgFam ? fgFam : "Verdana", false)
-            : null;
+        byte[]? fgBaseTtf = null;
+        if (FormGridCells)
+            fgBaseTtf = CellFaceTtf((paragraph as TextFragment)?.TextState.Font?.FontName
+                is { Length: > 0 } fgFam ? fgFam : "Verdana", false);
         double MeasFallback(string s)
         {
             // Raw text against the base face, unmapped Arabic chars at
@@ -731,7 +754,9 @@ public partial class Table
             arSegs = arLines;
         }
         else arSegs = new[] { pp.text! };
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var arSeg in arSegs)
+#pragma warning restore S3267
         {
             if (!PlanArabicSegment(pp, paragraph, pc, arabicFont, arabicTtf, fgBaseTtf, arSeg)) break;
         }

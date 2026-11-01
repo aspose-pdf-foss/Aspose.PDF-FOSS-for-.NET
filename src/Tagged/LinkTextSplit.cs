@@ -44,8 +44,10 @@ internal static class LinkTextSplit
         public string Text = string.Empty;
         /// <summary>Per code: the byte offset just past it, and the link it falls in (-1: none).</summary>
         public List<(int ByteEnd, int Link)> Codes = new();
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         /// <summary>The TJ adjustment standing before the string (0: none), in thousandths of an em.</summary>
         public double AdjustmentBefore;
+#pragma warning restore S3218
     }
 
     private sealed class TextOp
@@ -82,10 +84,6 @@ internal static class LinkTextSplit
     /// <summary>Split the page's text shows at the edges of <paramref name="linkRects"/>;
     /// true when the page's content changed.</summary>
     public static bool Apply(Page page, IReadOnlyList<Rectangle> linkRects) => Apply(page, linkRects, []);
-
-    /// <summary>Split the page's text shows at the edges of <paramref name="columns"/>, each word going whole to the
-    /// column its middle stands in (<see cref="SnapWords"/>): an edge standing inside a figure cuts nothing.</summary>
-    public static bool ApplyToColumns(Page page, IReadOnlyList<Rectangle> columns) => Apply(page, columns, [], [], snapWords: true);
 
     /// <summary>Split the page's text shows at the edges of <paramref name="linkRects"/>, and after the label each of
     /// <paramref name="leads"/> names: a show whose first code stands in the lead's rectangle, its text starting with
@@ -133,7 +131,7 @@ internal static class LinkTextSplit
         {
             if (shown is null) return;
             var m = GraphicsState.MultiplyMatrices(state.TextMatrix, state.Ctm);
-            var size = state.FontSize * Math.Sqrt(m[2] * m[2] + m[3] * m[3]);
+            var size = Math.Abs(state.FontSize) * Math.Sqrt(m[2] * m[2] + m[3] * m[3]);
             var previous = 0.0;
             foreach (var (byteEnd, advance) in ends)
             {
@@ -212,6 +210,10 @@ internal static class LinkTextSplit
         page.SetContentStream(output.ToArray());
         return true;
     }
+
+    /// <summary>Split the page's text shows at the edges of <paramref name="columns"/>, each word going whole to the
+    /// column its middle stands in (<see cref="SnapWords"/>): an edge standing inside a figure cuts nothing.</summary>
+    public static bool ApplyToColumns(Page page, IReadOnlyList<Rectangle> columns) => Apply(page, columns, [], [], snapWords: true);
 
     /// <summary>Each word of the operation - a run of codes with no blank among them and no word gap before the strings
     /// they stand in (a figure set glyph by glyph, each glyph a string with its kerning) - given the rectangle its middle

@@ -1,4 +1,5 @@
-using System.Collections;
+﻿using System.Collections;
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -34,7 +35,14 @@ public sealed partial class Form
         public bool ApplyRedactions { get; set; }
     }
 
-    private void FlattenXfa()
+    /// <summary>The conversion to a standard form of a document whose catalog asks a viewer to build the
+    /// pages from the XFA packets: the pages are laid out whatever the packets say of the form's kind.</summary>
+    internal void ConvertXfaAwaitingRender() => FlattenXfa(layOutPages: true);
+
+    /// <summary>Lays the form out onto the document's pages and leaves the XFA packets as they are.</summary>
+    internal void LayOutXfaPages() => RenderDynamicXfa(placeFields: false);
+
+    private void FlattenXfa(bool placeWidgets = true, bool layOutPages = false)
     {
         var flatReader = ResolvedReader;
         if (flatReader is null || !IsXfa) return;
@@ -43,29 +51,67 @@ public sealed partial class Form
         if (acroForm is null) return;
 
         // A dynamic XFA form carries its fields only in the XFA template — the AcroForm
-        // has no widget fields. When flattening it to a standard AcroForm, materialise one
-        // flat field per template field so the fields survive as findable AcroForm fields
-        // (/T = the full dotted SOM path, matching GetXfaFieldNames). A static XFA form
+        // has no widget fields. When flattening it to a standard AcroForm, the fields are the
+        // instances the render laid out: one per painted widget, a master page's once per page
+        // (/T = the full dotted SOM path with the instance index). A static XFA form
         // already owns AcroForm widget fields, so leave those untouched (no duplication).
         var existing = flatReader.Resolve(acroForm.Get("Fields")) as PdfArray;
-        bool hasWidgets = existing is not null && existing.Count > 0;
-        if (!hasWidgets)
-            GenerateFlatAcroFieldsFromXfaTemplate(flatReader, acroForm);
+        bool hasWidgets = existing is not null && existing.Any(f => !IsUnseenSignature(flatReader, f));
+        bool placed = false;
         // A DYNAMIC form's pages are only a saved preview - a conforming processor
         // re-renders from the XFA (NeedsRendering). The Standard
         // conversion replaces the preview pages with its own XFA layout (measured on
         // e.g. 8 preview pages -> a 3-page render with the continuation master's
         // slim header); a static XFA keeps its authoritative pages untouched.
-        if (!hasWidgets || Type == FormType.Dynamic)
-            RenderDynamicXfa();     // paint the form onto real pages (replaces the preview pages)
+        bool laysOut = !hasWidgets || layOutPages || Type == FormType.Dynamic;
+        if (laysOut)
+        {
+            // paint the form onto real pages (replaces the preview pages); each field the render painted
+            // becomes a field of the form with a widget where it was painted.
+            var placements = RenderDynamicXfa(placeFields: placeWidgets && !hasWidgets);
+            if (placements is not null) placed = PlaceXfaFieldWidgets(flatReader, acroForm, placements);
+        }
+        // A form listed without widgets, or one the renderer could not lay out, lists one flat field
+        // per template field so the fields survive as findable AcroForm fields.
+        if (!hasWidgets && !placed) GenerateFlatAcroFieldsFromXfaTemplate(flatReader, acroForm);
         // A static form keeps its pages, so a widget the template alone paints (a barcode)
         // needs an appearance of its own to survive the conversion.
-        else
+        if (!laysOut)
+        {
+            // The pages and widgets stay: the values the datasets alone hold go into the widgets before the XFA goes.
+            MergeXfaDataIntoEmptyFields();
             GenerateXfaBarcodeAppearances(flatReader, acroForm);
+        }
 
         // Remove XFA key from AcroForm — this converts XFA to standard AcroForm
+        // ... and the catalog no longer asks a viewer to build the pages from it
         acroForm.Remove("XFA");
+        catalog.Remove("NeedsRendering");
         MarkAcroFormDirty();
+        // The fields the conversion made are the form's fields from here on: a caller that sets their flags
+        // or values before the save edits the dictionaries the save writes.
+        ListFieldsOfEmptyForm();
+    }
+
+    /// <summary>True for a signature field whose widgets all have no area: the document signature a dynamic form
+    /// carries beside its XFA, which says nothing of the form's own fields.</summary>
+    private static bool IsUnseenSignature(PdfReader reader, PdfObject? entry)
+    {
+        if (reader.ResolveDict(entry) is not { } field) return false;
+        var widgets = reader.Resolve(field.Get("Kids")) is PdfArray kids
+            ? kids.Select(reader.ResolveDict).ToList()
+            : new List<PdfDictionary?> { field };
+        if (widgets.Count == 0) return false;
+        foreach (var widget in widgets)
+        {
+            if (widget is null || (widget.GetName("FT") ?? field.GetName("FT")) != "Sig") return false;
+            if (reader.Resolve(widget.Get("Rect")) is PdfArray r && r.Count == 4 && Side(r, 0) != 0 && Side(r, 1) != 0)
+                return false;
+        }
+        return true;
+
+        static double Side(PdfArray rect, int axis) =>
+            Aspose.Pdf.Functions.PdfArrayHelper.GetDouble(rect, axis + 2) - Aspose.Pdf.Functions.PdfArrayHelper.GetDouble(rect, axis);
     }
 
     /// <summary>Materialise a flat AcroForm field for each RENDERED XFA field (only used when
@@ -78,12 +124,12 @@ public sealed partial class Form
     /// layout engine and is not required to make the fields findable.</summary>
     /// <summary>Paint the dynamic-XFA form's content onto fresh PDF pages so a raster render shows
     /// the form rather than the XFA fallback page. Tolerant: a failure leaves pages untouched.</summary>
-    private void RenderDynamicXfa()
+    private List<Xfa.XfaFieldPlacement>? RenderDynamicXfa(bool placeFields)
     {
         var doc = OwnerDocument;
-        if (doc is null) return;
+        if (doc is null) return null;
         var xml = GetXfaTemplateXmlResolved() ?? GetXfaTemplateXml();
-        if (string.IsNullOrEmpty(xml)) return;
+        if (string.IsNullOrEmpty(xml)) return null;
         try
         {
             var tdoc = new XmlDocument();
@@ -94,10 +140,11 @@ public sealed partial class Form
                 // data node binds (a repeated group's fields stay
                 // empty — measured). A form packet keeps the lenient
                 // resolver: its recorded instances disambiguate repeats.
-                Xfa.XfaRenderer.Render(doc, root,
-                    HasXfaFormInstanceRecord() ? GetXfaFieldValue : GetXfaFieldValueStrict);
+                return Xfa.XfaRenderer.Render(doc, root,
+                    HasXfaFormInstanceRecord() ? GetXfaFieldValue : GetXfaFieldValueStrict, placeFields);
         }
-        catch { }
+        catch { /* an XFA form the renderer cannot lay out keeps the static pages */ }
+        return null;
     }
 
     /// <summary>True when the /XFA "form" packet records at least one subform — the
@@ -117,42 +164,54 @@ public sealed partial class Form
         catch { return false; }
     }
 
-    private void GenerateFlatAcroFieldsFromXfaTemplate(PdfReader reader, PdfDictionary acroForm)
+    private Dictionary<string, (PdfIndirectRef Ref, PdfDictionary Dict)>? GenerateFlatAcroFieldsFromXfaTemplate(PdfReader reader, PdfDictionary acroForm)
     {
         var doc = OwnerDocument;
-        if (doc is null) return;
-        var engine = Xfa.XfaFormEngine.TryCreate(GetXfaTemplateXmlResolved() ?? GetXfaTemplateXml());
-        if (engine is null) return;
+        if (doc is null) return null;
+        var engine = XfaTemplateEngine();
+        if (engine is null) return null;
         // Give the engine the XFA data-binding resolver so its scripts can read field rawValues.
         // The engine must never break a flatten — fall back to no generated fields on any failure.
         List<Xfa.XfaFlatField> fields;
         try { fields = engine.BuildRenderedFields(GetXfaFieldValue); }
-        catch { return; }
-        if (fields.Count == 0) return;
+        catch { return null; }
+        var byPath = new Dictionary<string, (PdfIndirectRef Ref, PdfDictionary Dict)>(fields.Count, StringComparer.Ordinal);
+        if (fields.Count == 0) return byPath;
 
         var fieldsArr = reader.Resolve(acroForm.Get("Fields")) as PdfArray;
         if (fieldsArr is null) { fieldsArr = new PdfArray(); acroForm.Set("Fields", fieldsArr); }
 
         foreach (var f in fields)
         {
-            var fld = new PdfDictionary();
-            fld.Set("T", new PdfString(Encoding.UTF8.GetBytes(f.Path)));
-            fld.Set("FT", new PdfName(f.Ft));
-            if (f.Ff != 0) fld.Set("Ff", new PdfInteger((int)f.Ff));
-            // Carry the field's bound datasets value onto the flat field's /V so the flattened
-            // dynamic-XFA form keeps its data values (Field.Value). Text and
-            // choice fields take a text /V; leave value-less and button/signature fields untouched.
-            if (!string.IsNullOrEmpty(f.Value) && (f.Ft == "Tx" || f.Ft == "Ch"))
-                fld.Set("V", new PdfString(Encoding.UTF8.GetBytes(f.Value)));
-            // An XFA image field carries its picture as base64 in the datasets node —
-            // materialise it as the flat pushbutton's /AP /N form so the image survives
-            // the flatten (readable back via Appearance["N"].Resources.Images).
-            if (f.IsImage && !string.IsNullOrEmpty(f.Value))
-                TrySetFlatImageAppearance(fld, f.Value);
+            var fld = FlatXfaFieldDict(f);
             int num = doc.AllocateObjectNumber();
             doc.AddNewObject(num, fld, registerOverlay: true);
-            fieldsArr.Add(new PdfIndirectRef(num, 0));
+            var reference = new PdfIndirectRef(num, 0);
+            fieldsArr.Add(reference);
+            // The render names a field by its plain path: a dot inside a name is not escaped there.
+            byPath[f.Path.Replace("\\.", ".")] = (reference, fld);
         }
+        return byPath;
+    }
+
+    /// <summary>The dictionary of a field the template declares: its path as the name, the type and flags of its
+    /// control, the value the data binds to it, and for an image field the picture as its appearance.</summary>
+    private static PdfDictionary FlatXfaFieldDict(Xfa.XfaFlatField f)
+    {
+        var fld = new PdfDictionary();
+        fld.Set("T", Field.EncodePdfTextString(f.Path));
+        fld.Set("FT", new PdfName(f.Ft));
+        if (f.Ff != 0) fld.Set("Ff", new PdfInteger((int)f.Ff));
+        // Text and choice fields take the bound datasets value as a text /V; value-less and
+        // button/signature fields are left untouched.
+        if (!string.IsNullOrEmpty(f.Value) && (f.Ft == "Tx" || f.Ft == "Ch"))
+            fld.Set("V", Field.EncodePdfTextString(f.Value));
+        // An XFA image field carries its picture as base64 in the datasets node -
+        // materialise it as the flat pushbutton's /AP /N form so the image survives
+        // the flatten (readable back via Appearance["N"].Resources.Images).
+        if (f.IsImage && !string.IsNullOrEmpty(f.Value))
+            TrySetFlatImageAppearance(fld, f.Value);
+        return fld;
     }
 
     /// <summary>Build a normal-appearance form XObject holding the base64-decoded
@@ -180,7 +239,7 @@ public sealed partial class Form
             resources.Set("XObject", xobjects);
 
             var content = Encoding.ASCII.GetBytes(
-                FormattableString.Invariant($"q {w:0.##} 0 0 {h:0.##} 0 0 cm /Im0 Do Q"));
+                Compat.Format(CultureInfo.InvariantCulture, $"q {w:0.##} 0 0 {h:0.##} 0 0 cm /Im0 Do Q"));
             var apN = new PdfDictionary();
             apN.Set("Type", new PdfName("XObject"));
             apN.Set("Subtype", new PdfName("Form"));
@@ -222,7 +281,7 @@ public sealed partial class Form
             doc.LoadXml(templateXml);
             var names = new List<string>();
             if (doc.DocumentElement is not null)
-                CollectXfaFieldNames(doc.DocumentElement, "", names);
+                CollectXfaFieldNames(doc.DocumentElement, "", names, RepeatedDataScope(templateXml));
             return names.ToArray();
         }
         catch { return []; }
@@ -246,7 +305,7 @@ public sealed partial class Form
             var data = FindDatasetsDataNode(doc);
             if (data is not null) WalkXfaDatasets(data, string.Empty, result);
         }
-        catch { }
+        catch { /* malformed XFA/XML leaves the values as they were */ }
         return result;
     }
 
@@ -298,7 +357,7 @@ public sealed partial class Form
         var templateXml = GetXfaTemplateXml();
         if (string.IsNullOrEmpty(templateXml)) return false;
         var leaf = SplitSomPath(path)[^1];
-        var match = Regex.Match(leaf, @"^(.+)\[\d+\]$");
+        var match = SafeRegex.Match(leaf, @"^(.+)\[\d+\]$");
         var name = match.Success ? match.Groups[1].Value : leaf;
         try
         {
@@ -311,8 +370,97 @@ public sealed partial class Form
         catch { return false; }
     }
 
-    private static void CollectXfaFieldNames(XmlNode node, string parentPath, List<string> names)
+    // The occur attribute that makes a subform repeatable, as the template writes it; a
+    // template without one lists its fields from the template alone.
+    private const string OccurMaxAttribute = " max=\"";
+
+    // The data node parsed for the field list, kept while the datasets text is the same
+    // instance (that text is itself kept while its stream is unchanged): the list is asked
+    // for once per looked-up name, and the walk only reads the node.
+    private string? _fieldListDataXml;
+    private XmlNode? _fieldListDataScope;
+
+    /// <summary>The datasets node whose children are the records, for a template that can
+    /// repeat a subform; null when nothing repeats or there is no data, so the datasets are
+    /// parsed only for the forms whose field list depends on them.</summary>
+    private XmlNode? RepeatedDataScope(string templateXml)
     {
+        if (templateXml.IndexOf(OccurMaxAttribute, StringComparison.Ordinal) < 0) return null;
+        var xml = GetXfaDatasetsXml();
+        if (string.IsNullOrEmpty(xml)) return null;
+        if (ReferenceEquals(xml, _fieldListDataXml)) return _fieldListDataScope;
+        XmlNode? scope = null;
+        try
+        {
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+            scope = FindDatasetsDataNode(doc);
+        }
+        catch (XmlException) { /* data that does not parse repeats nothing */ }
+        _fieldListDataXml = xml;
+        _fieldListDataScope = scope;
+        return scope;
+    }
+
+    /// <summary>How many instances the data holds of a repeatable template subform: the
+    /// same-named data groups of the scope, capped by the subform's occur maximum; one when
+    /// the subform cannot repeat or the data does not repeat it.</summary>
+    private static int RepeatedInstanceCount(XmlNode subform, List<XmlNode> groups)
+    {
+        const int Unbounded = -1;
+        if (groups.Count < 2) return 1;
+        foreach (XmlNode c in subform.ChildNodes)
+        {
+            if (c.LocalName != "occur" || c.Attributes?["max"]?.Value is not { } text
+                || !int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var max)) continue;
+            if (max == Unbounded) return groups.Count;
+            return Math.Max(1, Math.Min(max, groups.Count));
+        }
+        return 1;
+    }
+
+    /// <summary>The data groups of the scope that carry the subform's name.</summary>
+    private static List<XmlNode> NamedDataGroups(XmlNode? scope, string name)
+    {
+        var groups = new List<XmlNode>();
+        if (scope is null) return groups;
+        foreach (XmlNode c in scope.ChildNodes)
+        {
+            if (c.NodeType == XmlNodeType.Element && c.LocalName == name
+                && c.ChildNodes.OfType<XmlElement>().Any())
+                groups.Add(c);
+        }
+        return groups;
+    }
+
+    /// <summary>The data groups a subform bound by a reference to all instances ("$.A.B[*]") takes from the scope:
+    /// every node named as the reference's last step under the node its earlier steps reach. Empty for a subform
+    /// bound any other way.</summary>
+    private static List<XmlNode> ReferencedDataGroups(XmlNode subform, XmlNode? scope)
+    {
+        const string Head = "$.", AllInstances = "[*]";
+        var bind = FindBindElement(subform);
+        var reference = bind?.Attributes?["ref"]?.Value;
+        if (scope is null || bind?.Attributes?["match"]?.Value != "dataRef" || reference is null
+            || !reference.StartsWith(Head, StringComparison.Ordinal) || !reference.EndsWith(AllInstances, StringComparison.Ordinal))
+            return new List<XmlNode>();
+        var steps = reference.Substring(Head.Length, reference.Length - Head.Length - AllInstances.Length).Split('.');
+        XmlNode? node = scope;
+        for (int i = 0; i < steps.Length - 1 && node is not null; i++)
+            node = node.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == steps[i]);
+        // A record the reference names is an instance even while it holds nothing yet.
+        return node is null
+            ? new List<XmlNode>()
+            : node.ChildNodes.OfType<XmlElement>().Where(c => c.LocalName == steps[^1]).Cast<XmlNode>().ToList();
+    }
+
+    /// <summary>Lists the fields under <paramref name="node"/>. <paramref name="scope"/> is the
+    /// data node the subforms here bind under (null: no data to repeat by): a repeatable
+    /// subform the data holds several groups of is listed once per group, each instance
+    /// under its own index.</summary>
+    private static void CollectXfaFieldNames(XmlNode node, string parentPath, List<string> names, XmlNode? scope)
+    {
+        Dictionary<string, int>? shifted = null;
         foreach (XmlNode child in node.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
@@ -324,14 +472,28 @@ public sealed partial class Form
                 if (nameAttr is not null)
                 {
                     int idx = CountPrecedingSiblings(child, localName, nameAttr);
+                    if (shifted is not null && shifted.TryGetValue(nameAttr, out var extra)) idx += extra;
+                    var groups = NamedDataGroups(scope, nameAttr);
+                    if (groups.Count == 0) groups = ReferencedDataGroups(child, scope);
+                    int count = RepeatedInstanceCount(child, groups);
                     var escName = EscapeSomSegment(nameAttr);
-                    var currentPath = parentPath.Length > 0
-                        ? $"{parentPath}.{escName}[{idx}]"
-                        : $"{escName}[{idx}]";
-                    CollectXfaFieldNames(child, currentPath, names);
+                    for (int k = 0; k < count; k++)
+                    {
+                        var currentPath = parentPath.Length > 0
+                            ? $"{parentPath}.{escName}[{idx + k}]"
+                            : $"{escName}[{idx + k}]";
+                        var inner = groups.Count == 0 ? scope : groups[Math.Min(idx + k, groups.Count - 1)];
+                        CollectXfaFieldNames(child, currentPath, names, inner);
+                    }
+                    if (count > 1)
+                    {
+                        // Later same-named siblings are numbered after the added instances.
+                        shifted ??= new Dictionary<string, int>(StringComparer.Ordinal);
+                        shifted[nameAttr] = (shifted.TryGetValue(nameAttr, out var had) ? had : 0) + count - 1;
+                    }
                 }
                 else
-                    CollectXfaFieldNames(child, parentPath, names);
+                    CollectXfaFieldNames(child, parentPath, names, scope);
             }
             else if (localName is "field" or "exclGroup")
             {
@@ -349,7 +511,7 @@ public sealed partial class Form
             }
             else
             {
-                CollectXfaFieldNames(child, parentPath, names);
+                CollectXfaFieldNames(child, parentPath, names, scope);
             }
         }
     }
@@ -402,6 +564,25 @@ public sealed partial class Form
     /// the document carries none.
     /// </summary>
     internal string? GetXfaFormXml() => GetXfaPart("form").xml;
+
+    private string? _xfaFormXmlParsed;
+    private XmlDocument? _xfaFormDoc;
+
+    /// <summary>The form packet parsed once per text the part reader hands out, for the field reads that
+    /// fall back to the values a viewer saved; a packet that is no XML reads as none.</summary>
+    private XmlDocument? GetXfaFormDocument()
+    {
+        var xml = GetXfaFormXml();
+        if (xml is null) return null;
+        if (!ReferenceEquals(xml, _xfaFormXmlParsed))
+        {
+            XmlDocument? doc = new XmlDocument();
+            try { doc.LoadXml(xml); } catch (XmlException) { doc = null; }
+            _xfaFormDoc = doc;
+            _xfaFormXmlParsed = xml;
+        }
+        return _xfaFormDoc;
+    }
 
     /// <summary>
     /// Get the caption text for an XFA field by walking the template XML.
@@ -478,8 +659,8 @@ public sealed partial class Form
                     if (uiChild.NodeType != XmlNodeType.Element) continue;
                     if (uiChild.LocalName == "choiceList")
                     {
-                        // XFA: open="always"/"multiSelect" is an expanded list box;
-                        // "userControl"/"onEntry"/absent is a drop-down combo.
+                        // XFA: open="always"/"multiSelect" is an expanded list box; "userControl"/"onEntry"/absent
+                        // is a drop-down combo.
                         var open = uiChild.Attributes?["open"]?.Value;
                         return open is "always" or "multiSelect" ? "choiceListMulti" : "choiceList";
                     }

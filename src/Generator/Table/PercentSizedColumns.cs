@@ -216,7 +216,7 @@ public partial class Table
     private static int CountTrue(bool[] flags)
     {
         var count = 0;
-        foreach (var flag in flags) if (flag) count++;
+        foreach (var flag in flags.Where(flag => flag)) count++;
         return count;
     }
 
@@ -225,7 +225,7 @@ public partial class Table
     private double?[] DeclaredPercentWidths()
     {
         if (string.IsNullOrWhiteSpace(ColumnWidths)) return Array.Empty<double?>();
-        var tokens = ColumnWidths!.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        var tokens = ColumnWidths.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
         var shares = new double?[tokens.Length];
         for (var i = 0; i < tokens.Length; i++)
             shares[i] = tokens[i].EndsWith("%", StringComparison.Ordinal)

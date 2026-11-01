@@ -18,7 +18,7 @@ internal static partial class HtmlToPdfConverter
             var yLn = bandMid - words.Length * 9.0;
             foreach (var ln in words)
             {
-                EmitRun(cv, ln, 15, cv.regFace, cv.colX[i] + (cw - W(cv, ln, cv.regFace, 15)) / 2,
+                EmitRun(cv, ln, 15, cv.regFace, cv.colX[i] + (cw - W(ln, cv.regFace, 15)) / 2,
                     yLn + Drop(cv, 15, 18), cv.white);
                 yLn += 18.0;
             }
@@ -49,7 +49,7 @@ internal static partial class HtmlToPdfConverter
                     foreach (var ln in wrapped[ci])
                     {
                         EmitRun(cv, ln, 13, cv.lightFace,
-                            cv.colX[ci] + (cw - W(cv, ln, cv.lightFace, 13)) / 2, yC, cv.ink);
+                            cv.colX[ci] + (cw - W(ln, cv.lightFace, 13)) / 2, yC, cv.ink);
                         yC += 15.8;
                     }
                 }
@@ -68,13 +68,13 @@ internal static partial class HtmlToPdfConverter
                 foreach (var ln in totLines)
                 {
                     EmitRun(cv, ln, 15, cv.regFace,
-                        cv.colX[2] - 15.0 - W(cv, ln, cv.regFace, 15), yT + 0, cv.ink);
+                        cv.colX[2] - 15.0 - W(ln, cv.regFace, 15), yT + 0, cv.ink);
                     yT += 18.0;
                 }
                 var amt2 = cells.Count > 2 ? cells[2] : "";
                 var midY = ic.rTop + CiRowBasePt + 1.9 + (totLines.Length - 1) * 9.0;
                 EmitRun(cv, amt2, 15, cv.regFace,
-                    cv.colX[2] + (cv.colX[3] - cv.colX[2] - W(cv, amt2, cv.regFace, 15)) / 2,
+                    cv.colX[2] + (cv.colX[3] - cv.colX[2] - W(amt2, cv.regFace, 15)) / 2,
                     midY, cv.ink);
                 ic.rTop += CiRowHPt + (totLines.Length - 1) * 18.0;
             }
@@ -87,7 +87,7 @@ internal static partial class HtmlToPdfConverter
         if (cM.Groups[1].Value.Equals("total", StringComparison.OrdinalIgnoreCase))
         {
             // the float-right total strip: 18 pt blue, borderless
-            var tds = Regex.Matches(ic.inner, @"<td[^>]*>(.*?)</td>",
+            var tds = SafeRegex.Matches(ic.inner, @"<td[^>]*>(.*?)</td>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             if (tds.Count >= 3)
             {
@@ -97,9 +97,9 @@ internal static partial class HtmlToPdfConverter
                 var lbl = CollapseWs(DecodeEntities(tds[1].Groups[1].Value)).Trim();
                 var amt = CollapseWs(DecodeEntities(tds[2].Groups[1].Value)).Trim();
                 cv.y += 15.7;
-                var xAmt = CiContentXPt + CiContentWPt - 45.0 - W(cv, amt, cv.regFace, 15);
+                var xAmt = CiContentXPt + CiContentWPt - 45.0 - W(amt, cv.regFace, 15);
                 EmitRun(cv, amt, 15, cv.regFace, xAmt, cv.y + Drop(cv, 15, 18), cv.blue);
-                EmitRun(cv, lbl, 15, cv.regFace, xAmt - 30.0 - W(cv, lbl, cv.regFace, 15),
+                EmitRun(cv, lbl, 15, cv.regFace, xAmt - 30.0 - W(lbl, cv.regFace, 15),
                     cv.y + Drop(cv, 15, 18), cv.blue);
             }
             return true;
@@ -124,44 +124,42 @@ internal static partial class HtmlToPdfConverter
         cv.streams = new List<(Page pg, StringBuilder ops)> { (cv.page, cv.sb) };
 
         cv.yTop = 72.0 + 6.0;
+        var h1s = new List<string>();
+        var infoM = SafeRegex.Match(cv.html, @"class='info'[^>]*>(.*?)</div>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        if (infoM.Success)
+            foreach (Match hM in SafeRegex.Matches(infoM.Groups[1].Value, @"<h1[^>]*>(.*?)</h1>",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline))
+                h1s.Add(CollapseWs(DecodeEntities(
+                    SafeRegex.Replace(hM.Groups[1].Value, "<[^>]+>", " "))).Trim());
+        double boxW = 0;
+        foreach (var t in h1s) boxW = Math.Max(boxW, W(t, cv.lightFace, 16));
+        boxW += 45.0;                             // 30 px side pads
+        var boxH = 30.0 + h1s.Count * 19.5;       // 20 px pads + 16 pt lines
+        FillRect(cv, CiContentXPt, cv.yTop, boxW, boxH, cv.blue);
+        var yH1 = cv.yTop + 15.0;
+        foreach (var t in h1s)
         {
-            var h1s = new List<string>();
-            var infoM = Regex.Match(cv.html, @"class='info'[^>]*>(.*?)</div>",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (infoM.Success)
-                foreach (Match hM in Regex.Matches(infoM.Groups[1].Value, @"<h1[^>]*>(.*?)</h1>",
-                    RegexOptions.IgnoreCase | RegexOptions.Singleline))
-                    h1s.Add(CollapseWs(DecodeEntities(
-                        Regex.Replace(hM.Groups[1].Value, "<[^>]+>", " "))).Trim());
-            double boxW = 0;
-            foreach (var t in h1s) boxW = Math.Max(boxW, W(cv, t, cv.lightFace, 16));
-            boxW += 45.0;                             // 30 px side pads
-            var boxH = 30.0 + h1s.Count * 19.5;       // 20 px pads + 16 pt lines
-            FillRect(cv, CiContentXPt, cv.yTop, boxW, boxH, cv.blue);
-            var yH1 = cv.yTop + 15.0;
-            foreach (var t in h1s)
+            EmitRun(cv, t, 16, cv.lightFace, CiContentXPt + 22.5, yH1 + Drop(cv, 16, 19.5), cv.white);
+            yH1 += 19.5;
+        }
+        var logoM = SafeRegex.Match(cv.html, @"class='logo'[^>]*>\s*<img[^>]*src='(https?://[^']+)'",
+            RegexOptions.IgnoreCase);
+        if (logoM.Success && FetchRemoteImage(logoM.Groups[1].Value) is { } logoBytes
+            && logoBytes.Length > 24)
+        {
+            double natW = 0, natH = 0;
+            if (logoBytes[1] == 'P' && logoBytes.Length > 24)
             {
-                EmitRun(cv, t, 16, cv.lightFace, CiContentXPt + 22.5, yH1 + Drop(cv, 16, 19.5), cv.white);
-                yH1 += 19.5;
+                natW = (logoBytes[16] << 24) | (logoBytes[17] << 16) | (logoBytes[18] << 8) | logoBytes[19];
+                natH = (logoBytes[20] << 24) | (logoBytes[21] << 16) | (logoBytes[22] << 8) | logoBytes[23];
             }
-            var logoM = Regex.Match(cv.html, @"class='logo'[^>]*>\s*<img[^>]*src='(https?://[^']+)'",
-                RegexOptions.IgnoreCase);
-            if (logoM.Success && FetchRemoteImage(logoM.Groups[1].Value) is { } logoBytes
-                && logoBytes.Length > 24)
+            if (natW > 0 && natH > 0)
             {
-                double natW = 0, natH = 0;
-                if (logoBytes[1] == 'P' && logoBytes.Length > 24)
-                {
-                    natW = (logoBytes[16] << 24) | (logoBytes[17] << 16) | (logoBytes[18] << 8) | logoBytes[19];
-                    natH = (logoBytes[20] << 24) | (logoBytes[21] << 16) | (logoBytes[22] << 8) | logoBytes[23];
-                }
-                if (natW > 0 && natH > 0)
-                {
-                    var iw = natW * 0.75; var ih = natH * 0.75;
-                    cv.page.AddImage(logoBytes, new Rectangle(
-                        CiContentXPt + CiContentWPt - iw, cv.pageHeight - cv.yTop - ih,
-                        CiContentXPt + CiContentWPt, cv.pageHeight - cv.yTop));
-                }
+                var iw = natW * 0.75; var ih = natH * 0.75;
+                cv.page.AddImage(logoBytes, new Rectangle(
+                    CiContentXPt + CiContentWPt - iw, cv.pageHeight - cv.yTop - ih,
+                    CiContentXPt + CiContentWPt, cv.pageHeight - cv.yTop));
             }
         }
         cv.y = cv.yTop + CiHeaderHPt;

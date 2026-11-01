@@ -93,13 +93,12 @@ internal sealed class Asn1ObjectIdentifier : Asn1Primitive
     public static bool IsValid(string? id)
     {
         if (string.IsNullOrEmpty(id)) return false;
-        var arcs = id!.Split('.');
+        var arcs = id.Split('.');
         if (arcs.Length < 2) return false;
         foreach (var arc in arcs)
         {
             if (arc.Length == 0 || (arc.Length > 1 && arc[0] == '0')) return false;
-            foreach (var c in arc)
-                if (c < '0' || c > '9') return false;
+            if (arc.Any(c => c < '0' || c > '9')) return false;
         }
         if (arcs[0].Length > 1 || arcs[0][0] > '2') return false;
         return arcs[0] == "2" || BigInteger.Parse(arcs[1]) < 40;

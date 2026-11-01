@@ -10,10 +10,6 @@ internal static partial class HtmlToPdfConverter
     /// at its own min-content, because the cells of a block row size themselves and nothing stretches them.</summary>
     internal const string BlockRowGridAttr = "htmlblockrowgrid";
 
-    /// <summary>The rule an hr draws, and the width its cell keeps clear of the column edges.</summary>
-    private const double HrRulePt = 0.75;
-    private const double HrRuleInsetPt = 3.0;
-
     /// <summary>The em a bare hr's half-em margins resolve against: the quirks grid's own cell size.</summary>
     private const double UaHrEmPt = 12.0;
 
@@ -27,7 +23,7 @@ internal static partial class HtmlToPdfConverter
         if (html.IndexOf("display", StringComparison.OrdinalIgnoreCase) < 0) return html;
         var sb = new System.Text.StringBuilder(html.Length + 64);
         var at = 0;
-        foreach (Match open in Regex.Matches(html, @"<tr\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match open in SafeRegex.Matches(html, @"<tr\b[^>]*>", RegexOptions.IgnoreCase))
         {
             if (open.Index < at || !IsDisplayBlockRow(open.Value)) continue;
             var close = RowCloseIndex(html, open.Index + open.Length);
@@ -44,7 +40,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>The row's own style attribute takes it out of the table flow.</summary>
     private static bool IsDisplayBlockRow(string tag)
-        => Regex.IsMatch(tag, @"style\s*=\s*[""'][^""']*display\s*:\s*block", RegexOptions.IgnoreCase);
+        => SafeRegex.IsMatch(tag, @"style\s*=\s*[""'][^""']*display\s*:\s*block", RegexOptions.IgnoreCase);
 
     /// <summary>The index of the row's own <c>&lt;/tr&gt;</c> - the first one no nested table owns.</summary>
     private static int RowCloseIndex(string html, int from)
@@ -70,7 +66,7 @@ internal static partial class HtmlToPdfConverter
         if (html.IndexOf("<tr", StringComparison.OrdinalIgnoreCase) < 0) return html;
         var sb = new System.Text.StringBuilder(html.Length);
         var at = 0;
-        foreach (Match open in Regex.Matches(html, @"<tr\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match open in SafeRegex.Matches(html, @"<tr\b[^>]*>", RegexOptions.IgnoreCase))
         {
             if (open.Index < at) continue;
             var close = RowCloseIndex(html, open.Index + open.Length);
@@ -86,14 +82,13 @@ internal static partial class HtmlToPdfConverter
     /// <summary>True when the row carries no ink of its own and holds no cell that could paint one.</summary>
     private static bool RowDrawsNothing(string openTag, string inner)
     {
-        if (Regex.IsMatch(openTag, @"\b(class|style|bgcolor|background|height)\s*=", RegexOptions.IgnoreCase)) return false;
-        if (Regex.IsMatch(inner, @"<(table|img|input|select|textarea|hr|object|iframe)\b", RegexOptions.IgnoreCase)) return false;
-        var cells = Regex.Matches(inner, @"<t[dh]\b[^>]*>", RegexOptions.IgnoreCase);
+        if (SafeRegex.IsMatch(openTag, @"\b(class|style|bgcolor|background|height)\s*=", RegexOptions.IgnoreCase)) return false;
+        if (SafeRegex.IsMatch(inner, @"<(table|img|input|select|textarea|hr|object|iframe)\b", RegexOptions.IgnoreCase)) return false;
+        var cells = SafeRegex.Matches(inner, @"<t[dh]\b[^>]*>", RegexOptions.IgnoreCase);
         if (cells.Count == 0) return false;
-        foreach (Match c in cells)
-            if (Regex.IsMatch(c.Value, @"\b(class|style|bgcolor|background|width|height|colspan|rowspan)\s*=", RegexOptions.IgnoreCase))
-                return false;
-        return Regex.Replace(Regex.Replace(inner, @"<[^>]*>", ""), @"[\s\u00a0]+", "").Length == 0;
+        if (cells.Any(c => SafeRegex.IsMatch(c.Value, @"\b(class|style|bgcolor|background|width|height|colspan|rowspan)\s*=", RegexOptions.IgnoreCase)))
+            return false;
+        return SafeRegex.Replace(SafeRegex.Replace(inner, @"<[^>]*>", ""), @"[\s\u00a0]+", "").Length == 0;
     }
     /// <summary>A row whose only content is an <c>&lt;hr&gt;</c> is as tall as the rule's own box - its
     /// margins and its height - and no taller. The browser gives it no line box, and a rule declaring
@@ -104,17 +99,17 @@ internal static partial class HtmlToPdfConverter
         if (html.IndexOf("<hr", StringComparison.OrdinalIgnoreCase) < 0) return html;
         var sb = new System.Text.StringBuilder(html.Length);
         var at = 0;
-        foreach (Match open in Regex.Matches(html, @"<tr\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match open in SafeRegex.Matches(html, @"<tr\b[^>]*>", RegexOptions.IgnoreCase))
         {
             if (open.Index < at) continue;
             var close = RowCloseIndex(html, open.Index + open.Length);
             if (close < 0) continue;
             var inner = html.Substring(open.Index + open.Length, close - open.Index - open.Length);
-            if (Regex.Matches(inner, @"<hr\b[^>]*>", RegexOptions.IgnoreCase) is not { Count: 1 } hrs) continue;
-            if (Regex.IsMatch(open.Value, @"\bstyle\s*=", RegexOptions.IgnoreCase)) continue;
-            if (Regex.Replace(Regex.Replace(inner, @"<[^>]*>", ""), @"[\s\u00a0]+", "").Length != 0) continue;
+            if (SafeRegex.Matches(inner, @"<hr\b[^>]*>", RegexOptions.IgnoreCase) is not { Count: 1 } hrs) continue;
+            if (SafeRegex.IsMatch(open.Value, @"\bstyle\s*=", RegexOptions.IgnoreCase)) continue;
+            if (SafeRegex.Replace(SafeRegex.Replace(inner, @"<[^>]*>", ""), @"[\s\u00a0]+", "").Length != 0) continue;
             if (HrBandPt(hrs[0].Value, UaHrEmPt) is not { } bandPt) continue;
-            var cellOpen = Regex.Match(inner, @"<t[dh]\b[^>]*>", RegexOptions.IgnoreCase);
+            var cellOpen = SafeRegex.Match(inner, @"<t[dh]\b[^>]*>", RegexOptions.IgnoreCase);
             if (!cellOpen.Success) continue;
             sb.Append(html, at, open.Index - at)
               .Append("<tr style=\"height:").Append(bandPt.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture))
@@ -129,10 +124,10 @@ internal static partial class HtmlToPdfConverter
     /// below a two-pixel rule.</summary>
     private static double? HrBandPt(string hrTag, double emPt)
     {
-        var style = Regex.Match(hrTag, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+        var style = SafeRegex.Match(hrTag, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
         var css = style.Success ? style.Groups[1].Value : "";
-        var h = Regex.Match(css, @"(?<![-\w])height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
-        var m = Regex.Match(css, @"(?<![-\w])margin\s*:\s*([^;""]+)", RegexOptions.IgnoreCase);
+        var h = SafeRegex.Match(css, @"(?<![-\w])height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(css, @"(?<![-\w])margin\s*:\s*([^;""]+)", RegexOptions.IgnoreCase);
         if (!h.Success && !m.Success)
             return emPt > 0 ? 2 * UaHrMarginEm * emPt + UaHrRulePt : null;
         var rulePx = h.Success ? double.Parse(h.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) : 0;

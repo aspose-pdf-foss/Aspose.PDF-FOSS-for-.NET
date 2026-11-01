@@ -4,8 +4,8 @@ using System.Text.RegularExpressions;
 namespace Aspose.Pdf.Converters;
 
 // The class-positioned stl_ dialect: an older PDF→HTML export where EVERY div's
-// geometry lives in the stylesheet as `.stl_NN { left: Xpt; top: Ypt;
-// position: absolute }` (no page_N container, no inline styles), text style in
+// geometry lives in the stylesheet as `.stl_NN { left: Xpt; top: Ypt; position:
+// absolute }` (no page_N container, no inline styles), text style in
 // sibling `display: inline` classes (font-size/font-family in pt), and the page's
 // vector ink (rules, underlines) in an svg <object> background. The source
 // renderer re-imports each div as ONE line at its class position on the default
@@ -51,18 +51,18 @@ internal static partial class HtmlToPdfConverter
         if (sp.pos.Count < 3 || sp.styles.Count == 0) return null;
 
         sp.divs = new List<(double Left, double Top, string Inner)>();
-        sp.divMatches = Regex.Matches(sp.html,
+        sp.divMatches = SafeRegex.Matches(sp.html,
             @"<div\s+class=""(?<cls>[\w-]+)""\s*>(?<inner>(?:(?!</?div\b).)*?)</div>",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
-        foreach (Match dm in sp.divMatches)
+        foreach (var groups in sp.divMatches.Select(dm => dm.Groups))
         {
-            if (!sp.pos.TryGetValue(dm.Groups["cls"].Value, out var p)) continue;
-            sp.divs.Add((p.Left, p.Top, dm.Groups["inner"].Value));
+            if (!sp.pos.TryGetValue(groups["cls"].Value, out var p)) continue;
+            sp.divs.Add((p.Left, p.Top, groups["inner"].Value));
         }
         if (sp.divs.Count < 3) return null;
-        sp.totalDivs = Regex.Matches(sp.html, @"<div\b", RegexOptions.IgnoreCase).Count;
+        sp.totalDivs = SafeRegex.Matches(sp.html, @"<div\b", RegexOptions.IgnoreCase).Count;
         if (sp.divs.Count * 2 < sp.totalDivs) return null;
-        if (Regex.IsMatch(sp.html, @"<(table|p|h[1-6]|ul|ol|input|form)\b", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(sp.html, @"<(table|p|h[1-6]|ul|ol|input|form)\b", RegexOptions.IgnoreCase))
             return null;
 
         sp.pageW = sp.options?.PageInfo?.Width > 0 ? sp.options.PageInfo.Width : 595.0;
@@ -105,18 +105,18 @@ internal static partial class HtmlToPdfConverter
         // Compose the root scale with each path's own matrix. Only the matrix()
         // form appears in this writer's output.
         var rootScale = 1.0;
-        var rootM = Regex.Match(svg, @"<g transform=""matrix\((?<a>[\d.\-]+) [\d.\-]+ [\d.\-]+ [\d.\-]+ [\d.\-]+ [\d.\-]+\)""");
+        var rootM = SafeRegex.Match(svg, @"<g transform=""matrix\((?<a>[\d.\-]+) [\d.\-]+ [\d.\-]+ [\d.\-]+ [\d.\-]+ [\d.\-]+\)""");
         if (rootM.Success)
             rootScale = double.Parse(rootM.Groups["a"].Value, inv);
 
-        foreach (Match pm in Regex.Matches(svg, @"<path\b(?<attrs>[^>]*)/>", RegexOptions.IgnoreCase))
+        foreach (Match pm in SafeRegex.Matches(svg, @"<path\b(?<attrs>[^>]*)/>", RegexOptions.IgnoreCase))
         {
             var attrs = pm.Groups["attrs"].Value;
-            var dM = Regex.Match(attrs, @"\bd=""(?<d>[^""]+)""");
-            var strokeM = Regex.Match(attrs, @"stroke=""#(?<h>[0-9a-fA-F]{6})""");
+            var dM = SafeRegex.Match(attrs, @"\bd=""(?<d>[^""]+)""");
+            var strokeM = SafeRegex.Match(attrs, @"stroke=""#(?<h>[0-9a-fA-F]{6})""");
             if (!dM.Success || !strokeM.Success) continue;
-            var wM = Regex.Match(attrs, @"stroke-width=""(?<w>[\d.]+)""");
-            var flipM = Regex.Match(attrs, @"transform=""matrix\(1 0 0 -1 0 (?<h>[\d.]+)\)""");
+            var wM = SafeRegex.Match(attrs, @"stroke-width=""(?<w>[\d.]+)""");
+            var flipM = SafeRegex.Match(attrs, @"transform=""matrix\(1 0 0 -1 0 (?<h>[\d.]+)\)""");
             var flipH = flipM.Success ? double.Parse(flipM.Groups["h"].Value, inv) : 0;
 
             var h = strokeM.Groups["h"].Value;
@@ -128,15 +128,15 @@ internal static partial class HtmlToPdfConverter
             sb.AppendLine($"{N(r)} {N(g)} {N(b)} RG {N(w)} w");
 
             var started = false;
-            foreach (Match seg in Regex.Matches(dM.Groups["d"].Value,
-                @"(?<op>[ML])\s*(?<x>-?[\d.]+)[ ,](?<y>-?[\d.]+)"))
+            foreach (var groups in SafeRegex.Matches(dM.Groups["d"].Value,
+                @"(?<op>[ML])\s*(?<x>-?[\d.]+)[ ,](?<y>-?[\d.]+)").Select(seg => seg.Groups))
             {
-                var px = double.Parse(seg.Groups["x"].Value, inv);
-                var py = double.Parse(seg.Groups["y"].Value, inv);
+                var px = double.Parse(groups["x"].Value, inv);
+                var py = double.Parse(groups["y"].Value, inv);
                 if (flipH > 0) py = flipH - py;
                 var xPt = originX + px * rootScale * StlClsSvgPxPt;
                 var yPt = pageH - (originY + py * rootScale * StlClsSvgPxPt);
-                sb.AppendLine($"{N(xPt)} {N(yPt)} {(seg.Groups["op"].Value == "M" || !started ? "m" : "l")}");
+                sb.AppendLine($"{N(xPt)} {N(yPt)} {(groups["op"].Value == "M" || !started ? "m" : "l")}");
                 started = true;
             }
             if (started) sb.AppendLine("S");

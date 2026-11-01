@@ -5,11 +5,13 @@ namespace Aspose.Pdf.Facades;
 /// currently carries a signature value via <see cref="HasSignature"/>.</summary>
 public sealed class SignatureName
 {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
     /// <summary>Partial (leaf) field name — last segment of the hierarchical name.</summary>
     public string Name = string.Empty;
 
     /// <summary>Full dot-separated hierarchical field name.</summary>
     public string FullName = string.Empty;
+#pragma warning restore S1104
 
     private readonly bool _hasSignature;
 
@@ -36,5 +38,7 @@ public sealed class SignatureName
            && string.Equals(Name, other.Name, System.StringComparison.Ordinal)
            && HasSignature == other.HasSignature;
 
+#pragma warning disable S2328 // equality follows the current value; instances are not mutated while hashed
     public override int GetHashCode() => System.HashCode.Combine(FullName, Name, HasSignature);
+#pragma warning restore S2328
 }

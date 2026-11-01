@@ -75,13 +75,45 @@ internal static class ArabicShaper
         ['ا'] = ('ﻻ', 'ﻼ'),
     };
 
+    // Isolated presentation form -> the letter it is the isolated shape of.
+    private static readonly Dictionary<char, char> IsolatedBase = BuildIsolatedBase();
+
+    private static Dictionary<char, char> BuildIsolatedBase()
+    {
+        var map = new Dictionary<char, char>();
+        foreach (var entry in Table) map[entry.Value.Isolated] = entry.Key;
+        return map;
+    }
+
+    /// <summary>The base letter an isolated presentation form stands for, or NUL. A face's
+    /// nominal glyph for a letter is its isolated shape, so a face that maps only the base
+    /// letters still draws the isolated form exactly.</summary>
+    internal static char BaseOfIsolated(char c) => IsolatedBase.TryGetValue(c, out var b) ? b : '\0';
+
+    /// <summary>The contextual shapes of Arabic Presentation Forms-B in the order the AFII glyph names number
+    /// them: letter by letter in the order of their isolated forms, each letter's initial, medial and final
+    /// shapes the block holds (its isolated shape is the letter's own name), then the isolated and final shape
+    /// of each lam-alef ligature.</summary>
+    internal static IEnumerable<char> ContextualFormsInAfiiOrder()
+    {
+        foreach (var f in Table.Values.OrderBy(f => f.Isolated))
+            foreach (var form in new[] { f.Initial, f.Medial, f.Final }.Distinct())
+                if (form != f.Isolated && form is >= PresentationFormsBFirst and <= PresentationFormsBLast) yield return form;
+        foreach (var (iso, fin) in LamAlef.Values.OrderBy(l => l.iso))
+        {
+            yield return iso;
+            yield return fin;
+        }
+    }
+
+    private const char PresentationFormsBFirst = '\uFE70';
+    private const char PresentationFormsBLast = '\uFEFF';
+
     /// <summary>True when the string contains any base Arabic letter that needs shaping.</summary>
     public static bool ContainsArabic(string? text)
     {
         if (string.IsNullOrEmpty(text)) return false;
-        foreach (var c in text)
-            if (c >= '؀' && c <= 'ۿ') return true;
-        return false;
+        return text.Any(c => c >= '؀' && c <= 'ۿ');
     }
 
     /// <summary>Shape Arabic to its contextual presentation forms and reorder the
@@ -114,29 +146,31 @@ internal static class ArabicShaper
         var n = chars.Length;
         var sb = new StringBuilder(n);
 
-        for (int i = 0; i < n; i++)
+        int i = 0;
+        while (i < n)
         {
             char c = chars[i];
-            if (!Table.TryGetValue(c, out var f)) { sb.Append(c); continue; }
+            if (!Table.TryGetValue(c, out var f)) { sb.Append(c); i++; continue; }
 
             // Lam-alef ligature: a lam (dual) immediately followed by an alef variant.
             if (c == 'ل' && i + 1 < n && LamAlef.TryGetValue(chars[i + 1], out var lig))
             {
                 bool connectsBeforeLig = JoinsLeftToRight(PrevJoining(chars, i));
                 sb.Append(connectsBeforeLig ? lig.fin : lig.iso);
-                i++; // consume the alef
+                i += 2; // the lam and the alef make one ligature
                 continue;
             }
 
             bool joinPrev = f.Join is Joining.Dual or Joining.Right && JoinsLeftToRight(PrevJoining(chars, i));
             bool joinNext = f.Join is Joining.Dual && NextJoinsRight(chars, i);
 
-            char shaped =
-                joinPrev && joinNext ? f.Medial
-                : joinNext ? f.Initial
-                : joinPrev ? f.Final
-                : f.Isolated;
+            char shaped;
+            if (joinPrev && joinNext) shaped = f.Medial;
+            else if (joinNext) shaped = f.Initial;
+            else if (joinPrev) shaped = f.Final;
+            else shaped = f.Isolated;
             sb.Append(shaped);
+            i++;
         }
         return sb.ToString();
     }

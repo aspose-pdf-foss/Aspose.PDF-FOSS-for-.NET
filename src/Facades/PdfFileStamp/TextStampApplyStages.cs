@@ -12,7 +12,8 @@ public sealed partial class PdfFileStamp
     private static string DrawOps(TextStampApplyState ta, string fontRes)
     {
         var b = new StringBuilder();
-        if (!ta.text.BackgroundColor.IsEmpty)
+        // A fully transparent background colour asks for no box at all.
+        if (!ta.text.BackgroundColor.IsEmpty && ta.text.BackgroundColor.A > 0)
         {
             double descent = (Aspose.Pdf.Text.Standard14Fonts.IsStandard14(ta.fontName)
                 ? Aspose.Pdf.Text.Standard14Fonts.GetDescent(ta.fontName) : -207) * ta.text.FontSize / 1000.0;

@@ -19,7 +19,7 @@ internal static partial class MarkdownRenderer
         switch (name)
         {
             case "q": pp.stack.Push((double[])pp.ctm.Clone()); break;
-            case "Q": if (pp.stack.Count > 0) pp.ctm = pp.stack.Pop(); break;
+            case "Q": if (pp.stack.Count > 0) { pp.ctm = pp.stack.Pop(); } break;
             case "cm":
             {
                 var p = Operands(s, 6);

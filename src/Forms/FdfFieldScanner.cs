@@ -171,7 +171,7 @@ internal sealed class FdfFieldScanner
                     case ')': sb.Append(')'); break;
                     case '\\': sb.Append('\\'); break;
                     case '\n': break;
-                    case '\r': if (_pos < _t.Length && _t[_pos] == '\n') _pos++; break;
+                    case '\r': if (_pos < _t.Length && _t[_pos] == '\n') { _pos++; } break;
                     case >= '0' and <= '7':
                     {
                         // Octal byte escape \d, \dd or \ddd.
@@ -208,7 +208,8 @@ internal sealed class FdfFieldScanner
         if (c == '(') { ReadStringLiteral(); }
         else if (c == '[') { SkipArray(); }
         else if (c == '<' && _pos + 1 < _t.Length && _t[_pos + 1] == '<') { SkipDict(); }
-        else if (c == '<') { _pos++; while (_pos < _t.Length && _t[_pos] != '>') _pos++; if (_pos < _t.Length) _pos++; }
+        else if (c == '<') { _pos++; while (_pos < _t.Length && _t[_pos] != '>') _pos++;
+        if (_pos < _t.Length) _pos++; }
         else if (c == '/') { _pos++; while (_pos < _t.Length && !IsDelimOrWS(_t[_pos])) _pos++; }
         else { while (_pos < _t.Length && !IsDelimOrWS(_t[_pos])) _pos++; }
     }

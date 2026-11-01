@@ -103,8 +103,8 @@ internal static partial class HtmlToPdfConverter
             ReadRtlSvgDataRow(rt, ri);
         }
 
-        // The calibrated fractions describe the 3-legend auto-layout;
-        // other shapes fall back to equal right-to-left columns.
+        // The calibrated fractions describe the 3-legend auto-layout; other
+        // shapes fall back to equal right-to-left columns.
         if (rt.dt.Legend.Count != 3)
         {
             ReadRtlSvgLegend(rt);
@@ -131,7 +131,9 @@ internal static partial class HtmlToPdfConverter
                     .Equals("flex", StringComparison.OrdinalIgnoreCase) != true) continue;
             var fr = new FlexGridRow();
             if (row.Tag == "tr") fg.TableFlavor = true;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
             foreach (var cell in row.Children)
+#pragma warning restore S3267
             {
                 if (!ParseFlexGridCell(fr, cell, css)) break;
             }
@@ -186,9 +188,9 @@ internal static partial class HtmlToPdfConverter
             if (fb.icon.Attrs.TryGetValue("height", out var ih)) fb.sf.IconHPx = ParsePxValue(ih + "px");
             if (fb.icon.Attrs.TryGetValue("style", out var isty))
             {
-                var rm = Regex.Match(isty, @"right\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
+                var rm = SafeRegex.Match(isty, @"right\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
                 if (rm.Success) fb.sf.IconRightPx = double.Parse(rm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
-                var tm = Regex.Match(isty, @"top\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
+                var tm = SafeRegex.Match(isty, @"top\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
                 if (tm.Success) fb.sf.IconTopPx = double.Parse(tm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
             }
         }

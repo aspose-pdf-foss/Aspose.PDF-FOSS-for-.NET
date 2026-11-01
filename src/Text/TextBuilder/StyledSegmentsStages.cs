@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextBuilder
 {
 // The stages of the styled-segment append: the marker emit and one segment at a time.
-    private void EmitMarker(StyledSegmentsState ss)
+    private static void EmitMarker(StyledSegmentsState ss)
     {
         ss.builder.BeginText();
         ss.builder.SetFont(ss.fragResName, ss.fontSize > 0 ? ss.fontSize : 12.0);
@@ -31,9 +31,9 @@ public sealed partial class TextBuilder
             return;
         }
 
-        var segBase = segState is { FontSizeTouched: true, FontSize: > 0 }
-            ? segState.FontSize
-            : (ss.fontSize > 0 ? ss.fontSize : 12.0);
+        double segBase;
+        if (segState is { FontSizeTouched: true, FontSize: > 0 }) segBase = segState.FontSize;
+        else segBase = ss.fontSize > 0 ? ss.fontSize : 12.0;
         var scriptState = segState ?? ss.fragment.TextState;
         var segFs = ScriptSize(scriptState, segBase);
         var segFont = segState?.Font is { } sfnt && !ReferenceEquals(sfnt, FontInfo.DefaultHelvetica)
@@ -51,7 +51,7 @@ public sealed partial class TextBuilder
             {
                 var suffix = (segState.IsBold ? " Bold" : string.Empty)
                     + (segState.IsItalic ? " Italic" : string.Empty);
-                var spaced = System.Text.RegularExpressions.Regex.Replace(family, "(?<=[a-z])(?=[A-Z])", " ");
+                var spaced = SafeRegex.Replace(family, "(?<=[a-z])(?=[A-Z])", " ");
                 var styled = FontRepository.FindFontData(family + suffix)
                     ?? (spaced != family ? FontRepository.FindFontData(spaced + suffix) : null);
                 var wantTag = segState.IsBold ? "Bold" : "Italic";
@@ -95,7 +95,7 @@ public sealed partial class TextBuilder
             }
 
             if (segFg is not null)
-                ss.builder.SetFillColor(segFg.R / 255.0, segFg.G / 255.0, segFg.B / 255.0);
+                ss.builder.SetFillColor(segFg);
             ss.builder.BeginText();
             ss.builder.SetFont(resName, segFs);
             if (ScriptRise(scriptState, segBase) is not 0 and var rise) ss.builder.SetTextRise(rise);

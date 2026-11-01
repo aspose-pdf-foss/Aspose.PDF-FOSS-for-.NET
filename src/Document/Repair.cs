@@ -35,9 +35,8 @@ public sealed partial class Document
         try
         {
             var errors = 0;
-            foreach (var issue in Validate())
-                if (string.Equals(issue.Severity, "error", StringComparison.OrdinalIgnoreCase))
-                    errors++;
+            foreach (var issue in Validate().Where(issue => string.Equals(issue.Severity, "error", StringComparison.OrdinalIgnoreCase)))
+                errors++;
             if (errors > 0)
             {
                 options.HasValidationIssues = true;
@@ -53,7 +52,8 @@ public sealed partial class Document
 
         // Xref damage the loader papered over: a table only recovered by scanning
         // the file, or an in-use uncompressed entry whose declared offset is 0
-        // (a broken writer's tombstone - object 0 is the only legitimate zero).
+        // (a broken writer's tombstone - object 0 is the only legitimate zero) or
+        // does not lead to that object's header (the reader looks for it elsewhere).
         try
         {
             if (_reader.XRefTable.RecoveredByScan)
@@ -65,7 +65,7 @@ public sealed partial class Document
             {
                 var entry = kv.Value;
                 if (kv.Key == 0 || !entry.InUse || entry.IsCompressed) continue;
-                if (entry.Offset == 0)
+                if (entry.Offset == 0 || !IsObjectHeaderAt(entry.Offset, kv.Key))
                 {
                     options.HasXRefIssues = true;
                     return true;
@@ -94,6 +94,7 @@ public sealed partial class Document
         // - Normalizes the page tree structure
         // - Drops orphaned/corrupt objects
         _linearize = false; // ensure full rewrite
+        RepairPageTree();
 
         // Fix oversized annotation rects (clamp to short.MaxValue per PDF spec recommendation)
         const double maxCoord = short.MaxValue; // 32767
@@ -116,6 +117,53 @@ public sealed partial class Document
                 }
             }
         }
+    }
+
+    /// <summary>Whether "objectNumber G obj" starts at the offset of the bytes the xref was read from,
+    /// after any white-space.</summary>
+    private bool IsObjectHeaderAt(long offset, int objectNumber)
+    {
+        var data = _reader.RawData;
+        var pos = offset;
+        SkipWhitespace(data, ref pos);
+        if (!ReadNumber(data, ref pos, out var number) || number != objectNumber) return false;
+        if (!SkipWhitespace(data, ref pos) || !ReadNumber(data, ref pos, out _) || !SkipWhitespace(data, ref pos)) return false;
+        return pos + 3 <= data.Length && data[pos] == 'o' && data[pos + 1] == 'b' && data[pos + 2] == 'j';
+    }
+
+    private static bool ReadNumber(byte[] data, ref long pos, out long value)
+    {
+        value = 0;
+        var start = pos;
+        while (pos < data.Length && data[pos] >= '0' && data[pos] <= '9' && pos - start < MaxObjectNumberDigits)
+            value = value * 10 + (data[pos++] - '0');
+        return pos > start;
+    }
+
+    private static bool SkipWhitespace(byte[] data, ref long pos)
+    {
+        var start = pos;
+        while (pos < data.Length && PdfLexer.IsWhitespace(data[pos])) pos++;
+        return pos > start;
+    }
+
+    // int.MaxValue has ten digits; a longer run is no object number.
+    private const int MaxObjectNumberDigits = 10;
+
+    /// <summary>The page tree a save writes holds real pages only, under a root that is no node's kid: a kid
+    /// the file holds nowhere is dropped (a save would write it as a reference to nothing under a /Count
+    /// counting it), and a /Parent on the root is removed (it leads readers into whatever tree it names,
+    /// often a dead one whose /Parent chain loops). Objects only those references kept are dropped too.</summary>
+    private void RepairPageTree()
+    {
+        var dropped = Pages.DropUnresolvedPages();
+        var root = _reader.ResolveDict(_reader.Catalog.Get("Pages"));
+        if (root is not null && root.ContainsKey("Parent"))
+        {
+            root.Remove("Parent");
+            dropped = true;
+        }
+        if (dropped) _reader.MayHaveOrphansOnSave = true;
     }
 
     /// <summary>
@@ -176,7 +224,8 @@ public sealed partial class Document
         // Count occurrences of %%EOF in the raw data
         int eofCount = 0;
         var marker = "%%EOF"u8;
-        for (int i = 0; i <= _data.Length - marker.Length; i++)
+        int i = 0;
+        while (i <= _data.Length - marker.Length)
         {
             bool match = true;
             for (int j = 0; j < marker.Length; j++)
@@ -188,6 +237,7 @@ public sealed partial class Document
                 eofCount++;
                 i += marker.Length - 1;
             }
+            i++;
         }
 
         if (eofCount < 2) return false;

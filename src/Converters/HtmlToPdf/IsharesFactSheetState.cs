@@ -32,8 +32,8 @@ private sealed class IsharesFactSheetState
     public double labelRight;
     public double valueRight;
     // Column heads: value-head lines right-aligned at the value edge
-    // (sup included), the label head on the LAST line's natural baseline;
-    // a line holding <ins> content seats half a point lower.
+    // (sup included), the label head on the LAST line's natural baseline; a
+    // line holding <ins> content seats half a point lower.
     public double headBase;
     public double headPitch;
     public double lastHeadBase;

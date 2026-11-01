@@ -39,7 +39,7 @@ internal static partial class HtmlToPdfConverter
     private static bool WalkDtpTag(DtpPositionedState dp)
     {
         var wt = new DtpTagState();
-        wt.tm = dp.tagRx.Match(dp.bodyHtml, dp.pos);
+        wt.tm = SafeRegex.Match(dp.tagRx, dp.bodyHtml, dp.pos);
         if (!wt.tm.Success) return false;
         wt.tagEnd = dp.bodyHtml.IndexOf('>', wt.tm.Index);
         if (wt.tagEnd < 0) return false;
@@ -92,10 +92,10 @@ internal static partial class HtmlToPdfConverter
         wt.depth = 1;
         wt.scan = wt.tagEnd + 1;
         wt.innerEnd = -1;
-        wt.divRx = new Regex(@"<(/?)div\b[^>]*>", RegexOptions.IgnoreCase);
+        wt.divRx = new Regex(@"<(/?)div\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         while (wt.depth > 0)
         {
-            var dm = wt.divRx.Match(dp.bodyHtml, wt.scan);
+            var dm = SafeRegex.Match(wt.divRx, dp.bodyHtml, wt.scan);
             if (!dm.Success) break;
             wt.depth += dm.Groups[1].Value.Length > 0 ? -1 : 1;
             if (wt.depth == 0) wt.innerEnd = dm.Index;
@@ -108,11 +108,11 @@ internal static partial class HtmlToPdfConverter
         // Positioned images nested inside this container carry their own
         // id rules with coordinates RELATIVE to the container's box (the
         // contract's notice GIFs live 2900+ pt down a 792 pt-high parent).
-        foreach (Match nm in Regex.Matches(wt.inner, @"<img\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (var nmValue in SafeRegex.Matches(wt.inner, @"<img\b[^>]*>", RegexOptions.IgnoreCase).Select(nm => nm.Value))
         {
-            var nid = DtpAttr(nm.Value, "id");
+            var nid = DtpAttr(nmValue, "id");
             if (nid is not null && dp.idRules.TryGetValue(nid, out var nRule))
-                DrawDtpImage(dp, nm.Value, nRule, rule.L, rule.T);
+                DrawDtpImage(dp, nmValue, nRule, rule.L, rule.T);
         }
 
         wt.defaultAlign = rule.Align ?? wt.cr.Align ?? "left";
@@ -133,17 +133,17 @@ internal static partial class HtmlToPdfConverter
     {
 
         dp.styleText = new StringBuilder();
-        foreach (Match sm in Regex.Matches(dp.html,
+        foreach (Match sm in SafeRegex.Matches(dp.html,
                      @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
             dp.styleText.Append(sm.Groups[1].Value).Append('\n');
-        dp.styles = Regex.Replace(dp.styleText.ToString(), @"/\*[\s\S]*?\*/", " ");
+        dp.styles = SafeRegex.Replace(dp.styleText.ToString(), @"/\*[\s\S]*?\*/", " ");
 
         dp.idRules = new Dictionary<string, DtpIdRule>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in Regex.Matches(dp.styles,
-                     @"(?:div|input|img)#([\w-]+)\s*\{([^}]*)\}", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(dp.styles,
+                     @"(?:div|input|img)#([\w-]+)\s*\{([^}]*)\}", RegexOptions.IgnoreCase).Select(m => m.Groups))
         {
-            var body = m.Groups[2].Value;
-            if (!Regex.IsMatch(body, @"position\s*:\s*absolute", RegexOptions.IgnoreCase)) continue;
+            var body = groups[2].Value;
+            if (!SafeRegex.IsMatch(body, @"position\s*:\s*absolute", RegexOptions.IgnoreCase)) continue;
             var rule = new DtpIdRule();
             if (TryDtpPt(body, "left") is not { } left || TryDtpPt(body, "top") is not { } top
                 || TryDtpPt(body, "width") is not { } width) continue;
@@ -151,37 +151,35 @@ internal static partial class HtmlToPdfConverter
             var height = TryDtpPt(body, "height");
             rule.HasH = height is not null;
             rule.H = height ?? 0;
-            var am = Regex.Match(body, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
+            var am = SafeRegex.Match(body, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
             if (am.Success) rule.Align = am.Groups[1].Value.ToLowerInvariant();
-            dp.idRules[m.Groups[1].Value] = rule;
+            dp.idRules[groups[1].Value] = rule;
         }
-        dp.inputRuleCount = Regex.Matches(dp.styles,
+        dp.inputRuleCount = SafeRegex.Matches(dp.styles,
             @"input#[\w-]+\s*\{[^}]*position\s*:\s*absolute", RegexOptions.IgnoreCase).Count;
         if (dp.idRules.Count < 10 || dp.inputRuleCount == 0) return false;
 
         dp.classRules = new Dictionary<string, DtpClassRule>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in Regex.Matches(dp.styles, @"\.([\w-]+)\s*\{([^}]*)\}"))
+        foreach (var mGroups in SafeRegex.Matches(dp.styles, @"\.([\w-]+)\s*\{([^}]*)\}").Select(m => m.Groups))
         {
-            var body = m.Groups[2].Value;
+            var body = mGroups[2].Value;
             var cr = new DtpClassRule();
-            var fm = Regex.Match(body, @"font\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
+            var fm = SafeRegex.Match(body, @"font\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
             if (fm.Success)
             {
                 var shorthand = fm.Groups[1].Value;
-                cr.Bold = Regex.IsMatch(shorthand, @"\bbold\b", RegexOptions.IgnoreCase);
-                cr.Italic = Regex.IsMatch(shorthand, @"\bitalic\b", RegexOptions.IgnoreCase);
-                var szm = Regex.Match(shorthand, @"([\d.]+)\s*pt");
+                cr.Bold = SafeRegex.IsMatch(shorthand, @"\bbold\b", RegexOptions.IgnoreCase);
+                var szm = SafeRegex.Match(shorthand, @"([\d.]+)\s*pt");
                 if (szm.Success) cr.SizePt = DtpNum(szm.Groups[1].Value);
-                var famM = Regex.Match(shorthand, @"pt\s+'([^']+)'|pt\s+""([^""]+)""|pt\s+([A-Za-z][\w -]*)");
+                var famM = SafeRegex.Match(shorthand, @"pt\s+'([^']+)'|pt\s+""([^""]+)""|pt\s+([A-Za-z][\w -]*)");
                 if (famM.Success)
-                    cr.Family = (famM.Groups[1].Success ? famM.Groups[1].Value
-                        : famM.Groups[2].Success ? famM.Groups[2].Value : famM.Groups[3].Value).Trim();
+                    cr.Family = AlternativeValue(famM).Trim();
             }
-            var cm2 = Regex.Match(body, @"color\s*:\s*#([0-9a-fA-F]{6})");
+            var cm2 = SafeRegex.Match(body, @"color\s*:\s*#([0-9a-fA-F]{6})");
             if (cm2.Success) cr.Color = DtpHexColor(cm2.Groups[1].Value);
-            var am = Regex.Match(body, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
+            var am = SafeRegex.Match(body, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
             if (am.Success) cr.Align = am.Groups[1].Value.ToLowerInvariant();
-            dp.classRules[m.Groups[1].Value] = cr;
+            dp.classRules[mGroups[1].Value] = cr;
         }
         return true;
     }

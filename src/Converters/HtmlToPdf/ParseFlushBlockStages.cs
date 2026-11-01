@@ -11,7 +11,9 @@ internal static partial class HtmlToPdfConverter
         {
             Text = collapsed,
             FontSize = styleUsed.FontSize,
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             LeadFontSize = pb.ptyLeadFs > 0 && pb.ptyLeadFs != styleUsed.FontSize
+#pragma warning restore S1244
                 ? pb.ptyLeadFs : 0,
             RightInsetPt = styleUsed.RightInsetPt,
             SmallCaps = styleUsed.SmallCaps,
@@ -40,6 +42,7 @@ internal static partial class HtmlToPdfConverter
             ExplicitHeight = pb.closingElement ? styleUsed.ExplicitHeight : 0,
             ShorthandLeftPt = styleUsed.ShorthandLeftPt,
             ShorthandTopPt = styleUsed.ShorthandTopPt,
+            ShorthandBottomPt = styleUsed.ShorthandBottomPt,
             MarginRightPt = styleUsed.MarginRightPt,
             FontFamilyStack = styleUsed.FontFamilyStack,
             DeclaredWidthPt = styleUsed.DeclaredWidthPt,
@@ -73,8 +76,11 @@ internal static partial class HtmlToPdfConverter
             AlignCenterAttr = styleUsed.AlignCenterAttr || pb.centerDepth > 0,
             WidthFrac = styleUsed.WidthFrac,
             WidthPx = styleUsed.WidthPx,
+            WidthBoxAuto = styleUsed.WidthBoxAuto,
             PadTop = styleUsed.PadTop,
             AlignRight = styleUsed.AlignRight,
+            Rtl = styleUsed.Rtl,
+            BidiOverride = styleUsed.BidiOverride,
             BandColor = styleUsed.BandColor,
             BandPx = styleUsed.BandPx,
             BandPadPx = styleUsed.BandPadPx,

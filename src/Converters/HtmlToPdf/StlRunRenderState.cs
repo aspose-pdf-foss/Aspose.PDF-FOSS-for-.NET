@@ -34,7 +34,6 @@ private sealed class StlRunRenderState
     public List<(string Text, char Sep)> segments = null!;
     public double segX;
     public StlPositionedState sp = default!;
-    public int p = 0;
     public StlRun r = default!;
 }
 }

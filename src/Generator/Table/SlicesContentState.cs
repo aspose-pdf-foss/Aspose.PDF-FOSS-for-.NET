@@ -20,7 +20,7 @@ private sealed class SlicesContentState
     // Checkbox placements are recorded for every real page: the first page
     // binds its widgets now, a spill page's are handed to the flow dispatcher
     // (LastCheckboxDraws) for the page that materialises later.
-    public List<(Aspose.Pdf.Forms.CheckboxField cbf, Aspose.Pdf.Rectangle rect)>? checkboxSink;
+    public List<(Aspose.Pdf.Annotations.Annotation annot, Aspose.Pdf.Rectangle rect)>? checkboxSink;
     public List<(byte[] data, Aspose.Pdf.Rectangle rect)> pageImages = null!;
     public List<(ReservedBlock block, ReservedPart part, Aspose.Pdf.Rectangle rect)> pageBlocks = null!;
     public List<byte[]> pageGraphs = null!;

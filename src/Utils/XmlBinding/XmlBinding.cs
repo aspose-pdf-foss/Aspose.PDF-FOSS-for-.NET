@@ -247,7 +247,7 @@ internal static partial class XmlBinding
             || !string.Equals(GetAttr(child, "IsAutoSequence"), "true", StringComparison.OrdinalIgnoreCase))
             return string.Empty;
         var lvl = 1;
-        if (GetAttr(child, "Level") is { } lvlStr && int.TryParse(lvlStr, out var parsed) && parsed > 0)
+        if (GetAttr(child, "Level") is { } lvlStr && int.TryParse(lvlStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0)
             lvl = parsed;
         headingCounters[lvl] = (headingCounters.TryGetValue(lvl, out var c) ? c : 0) + 1;
         foreach (var deeper in headingCounters.Keys.Where(k => k > lvl).ToList())
@@ -315,6 +315,9 @@ internal static partial class XmlBinding
             case "Graph":
                 page.Paragraphs.Add(BuildGraph(child));
                 break;
+            case "HtmlFragment":
+                if (BuildHtmlFragment(child) is { } pageHtml) page.Paragraphs.Add(pageHtml);
+                break;
             case "FootNote":
                 // Inline the footnote body as flow text; a true footnote pass
                 // would anchor it at the page foot, but getting the text onto
@@ -324,11 +327,12 @@ internal static partial class XmlBinding
         }
     }
 
-    /// <summary>Build a page band (header or footer) from its element: margin, text
-    /// fragments, tables and images become the band's paragraphs.</summary>
+    /// <summary>Build a page band (header or footer) from its element: its margin, and every paragraph kind a
+    /// band holds - text fragments and headings, tables, images, graphs, floating boxes and HTML fragments.</summary>
     private static HeaderFooter BuildPageBand(XmlNode child, BindContext ctx)
     {
         var band = new HeaderFooter();
+        if (GetId(child) is { } bandId) ctx.Document.RegisterXmlObject(bandId, band);
         foreach (XmlNode hf in child.ChildNodes)
         {
             if (hf.NodeType != XmlNodeType.Element) continue;
@@ -338,13 +342,25 @@ internal static partial class XmlBinding
                     band.Margin = ParseMargin(hf);
                     break;
                 case "TextFragment":
-                    band.Paragraphs.Add(BuildBandFragment(hf));
+                    band.Paragraphs.Add(BuildBandFragment(hf, ctx.Document));
                     break;
                 case "Table":
                     band.Paragraphs.Add(BuildTable(hf, ctx));
                     break;
+                case "Heading":
+                    band.Paragraphs.Add(BuildBandFragment(hf, ctx.Document));
+                    break;
                 case "Image":
                     band.Paragraphs.Add(BuildImage(hf, ctx));
+                    break;
+                case "Graph":
+                    band.Paragraphs.Add(BuildGraph(hf));
+                    break;
+                case "FloatingBox":
+                    band.Paragraphs.Add(BuildFloatingBox(hf, ctx));
+                    break;
+                case "HtmlFragment":
+                    if (BuildHtmlFragment(hf) is { } bandHtml) band.Paragraphs.Add(bandHtml);
                     break;
             }
         }
@@ -355,10 +371,16 @@ internal static partial class XmlBinding
     /// inline flag and its font size (a right-aligned 10 pt print date; a band sizes from
     /// a TextState nested in the segment). An empty fragment is a line of the band too (a
     /// page number sitting under an empty centred paragraph).</summary>
-    private static TextFragment BuildBandFragment(XmlNode hf)
+    private static TextFragment BuildBandFragment(XmlNode hf, Document document)
     {
         var bandText = ExtractTextFromFragment(hf);
         var bandFrag = new TextFragment(bandText ?? string.Empty);
+        RegisterSegmentIds(document, hf);
+        if (GetId(hf) is { } bandFragId)
+        {
+            bandFrag.Id = bandFragId;
+            document.RegisterXmlObject(bandFragId, bandFrag);
+        }
         if (ParseHAlign(GetAttr(hf, "HorizontalAlignment")) is { } bandAlign)
             bandFrag.HorizontalAlignment = bandAlign;
         if (string.Equals(GetAttr(hf, "IsInLineParagraph"), "true", StringComparison.OrdinalIgnoreCase))
@@ -366,12 +388,16 @@ internal static partial class XmlBinding
         foreach (XmlNode bandChild in hf.ChildNodes)
         {
             if (bandChild.NodeType != XmlNodeType.Element) continue;
-            var bandState = bandChild.LocalName == "TextState" ? bandChild
-                : bandChild.LocalName == "TextSegment"
-                    ? FirstElementChild(bandChild, "TextState")
-                    : null;
+            var bandState = bandChild.LocalName switch
+            {
+                "TextState" => bandChild,
+                "TextSegment" => FirstElementChild(bandChild, "TextState"),
+                _ => null,
+            };
             if (bandState is not null && GetAttr(bandState, "FontSize") is not null
+#pragma warning disable S1244 // the untouched default size (10, assigned as a literal) - exact on purpose
                 && bandFrag.TextState.FontSize == 10)
+#pragma warning restore S1244
                 bandFrag.TextState.FontSize =
                     (float)GetAttrLength(bandState, "FontSize", 10);
         }
@@ -382,7 +408,10 @@ internal static partial class XmlBinding
     // so emitting one with child paragraphs is enough for paginated flow. Absolute
     // boxes (Left/Top set) could be added here later; none of the regression XMLs
     // currently exercise that path.
-    private static void ProcessFloatingBox(Page page, XmlNode boxNode, BindContext ctx)
+    private static void ProcessFloatingBox(Page page, XmlNode boxNode, BindContext ctx) =>
+        page.Paragraphs.Add(BuildFloatingBox(boxNode, ctx));
+
+    private static FloatingBox BuildFloatingBox(XmlNode boxNode, BindContext ctx)
     {
         var fbox = new FloatingBox();
 
@@ -414,6 +443,15 @@ internal static partial class XmlBinding
                 case "Margin":
                     fbox.Margin = ParseMargin(child);
                     break;
+                case "Padding":
+                    fbox.Padding = ParseMargin(child);
+                    break;
+                case "Border":
+                    fbox.Border = ParseBorder(child);
+                    break;
+                case "HtmlFragment":
+                    if (BuildHtmlFragment(child) is { } boxHtml) fbox.Paragraphs.Add(boxHtml);
+                    break;
                 case "TextFragment":
                 case "FootNote":
                     if (BuildPageFragment(ctx.Document, child, ctx.Defaults, includeEmpty: true) is { } boxFrag)
@@ -440,10 +478,22 @@ internal static partial class XmlBinding
                     // FlowLayout only ever inlines one level of nesting.
                     FlattenNestedFloatingBox(fbox, child, ctx);
                     break;
-                // Line / All — visual primitives not yet renderable; ignore.
             }
         }
-        page.Paragraphs.Add(fbox);
+        return fbox;
+    }
+
+    /// <summary>An HtmlFragment outside a table cell: its HTML body, its margin and the flow flags, set on the
+    /// fragment itself (it shadows the paragraph's own); null for an empty body.</summary>
+    private static HtmlFragment? BuildHtmlFragment(XmlNode node)
+    {
+        var htmlText = ExtractHtmlContent(node);
+        if (string.IsNullOrWhiteSpace(htmlText)) return null;
+        var html = new HtmlFragment(htmlText);
+        if (FirstElementChild(node, "Margin") is { } margin) html.Margin = ParseMargin(margin);
+        html.IsInNewPage = Flag(node, "IsInNewPage");
+        html.IsKeptWithNext = Flag(node, "IsKeptWithNext");
+        return html;
     }
 
     private static void FlattenNestedFloatingBox(FloatingBox outer, XmlNode innerNode,

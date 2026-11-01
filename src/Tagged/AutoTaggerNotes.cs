@@ -13,7 +13,7 @@ internal static partial class AutoTagger
     // A note opens with its label - a number (not a longer figure) or a reference mark - then
     // its text; a label set as a superscript a little left of the text is a line of its own,
     // ending at the label (or at another mark set beside it).
-    private static readonly Regex NoteLabel = new(@"^\s*(?:\d{1,3}(?!\d)|[^\sA-Za-z0-9]{1,3})", RegexOptions.Compiled);
+    private static readonly Regex NoteLabel = new(@"^\s*(?:\d{1,3}(?!\d)|[^\sA-Za-z0-9]{1,3})", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Whether a line is small print at the foot of its column: set smaller than the
     /// body, with no body text below it in the column, and in no box ruled round text (a box's small
@@ -21,11 +21,13 @@ internal static partial class AutoTagger
     private static bool IsFootLine(PageAnalysisState pa, Line line)
         => line.Size <= pa.bodySize - NoteSizeStep
            && !pa.frames.Any(f => InsideBox(line, f.LLX, f.LLY, f.URX, f.URY))
+#pragma warning disable S1244 // both sides copy one stored value - exact equality is the grouping
            && !pa.lines.Any(l => l.Running == 0 && l.Frags.Count > 0 && l.ColumnRight == line.ColumnRight
+#pragma warning restore S1244
                                  && Math.Abs(l.Size - pa.bodySize) <= NoteSizeStep && l.Y < line.Y);
 
     // A footnote's own label: a number, maybe with a full stop, then a space.
-    private static readonly Regex NoteNumber = new(@"^\d{1,3}\.?\s", RegexOptions.Compiled);
+    private static readonly Regex NoteNumber = new(@"^\d{1,3}\.?\s", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Whether a small-print line at the foot of its column ends the footnote above it: it starts
     /// left of all the note's lines (a legend under the notes), or it opens the next footnote - it starts
@@ -41,10 +43,10 @@ internal static partial class AutoTagger
         // (a note's number raised before its text, in a show of its own, stands with no blank in the line's text)
         var text = string.Concat(line.Frags.Select(f => f.Text));
         var leading = text.Length - text.TrimStart().Length;
-        if (!NoteNumber.IsMatch(text.TrimStart()) && !OpensWithRaisedMark(line)) return false;
+        if (!SafeRegex.IsMatch(NoteNumber, text.TrimStart()) && !OpensWithRaisedMark(line)) return false;
         var before = string.Concat(prev.Frags.Select(f => f.Text));
         var beforeLeading = before.Length - before.TrimStart().Length;
-        return beforeLeading > leading || (beforeLeading == leading && (NoteNumber.IsMatch(before.TrimStart()) || OpensWithRaisedMark(prev)));
+        return beforeLeading > leading || (beforeLeading == leading && (SafeRegex.IsMatch(NoteNumber, before.TrimStart()) || OpensWithRaisedMark(prev)));
     }
 
     /// <summary>Footnotes: the paragraphs at the foot of a column set smaller than the body,
@@ -61,7 +63,7 @@ internal static partial class AutoTagger
             // (an entry of a table of contents is no note, however small and numbered)
             if (b.Kind != BlockKind.Paragraph || b.Toc || b.Lines is not { Count: > 0 } lines) continue;
             if (!lines.All(l => l.Size <= pa.bodySize - NoteSizeStep)) continue;
-            if (!NoteLabel.IsMatch(string.Concat(lines[0].Frags.Select(f => f.Text)))) continue;
+            if (!SafeRegex.IsMatch(NoteLabel, string.Concat(lines[0].Frags.Select(f => f.Text)))) continue;
             if (!IsFootLine(pa, lines[0])) continue;
             b.Note = true;
             pa.result[i] = b;

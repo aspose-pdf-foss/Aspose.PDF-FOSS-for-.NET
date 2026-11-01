@@ -205,6 +205,25 @@ internal sealed partial class TrueTypeParser
     /// <summary>The cmap subtables the font carries, by platform and encoding, in table order.</summary>
     public IReadOnlyList<(int PlatformId, int EncodingId)> CMapSubtables => _cmapSubtables ??= ReadCMapSubtableIds();
 
+    /// <summary>True when the program carries a Unicode cmap subtable (platform 0, or Windows
+    /// Unicode BMP/full), through which a character reaches a glyph. A symbol face maps only
+    /// through its (3,0) table; an unreadable program maps nothing.</summary>
+    internal static bool HasUnicodeCmap(byte[] ttf)
+    {
+        try
+        {
+            foreach (var (platform, encoding) in new TrueTypeParser(ttf).CMapSubtables)
+            {
+                if (platform == 0 || (platform == 3 && encoding is 1 or 10)) return true;
+            }
+            return false;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private List<(int, int)> ReadCMapSubtableIds()
     {
         var ids = new List<(int, int)>();

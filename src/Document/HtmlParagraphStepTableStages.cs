@@ -45,11 +45,11 @@ public sealed partial class Document
                 var lineEnd = new double[lhs.Count + 1];
                 foreach (var (li, sx, seg, txt) in pieces)
                 {
-                    var w = seg is { BlankPt: > 0 } ? seg.BlankPt
-                        : seg is { Radio: true } ? (ts.pt.FormRhythm ? 13.5 : 11.2) * ts.kfs
-                        : seg is { Checkbox: true } ? 11.2 * ts.kfs
-                        : txt is not null && seg is not null
-                            ? PsMeasure(txt, seg.Bold, ts.cfs) : 0.0;
+                    double w = 0.0;
+                    if (seg is { BlankPt: > 0 }) w = seg.BlankPt;
+                    else if (seg is { Radio: true }) w = (ts.pt.FormRhythm ? 13.5 : 11.2) * ts.kfs;
+                    else if (seg is { Checkbox: true }) w = 11.2 * ts.kfs;
+                    else if (txt is not null && seg is not null) w = PsMeasure(txt, seg.Bold, ts.cfs);
                     var i2 = Math.Min(li, lhs.Count);
                     lineEnd[i2] = Math.Max(lineEnd[i2], sx + w);
                 }
@@ -77,7 +77,7 @@ public sealed partial class Document
                     }
                     else if (seg is { Radio: true } or { Checkbox: true })
                     {
-                        PsGlyph(ts.tb2, seg!.Checkbox, lx, lBase);
+                        PsGlyph(ts.tb2, seg.Checkbox, lx, lBase);
                     }
                     else if (txt is not null && seg is not null)
                     {
@@ -127,7 +127,9 @@ public sealed partial class Document
             // drawn inside its box, and the spacing shows as a
             // gap between one cell's box and the next
             var cy = ts.topY - ts.headH - ts.gap;
+#pragma warning disable S3267 // Select would read the member once, before calls in the body that can change it
             foreach (var lr in ts.laidRows)
+#pragma warning restore S3267
             {
                 var boxH = Math.Max(0, lr.h - ts.gap);
                 var cx = ts.tx0 + ts.gap;

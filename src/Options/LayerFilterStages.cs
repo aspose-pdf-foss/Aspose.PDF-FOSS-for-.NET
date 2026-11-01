@@ -80,8 +80,7 @@ internal static partial class LayerContentFilter
         if (PaintOps.Contains(op))
         {
             var hadClip = false;
-            foreach (var b in lf.pathBuffer)
-                if (ClipOps.Contains(b.Op)) { hadClip = true; break; }
+            if (lf.pathBuffer.Any(b => ClipOps.Contains(b.Op))) { hadClip = true; }
             if (hadClip)
             {
                 foreach (var b in lf.pathBuffer) Emit(lf, b.Operands, b.Op);

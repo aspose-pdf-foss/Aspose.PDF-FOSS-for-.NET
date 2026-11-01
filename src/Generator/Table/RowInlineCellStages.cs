@@ -99,8 +99,11 @@ public partial class Table
             }
             else if (TryGetCellImageSizePt(bytes) is (var nw, var nh) && nw > 0 && nh > 0)
             {
-                dispW = il.contentW < double.MaxValue && nw > il.contentW ? il.contentW : nw;
-                dispH = nh;
+                // A picture sized as a fraction of its cell's text box takes that share of it, its
+                // height by its own aspect; any other draws its own width, clamped to the box.
+                var fracW = inlineImg.BoxWidthFraction > 0 && il.contentW < double.MaxValue ? il.contentW * inlineImg.BoxWidthFraction : 0;
+                dispW = fracW > 0 ? fracW : il.contentW < double.MaxValue && nw > il.contentW ? il.contentW : nw;
+                dispH = fracW > 0 ? fracW * nh / nw : nh;
             }
             else
             {

@@ -20,7 +20,9 @@ internal static partial class AutoTagger
         foreach (var ls in run.LinkSlots)
             if (run.Pages.FirstOrDefault()?.Page.Reader.ResolveDict(ls.Annot) is { } d) tagged.Add(d);
 
+#pragma warning disable S3267 // Select would read the member once, before calls in the body that can change it
         foreach (var pw in run.Pages)
+#pragma warning restore S3267
         {
             var reader = pw.Page.Reader;
             if (reader.Resolve(pw.Page.Dict.Get("Annots")) is not PdfArray annots) continue;

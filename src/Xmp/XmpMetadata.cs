@@ -39,6 +39,11 @@ public sealed partial class XmpMetadata
         ParseXmp(xml);
     }
 
+    internal XmpMetadata()
+    {
+        _dirty = true;
+    }
+
     /// <summary>Bind this metadata to its source /Metadata stream so that
     /// subsequent edits are re-serialised back into that stream and persist on the
     /// next document save. Call once, right after constructing from a stream.</summary>
@@ -54,11 +59,6 @@ public sealed partial class XmpMetadata
         _backingStream.Dict.Remove("Filter");
         _backingStream.Dict.Remove("DecodeParms");
         _backingStream.Dict.Set("Length", new PdfInteger(bytes.Length));
-    }
-
-    internal XmpMetadata()
-    {
-        _dirty = true;
     }
 
     /// <summary>All metadata property keys (flat string properties plus any
@@ -110,6 +110,7 @@ public sealed partial class XmpMetadata
     public void Set(string key, string value)
     {
         if (key == "pdf:Producer") ProducerExplicitlySet = true;
+        if (key == ModifyDateKey) ModifyDateExplicitlySet = true;
         _properties[key] = value;
         _structured.Remove(key);
         _dirty = true;
@@ -121,7 +122,14 @@ public sealed partial class XmpMetadata
     /// loaded packet does not set this).</summary>
     internal bool ProducerExplicitlySet;
 
-    /// <summary>Save-time stamp write: bypasses <see cref="ProducerExplicitlySet"/>.</summary>
+    private const string ModifyDateKey = "xmp:ModifyDate";
+
+    /// <summary>The caller assigned xmp:ModifyDate, so a save keeps it rather than writing
+    /// its own time over it.</summary>
+    internal bool ModifyDateExplicitlySet;
+
+    /// <summary>Save-time stamp write: bypasses <see cref="ProducerExplicitlySet"/> and
+    /// <see cref="ModifyDateExplicitlySet"/>.</summary>
     internal void SetStamped(string key, string value)
     {
         _properties[key] = value;
@@ -154,19 +162,23 @@ public sealed partial class XmpMetadata
             return;
         }
         if (key == "pdf:Producer") ProducerExplicitlySet = true;
+        if (key == ModifyDateKey) ModifyDateExplicitlySet = true;
         _properties[key] = value?.ToStringValue() ?? string.Empty;
         _structured.Remove(key);
         _dirty = true;
         PersistToBackingStream();
     }
 
+#pragma warning disable S4144 // public API: both published members do the same thing
     /// <summary>
     /// Add a metadata property with a string value. Convenience overload that
     /// matches the XmpMetadata.Add(string, string) public surface.
     /// </summary>
     public void Add(string key, string value)
+#pragma warning restore S4144
     {
         if (key == "pdf:Producer") ProducerExplicitlySet = true;
+        if (key == ModifyDateKey) ModifyDateExplicitlySet = true;
         _properties[key] = value;
         _structured.Remove(key);
         _dirty = true;
@@ -206,6 +218,7 @@ public sealed partial class XmpMetadata
     {
         var removed = _properties.Remove(key);
         removed |= _structured.Remove(key);
+        _arrays.Remove(key);
         if (removed) { _dirty = true; PersistToBackingStream(); }
         return removed;
     }
@@ -313,6 +326,10 @@ public sealed partial class XmpMetadata
         xb.sb.AppendLine("  <rdf:Description rdf:about=\"\"");
 
         if (KeepOnePropertyPerName) DropShadowedLegacyProperties();
+        // The packet carries one pdfaExtension:schemas block: its own, with the schemas it lacks added.
+        var structured = _structured.Where(p => p.Key != ExtensionSchemasKey).ToList();
+        if (ExtensionSchemasToWrite() is { } extensionSchemas)
+            structured.Add(new KeyValuePair<string, XmpValue>(ExtensionSchemasKey, extensionSchemas));
         xb.usedPrefixes = new HashSet<string>(StringComparer.Ordinal);
         foreach (var key in _properties.Keys)
         {
@@ -320,10 +337,11 @@ public sealed partial class XmpMetadata
             if (colon > 0)
                 xb.usedPrefixes.Add(key[..colon]);
         }
-        foreach (var key in _structured.Keys)
+        foreach (var (key, value) in structured)
+        {
             AddPrefix(key, xb.usedPrefixes);
-        foreach (var v in _structured.Values)
-            CollectStructuredPrefixes(v, xb.usedPrefixes);
+            CollectStructuredPrefixes(value, xb.usedPrefixes);
+        }
 
         // Emit namespace declarations
         foreach (var prefix in xb.usedPrefixes)
@@ -340,29 +358,15 @@ public sealed partial class XmpMetadata
             WriteXmpProperty(xb, key, value);
         }
 
-        MergeRegisteredExtensionSchemas();
-
         // Structured (nested array/struct) properties — e.g. xmpMM:Manifest /
         // xmpMM:History — serialised as nested RDF so they round-trip.
-        foreach (var (key, value) in _structured.OrderBy(p => p.Key, StringComparer.Ordinal))
+        foreach (var (key, value) in structured.OrderBy(p => p.Key, StringComparer.Ordinal))
         {
             if (key.IndexOf(':') <= 0) continue;
             AppendStructured(xb.sb, key, value, "   ");
         }
 
         xb.sb.AppendLine("  </rdf:Description>");
-
-        // PDF/A extension-schema descriptions (pdfaExtension:schemas). One rdf:li
-        // per registered custom schema carries its prefix, namespace URI and
-        // human-readable description so they survive a save/reload round-trip.
-        // When the packet brought its own pdfaExtension:schemas (written above with
-        // its property descriptions), the registered schemas it lacks joined it
-        // there: a second pdfaExtension:schemas would make the packet invalid.
-        if (_extensionSchemas.Count > 0 && !_structured.ContainsKey(ExtensionSchemasKey))
-        {
-            WriteXmpExtensionSchemas(xb);
-        }
-
         xb.sb.AppendLine(" </rdf:RDF>");
         xb.sb.AppendLine("</x:xmpmeta>");
 
@@ -376,33 +380,6 @@ public sealed partial class XmpMetadata
     }
 
     private const string ExtensionSchemasKey = "pdfaExtension:schemas";
-
-    /// <summary>Add the registered extension schemas the packet's own pdfaExtension:schemas
-    /// block does not describe yet to that block, so the packet carries one such block.</summary>
-    private void MergeRegisteredExtensionSchemas()
-    {
-        if (_extensionSchemas.Count == 0 || !_structured.TryGetValue(ExtensionSchemasKey, out var block) || !block.IsArray)
-            return;
-        var items = block.ToArray().ToList();
-        var described = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var item in items)
-            if (IsStructValue(item))
-                foreach (var (k, v) in EnumerateStruct(item))
-                    if (k == "pdfaSchema:prefix") described.Add(v.ToString());
-        var added = false;
-        foreach (var (prefix, schema) in _extensionSchemas)
-        {
-            if (described.Contains(prefix)) continue;
-            items.Add(new XmpValue(new Dictionary<string, XmpValue>(StringComparer.Ordinal)
-            {
-                ["pdfaSchema:schema"] = new XmpValue(schema.Description),
-                ["pdfaSchema:namespaceURI"] = new XmpValue(schema.Uri),
-                ["pdfaSchema:prefix"] = new XmpValue(prefix),
-            }));
-            added = true;
-        }
-        if (added) _structured[ExtensionSchemasKey] = new XmpValue(items.ToArray());
-    }
 
     // ── Structured (nested array/struct) serialization ──────────────────────
 
@@ -433,17 +410,17 @@ public sealed partial class XmpMetadata
     }
 
     // Emit a property (or a struct field — same shape) named <paramref name="key"/>:
-    // an array becomes <key><rdf:Seq>…</rdf:Seq></key>, a struct becomes
+    // an array becomes <key><rdf:Seq>…</rdf:Seq></key> (or the Bag/Alt it was read as), a struct becomes
     // <key rdf:parseType="Resource">fields</key>, a scalar becomes <key>value</key>.
     private void AppendStructured(StringBuilder sb, string key, XmpValue value, string ind)
     {
         if (value.IsArray)
         {
             sb.AppendLine($"{ind}<{key}>");
-            sb.AppendLine($"{ind} <rdf:Seq>");
+            sb.AppendLine($"{ind} <rdf:{value.ArrayKind}>");
             foreach (var item in value.ToArray())
                 AppendArrayItem(sb, item, ind + "  ");
-            sb.AppendLine($"{ind} </rdf:Seq>");
+            sb.AppendLine($"{ind} </rdf:{value.ArrayKind}>");
             sb.AppendLine($"{ind}</{key}>");
         }
         else if (IsStructValue(value))
@@ -471,10 +448,10 @@ public sealed partial class XmpMetadata
         else if (item.IsArray)
         {
             sb.AppendLine($"{ind}<rdf:li>");
-            sb.AppendLine($"{ind} <rdf:Seq>");
+            sb.AppendLine($"{ind} <rdf:{item.ArrayKind}>");
             foreach (var sub in item.ToArray())
                 AppendArrayItem(sb, sub, ind + "  ");
-            sb.AppendLine($"{ind} </rdf:Seq>");
+            sb.AppendLine($"{ind} </rdf:{item.ArrayKind}>");
             sb.AppendLine($"{ind}</rdf:li>");
         }
         else
@@ -493,16 +470,23 @@ public sealed partial class XmpMetadata
             "xmp" => "http://ns.adobe.com/xap/1.0/",
             "xmpMM" => "http://ns.adobe.com/xap/1.0/mm/",
             "pdf" => "http://ns.adobe.com/pdf/1.3/",
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
             "pdfaid" => "http://www.aiim.org/pdfa/ns/id/",
             // PDF/UA identification (ISO 14289-1 §5): under any other URI the claim is not one.
             "pdfuaid" => "http://www.aiim.org/pdfua/ns/id/",
             "pdfx" =>"http://ns.adobe.com/pdfx/1.3/",
             "pdfxid" => "http://www.npes.org/pdfx/ns/id/",
+            "pdfaExtension" => ExtensionNamespace,
+            "pdfaSchema" => SchemaNamespace,
+            "pdfaProperty" => PropertyNamespace,
+#pragma warning restore S5332
             "xmpRights" => "http://ns.adobe.com/xap/1.0/rights/",
             "photoshop" => "http://ns.adobe.com/photoshop/1.0/",
             "tiff" => "http://ns.adobe.com/tiff/1.0/",
             "exif" => "http://ns.adobe.com/exif/1.0/",
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
             _ => $"http://ns.custom/{prefix}/",
+#pragma warning restore S5332
         };
     }
 
@@ -514,7 +498,47 @@ public sealed partial class XmpMetadata
     {
         var xp = new XmpParseState();
         xp.xml = xml;
-        xp.matches = PropertyPattern().Matches(xp.xml);
+        // A well-formed packet is read as the RDF tree it is: its properties are the children and attributes of
+        // the top-level rdf:Description elements, each with its container and decoded text. Only a packet that is
+        // not well-formed falls back to the pattern passes, which see every element alike.
+        var tree = TryParseXml(xml, out var treeText);
+        var descriptions = tree is null ? null : TopLevelDescriptions(tree);
+        if (descriptions is { Count: > 0 })
+            ParseRdfTree(descriptions, treeText);
+        else
+            ParseLooseXmp(xp, tree);
+
+        // Recover namespace prefix → URI bindings (xmlns:prefix="uri") so custom
+        // namespaces round-trip through save/reload, not just property values.
+        foreach (var mGroups in SafeRegex.Matches(NamespacePattern(), xp.xml).Select(m => m.Groups))
+        {
+            var prefix = mGroups[1].Value;
+            if (prefix is "x" or "rdf") continue;
+            _customNamespaces[prefix] = mGroups[2].Value;
+        }
+
+        xp.liPattern = new System.Text.RegularExpressions.Regex(
+            @"<rdf:li[^>]*>(.*?)</rdf:li>", System.Text.RegularExpressions.RegexOptions.Singleline, RegexLimits.Timeout);
+        foreach (System.Text.RegularExpressions.Match li in SafeRegex.Matches(xp.liPattern, xp.xml))
+        {
+            ParseXmpListItem(li);
+        }
+
+        // Extension-schema description fields live only inside pdfaExtension:schemas; the
+        // leaf pass picks them up from in there, and as top-level properties they
+        // would make the packet describe nothing.
+        foreach (var key in _properties.Keys.Where(k => k.StartsWith("pdfaSchema:", StringComparison.Ordinal)
+                     || k.StartsWith("pdfaProperty:", StringComparison.Ordinal)
+                     || k.StartsWith("pdfaType:", StringComparison.Ordinal)
+                     || k.StartsWith("pdfaField:", StringComparison.Ordinal)).ToList())
+            _properties.Remove(key);
+    }
+
+    /// <summary>The pattern passes for a packet that is not well-formed XML (<paramref name="tree"/> is null) or has
+    /// no rdf:RDF of top-level descriptions.</summary>
+    private void ParseLooseXmp(XmpParseState xp, XDocument? tree)
+    {
+        xp.matches = SafeRegex.Matches(PropertyPattern(), xp.xml);
         foreach (Match m in xp.matches)
         {
             ParseXmpProperty(m);
@@ -525,24 +549,15 @@ public sealed partial class XmpMetadata
         //   <rdf:Description rdf:about="" pdfaid:part="2" pdfaid:conformance="A">
         // (Acrobat and many producers write pdfaid this way.) Element-form values
         // win when both exist (TryAdd keeps the first hit).
-        foreach (Match d in DescriptionOpenTagPattern().Matches(xp.xml))
-            foreach (Match a in AttributePropertyPattern().Matches(d.Groups[1].Value))
+        foreach (Match d in SafeRegex.Matches(DescriptionOpenTagPattern(), xp.xml))
+            foreach (var groups in SafeRegex.Matches(AttributePropertyPattern(), d.Groups[1].Value).Select(a => a.Groups))
             {
-                var prefix = a.Groups[1].Value;
+                var prefix = groups[1].Value;
                 if (prefix is "xmlns" or "xml" or "rdf" or "x") continue;
-                _properties.TryAdd($"{prefix}:{a.Groups[2].Value}", a.Groups[3].Value.Trim());
+                _properties.TryAdd($"{prefix}:{groups[2].Value}", groups[3].Value.Trim());
             }
 
-        // Recover namespace prefix → URI bindings (xmlns:prefix="uri") so custom
-        // namespaces round-trip through save/reload, not just property values.
-        foreach (Match m in NamespacePattern().Matches(xp.xml))
-        {
-            var prefix = m.Groups[1].Value;
-            if (prefix is "x" or "rdf") continue;
-            _customNamespaces[prefix] = m.Groups[2].Value;
-        }
-
-        xp.listMatches = ListPropertyPattern().Matches(xp.xml);
+        xp.listMatches = SafeRegex.Matches(ListPropertyPattern(), xp.xml);
         foreach (Match m in xp.listMatches)
         {
             ParseXmpListProperty(m);
@@ -550,25 +565,18 @@ public sealed partial class XmpMetadata
 
         xp.structPattern = new System.Text.RegularExpressions.Regex(
             @"<(\w+):(\w+)>\s*<rdf:Description[^>]*>(.*?)</rdf:Description>\s*</\1:\2>",
-            System.Text.RegularExpressions.RegexOptions.Singleline);
+            System.Text.RegularExpressions.RegexOptions.Singleline, RegexLimits.Timeout);
         xp.fieldPattern = new System.Text.RegularExpressions.Regex(
-            @"<(\w+):(\w+)>([^<]*)</\1:\2>");
-        foreach (System.Text.RegularExpressions.Match m in xp.structPattern.Matches(xp.xml))
+            @"<(\w+):(\w+)>([^<]*)</\1:\2>", RegexOptions.None, RegexLimits.Timeout);
+        foreach (var structGroups in SafeRegex.Matches(xp.structPattern, xp.xml).Select(m => m.Groups))
         {
-            var key = $"{m.Groups[1].Value}:{m.Groups[2].Value}";
+            var key = $"{structGroups[1].Value}:{structGroups[2].Value}";
             var pairs = new List<KeyValuePair<string, XmpValue>>();
-            foreach (System.Text.RegularExpressions.Match f in xp.fieldPattern.Matches(m.Groups[3].Value))
+            foreach (var fGroups in SafeRegex.Matches(xp.fieldPattern, structGroups[3].Value).Select(f => f.Groups))
                 pairs.Add(new KeyValuePair<string, XmpValue>(
-                    $"{f.Groups[1].Value}:{f.Groups[2].Value}", new XmpValue(f.Groups[3].Value.Trim())));
+                    $"{fGroups[1].Value}:{fGroups[2].Value}", new XmpValue(fGroups[3].Value.Trim())));
             if (pairs.Count > 0)
                 _structured[key] = new XmpValue(pairs.ToArray());
-        }
-
-        xp.liPattern = new System.Text.RegularExpressions.Regex(
-            @"<rdf:li[^>]*>(.*?)</rdf:li>", System.Text.RegularExpressions.RegexOptions.Singleline);
-        foreach (System.Text.RegularExpressions.Match li in xp.liPattern.Matches(xp.xml))
-        {
-            ParseXmpListItem(li);
         }
 
         // Array-of-structures properties (xmpMM:History, xmpMM:Manifest, …): a
@@ -576,16 +584,7 @@ public sealed partial class XmpMetadata
         // (each a parseType="Resource" struct, possibly recursively nested). The
         // regex passes above only cover scalar lists and single structs, so parse
         // these with a real XML reader into nested XmpValue arrays/dicts.
-        ParseStructuredArrays(xp.xml);
-
-        // Extension-schema description fields live only inside pdfaExtension:schemas; the
-        // leaf pass above picks them up from in there, and as top-level properties they
-        // would make the packet describe nothing.
-        foreach (var key in _properties.Keys.Where(k => k.StartsWith("pdfaSchema:", StringComparison.Ordinal)
-                     || k.StartsWith("pdfaProperty:", StringComparison.Ordinal)
-                     || k.StartsWith("pdfaType:", StringComparison.Ordinal)
-                     || k.StartsWith("pdfaField:", StringComparison.Ordinal)).ToList())
-            _properties.Remove(key);
+        if (tree is not null) ParseStructuredArrays(tree);
     }
 
     // Early XMP wrote the xap* prefixes for what are now the xmp* namespaces (the URIs are the
@@ -607,12 +606,11 @@ public sealed partial class XmpMetadata
     {
         var shadowed = new List<string>();
         foreach (var (legacy, current) in LegacyPrefixes)
-            foreach (var key in _properties.Keys.Concat(_structured.Keys))
-                if (key.StartsWith(legacy + ":", StringComparison.Ordinal))
-                {
-                    var name = current + key[legacy.Length..];
-                    if (_properties.ContainsKey(name) || _structured.ContainsKey(name)) shadowed.Add(key);
-                }
+            foreach (var key in _properties.Keys.Concat(_structured.Keys).Where(key => key.StartsWith(legacy + ":", StringComparison.Ordinal)))
+            {
+                var name = current + key[legacy.Length..];
+                if (_properties.ContainsKey(name) || _structured.ContainsKey(name)) shadowed.Add(key);
+            }
         if (shadowed.Count == 0) return;
         foreach (var key in shadowed)
         {
@@ -625,11 +623,8 @@ public sealed partial class XmpMetadata
     private static readonly XNamespace RdfNs =
         XNamespace.Get("http://www.w3.org/1999/02/22-rdf-syntax-ns#");
 
-    private void ParseStructuredArrays(string xml)
+    private void ParseStructuredArrays(XDocument doc)
     {
-        XDocument doc;
-        try { doc = XDocument.Parse(xml); }
-        catch { return; } // malformed XMP — leave the regex-parsed properties as-is
         foreach (var desc in doc.Descendants(RdfNs + "Description"))
         {
             foreach (var prop in desc.Elements())
@@ -640,7 +635,7 @@ public sealed partial class XmpMetadata
                 {
                     var items = container.Elements(RdfNs + "li").ToList();
                     if (items.Count == 0 || !items.Any(IsStructLi)) continue; // scalar list — leave to regex pass
-                    _structured[QName(prop)] = new XmpValue(items.Select(ParseStructNode).ToArray());
+                    _structured[QName(prop)] = new XmpValue(items.Select(ParseStructNode).ToArray(), container.Name.LocalName);
                     continue;
                 }
 
@@ -698,11 +693,11 @@ public sealed partial class XmpMetadata
     // XMP toolkits normalise dates. Non-date strings — and dates whose offset is
     // already two-digit — are returned unchanged.
     private static readonly Regex XmpDateTzPattern = new(
-        @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)([+-])(\d{1,2}):(\d{2})$");
+        @"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)([+-])(\d{1,2}):(\d{2})$", RegexOptions.None, RegexLimits.Timeout);
 
     private static string NormalizeXmpScalar(string value)
     {
-        var m = XmpDateTzPattern.Match(value);
+        var m = SafeRegex.Match(XmpDateTzPattern, value);
         return m.Success
             ? $"{m.Groups[1].Value}{m.Groups[2].Value}{int.Parse(m.Groups[3].Value):D2}:{m.Groups[4].Value}"
             : value;
@@ -745,7 +740,7 @@ public sealed partial class XmpMetadata
     {
         var container = el.Elements().FirstOrDefault(IsContainer);
         if (container is not null)
-            return new XmpValue(container.Elements(RdfNs + "li").Select(ParseStructNode).ToArray());
+            return new XmpValue(container.Elements(RdfNs + "li").Select(ParseStructNode).ToArray(), container.Name.LocalName);
         if ((string?)el.Attribute(RdfNs + "parseType") == "Resource"
             || HasStructAttributes(el)
             || el.Elements().Any(e => e.Name == RdfNs + "Description" || e.Name.Namespace != RdfNs))
@@ -765,32 +760,32 @@ public sealed partial class XmpMetadata
     private const string AttributePropertyPatternText = "([\\w]+):([\\w.-]+)=\"([^\"]*)\"";
 
 #if NET7_0_OR_GREATER
-    [GeneratedRegex(PropertyPatternText)]
+    [GeneratedRegex(PropertyPatternText, RegexOptions.None, RegexLimits.TimeoutMilliseconds)]
     private static partial Regex PropertyPattern();
 
-    [GeneratedRegex(NamespacePatternText)]
+    [GeneratedRegex(NamespacePatternText, RegexOptions.None, RegexLimits.TimeoutMilliseconds)]
     private static partial Regex NamespacePattern();
 
-    [GeneratedRegex(ListPropertyPatternText, RegexOptions.Singleline)]
+    [GeneratedRegex(ListPropertyPatternText, RegexOptions.Singleline, RegexLimits.TimeoutMilliseconds)]
     private static partial Regex ListPropertyPattern();
 
-    [GeneratedRegex(ListItemPatternText)]
+    [GeneratedRegex(ListItemPatternText, RegexOptions.None, RegexLimits.TimeoutMilliseconds)]
     private static partial Regex ListItemPattern();
 
-    [GeneratedRegex(DescriptionOpenTagPatternText)]
+    [GeneratedRegex(DescriptionOpenTagPatternText, RegexOptions.None, RegexLimits.TimeoutMilliseconds)]
     private static partial Regex DescriptionOpenTagPattern();
 
-    [GeneratedRegex(AttributePropertyPatternText)]
+    [GeneratedRegex(AttributePropertyPatternText, RegexOptions.None, RegexLimits.TimeoutMilliseconds)]
     private static partial Regex AttributePropertyPattern();
 #else
     // The regex source generator needs .NET 7; the older targets compile the same
     // patterns once into static instances.
-    private static readonly Regex s_propertyPattern = new(PropertyPatternText, RegexOptions.Compiled);
-    private static readonly Regex s_namespacePattern = new(NamespacePatternText, RegexOptions.Compiled);
-    private static readonly Regex s_listPropertyPattern = new(ListPropertyPatternText, RegexOptions.Singleline | RegexOptions.Compiled);
-    private static readonly Regex s_listItemPattern = new(ListItemPatternText, RegexOptions.Compiled);
-    private static readonly Regex s_descriptionOpenTagPattern = new(DescriptionOpenTagPatternText, RegexOptions.Compiled);
-    private static readonly Regex s_attributePropertyPattern = new(AttributePropertyPatternText, RegexOptions.Compiled);
+    private static readonly Regex s_propertyPattern = new(PropertyPatternText, RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex s_namespacePattern = new(NamespacePatternText, RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex s_listPropertyPattern = new(ListPropertyPatternText, RegexOptions.Singleline | RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex s_listItemPattern = new(ListItemPatternText, RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex s_descriptionOpenTagPattern = new(DescriptionOpenTagPatternText, RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex s_attributePropertyPattern = new(AttributePropertyPatternText, RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static Regex PropertyPattern() => s_propertyPattern;
     private static Regex NamespacePattern() => s_namespacePattern;

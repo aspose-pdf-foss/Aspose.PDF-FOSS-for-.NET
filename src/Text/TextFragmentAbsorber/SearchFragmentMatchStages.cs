@@ -16,11 +16,11 @@ public sealed partial class TextFragmentAbsorber
             foreach (TextSegment seg in em.fragment.Segments)
             {
                 if (seg.Rectangle is not { } segRect || seg.Position is not { } segPos) continue;
-                // The segment position anchors at the rect bottom (baseline − descent);
-                // lift it back to the true baseline so a rule hugging the baseline
+                // The segment position anchors at the rect bottom (baseline − descent); lift
+                // it back to the true baseline so a rule hugging the baseline
                 // stays inside the detector's window.
                 var segBaseline = Math.Max(segPos.YIndent, segRect.LLY + 0.22 * em.textState.FontSize);
-                if (DetectUnderlineRect(segRect, segBaseline, em.textState.FontSize, sf.fillIndex!) is not { } segUl) continue;
+                if (DetectUnderlineRect(segRect, segBaseline, em.textState.FontSize, sf.fillIndex) is not { } segUl) continue;
                 // Raw coords repeat across cm-translated blocks — the width is
                 // part of the identity.
                 if (em.fragment.CapturedUnderlineSources is { } have
@@ -33,7 +33,7 @@ public sealed partial class TextFragmentAbsorber
     }
 
     /// <summary></summary>
-    private void ApplyCapturedMarks(SearchFragmentState sf, EmitMatchState em)
+    private static void ApplyCapturedMarks(SearchFragmentState sf, EmitMatchState em)
     {
         if (em.capturedUl is { } ulr)
         {
@@ -130,8 +130,12 @@ public sealed partial class TextFragmentAbsorber
             // one while the old rect still stands leaves the old one on top.
             if (wantUnderline)
                 em.capturedBg = DetectBackgroundRect(em.rect, baselineY, em.textState.FontSize, sf.fillIndex);
-            if (DetectStrikeoutRect(em.rect, baselineY, em.textState.FontSize, sf.fillIndex) is not null)
+            // With the rule, the bar is captured too: a replacement redraws it across the new text.
+            if (DetectStrikeoutRect(em.rect, baselineY, em.textState.FontSize, sf.fillIndex) is { } sor)
+            {
                 em.fragment.TextState.SetCapturedStrikeOut(true);
+                if (wantUnderline) em.fragment.MarkCapturedStrikeOutSource(sor.RawX, sor.RawY, sor.RawW, sor.RawH);
+            }
         }
 
         // Build per-run segments with position and rectangle
@@ -172,7 +176,7 @@ public sealed partial class TextFragmentAbsorber
     }
 
     /// <summary></summary>
-    private void ResolveMatchRuns(SearchFragmentState sf, EmitMatchState em, Match match)
+    private static void ResolveMatchRuns(SearchFragmentState sf, EmitMatchState em, Match match)
     {
         em.firstRunIdx = sf.charToRun[em.startCharIdx];
         em.lastRunIdx = sf.charToRun[em.endCharIdx];
@@ -230,6 +234,7 @@ public sealed partial class TextFragmentAbsorber
             // point.
             var anchorIdx = sf.bidiPerm is not null && match.Index < sf.bidiPerm.Length
                 ? sf.bidiPerm[match.Index] : match.Index;
+            if (sf.foldMap is not null && anchorIdx < sf.foldMap.Length) anchorIdx = sf.foldMap[anchorIdx];
             var empty = new TextFragment(string.Empty)
             {
                 PageIndex = sf.pageIndex,
@@ -250,6 +255,12 @@ public sealed partial class TextFragmentAbsorber
         em.endCharIdx = sf.bidiPerm is not null
             ? sf.bidiPerm[match.Index + match.Length - 1]
             : match.Index + match.Length - 1;
+        // A folded character (a ligature read as its letters) is one character as drawn.
+        if (sf.foldMap is not null)
+        {
+            em.startCharIdx = sf.foldMap[em.startCharIdx];
+            em.endCharIdx = sf.foldMap[em.endCharIdx];
+        }
         if (em.startCharIdx > em.endCharIdx)
             (em.startCharIdx, em.endCharIdx) = (em.endCharIdx, em.startCharIdx);
 
@@ -258,6 +269,18 @@ public sealed partial class TextFragmentAbsorber
             _fragments.Add(new TextFragment(LogicalizeRtlPresentationForms(match.Value)) { PageIndex = sf.pageIndex, SourcePage = sf.sourcePage, Form = sf.sourceForm });
             return true;
         }
-        return false;
+        // A match of line breaks alone (".", "\s" or "\r" meeting the line sentinel) covers no glyph:
+        // it has no text to report and no box, so it yields no fragment.
+        return MatchHoldsNoGlyph(sf, em);
+    }
+
+    private static bool MatchHoldsNoGlyph(SearchFragmentState sf, EmitMatchState em)
+    {
+        var from = Math.Min(sf.charToRun[em.startCharIdx], sf.charToRun[em.endCharIdx]);
+        var to = Math.Max(sf.charToRun[em.startCharIdx], sf.charToRun[em.endCharIdx]);
+        if (from < 0 || to >= sf.rawFragments.Count) return false;
+        for (var ri = from; ri <= to; ri++)
+            if (sf.rawFragments[ri].Text != "\r\n") return false;
+        return true;
     }
 }

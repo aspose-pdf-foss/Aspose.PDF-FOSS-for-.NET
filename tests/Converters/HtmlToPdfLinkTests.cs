@@ -48,4 +48,25 @@ public class HtmlToPdfLinkTests
             Assert.InRange(link.Rect.URX, text.Rectangle.URX - 1, text.Rectangle.URX + 1);
         }
     }
+
+    [Fact]
+    public void TheLinksOfTableRowsThatSpillOntoTheNextPageStandOnThatPage()
+    {
+        var rows = new StringBuilder();
+        for (var i = 1; i <= 120; i++)
+            rows.Append("<tr><td>Name ").Append(i).Append("</td><td><a href=\"https://example.org/").Append(i).Append("\">Site ").Append(i).Append("</a></td></tr>");
+        using var doc = Load("<html><head><style>.wrap { position: relative; top: 0 }</style></head><body><div class=\"wrap\"><table>"
+            + rows + "</table></div><p>After table</p></body></html>");
+        Assert.True(doc.Pages.Count >= 2, "the table runs onto a second page");
+        for (var p = 1; p <= doc.Pages.Count; p++)
+        {
+            var absorber = new TextFragmentAbsorber();
+            doc.Pages[p].Accept(absorber);
+            var sites = absorber.TextFragments.Cast<TextFragment>().Where(f => f.Text.Trim().StartsWith("Site ")).ToList();
+            var links = doc.Pages[p].Annotations.OfType<LinkAnnotation>().ToList();
+            Assert.Equal(sites.Count, links.Count);
+            foreach (var site in sites)
+                Assert.Contains(links, l => l.Rect!.LLY < site.Rectangle!.URY && l.Rect.URY > site.Rectangle.LLY);
+        }
+    }
 }

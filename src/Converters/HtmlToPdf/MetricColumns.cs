@@ -11,8 +11,8 @@ internal static partial class HtmlToPdfConverter
         OrderMetricRows(mt);
 
         // colspan: a spanning cell keeps its own column and occupies phantom
-        // empty slots after it, so per-column index arithmetic stays intact;
-        // the wrap and draw passes extend the real cell's box over its phantoms.
+        // empty slots after it, so per-column index arithmetic stays intact; the
+        // wrap and draw passes extend the real cell's box over its phantoms.
         CountMetricColumns(mt);
         MeasureMetricColumnMinima(mt);
         // A colgroup's own absolute width IS its column's width — not a floor and not a
@@ -78,7 +78,7 @@ internal static partial class HtmlToPdfConverter
         // min-content is 740.7 against a 610 box: the 10% column solved to -133.5.
         for (var cn = 0; cn < mt.nCols; cn++) if (mt.colW[cn] < 0 && !(mt.colVoid?[cn] ?? false)) mt.colW[cn] = 0;
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_MCOL") == "1")
-            Console.Error.WriteLine($"[mcol] nCols={mt.nCols} availW={mt.availW:0.##} usableW={mt.usableW:0.##} tableWpt={mt.tableWpt:0.##} tablePct={mt.tablePct} s={mt.s} p={mt.p} pct=[{string.Join(",", mt.colPct)}] w=[{string.Join(",", Array.ConvertAll(mt.colW, w => w.ToString("0.#")))}] fixed=[{string.Join(",", mt.colFixed)}] cells=[{(mt.rows.Count > 0 ? string.Join(" | ", mt.rows[0].ConvertAll(mc => $"'{(mc.Text.Length > 12 ? mc.Text[..12] : mc.Text)}' b={mc.Bold} fs={mc.FontSize} face={mc.Face} nw={mc.NoWrap} span={mc.ColSpan} pct={mc.WidthPct} img={mc.ImgWPt:0.#}/{mc.ImgPlaceholder}/{mc.ImgRemoteBroken} segs={(mc.DivSegs?.Count ?? 0)}")) : "")}] '{Regex.Replace(mt.tableHtml.Length > 90 ? mt.tableHtml[..90] : mt.tableHtml, @"\s+", " ")}'");
+            Console.Error.WriteLine($"[mcol] nCols={mt.nCols} availW={mt.availW:0.##} usableW={mt.usableW:0.##} tableWpt={mt.tableWpt:0.##} tablePct={mt.tablePct} s={mt.s} p={mt.p} pct=[{string.Join(",", mt.colPct)}] w=[{string.Join(",", Array.ConvertAll(mt.colW, w => w.ToString("0.#")))}] fixed=[{string.Join(",", mt.colFixed)}] cells=[{(mt.rows.Count > 0 ? string.Join(" | ", mt.rows[0].ConvertAll(mc => $"'{(mc.Text.Length > 12 ? mc.Text[..12] : mc.Text)}' b={mc.Bold} fs={mc.FontSize} face={mc.Face} nw={mc.NoWrap} span={mc.ColSpan} pct={mc.WidthPct} img={mc.ImgWPt:0.#}/{mc.ImgPlaceholder}/{mc.ImgRemoteBroken} segs={(mc.DivSegs?.Count ?? 0)}")) : "")}] '{SafeRegex.Replace(mt.tableHtml.Length > 90 ? mt.tableHtml[..90] : mt.tableHtml, @"\s+", " ")}'");
 
         // RTL grid: the (mirrored-LTR) table RIGHT-anchors one right inset
         // inside the page edge — the widest grid's left edge then sits on the
@@ -90,17 +90,15 @@ internal static partial class HtmlToPdfConverter
             mt.tableX = Math.Max(0, mt.pageWidth - RtlGridRightInsetPt - mt.rtlTotal);
         }
 
+        // A picture declared as a share of its cell takes it from the solved column, before the
+        // rows are sized on its height.
+        ResolveMetricImgFractions(mt);
         // Wrap cell text and size rows. An inline-table span grows the cell's first
         // line box by 3 pt (22px vs 18px line).
         mt.invc = System.Globalization.CultureInfo.InvariantCulture;
         // Per-cell face/metrics: a <font face> cell wraps, paces and seats with its
         // own family's win metrics (the flow face otherwise).
-        // Font-tag-sized cells pace on the face's HHEA line (the quirks strut
-        // model, measured: a size-4 cell's 18px font sits in a 21px line and
-        // never under the table base font's own 18px strut); CSS-sized cells
-        // keep the calibrated win-metric line.
-        mt.hheaSum = mt.stdSerif ? (HheaLineSumFor(mt.face) ?? mt.fmSum) : mt.fmSum;
-        // …and their baselines align on the shared line: the drop is whichever
+        // Their baselines align on the shared line: the drop is whichever
         // is deeper — the table base font's strut baseline or the cell font's
         // own seat (measured: size-2 rows seat on the 12pt strut's 10.8, the
         // size-4 row on its own 12.43).

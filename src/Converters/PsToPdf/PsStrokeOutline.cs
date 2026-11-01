@@ -98,15 +98,11 @@ internal static class PsStrokeOutline
                 runs.Add(run);
                 run.Points.Add(new PsPoint(s.X, s.Y));
             }
-            else if (run is null)
-            {
-                continue;
-            }
-            else if (s.Kind == PsSegmentKind.Close)
+            else if (run is not null && s.Kind == PsSegmentKind.Close)
             {
                 run.Closed = true;
             }
-            else
+            else if (run is not null)
             {
                 AddDistinct(run.Points, new PsPoint(s.X, s.Y));
             }

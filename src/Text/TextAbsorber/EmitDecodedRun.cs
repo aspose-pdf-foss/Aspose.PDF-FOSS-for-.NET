@@ -10,9 +10,11 @@ public sealed partial class TextAbsorber
     /// <summary>Show text: one decoded run seated on the grid and appended.</summary>
     private void EmitDecodedRun(ExtractState xs, PdfString tjStr, string decoded, string fullDecoded, double width, double txClip, bool clipping)
     {
-        var runPageX = TrackRunLineStart(xs, decoded, txClip);
+        // Before the line tracking: the run that opens a new logical line anchors that line, not this one.
+        BreakAtBackwardJump(xs, xs.tmE + (txClip - xs.tlmX) * xs.tmAr);
+        var runPageX = TrackRunLineStart(xs, txClip);
         TrackRowX(xs.tmRotated
-            ? (_pageRotDominant ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx : xs.tmE)
+            ? RotatedRunX(xs)
             : (xs.tmOriginX + (txClip - xs.tmOriginX) * xs.tmA) * xs.cmLa + xs.cmLe);
         // Insert space for significant inter-word gap.
         // With proper text line matrix tracking, gap = tx - lastRunEndX
@@ -29,10 +31,11 @@ public sealed partial class TextAbsorber
         var runStartPageX = xs.tmE + (txClip - xs.tlmX) * xs.tmAr;
         // A 180-degree line advances LEFTWARD in page space: its hole is measured along the line's own advance.
         var advanceSign = xs.tmAr < 0 ? -1 : 1;
-        var gapPre = double.IsNaN(xs.lastRunEndX) ? 0
-            : useDev ? runDevX - xs.lastRunEndDevX
-            : usePage ? (runStartPageX - xs.lastRunEndPageX) * advanceSign
-            : (txClip - xs.lastRunEndX) * (xs.tmRotated ? xs.tmA : xs.tmAr);
+        double gapPre;
+        if (double.IsNaN(xs.lastRunEndX)) gapPre = 0;
+        else if (useDev) gapPre = runDevX - xs.lastRunEndDevX;
+        else if (usePage) gapPre = (runStartPageX - xs.lastRunEndPageX) * advanceSign;
+        else gapPre = (txClip - xs.lastRunEndX) * (xs.tmRotated ? xs.tmA : xs.tmAr);
         // Duplicate-stack dedup: when this run re-draws the previous
         // run's text over its box, it inherits the victim's slot —
         // no gap spaces of its own (they were measured against the
@@ -48,16 +51,17 @@ public sealed partial class TextAbsorber
                 || _prevShowHadTab
                 || (_pageCellWidth > 0 && gapPre > _pageCellWidth)))
         {
-            var gap = useDev ? runDevX - xs.lastRunEndDevX
-                : usePage ? (runStartPageX - xs.lastRunEndPageX) * advanceSign
-                : txClip - xs.lastRunEndX;
+            double gap;
+            if (useDev) gap = runDevX - xs.lastRunEndDevX;
+            else if (usePage) gap = (runStartPageX - xs.lastRunEndPageX) * advanceSign;
+            else gap = txClip - xs.lastRunEndX;
             // See the TJ note: upright keeps the page-space Tm scale,
             // rotated runs use the projected line size.
-            var gapFs = usePage ? xs.fontSize * Math.Abs(xs.tmAr)
-                : _currentLineEffFs > 0 && !double.IsNaN(_currentLineEffFs)
-                ? _currentLineEffFs
-                : xs.tmRotated ? Math.Abs(xs.fontSize * xs.tmN)
-                : xs.fontSize;
+            double gapFs;
+            if (usePage) gapFs = xs.fontSize * Math.Abs(xs.tmAr);
+            else if (_currentLineEffFs > 0 && !double.IsNaN(_currentLineEffFs)) gapFs = _currentLineEffFs;
+            else if (xs.tmRotated) gapFs = Math.Abs(xs.fontSize * xs.tmN);
+            else gapFs = xs.fontSize;
             // Use a threshold based on font size. Lower threshold for runs
             // with font metrics since tlmX tracking gives accurate gaps.
             // Cumulative font metric imprecision over long runs can narrow
@@ -70,9 +74,9 @@ public sealed partial class TextAbsorber
             // space glyphs then land at their columns like any
             // character (nothing is discounted
             // for them — pad + drawn spaces total the gap).
-            var spaces = _pageCellWidth > 0
-                ? ColumnSpaces(gap, threshold, runPageX)
-                : ComputeSpaceCount(gap, threshold, usePage ? gapFs : xs.fontSize);
+            int spaces;
+            if (_pageCellWidth > 0) spaces = ColumnSpaces(gap, threshold, runPageX);
+            else spaces = ComputeSpaceCount(gap, threshold, usePage ? gapFs : xs.fontSize);
             // Sub-cell gaps keep their grid pad: the synthesized gap
             // space lands at ITS OWN grid column (padding
             // the cursor up to it) and the following word writes
@@ -106,6 +110,5 @@ public sealed partial class TextAbsorber
             && decoded.Trim().Length > 0)
             xs.dedupPrevOffset = _text.Length;
         AppendShowText(decoded);
-        xs.lastDecodedLength = decoded.Length;
     }
 }

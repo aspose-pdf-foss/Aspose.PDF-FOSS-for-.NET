@@ -7,7 +7,7 @@ namespace Aspose.Pdf.Forms.Xfa;
 internal static partial class XfaRenderer
 {
     /// <summary>XFA render bodies: one body box placed on the flowing pages.</summary>
-    private static bool RenderBody(XfaRenderState xr, XmlElement body, List<XmlElement> bodies)
+    private static bool RenderBody(XfaRenderState xr, XmlElement body)
     {
         double h = Height(xr.ctx, body, xr.areas[xr.ai].w);
         // An empty trailing body (Designer end-of-form marker) renders nothing and
@@ -25,7 +25,9 @@ internal static partial class XfaRenderer
         // A breakBefore acts only when it names a pageArea or requests a new page;
         // Designer also emits EMPTY <breakBefore/> placeholders that are no-ops.
         var brk = body.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "breakBefore");
-        ApplyBreakBefore(xr, body, brk!, h, bodies);
+        ApplyBreakBefore(xr, body, brk!);
+        xr.overflowMaster = OverflowTarget(body, xr.pageAreas);
+        (xr.overflowLeader, xr.leaderIndent, xr.leaderPath) = (OverflowLeaderOf(xr, body), 0, xr.rootPath);
         // A flow body splits between its rows mid-page (keep=none fills the page
         // bottom) in two cases: it is substantially taller than a WHOLE content
         // area (it could never fit any single area), or it fits a whole area but
@@ -38,30 +40,29 @@ internal static partial class XfaRenderer
         bool fillsBottom = h > xr.areas[xr.ai].h - xr.used + 0.1 && h <= maxAreaH + 0.1
             && Boxes(body).FirstOrDefault(c => !IsFloating(c)) is { } firstRow
             && Height(xr.ctx, firstRow, xr.areas[xr.ai].w) <= xr.areas[xr.ai].h - xr.used + 0.1;
-        if ((h > maxAreaH + 20 || fillsBottom) && xr.used > 0 && Splittable(xr, body)
-            && body.GetAttribute("layout") is "tb" or "table")
+        // A body that wraps its boxes into rows fills the page bottom the same way; one
+        // taller than a whole area is flowed from the top of a fresh area, further down.
+        var bodyLayout = body.GetAttribute("layout");
+        if ((h > maxAreaH + 20 || fillsBottom) && xr.used > 0 && Splittable(body)
+            && (bodyLayout is "tb" or "table" || (fillsBottom && bodyLayout == "lr-tb")))
         {
             if (System.Environment.GetEnvironmentVariable("XFA_PAGES") is not null)
                 System.Console.Error.WriteLine($"BODYSPLIT\t{body.GetAttribute("name")}\th={h:F1}\tpage={xr.newPages.Count}\tused={xr.used:F1}");
-            FlowRows(xr, body, 0, 0);
+            FlowRows(xr, body, 0, 0, xr.rootPath);
             xr.pageFresh = false;
             return true;
         }
         while (h > xr.areas[xr.ai].h - xr.used + 0.1 && !(xr.used == 0 && h > xr.areas[xr.ai].h))
-        {
-            xr.ai++;
-            if (xr.ai >= xr.areas.Count) { AdvanceMaster(xr); NewPage(xr); }
-            else xr.used = 0;
-        }
+            NextArea(xr, overflow: false);
         if (System.Environment.GetEnvironmentVariable("XFA_PAGES") is not null)
             System.Console.Error.WriteLine($"BODY\t{body.GetAttribute("name")}\th={h:F1}\tpage={xr.newPages.Count}\tarea={xr.ai}\tused={xr.used:F1}\tareaH={xr.areas[xr.ai].h:F1}");
         if (h > xr.areas[xr.ai].h + 20 && xr.used == 0 && body.GetAttribute("layout") == "lr-tb"
-            && Splittable(xr, body))
+            && FlowContainer(body) && Boxes(body).Any())
         {
             // An over-tall lr-tb body flows its wrapped rows across content
             // areas / continuation pages, same as a tb/table body below —
             // placing it whole would clip everything past the first area.
-            FlowRows(xr, body, 0, 0);
+            FlowRows(xr, body, 0, 0, xr.rootPath);
             xr.pageFresh = false;
             return true;
         }
@@ -82,30 +83,38 @@ internal static partial class XfaRenderer
             // must not force a page for content that belongs together.
             var (mtB, _, mlB, mrB) = Margins(body);
             xr.used += mtB;
+            // The children are placed one by one, so the body's own segment goes into their paths here.
+            var bodyName = body.GetAttribute("name");
+            var bodyPath = bodyName.Length > 0 ? $"{xr.rootPath}.{bodyName}[{SiblingIndex(body)}]" : xr.rootPath;
             foreach (var c in Boxes(body).ToList())
             {
                 if (IsFloating(c))
                 {
                     Place(xr.ctx, c, xr.areas[xr.ai].x + mlB + Len(c.GetAttribute("x"), 0),
-                          xr.areas[xr.ai].y + xr.used + Len(c.GetAttribute("y"), 0), xr.rootPath,
+                          xr.areas[xr.ai].y + xr.used + Len(c.GetAttribute("y"), 0), bodyPath,
                           xr.areas[xr.ai].w - mlB - Len(c.GetAttribute("x"), 0));
                     continue;
                 }
                 double ch = Height(xr.ctx, c, xr.areas[xr.ai].w - mlB - mrB);
+                if (ch > MinFlowHeight) ApplyNestedBreakBefore(xr, c);
                 if (System.Environment.GetEnvironmentVariable("XFA_PAGES") is not null)
                     System.Console.Error.WriteLine($"CHILD\t{c.GetAttribute("name")}\tch={ch:F1}\tpage={xr.newPages.Count}\tused={xr.used:F1}");
-                if (ch > xr.areas[xr.ai].h - xr.used + 0.1 && !(xr.used == 0 && ch > xr.areas[xr.ai].h) && Splittable(xr, c))
+                if (OverTallSplittable(xr, c, ch)
+                    || (ch > xr.areas[xr.ai].h - xr.used + 0.1 && !(AtAreaTop(xr) && ch > xr.areas[xr.ai].h - xr.used) && Splittable(c)))
                 {
-                    FlowRows(xr, c, mlB, mrB);
+                    FlowRows(xr, c, mlB, mrB, bodyPath);
                     continue;
                 }
-                while (ch > xr.areas[xr.ai].h - xr.used + 0.1 && !(xr.used == 0 && ch > xr.areas[xr.ai].h))
+                bool sliced = OverTallLeaf(xr, c, ch);
+                while (ch > xr.areas[xr.ai].h - xr.used + 0.1 && !(AtAreaTop(xr) && ch > xr.areas[xr.ai].h - xr.used)
+                       && !(sliced && RoomToStartSlicing(xr, c)))
+                    NextArea(xr);
+                if (sliced)
                 {
-                    xr.ai++;
-                    if (xr.ai >= xr.areas.Count) { AdvanceMaster(xr); NewPage(xr); }
-                    else xr.used = 0;
+                    PlaceSliced(xr, c, xr.areas[xr.ai].x + mlB, bodyPath, xr.areas[xr.ai].w - mlB - mrB, ch);
+                    continue;
                 }
-                Place(xr.ctx, c, xr.areas[xr.ai].x + mlB, xr.areas[xr.ai].y + xr.used, xr.rootPath, xr.areas[xr.ai].w - mlB - mrB);
+                Place(xr.ctx, c, xr.areas[xr.ai].x + mlB, xr.areas[xr.ai].y + xr.used, bodyPath, xr.areas[xr.ai].w - mlB - mrB);
                 xr.used += ch;
             }
         }
@@ -117,7 +126,7 @@ internal static partial class XfaRenderer
     }
 
     /// <summary></summary>
-    private static void ApplyBreakBefore(XfaRenderState xr, XmlElement body, XmlElement brk, double h, List<XmlElement> bodies)
+    private static void ApplyBreakBefore(XfaRenderState xr, XmlElement body, XmlElement brk)
     {
         if (brk is not null)
         {

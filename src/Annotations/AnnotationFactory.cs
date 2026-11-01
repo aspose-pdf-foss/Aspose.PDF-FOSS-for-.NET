@@ -325,10 +325,7 @@ internal static class AnnotationFactory
     {
         // Check if all characters fit in Latin1 (code points 0-255)
         bool isLatin1 = true;
-        foreach (char c in text)
-        {
-            if (c > 0xFF) { isLatin1 = false; break; }
-        }
+        if (text.Any(c => c > 0xFF)) { isLatin1 = false; }
         if (isLatin1) return Compat.Latin1.GetBytes(text);
 
         // Use UTF-16BE with BOM (PDF text string per spec §7.9.2.2)

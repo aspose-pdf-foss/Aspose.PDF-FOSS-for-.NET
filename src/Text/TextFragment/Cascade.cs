@@ -28,6 +28,7 @@ public partial class TextFragment
         if (!GroupUnits(sc)) return false;
         PlacePieces(sc);
         WriteStyledLines(sc);
+        RebuildSegmentsFromPieces(sc);
         return true;
     }
 
@@ -69,9 +70,7 @@ public partial class TextFragment
         // of a point. Falls back to the coarser delete-and-re-emit below when the page
         // structure defeats it (CID font, replacement glyphs missing from the subset,
         // match not carried by a single run).
-        {
-            if (TryMoveRuns(cf)) { appendedBottom = cf.appendedBottom; return appendedBottom; }
-        }
+        if (TryMoveRuns(cf)) { appendedBottom = cf.appendedBottom; return appendedBottom; }
         if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_FIT_DEBUG") == "1")
             Console.Error.WriteLine("[reflow-path] cascade-fallback");
 

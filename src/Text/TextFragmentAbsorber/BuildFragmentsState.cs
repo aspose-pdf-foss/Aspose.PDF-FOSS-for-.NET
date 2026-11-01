@@ -59,5 +59,6 @@ private sealed class BuildFragmentsState
     // save-time rect-injection registration that the public setter performs.
     public RawFillRect? capturedUl;
     public RawFillRect? capturedBg;
+    public RawFillRect? capturedSo;
 }
 }

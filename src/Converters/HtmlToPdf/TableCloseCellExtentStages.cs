@@ -9,27 +9,32 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Each line of the closing cell contributes its drawn width and its breakable minimum to the cell's extents.</summary>
     private static void MeasureCellLineWidths(CloseCellState cc)
     {
+        var lineIdx = -1;
         foreach (var spec in cc.ps.lines)
         {
+            lineIdx++;
             var ln = spec.Text;
             // The probe measures each line with the styles it renders with: its own
             // font size (a 9pt header row in a 10pt table measures at 9), real bold
             // metrics for an all-bold line, and its own family.
             // …and so does the CSS run dialect, whose column floors must hold the
             // widest token AT ITS OWN SIZE (a 24 pt run in a 10 pt table).
-            var mPt = (cc.widenProbe || cc.cssRunFace is not null || cc.chainBase is not null
-                || cc.ptCellWidths || cc.dwFormCells) && spec.FontPt > 0 ? spec.FontPt
-                // (a NOWRAP cell's whole line measures at its class size: the 12 pt stand-in would
-                // floor the grid for a line half again as wide as the one it draws)
-                // …and a line that states no size of its own measures at the size its CELL's class
-                // gives it: the stand-in default would floor the column for text a size it never draws.
-                : (cc.ps.cell!.HtmlNoWrap || (cc.ps.sheetTdBoxRule)) && cc.ps.cellClassPt > 0 ? cc.ps.cellClassPt : 0.0;
+            double mPt = 0.0;
+            if ((cc.widenProbe || cc.cssRunFace is not null || cc.chainBase is not null
+                || cc.ptCellWidths || cc.dwFormCells) && spec.FontPt > 0)
+                mPt = spec.FontPt;
+            // (a NOWRAP cell's whole line measures at its class size: the 12 pt stand-in would
+            // floor the grid for a line half again as wide as the one it draws)
+            // …and a line that states no size of its own measures at the size its CELL's class
+            // gives it: the stand-in default would floor the column for text a size it never draws.
+            else if ((cc.ps.cell!.HtmlNoWrap || (cc.ps.sheetTdBoxRule)) && cc.ps.cellClassPt > 0) mPt = cc.ps.cellClassPt;
             // (…and a line that states no weight of its own is measured in the weight its CELL's class
             //  gives it - a bold label measured light floors its column for text it never draws)
             var mBold = cc.ps.isHeader || ((cc.widenProbe || cc.chainBase is not null || cc.ptCellWidths) && spec.Bold)
                 || (cc.ps.sheetTdBoxRule && cc.ps.cellBold);
-            var mFam = cc.widenProbe ? spec.Family
-                : cc.ptCellWidths || cc.dwFormCells || cc.ps.uaControlGrid ? spec.Family ?? cc.ps.cellFamily : null;
+            string? mFam = null;
+            if (cc.widenProbe) mFam = spec.Family;
+            else if (cc.ptCellWidths || cc.dwFormCells || cc.ps.uaControlGrid) mFam = spec.Family ?? cc.ps.cellFamily;
             // pt-styled fragment: the paragraph's own margins ride the cell's
             // min-content footprint (probed: the squeeze sheds almost nothing
             // from the header column whose word + pads + margins ≈ its box).
@@ -47,7 +52,7 @@ internal static partial class HtmlToPdfConverter
             }
             cc.cellMin = Math.Max(cc.cellMin, MeasureMinContent(cc.ps, cc.options, cc.cellFontSize, cc.dwFormCells, cc.fullWidthCjkMin, cc.widenProbe, ln, mBold, mPt, mFam) + mMargins);
             cc.cellMinBrk = Math.Max(cc.cellMinBrk, MeasureMinContent(cc.ps, cc.options, cc.cellFontSize, cc.dwFormCells, cc.fullWidthCjkMin, cc.widenProbe, ln, mBold, mPt, mFam, breakDashes: true) + mMargins);
-            cc.cellMax = Math.Max(cc.cellMax, MeasureLine(cc.ps, cc.options, cc.cellFontSize, cc.dwFormCells, cc.fullWidthCjkMin, cc.widenProbe, ln, mBold, mPt, mFam));
+            cc.cellMax = Math.Max(cc.cellMax, MeasureMixedWeightLine(cc, lineIdx, ln, mBold, mPt, mFam));
             // A header cell's full (unwrapped) line width — used to keep <th> on one line when
             // the whole table still fits the available width (a browser does not wrap headers to
             // their widest word). Recorded separately so it never forces the page/table wider.
@@ -104,5 +109,19 @@ internal static partial class HtmlToPdfConverter
             cc.ps.pendingCellTablesDeclW = 0;
             cc.ps.pendingCellTablesMinW = 0;
         }
+    }
+
+    /// <summary>A line's drawn width: run by run when its runs change weight (the bold label
+    /// measured bold, the value light - what the line draws), else whole in the weight the
+    /// dialect measures lines in.</summary>
+    private static double MeasureMixedWeightLine(CloseCellState cc, int lineIdx, string ln, bool bold, double pt, string? fam)
+    {
+        if (!MixedWeightLinesFlow(cc) || cc.ps.lineRunsByIdx is null
+            || !cc.ps.lineRunsByIdx.TryGetValue(lineIdx, out var runs) || runs.Count < 2)
+            return MeasureLine(cc.ps, cc.options, cc.cellFontSize, cc.dwFormCells, cc.fullWidthCjkMin, cc.widenProbe, ln, bold, pt, fam);
+        var width = 0.0;
+        foreach (var (text, runBold) in runs)
+            width += MeasureLine(cc.ps, cc.options, cc.cellFontSize, cc.dwFormCells, cc.fullWidthCjkMin, cc.widenProbe, text, bold || runBold, pt, fam);
+        return width;
     }
 }

@@ -9,7 +9,7 @@ public sealed partial class PdfToHtmlConverter
 {
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void ShowTextOp(ContentRenderState ct, string op)
+    private static void ShowTextOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 1 && ct.operands[0] is PdfString s)
         {
@@ -23,13 +23,13 @@ public sealed partial class PdfToHtmlConverter
             text = FoldZeroWidthSpaces(text, ok ? pc : null, ok ? pcodes : null);
             ShowRun(ct, ct.fonts, ct.sb, ct.pageHeight, ct.pageWidth, ct.saveTransparentTexts, ct.emCompensation, ct.textOnly, ct.styleReg, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, text, adv, ext, ok ? pc : null, ok ? pcodes : null);
             if (!double.IsNaN(adv))
-            { ct.tm.Concat(1, 0, 0, 1, adv, 0); ct.tx = ct.tm.E; ct.ty = ct.tm.F; }
+            { ct.tm.Concat(1, 0, 0, 1, adv, 0); }
         }
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void ShowTextArrayOp(ContentRenderState ct, string op)
+    private static void ShowTextArrayOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 1 && ct.operands[0] is PdfArray arr)
         {
@@ -37,13 +37,24 @@ public sealed partial class PdfToHtmlConverter
             double tjAdv = 0, tjExt = 0;
             var tjChars = new List<(double pen, double glyph)>();
             var tjCodes = new List<int>();
+            // An array that draws its own space glyphs gets no synthesized ones: its deep
+            // kerns are tracking (a producer quantising glyph positions to a sixteenth of an
+            // em writes kerns of up to three steps inside its words), not word gaps.
+            var texts = new string?[arr.Count];
+            var drawsSpace = false;
+            for (var ai = 0; ai < arr.Count; ai++)
+            {
+                if (arr[ai] is not PdfString ps0) continue;
+                texts[ai] = DecodeString(ps0, ct.currentFontKey, ct.fonts);
+                drawsSpace |= texts[ai]!.Contains(' ');
+            }
             void TjKern(double num)
             {
                 ct.pendingTjNum += num;
-                var d = -num / 1000.0 * ct.fontSize;
+                var d = -num / 1000.0 * ct.fontSize * ct.horizScale;
                 if (!double.IsNaN(tjAdv)) tjAdv += d;
                 if (!double.IsNaN(tjExt)) tjExt += d;
-                if (num < -100)
+                if (num < -100 && !drawsSpace)
                 {
                     // a deep kern is a synthesized word space
                     // whose advance IS the kern gap
@@ -58,12 +69,13 @@ public sealed partial class PdfToHtmlConverter
                     tjChars[^1] = (lastC.pen + d, lastC.glyph + d);
                 }
             }
-            foreach (var item in arr)
+            for (var ai = 0; ai < arr.Count; ai++)
             {
+                var item = arr[ai];
                 if (item is PdfString ts)
                 {
                     var t0 = tjText.Length;
-                    var itemText = DecodeString(ts, ct.currentFontKey, ct.fonts);
+                    var itemText = texts[ai]!;
                     tjText.Append(itemText);
                     var itemChars = new List<(double pen, double glyph)>();
                     var itemCodes = new List<int>();
@@ -102,26 +114,24 @@ public sealed partial class PdfToHtmlConverter
             if (tjText.Length > 0)
             {
                 var pcOk = !double.IsNaN(tjAdv) && tjChars.Count == tjText.Length;
-                if (pcOk)
-                    foreach (var e2 in tjChars)
-                        if (double.IsNaN(e2.pen)) { pcOk = false; break; }
+                if (pcOk && tjChars.Any(e2 => double.IsNaN(e2.pen))) { pcOk = false; }
                 var tjRun = FoldZeroWidthSpaces(tjText.ToString(), pcOk ? tjChars : null, pcOk ? tjCodes : null);
                 ShowRun(ct, ct.fonts, ct.sb, ct.pageHeight, ct.pageWidth, ct.saveTransparentTexts, ct.emCompensation, ct.textOnly, ct.styleReg, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, tjRun, tjAdv, tjExt,
                     pcOk ? tjChars : null, pcOk ? tjCodes : null);
             }
             if (!double.IsNaN(tjAdv))
-            { ct.tm.Concat(1, 0, 0, 1, tjAdv, 0); ct.tx = ct.tm.E; ct.ty = ct.tm.F; }
+            { ct.tm.Concat(1, 0, 0, 1, tjAdv, 0); }
         }
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void NextLineShowTextOp(ContentRenderState ct, string op)
+    private static void NextLineShowTextOp(ContentRenderState ct)
     {
         // Move to next line and show string
         ct.tlm.Concat(1, 0, 0, 1, 0, -(ct.hasLeading ? ct.leading : ct.fontSize * 1.2));
         ct.tm.CopyFrom(ct.tlm);
-        ct.tx = ct.tm.E; ct.ty = ct.tm.F;
+
         if (ct.operands.Count >= 1 && ct.operands[0] is PdfString qs)
         {
             var text = DecodeString(qs, ct.currentFontKey, ct.fonts);
@@ -134,7 +144,7 @@ public sealed partial class PdfToHtmlConverter
             text = FoldZeroWidthSpaces(text, qok ? qc : null, qok ? qcodes : null);
             ShowRun(ct, ct.fonts, ct.sb, ct.pageHeight, ct.pageWidth, ct.saveTransparentTexts, ct.emCompensation, ct.textOnly, ct.styleReg, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, text, adv, ext, qok ? qc : null, qok ? qcodes : null);
             if (!double.IsNaN(adv))
-            { ct.tm.Concat(1, 0, 0, 1, adv, 0); ct.tx = ct.tm.E; ct.ty = ct.tm.F; }
+            { ct.tm.Concat(1, 0, 0, 1, adv, 0); }
         }
     }
 }

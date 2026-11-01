@@ -25,10 +25,23 @@ public sealed class FontSourceCollection : System.Collections.Generic.IEnumerabl
             _sources.Add(new FolderFontSource(userFonts) { IsDefaultUserFolder = true });
     }
 
+    /// <summary>Moves on every change of the collection, and differs between collections: lookups cached
+    /// against the registered sources are taken again once it has moved (or the repository's
+    /// collection was replaced).</summary>
+    internal int Version { get { lock (SyncRoot) return _version; } }
+
+    private int _version = NextVersion();
+
+    private static int _lastVersion;
+
+    private static int NextVersion() => System.Threading.Interlocked.Increment(ref _lastVersion);
+
     /// <summary>Gets the number of font sources in the collection.</summary>
     public int Count { get { lock (SyncRoot) return _sources.Count; } }
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => true;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>Gets the font source at the given zero-based index.</summary>
@@ -52,6 +65,7 @@ public sealed class FontSourceCollection : System.Collections.Generic.IEnumerabl
                     return;
             }
             _sources.Add(fontSource);
+            _version = NextVersion();
         }
     }
 
@@ -59,16 +73,16 @@ public sealed class FontSourceCollection : System.Collections.Generic.IEnumerabl
     public bool Contains(FontSource item) { lock (SyncRoot) return _sources.Contains(item); }
 
     /// <summary>Removes the given font source, if present.</summary>
-    public void Delete(FontSource fontSource) { lock (SyncRoot) _sources.Remove(fontSource); }
+    public void Delete(FontSource fontSource) { lock (SyncRoot) { _sources.Remove(fontSource); _version = NextVersion(); } }
 
     /// <summary>Removes the given font source; returns <c>true</c> when it was found.</summary>
-    public bool Remove(FontSource item) { lock (SyncRoot) return _sources.Remove(item); }
+    public bool Remove(FontSource item) { lock (SyncRoot) { _version = NextVersion(); return _sources.Remove(item); } }
 
     /// <summary>Copies the font sources into <c>array</c>, starting at the zero-based <c>index</c>.</summary>
     public void CopyTo(FontSource[] array, int index) { lock (SyncRoot) _sources.CopyTo(array, index); }
 
     /// <summary>Removes all font sources, including the default ones.</summary>
-    public void Clear() { lock (SyncRoot) _sources.Clear(); }
+    public void Clear() { lock (SyncRoot) { _sources.Clear(); _version = NextVersion(); } }
 
     public System.Collections.Generic.IEnumerator<FontSource> GetEnumerator()
     {

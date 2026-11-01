@@ -13,10 +13,10 @@ internal static partial class HtmlToPdfConverter
         se.attrs = el.Groups["attrs"].Value;
         se.elBody = el.Groups["body"].Value;
         // an element nested inside a float div is drawn by the float walk
-        if (Regex.IsMatch(se.attrs, "class\\s*=\\s*[\"'][^\"']*float", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(se.attrs, "class\\s*=\\s*[\"'][^\"']*float", RegexOptions.IgnoreCase))
             se.tag = "float:" + (se.attrs.Contains("floatright", System.StringComparison.OrdinalIgnoreCase)
                 ? "right" : "left");
-        else if (el.Index > 0 && Regex.IsMatch(
+        else if (el.Index > 0 && SafeRegex.IsMatch(
                      rs.inner[..el.Index], "<div\\b[^>]*float[^>]*>(?:(?!</div>)[\\s\\S])*$",
                      RegexOptions.IgnoreCase))
             return true;
@@ -24,13 +24,13 @@ internal static partial class HtmlToPdfConverter
         switch (se.tag)
         {
             case "h1":
-                PlaceHeading(sp, rs, se, el, se.tag);
+                PlaceHeading(sp, rs, se, se.tag);
                 break;
             case "p":
-                PlaceParagraph(sp, rs, se, el, se.tag);
+                PlaceParagraph(sp, rs, se, se.tag);
                 break;
             case "float:right": case "float:left":
-                PlaceFloat(sp, rs, se, el, se.tag);
+                PlaceFloat(sp, rs, se, se.tag);
                 break;
         }
         return true;

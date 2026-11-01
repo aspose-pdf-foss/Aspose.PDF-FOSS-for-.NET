@@ -56,7 +56,7 @@ public sealed partial class Document
         var next = (counters.TryGetValue(lvl, out var c) ? c : heading.StartNumber - 1) + 1;
         counters[lvl] = next;
         var stale = new List<int>();
-        foreach (var k in counters.Keys) if (k > lvl) stale.Add(k);
+        foreach (var k in counters.Keys.Where(k => k > lvl)) stale.Add(k);
         foreach (var k in stale) counters.Remove(k);
         var parts = new List<string>();
         for (var k = 1; k <= lvl; k++)

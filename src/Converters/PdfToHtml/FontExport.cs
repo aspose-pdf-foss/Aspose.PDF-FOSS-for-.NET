@@ -13,7 +13,7 @@ public sealed partial class PdfToHtmlConverter
     /// <see cref="HtmlSaveOptions.CustomResourceSavingStrategy"/>; a returned URL
     /// replaces the sidecar (recorded in <see cref="EmbeddedFont.Hrefs"/> for the
     /// @font-face src). <c>DontSave</c> emits nothing.</summary>
-    private static List<EmbeddedFont> EmitFontSidecars(Document doc, int[] pageList,
+    private List<EmbeddedFont> EmitFontSidecars(Document doc, int[] pageList,
         List<SidecarFile> sidecars, HtmlSaveOptions.FontSavingModes fontMode,
         HtmlSaveOptions? options)
     {
@@ -64,6 +64,12 @@ public sealed partial class PdfToHtmlConverter
         sidecars.Add(new SidecarFile { Name = name, Content = bytes });
     }
 
+    private const string EotExtension = ".eot";
+
+    /// <summary>The suffix the all-formats rule puts behind its second EOT source, so
+    /// that a legacy browser reads the rest of the source list as a query string.</summary>
+    private const string EotLegacyQuery = "?#iefix";
+
     /// <summary>One @font-face rule for <paramref name="font"/> in the given saving
     /// mode. <paramref name="fontUrlPrefix"/> rebases the src URLs when the CSS does
     /// not live next to the font files (e.g. embedded into the HTML).</summary>
@@ -82,7 +88,7 @@ public sealed partial class PdfToHtmlConverter
              // the "bulletproof" shape: plain EOT for old IE, then the format list
             HtmlSaveOptions.FontSavingModes.SaveInAllFormats =>
                 $"\tsrc:url(\"{U(".eot")}\");\n" +
-                $"\tsrc:url(\"{U(".eot")}?#iefix\") format(\"embedded-opentype\"),\n" +
+                $"\tsrc:url(\"{U(EotExtension)}{EotLegacyQuery}\") format(\"embedded-opentype\"),\n" +
                 $"\turl(\"{U(".woff")}\") format(\"woff\"),\n" +
                 $"\turl(\"{U(".ttf")}\") format(\"truetype\");\n",
             _ => $"\tsrc:url(\"{U(".woff")}\") format(\"woff\");\n",
@@ -127,7 +133,7 @@ public sealed partial class PdfToHtmlConverter
         return false;
     }
 
-    private static List<EmbeddedFont> CollectEmbeddedFonts(Document doc, int[]? pages = null,
+    private List<EmbeddedFont> CollectEmbeddedFonts(Document doc, int[]? pages = null,
         HtmlSaveOptions? options = null)
     {
         var result = new List<EmbeddedFont>();
@@ -151,29 +157,36 @@ public sealed partial class PdfToHtmlConverter
             ScanUsedFontObjectsOnPage(doc, i, used);
 
         // Pass 2: walk the resource dictionaries and emit the used fonts in
-        // encounter order.
+        // encounter order - the page's, then those of the widget appearances drawn with it, so a
+        // face only a field's appearance carries (a form's default-resource font, non-embedded or
+        // not) ships like the page's own and the field's text names a family the stylesheet serves.
         foreach (var i in pageList)
         {
             var page = doc.Pages[i];
             var reader = page.Reader;
             if (reader is null) continue;
-            var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+            var resources = PageResources(page.Dict, reader);
             CollectFontsFromResources(resources, reader, seen, seenObjs, used, result, new System.Collections.Generic.HashSet<PdfObject>(), options);
+            if (WidgetLayer(page.Dict, reader) is { } widgets)
+                CollectFontsFromResources(widgets.Resources, reader, seen, seenObjs, used, result, new System.Collections.Generic.HashSet<PdfObject>(), options);
         }
         return result;
     }
 
     /// <summary>Add every font object showing a visible glyph on page
-    /// <paramref name="pageNum"/> to <paramref name="used"/>.</summary>
-    private static void ScanUsedFontObjectsOnPage(Document doc, int pageNum,
+    /// <paramref name="pageNum"/> to <paramref name="used"/>. The widgets' appearances are drawn
+    /// with the page, so a font that only a field's value is set in counts too.</summary>
+    private void ScanUsedFontObjectsOnPage(Document doc, int pageNum,
         System.Collections.Generic.HashSet<PdfObject> used)
     {
         var page = doc.Pages[pageNum];
         var reader = page.Reader;
         if (reader is null) return;
-        var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+        var resources = PageResources(page.Dict, reader);
         foreach (var stream in GetContentStreams(page.Dict, reader))
             ScanVisiblyUsedFonts(stream, resources, reader, used, new System.Collections.Generic.HashSet<PdfObject>());
+        if (WidgetLayer(page.Dict, reader) is { } widgets)
+            ScanVisiblyUsedFonts(widgets.Content, widgets.Resources, reader, used, new System.Collections.Generic.HashSet<PdfObject>());
     }
 
     /// <summary>Walk a content stream marking every font object that a text-showing
@@ -189,9 +202,7 @@ public sealed partial class PdfToHtmlConverter
 
         static bool Visible(PdfString s)
         {
-            foreach (var b in s.Value)
-                if (b is not (0x00 or 0x09 or 0x0A or 0x0D or 0x20)) return true;
-            return false;
+            return s.Value.Any(b => b is not (0x00 or 0x09 or 0x0A or 0x0D or 0x20));
         }
 
         var lexer = new PdfLexer(streamBytes);
@@ -232,7 +243,7 @@ public sealed partial class PdfToHtmlConverter
                                 && form.Dict.GetName("Subtype") == "Form" && visitedForms.Add(form))
                             {
                                 byte[]? body = null;
-                                try { body = reader.DecodeStream(form); } catch { }
+                                try { body = reader.DecodeStream(form); } catch { /* a stream that does not decode is skipped, as if absent */ }
                                 if (body is not null)
                                     ScanVisiblyUsedFonts(body, reader.ResolveDict(form.Dict.Get("Resources")),
                                         reader, used, visitedForms);
@@ -258,7 +269,7 @@ public sealed partial class PdfToHtmlConverter
     /// Only fonts in <paramref name="used"/> (visibly shown somewhere) are emitted,
     /// each font OBJECT once. The <paramref name="visitedForms"/> set guards against
     /// resource-graph cycles.</summary>
-    private static void CollectFontsFromResources(PdfDictionary? resources, PdfReader reader,
+    private void CollectFontsFromResources(PdfDictionary? resources, PdfReader reader,
         System.Collections.Generic.HashSet<string> seen,
         System.Collections.Generic.HashSet<PdfObject> seenObjs,
         System.Collections.Generic.HashSet<PdfObject> used,
@@ -281,27 +292,41 @@ public sealed partial class PdfToHtmlConverter
                 if (IsFontExcluded(options, baseFont)) continue;
                 if (!used.Contains(font) || !seenObjs.Add(font)) continue;
                 var ttf = GetEmbeddedTtf(font, reader) ?? GetEmbeddedOpenType(font, reader);
-                // A CID-keyed subset ships without a cmap (glyphs are addressed by GID;
-                // the char mapping lives in /ToUnicode + /CIDToGIDMap), and a simple
+                // A CID-keyed subset ships without a cmap (glyphs are addressed by GID; the
+                // char mapping lives in /ToUnicode + /CIDToGIDMap), and a simple
                 // TrueType subset commonly ships only a byte cmap over its re-encoded
                 // content-stream codes (a (1,0) format-0 table — the CJK newspaper
                 // workflow). Either face is useless to the HTML consumer — the spans
                 // carry Unicode text — so synthesize a (3,1) cmap from the PDF's own
                 // mapping before shipping.
+                var standIns = fontDict.Get(key) is PdfIndirectRef fontRef
+                    && _substitutors.TryGetValue(fontRef.ObjectNumber, out var substitutor) ? substitutor : null;
                 if (ttf is not null && font.GetName("Subtype") is "Type0" or "TrueType")
-                    ttf = EnsureUnicodeCmap(ttf, font, reader) ?? ttf;
+                    ttf = EnsureUnicodeCmap(ttf, font, reader, standIns: standIns) ?? ttf;
+                byte[]? overflowCff = null;
                 if (ttf is null && GetEmbeddedBareCff(font, reader) is { } cff)
                 {
                     // Bare CFF (Type1C): synthesize a TrueType sfnt so the glyphs
                     // survive into a WOFF like any other embedded program. A CID-keyed one
                     // has no Unicode cmap of its own: it comes from the PDF's mapping, each
                     // CID reaching its glyph through the program's charset.
-                    try { ttf = Text.CffToTrueType.Convert(cff); } catch { }
+                    // A simple font's own encoding says which glyph each code draws; the
+                    // served face maps the text to those glyphs, not to the program's names.
+                    var simpleCff = font.GetName("Subtype") != "Type0";
+                    try
+                    {
+                        ttf = Text.CffToTrueType.Convert(cff,
+                            simpleCff ? EncodedGlyphNames(font, reader) : null,
+                            simpleCff ? SingleCharToUnicode(font, reader) : null);
+                    }
+                    catch { /* a CFF program that does not convert falls back to the installed face */ }
+                    // Either kind may draw one character through several glyphs; the overflow faces carry the rest.
+                    if (ttf is not null) overflowCff = cff;
                     if (ttf is not null && font.GetName("Subtype") == "Type0")
                     {
                         var program = Text.CffGlyphSource.TryLoad(cff);
                         ttf = EnsureUnicodeCmap(ttf, font, reader,
-                            program is { IsCidKeyed: true } ? program.CidToGid : null) ?? ttf;
+                            program is { IsCidKeyed: true } ? program.CidToGid : null, standIns) ?? ttf;
                     }
                 }
                 if (ttf is null && GetEmbeddedType1(font, reader) is { } t1)
@@ -317,7 +342,7 @@ public sealed partial class PdfToHtmlConverter
                         ttf = Text.CffToTrueType.ConvertType1(t1.Data, t1.Length1, t1.Length2,
                             RawDifferencesNames(font, reader), SingleCharToUnicode(font, reader));
                     }
-                    catch { }
+                    catch { /* a Type 1 program that does not convert falls back to the installed face */ }
                 }
                 string? dedupKey = null;
                 string? substituteFamily = null;
@@ -336,17 +361,20 @@ public sealed partial class PdfToHtmlConverter
                         result.Find(f => f.DedupKey == dedupKey)?.Objects.Add(font);
                         continue;
                     }
-                    try { ttf = Text.SystemFontResolver.Resolve(baseFont); } catch { }
+                    try { ttf = Text.SystemFontResolver.Resolve(baseFont); } catch { /* a font that cannot be found or read leaves the fallback in place */ }
                     // A CJK font with no installed face by name serves a SUBSET
                     // of the substitute face instead (shipped as "TAG+SimSun"
                     // programs for these).
                     if (ttf is null)
                     {
                         try { (ttf, substituteFamily) = BuildCjkSubstituteSubset(font, reader); }
-                        catch { }
+                        catch { /* no CJK substitute can be built - the font is not exported */ }
                     }
                     if (ttf is null) continue;
                 }
+                // A browser's sanitiser is stricter than a PDF viewer: the program ships with the
+                // tables it demands.
+                ttf = Text.CffToTrueType.MakeShippable(ttf);
                 byte[] woff;
                 try { woff = TtfToWoff(ttf); }
                 catch { continue; /* an unparseable sfnt is skipped rather than aborting */ }
@@ -354,6 +382,7 @@ public sealed partial class PdfToHtmlConverter
                 var emitted = new EmbeddedFont { Family = tag, Ttf = ttf, Woff = woff, DedupKey = dedupKey };
                 emitted.Objects.Add(font);
                 result.Add(emitted);
+                if (overflowCff is not null) AddOverflowFaces(font, reader, overflowCff, tag, result);
             }
         }
 
@@ -375,14 +404,31 @@ public sealed partial class PdfToHtmlConverter
     /// CID in a program ordered by its own charset in place of the /CIDToGIDMap.
     /// Null when the program already maps Unicode or no mapping can be derived.</summary>
     private static byte[]? EnsureUnicodeCmap(byte[] ttf, PdfDictionary font, PdfReader reader,
-        Func<int, int>? cidToGlyph = null)
+        Func<int, int>? cidToGlyph = null, LigatureSubstitutor? standIns = null)
     {
         try
         {
-            var toUni = Text.TextAbsorber.ParseToUnicodeFromDict(font, reader);
-            if (toUni is not { Count: > 0 }) return null;
-
+            var toUni = new List<KeyValuePair<int, string>>();
+            if (Text.TextAbsorber.ParseToUnicodeFromDict(font, reader) is { } mapped) toUni.AddRange(mapped);
+            // The characters the page text stands in for codes with no usable mapping (a
+            // bullet of a symbol face with no /ToUnicode is written as a minted character)
+            // must reach those codes' glyphs in the shipped face, or the browser shows a
+            // fallback mark for each.
+            if (standIns is not null) toUni.AddRange(standIns.Assigned);
             var isType0 = font.GetName("Subtype") == "Type0";
+            // A code reaches its glyph exactly through a CID font's map, and through a simple font's own table when
+            // no /Differences renames it: then the program's Unicode table must agree with the mapping derived here.
+            var exactCodes = isType0;
+            // A simple font's code with no /ToUnicode entry is read as the character its /Differences glyph name
+            // stands for: the page text has that character, so the shipped face must map it to the code's glyph.
+            if (!isType0 && reader.ResolveDict(font.Get("Encoding")) is { } encoding
+                && Text.TextAbsorber.ParseDifferencesEncoding(encoding, reader) is { } differences)
+            {
+                var mappedCodes = new HashSet<int>(toUni.Select(kv => kv.Key));
+                toUni.AddRange(differences.Where(kv => !mappedCodes.Contains(kv.Key)));
+            }
+            if (toUni.Count == 0) return null;
+
             byte[]? cid2gid = null;
             if (isType0
                 && reader.Resolve(font.Get("DescendantFonts")) is PdfArray da2 && da2.Count > 0
@@ -391,21 +437,28 @@ public sealed partial class PdfToHtmlConverter
             {
                 var mapStream = reader.ResolveStream(mapObj);
                 if (mapStream is not null)
-                    try { cid2gid = reader.DecodeStream(mapStream); } catch { }
+                    try { cid2gid = reader.DecodeStream(mapStream); } catch { /* a stream that does not decode is skipped, as if absent */ }
             }
             Dictionary<int, int>? programCmap = null;
             if (!isType0)
             {
-                try { programCmap = new Text.GlyphOutlineParser(ttf).CMap; }
+                Text.GlyphOutlineParser program;
+                try { program = new Text.GlyphOutlineParser(ttf); }
                 catch { return null; }
+                programCmap = program.CMap;
                 if (programCmap.Count == 0) return null;
+                exactCodes = !program.HasSymbolTableOnly && !(reader.ResolveDict(font.Get("Encoding")) is { } dictEncoding
+                    && dictEncoding.Get("Differences") is not null);
             }
 
             var uniToGid = new Dictionary<int, int>();
             foreach (var kv in toUni)
             {
                 var (code, text) = (kv.Key, kv.Value);
-                if (string.IsNullOrEmpty(text)) continue;
+                // A glyph whose text is several characters draws them all (a ligature, a
+                // traced letter pair): mapped from its first character it would draw that
+                // whole cluster for every occurrence of the one letter.
+                if (string.IsNullOrEmpty(text) || text.Length > 1) continue;
                 int uni = text[0];
                 if (char.IsHighSurrogate(text[0])) continue;   // format 4 is BMP-only
                 int gid;
@@ -424,9 +477,22 @@ public sealed partial class PdfToHtmlConverter
                     continue;
                 if (gid > 0 && !uniToGid.ContainsKey(uni)) uniToGid[uni] = gid;
             }
-            return Text.CffToTrueType.TryAddUnicodeCmap(ttf, uniToGid);
+            return Text.CffToTrueType.TryAddUnicodeCmap(ttf, uniToGid, MarkGlyphsBesideMintedMarks(uniToGid, standIns),
+                replaceDisagreeing: exactCodes);
         }
         catch { return null; }
+    }
+
+    /// <summary>The glyphs of a face that real nonspacing marks reach, when a stand-in minted for one of its
+    /// glyphs is itself a nonspacing mark (a virama of the block above U+A880), else null. A browser zeroes the
+    /// advance of such a mark and sets it over the glyph before; the face then classes its glyphs, so the
+    /// minted one is a base glyph and a real mark stays a mark.</summary>
+    private static HashSet<int>? MarkGlyphsBesideMintedMarks(Dictionary<int, int> uniToGid, LigatureSubstitutor? standIns)
+    {
+        static bool IsNonSpacingMark(int uni) => uni <= char.MaxValue
+            && System.Globalization.CharUnicodeInfo.GetUnicodeCategory((char)uni) == System.Globalization.UnicodeCategory.NonSpacingMark;
+        if (standIns is null || !uniToGid.Keys.Any(uni => IsNonSpacingMark(uni) && standIns.IsMinted((char)uni))) return null;
+        return uniToGid.Where(kv => IsNonSpacingMark(kv.Key) && !standIns.IsMinted((char)kv.Key)).Select(kv => kv.Value).ToHashSet();
     }
 
     /// <summary>Decoded FontFile3 program when it is a bare CFF (Type1C /
@@ -457,6 +523,26 @@ public sealed partial class PdfToHtmlConverter
             return tag is 0x4F54544F or 0x00010000 or 0x74727565 ? null : bytes;
         }
         catch { return null; }
+    }
+
+    /// <summary>The glyph name each code of a simple font names: its /Differences, else the names of a WinAnsi or
+    /// MacRoman encoding it names. A program whose glyphs a /ToUnicode reads as other characters (capitals read as
+    /// lowercase text) reaches them through these names; null when the font names neither.</summary>
+    private static Dictionary<int, string>? EncodedGlyphNames(PdfDictionary font, PdfReader reader)
+    {
+        if (RawDifferencesNames(font, reader) is { } differences) return differences;
+        Func<int, string?>? baseNames = font.GetName("Encoding") switch
+        {
+            "WinAnsiEncoding" => Text.PdfEncodings.WinAnsiName,
+            "MacRomanEncoding" => Text.PdfEncodings.MacRomanName,
+            _ => null,
+        };
+        if (baseNames is null) return null;
+        const int CodeCount = 256;
+        var map = new Dictionary<int, string>();
+        for (var code = 0; code < CodeCount; code++)
+            if (baseNames(code) is { } glyph) map[code] = glyph;
+        return map;
     }
 
     /// <summary>The font's /Encoding /Differences as raw code → glyph NAME (no

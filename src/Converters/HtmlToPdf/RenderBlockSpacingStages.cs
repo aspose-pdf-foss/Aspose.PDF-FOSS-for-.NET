@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -45,6 +46,10 @@ internal static partial class HtmlToPdfConverter
     /// the close fills from that top down to the cursor. The fill is PREPENDED to the page so the
     /// blocks it brackets draw over it, which is what a background is; it spans the width the
     /// container declared, falling back to the content box when it declared none.</summary>
+    /// <summary>The box of a UA-base line above the fresh-page cursor: the canonical 1.1 em line box of
+    /// a 12 pt run, which is the extent the text absorber reports for the line.</summary>
+    private const double UaFirstLineBoxPt = 1.1 * 12;
+
     private static bool? LayoutBackgroundSpanMarker(ConvertState cv, Block block)
     {
         if (block.BgSpan == 1)
@@ -64,9 +69,10 @@ internal static partial class HtmlToPdfConverter
             var (bgPage, bgTop, bgFill, bgW, bgFrac, bgPadT, bgPadB, bgPadL) = cv.bgSpanStack.Pop();
             if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_BGSPAN") == "1")
                 Console.Error.WriteLine($"[bgspan] RENDER CLOSE flow.y={cv.flow.y:0.##} rasterBottom={cv.pageHeight - cv.flow.y:0.##} prevMB={cv.flow.prevFlowMarginBottom:0.##} uaPrevMB={cv.flow.uaPrevMarginBottom:0.##} uaTopPending={cv.flow.uaTopMarginPending}");
-            // A box the flow carried onto another page is not one rectangle any more; the
-            // per-page split is not modelled, so it is left unpainted rather than drawn wrong.
-            if (ReferenceEquals(bgPage, cv.flow.page) && bgTop > cv.flow.y)
+            // A box the flow carried onto further pages is one rectangle per page: from its top to the
+            // bottom margin on the page it opened on, the whole content box on every page between, and
+            // from the content top down to the cursor on the page it closes on.
+            if (!ReferenceEquals(bgPage, cv.flow.page) || bgTop > cv.flow.y)
             {
                 var inv = System.Globalization.CultureInfo.InvariantCulture;
                 var bgX = cv.marginLeft;
@@ -82,11 +88,30 @@ internal static partial class HtmlToPdfConverter
                 // box is the page less twice that - written from the page rather than from
                 // cv.marginRight, which the widening branches leave holding their own band.
                 var bgBase = cv.pageWidth - 2 * cv.marginLeft;
-                var bgWidth = (bgFrac > 0 ? bgFrac * bgBase
-                    : bgW > 0 ? bgW : cv.pageWidth - cv.marginLeft - cv.marginRight) + bgPadL;
-                bgPage.PrependContentStream(Encoding.ASCII.GetBytes(Compat.Format(inv,
-                    $"q {bgFill.R / 255.0:F5} {bgFill.G / 255.0:F5} {bgFill.B / 255.0:F5} rg " +
-                    $"{bgX:F2} {cv.flow.y - bgPadB:F2} {bgWidth:F2} {bgTop - cv.flow.y + bgPadT + bgPadB:F2} re f Q\n")));
+                var bgWidth = ((bgFrac, bgW) switch
+                {
+                    (> 0, _) => bgFrac * bgBase,
+                    (_, > 0) => bgW,
+                    _ => cv.pageWidth - cv.marginLeft - cv.marginRight,
+                }) + bgPadL;
+                void Fill(Page page, double top, double bottom)
+                {
+                    if (top <= bottom) return;
+                    page.PrependContentStream(Encoding.ASCII.GetBytes(Compat.Format(inv,
+                        $"q {bgFill.R / 255.0:F5} {bgFill.G / 255.0:F5} {bgFill.B / 255.0:F5} rg " +
+                        $"{bgX:F2} {bottom:F2} {bgWidth:F2} {top - bottom:F2} re f Q\n")));
+                }
+                if (ReferenceEquals(bgPage, cv.flow.page)) Fill(bgPage, bgTop + bgPadT, cv.flow.y - bgPadB);
+                else
+                {
+                    // the fresh-page cursor is the first baseline's seat: the first line's box stands
+                    // above it, and the box that continues over the page holds that whole line
+                    // (probed: the box's top on a continuation page is its first child's top)
+                    var pageTop = FreshPageTopY(cv.profile, cv.pageHeight, cv.marginTop) + UaFirstLineBoxPt;
+                    Fill(bgPage, bgTop + bgPadT, cv.marginBottom);
+                    for (var n = bgPage.Number + 1; n < cv.flow.page.Number; n++) Fill(cv.doc.Pages[n], pageTop, cv.marginBottom);
+                    Fill(cv.flow.page, pageTop, cv.flow.y - bgPadB);
+                }
                 cv.flow.contentPage = cv.flow.page;
             }
         }
@@ -112,8 +137,9 @@ internal static partial class HtmlToPdfConverter
             // a class-bordered frame (the quirks chain sheet) that declares no width spans the content
             // box: its content is the box less both borders; an inline-bordered div with a width the
             // parser could not read keeps standing for no frame at all, as it always did
-            cv.flow.frameContentW = block.FrameBoxW > 0 ? block.FrameBoxW
-                : _quirksChainSheet ? cv.flow.contentWidth - 2 * block.FrameW : 0;
+            if (block.FrameBoxW > 0) cv.flow.frameContentW = block.FrameBoxW;
+            else if (_quirksChainSheet) cv.flow.frameContentW = cv.flow.contentWidth - 2 * block.FrameW;
+            else cv.flow.frameContentW = 0;
             cv.flow.frameCentred = block.FrameCentred;
             cv.flow.frameCol = block.FrameCol;
             cv.flow.lastWasHardBreak = false;
@@ -212,6 +238,7 @@ internal static partial class HtmlToPdfConverter
             // table carries no top margin of its own to collapse it against).
             if (cv.profile.uaStdSerif && rb.uaClosingGap > 0 && cv.flow.y < cv.pageHeight - cv.marginTop - 1e-3)
                 cv.flow.y -= Math.Max(0, rb.uaClosingGap - rb.uaPrevMB);
+            RegisterTableAnchorTargets(cv, block);
             LayoutTableBlock(block, cv.flow, cv.profile, cv.doc, cv.docFontDict, cv.css, options, inlineSvgs, cv.floatFirstOps, cv.bandStack, cv.bodyCssFace, cv.profile.dwFormDoc, cv.marginBottom, cv.marginLeft, cv.marginTop, cv.pageHeight, cv.pageWidth, rb.tableAfterSpacer, rb.tableAfterText);
             if (tableBoxMargins)
             {
@@ -231,6 +258,12 @@ internal static partial class HtmlToPdfConverter
             return false;
         }
 
+        if (block.SizedFillBox is { } fillBox)
+        {
+            LayoutSizedFillBox(cv, block, fillBox);
+            return false;
+        }
+
         if (block.IsRadio)
         {
             const double boxSize = 10.0;
@@ -241,7 +274,7 @@ internal static partial class HtmlToPdfConverter
                 cv.flow.y = cv.pageHeight - cv.marginTop; cv.flow.pendingTopDrop = cv.profile.hasZeroTopMargin;
             }
             var rbx = cv.marginLeft + block.LeftIndent;
-            cv.radioOptions.Add((block.RadioGroup, block.Checked, cv.flow.page,
+            cv.radioOptions.Add((block.RadioGroup, block.RadioValue, block.Checked, block.InputReadOnly, cv.flow.page,
                 new Rectangle(rbx, cv.flow.y - boxSize, rbx + boxSize, cv.flow.y)));
             cv.flow.y -= boxSize + 2;
             cv.flow.lastWasHardBreak = false;
@@ -251,14 +284,49 @@ internal static partial class HtmlToPdfConverter
         return null;
     }
 
+    /// <summary>A box painted by its background alone stands at the cursor, on a fresh page when the
+    /// rest of this one cannot hold it, and the flow goes on below it.</summary>
+    private static void LayoutSizedFillBox(ConvertState cv, Block block, (double W, double H, Color Fill) fillBox)
+    {
+        if (cv.flow.y - fillBox.H < cv.marginBottom && cv.flow.y < cv.pageHeight - cv.marginTop)
+        {
+            cv.flow.page = cv.doc.Pages.Add(cv.pageWidth, cv.pageHeight);
+            EnsureFonts(cv.flow.page, cv.docFontDict);
+            cv.flow.y = cv.pageHeight - cv.marginTop; cv.flow.pendingTopDrop = cv.profile.hasZeroTopMargin;
+        }
+        DrawBox(cv.flow.page, cv.marginLeft + block.LeftIndent, cv.flow.y - fillBox.H, fillBox.W, fillBox.H,
+            border: null, borderWidth: 0, fill: fillBox.Fill);
+        cv.flow.y -= fillBox.H;
+        cv.flow.lastWasHardBreak = false;
+    }
+
+    /// <summary>A declared page break that nothing followed - the empty break div closing a printed form - leaves
+    /// the page it opened blank: a break separates content and ends no document with an empty sheet, so that
+    /// page goes when it is still the last one and holds no content and no annotation.</summary>
+    private static void DropEmptyPageOfTrailingBreak(ConvertState cv)
+    {
+        var count = cv.doc.Pages.Count;
+        if (cv.flow.breakPage is not { } opened || count < 2) return;
+        var last = cv.doc.Pages[count];
+        if (ReferenceEquals(last, opened) && last.ContentStreamCount == 0 && last.Annotations.Count == 0)
+            cv.doc.Pages.Delete(count);
+    }
+
     /// <summary>A declared page break opens a new page; a float-band rule and an escaped-attribute table draw themselves and leave.</summary>
     private static bool? BreakPageBeforeBlock(ConvertState cv, RenderBlockState rb, Block block)
     {
         rb.brokeForRule = false;
-        if (block.PageBreakBefore
+        // A break declared before the document's first content opens no page: nothing has been
+        // drawn yet (a margin alone may have moved the cursor), and a browser prints no empty
+        // sheet ahead of such an element. The first sheet's own content streams decide, since a
+        // grid drawn on it leaves the content page unset.
+        var nothingDrawnYet = cv.flow.contentPage is null && cv.doc.Pages.Count == 1
+            && cv.flow.page.ContentStreamCount == 0;
+        if (block.PageBreakBefore && !nothingDrawnYet
             && (ReferenceEquals(cv.flow.page, cv.flow.contentPage) || cv.flow.y < cv.pageHeight - cv.marginTop - 1e-3))
         {
             cv.flow.page = cv.doc.Pages.Add(cv.pageWidth, cv.pageHeight);
+            cv.flow.breakPage = cv.flow.page;
             EnsureFonts(cv.flow.page, cv.docFontDict);
             cv.flow.y = cv.pageHeight - cv.marginTop; cv.flow.pendingTopDrop = cv.profile.hasZeroTopMargin;
             cv.flow.uaTopMarginPending = cv.profile.uaStdSerif && !cv.fieldsetDoc;
@@ -291,6 +359,25 @@ internal static partial class HtmlToPdfConverter
         }
         return null;
     }
+
+    /// <summary>The CSS line box of a line set at <paramref name="lineHeight"/> that holds the paragraph's
+    /// own face (the strut) and a CJK fallback face: each inline box sits (L - (A + D) fs) / 2 + A fs above
+    /// the baseline, A and D its face's win ascent and descent, and the line is the highest top over the
+    /// lowest bottom.</summary>
+    private static double CjkCssLineBoxPt(Block block, double lineHeight, double fontSize)
+    {
+        double above = 0, below = 0;
+        foreach (var face in new[] { FirstFontFamily(block.FontFamily ?? "") ?? "Arial", CjkLineFaceName })
+        {
+            if (WinMetricsFor(face) is not { } m) continue;
+            var a = (lineHeight - m.sum * fontSize) / 2 + m.asc * fontSize;
+            above = Math.Max(above, a);
+            below = Math.Max(below, lineHeight - a);
+        }
+        return above + below > 0 ? above + below : lineHeight;
+    }
+
+    private const string CjkLineFaceName = "SimSun";
 
     /// <summary>The block's font size, line pitch, extra leads, inline-css box and metric-flow face.</summary>
     private static bool? ResolveBlockLineMetrics(ConvertState cv, RenderBlockState rb, Block block)
@@ -329,6 +416,11 @@ internal static partial class HtmlToPdfConverter
             if (block.SheetLineFactor > 0 && rb.metrics.blockFontSize > 0)
                 rb.metrics.lineHeight = rb.metrics.blockFontSize * block.SheetLineFactor;
             if (block.LineBoxPt > 0) rb.metrics.lineHeight = block.LineBoxPt;
+            // A body that pads its own box lays its lines the CSS way: a line holding CJK text is the
+            // union of the paragraph's strut and the CJK face's inline box, each centred in the line
+            // height on its own ascent and descent (probed: 16.93 for a 16.8 line of 10.5 pt text).
+            if (rb.metrics.blockFontSize > 0 && HasIdeograph(block.Text) && cv.profile.cssBoxBody)
+                rb.metrics.lineHeight = CjkCssLineBoxPt(block, rb.metrics.lineHeight, rb.metrics.blockFontSize);
         }
         rb.inlineCssBox = false;
         rb.icbHalfLead = 0;
@@ -362,14 +454,15 @@ internal static partial class HtmlToPdfConverter
             // — same as 1.125em there — but 27.75 @24, 21 @18, 16.5 @14.04:
             // all measured on the expected render's h1-h3 list items).
             // The print grid uses the CSS body line-height, px-rounded.
-            rb.metrics.lineHeight = cv.profile.printGrid
-                ? Math.Round(rb.metrics.blockFontSize / 0.75 * cv.printGridLineFactor, MidpointRounding.AwayFromZero) * 0.75
-                // The article sheet's own unitless line-height, resolved against
-                // each block's size and px-rounded the way the expected render does.
-                : cv.articleFlow
-                    ? Math.Round(rb.metrics.blockFontSize / 0.75 * cv.articleLineFactor, MidpointRounding.AwayFromZero) * 0.75
-                : cv.uaFlow ? MetricLineHeight(rb.metrics.blockFontSize, HheaLineSumFor(cv.profile.metricFace) ?? mfm.sum)
-                : MetricLineHeight(rb.metrics.blockFontSize, cv.profile.metricLineSum > 0 ? cv.profile.metricLineSum : mfm.sum);
+            if (cv.profile.printGrid)
+                rb.metrics.lineHeight = Math.Round(rb.metrics.blockFontSize / 0.75 * cv.printGridLineFactor, MidpointRounding.AwayFromZero) * 0.75;
+            // The article sheet's own unitless line-height, resolved against
+            // each block's size and px-rounded the way the expected render does.
+            else if (cv.articleFlow)
+                rb.metrics.lineHeight = Math.Round(rb.metrics.blockFontSize / 0.75 * cv.articleLineFactor, MidpointRounding.AwayFromZero) * 0.75;
+            else if (cv.uaFlow) rb.metrics.lineHeight = MetricLineHeight(rb.metrics.blockFontSize, HheaLineSumFor(cv.profile.metricFace) ?? mfm.sum);
+            else
+                rb.metrics.lineHeight = MetricLineHeight(rb.metrics.blockFontSize, cv.profile.metricLineSum > 0 ? cv.profile.metricLineSum : mfm.sum);
             // A block that carries its OWN resolvable face lines on that
             // face's box (a Word-filtered span's Tahoma pitches 12 where the
             // serif box gives 11.25) and seats its baseline by its metrics.
@@ -582,7 +675,7 @@ internal static partial class HtmlToPdfConverter
                 : "0 G";
             if (ReferenceEquals(cv.flow.page, box.Page) && box.BorderPt > 0 && box.TopY - cv.flow.y > 1)
             {
-                var rect = FormattableString.Invariant(
+                var rect = Compat.Format(CultureInfo.InvariantCulture,
                     $"q {box.BorderPt:0.##} w {strokeG} {box.XLeft:0.##} {cv.flow.y:0.##} {box.Width:0.##} {box.TopY - cv.flow.y:0.##} re S Q\n");
                 cv.flow.page.AddContentStream(System.Text.Encoding.ASCII.GetBytes(rect));
             }
@@ -594,7 +687,7 @@ internal static partial class HtmlToPdfConverter
                 // box's sides stop ~10 pt into the margin, not at the page edge).
                 var xr = box.XLeft + box.Width;
                 var yb = Math.Max(0, cv.marginBottom - 10);
-                var frame = FormattableString.Invariant(
+                var frame = Compat.Format(CultureInfo.InvariantCulture,
                     $"q {box.BorderPt:0.##} w {strokeG} {box.XLeft:0.##} {yb:0.##} m {box.XLeft:0.##} {box.TopY:0.##} l {xr:0.##} {box.TopY:0.##} l {xr:0.##} {yb:0.##} l S Q\n");
                 box.Page.AddContentStream(System.Text.Encoding.ASCII.GetBytes(frame));
             }
@@ -619,6 +712,8 @@ internal static partial class HtmlToPdfConverter
         }
         rb.tableAfterText = block.IsTable && cv.flow.prevBlockWasText;
         rb.breakAfterTable = cv.flow.lastWasMetricTable;
+        rb.afterTable = cv.flow.lastBlockWasTable;
+        cv.flow.lastBlockWasTable = block.IsTable;
         rb.tableAfterSpacer = cv.flow.lastBreakWasUaSpacer;
         // Only the FIRST break after the table stands in for the table
         // wrapper's margin - a chain of breaks must not re-charge it.
@@ -635,12 +730,11 @@ internal static partial class HtmlToPdfConverter
                 cv.flow.contentPage = cv.flow.page;
                 var spHeads = new List<string>();
                 var spTable = "";
-                foreach (var secB in cv.blocks)
-                    if (cv.spBlocks.Contains(secB))
-                    {
-                        if (secB.IsTable) spTable = secB.TableHtml ?? "";
-                        else if (!string.IsNullOrEmpty(secB.Text)) spHeads.Add(secB.Text!);
-                    }
+                foreach (var secB in cv.blocks.Where(secB => cv.spBlocks.Contains(secB)))
+                {
+                    if (secB.IsTable) spTable = secB.TableHtml ?? "";
+                    else if (!string.IsNullOrEmpty(secB.Text)) spHeads.Add(secB.Text);
+                }
                 RenderSpMatrixSection(cv.flow.page, cv.pageHeight, cv.marginLeft, spHeads, spTable, inlineSvgs);
                 cv.flow.y = cv.marginBottom;
                 cv.flow.lastWasHardBreak = false;

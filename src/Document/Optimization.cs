@@ -98,310 +98,6 @@ public sealed partial class Document : IDisposable
         SaveWithSaveOptions(doc, dstStream, saveOptions);
     }
 
-    private static Document OpenWithLoadOptions(string srcFileName, LoadOptions loadOptions) => loadOptions switch
-    {
-        HtmlLoadOptions h => Open(srcFileName, h),
-        MdLoadOptions md => Open(srcFileName, md),
-        SvgLoadOptions svg => Open(srcFileName, svg),
-        _ => Open(srcFileName),
-    };
-
-    private static Document OpenWithLoadOptions(Stream srcStream, LoadOptions loadOptions)
-    {
-        if (loadOptions is HtmlLoadOptions h) return new Document(srcStream, h);
-        if (loadOptions is MdLoadOptions md)
-            return Open(ReadStreamBytes(srcStream), md);
-        if (loadOptions is SvgLoadOptions svg)
-            return Open(ReadStreamBytes(srcStream), svg);
-        return new Document(srcStream);
-    }
-
-    private static byte[] ReadStreamBytes(Stream s)
-    {
-        using var ms = new MemoryStream();
-        s.CopyTo(ms);
-        return ms.ToArray();
-    }
-
-    private static void SaveWithSaveOptions(Document doc, string dst, SaveOptions saveOptions)
-    {
-        if (saveOptions is HtmlSaveOptions h) doc.Save(dst, h);
-        else if (saveOptions is PdfToMarkdown.MarkdownSaveOptions) doc.Save(dst, saveOptions);
-        else doc.Save(dst);
-    }
-
-    private static void SaveWithSaveOptions(Document doc, Stream dst, SaveOptions saveOptions)
-    {
-        if (saveOptions is HtmlSaveOptions h) doc.Save(dst, h);
-        else if (saveOptions is PdfToMarkdown.MarkdownSaveOptions) doc.Save(dst, saveOptions);
-        else doc.Save(dst);
-    }
-
-    private void ApplyRotateFixup(bool targetLandscape)
-    {
-        for (var i = 1; i <= PageCount; i++)
-        {
-            var page = Pages[i];
-            var media = page.MediaBox;
-            var existing = (int)(page.Dict.Get("Rotate") is Aspose.Pdf.Core.PdfInteger n ? n.Value : 0);
-            // Displayed orientation depends on /Rotate: a 90°/270° rotation swaps
-            // the media box's width and height on screen.
-            var norm = ((existing % 360) + 360) % 360;
-            var quarterTurned = norm == 90 || norm == 270;
-            var displaysLandscape = quarterTurned ? media.Height > media.Width : media.Width > media.Height;
-            // Already in the requested orientation — leave the page untouched.
-            if (displaysLandscape == targetLandscape) continue;
-            // Otherwise a single 90° clockwise turn flips landscape↔portrait.
-            page.Dict.Set("Rotate", new Aspose.Pdf.Core.PdfInteger((existing + 90) % 360));
-        }
-    }
-
-    private static void LogFixup(Stream? logStream, string line)
-    {
-        if (logStream is null || logStream == Stream.Null) return;
-        try
-        {
-            var bytes = System.Text.Encoding.UTF8.GetBytes(line + "\n");
-            logStream.Write(bytes, 0, bytes.Length);
-        }
-        catch { }
-    }
-
-    /// <summary>
-    /// The raw PDF catalog dictionary for power-user access.
-    /// </summary>
-    internal PdfDictionary Catalog => _reader.Catalog;
-
-    /// <summary>
-    /// The internal reader (for sub-components that need object resolution).
-    /// </summary>
-    internal PdfReader Reader => _reader;
-
-    /// <summary>
-    /// Encrypt the document with the specified algorithm, passwords, and permissions.
-    /// Encryption is applied on the next save.
-    /// </summary>
-    public void Encrypt(string userPassword, string ownerPassword,
-        DocumentPrivilege? permissions = null, CryptoAlgorithm algorithm = Aspose.Pdf.CryptoAlgorithm.AESx128)
-    {
-        // Encryption is gated on the SIGNATURE TYPE, not the mere
-        // presence of a signature:
-        // a DocMDP CERTIFICATION signature refuses encryption (it would break the
-        // certification), while an ordinary APPROVAL signature encrypts normally.
-        // So an approval signature succeeds; a certified (DocMDP) one throws.
-        if (HasCertificationSignature())
-            throw new PdfException(
-                "You cannot change this document because it is certified.");
-
-        var p = permissions is not null
-            ? GetPermissionFlags(permissions)
-            : -4; // all permissions
-
-        _encryptor = algorithm switch
-        {
-            Aspose.Pdf.CryptoAlgorithm.RC4x40 => PdfEncryptor.CreateRC4x40(userPassword, ownerPassword, p),
-            Aspose.Pdf.CryptoAlgorithm.RC4x128 => PdfEncryptor.CreateRC4x128(userPassword, ownerPassword, p),
-            Aspose.Pdf.CryptoAlgorithm.AESx128 => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p,
-                encryptMetadata: EncryptMetadata),
-            Aspose.Pdf.CryptoAlgorithm.AESx256 => PdfEncryptor.CreateAES256(userPassword, ownerPassword, p,
-                encryptMetadata: EncryptMetadata),
-            _ => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p,
-                encryptMetadata: EncryptMetadata),
-        };
-    }
-
-    /// <summary>
-    /// Whether the next encryption carries the document's METADATA with
-    /// everything else, or leaves the packet in the clear for a reader that
-    /// indexes it without the password.
-    ///
-    /// ⚠ Only the crypt-filter handlers can express it: from revision 4 on, the
-    /// choice is part of the key. A 40-bit RC4 document has no way to say it and
-    /// ignores this.
-    ///
-    /// Default true, which is what a document says by writing nothing.
-    /// </summary>
-    public bool EncryptMetadata { get; set; } = true;
-
-    /// <summary>True when the document carries a DocMDP certification (author) signature.
-    /// A certification is recorded in the catalog as <c>/Perms &lt;&lt; /DocMDP &lt;sigref&gt; &gt;&gt;</c>
-    /// (PDF 32000-1 §12.8.2.2), so it is detected by a direct catalog lookup rather than by
-    /// enumerating the AcroForm fields — the latter can recurse on a pathological field tree.
-    /// Ordinary approval signatures leave /Perms absent, so they are not blocked.</summary>
-    internal bool HasCertificationSignature()
-    {
-        try
-        {
-            var perms = _reader.ResolveDict(_reader.Catalog?.Get("Perms"));
-            return perms is not null && perms.Get("DocMDP") is not null;
-        }
-        catch
-        {
-            // A malformed catalog must not turn encryption into a crash — treat it as
-            // "not certified" and let encryption proceed (the pre-enforcement behaviour).
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Encrypt overload accepting an explicit <c>usePdf20</c> flag.
-    /// With <c>usePdf20</c> true, AES-256 writes the ISO 32000-2 revision-6
-    /// handler (the existing AES-256 path already derives revision-6 values);
-    /// deprecated combinations throw <see cref="DeprecatedFeatureException"/>.
-    /// </summary>
-    public void Encrypt(string userPassword, string ownerPassword,
-        DocumentPrivilege? privileges, CryptoAlgorithm cryptoAlgorithm, bool usePdf20)
-    {
-        GuardPdf20Encryption(cryptoAlgorithm, usePdf20);
-        Encrypt(userPassword, ownerPassword, privileges, cryptoAlgorithm);
-    }
-
-    /// <summary>
-    /// Encrypt overload accepting the <see cref="Permissions"/> flags enum and
-    /// an explicit <c>usePdf20</c> flag. Same usePdf20 contract as the
-    /// DocumentPrivilege-typed overload above.
-    /// </summary>
-    public void Encrypt(string userPassword, string ownerPassword,
-        Aspose.Pdf.Permissions permissions, CryptoAlgorithm cryptoAlgorithm, bool usePdf20)
-    {
-        GuardPdf20Encryption(cryptoAlgorithm, usePdf20);
-        Encrypt(userPassword, ownerPassword, permissions, cryptoAlgorithm);
-    }
-
-    /// <summary>
-    /// PDF 2.0 (ISO 32000-2 §7.6) keeps only the AES-256 revision-6 security
-    /// handler: the RC4 crypt filters are removed outright, and on a document
-    /// that is already PDF 2.0 the legacy handlers (RC4, AESV2, and the interim
-    /// AES-256 revision 5 selected by <c>usePdf20:false</c>) are deprecated too.
-    /// </summary>
-    private void GuardPdf20Encryption(CryptoAlgorithm algorithm, bool usePdf20)
-    {
-        var isRc4 = algorithm is Aspose.Pdf.CryptoAlgorithm.RC4x40 or Aspose.Pdf.CryptoAlgorithm.RC4x128;
-        if (usePdf20 && isRc4)
-            throw new DeprecatedFeatureException(
-                "RC4 encryption is deprecated in PDF 2.0; use AES-256.");
-        if (!usePdf20 && Version == "2.0")
-            throw new DeprecatedFeatureException(
-                "Legacy security handlers are deprecated in PDF 2.0; use AES-256 with usePdf20 set to true.");
-    }
-
-    /// <summary>
-    /// Encrypt overload accepting the legacy <see cref="Permissions"/> flags
-    /// enum. Maps each flag to the corresponding bit and forwards to the
-    /// DocumentPrivilege overload.
-    /// </summary>
-    public void Encrypt(string userPassword, string ownerPassword,
-        Aspose.Pdf.Permissions permissions, CryptoAlgorithm cryptoAlgorithm = Aspose.Pdf.CryptoAlgorithm.AESx128)
-    {
-        var dp = new DocumentPrivilege();
-        if ((permissions & Aspose.Pdf.Permissions.PrintDocument) != 0) dp.AllowPrint = true;
-        if ((permissions & Aspose.Pdf.Permissions.ModifyContent) != 0) dp.AllowModifyContents = true;
-        if ((permissions & Aspose.Pdf.Permissions.ExtractContent) != 0) dp.AllowCopy = true;
-        if ((permissions & Aspose.Pdf.Permissions.ModifyTextAnnotations) != 0) dp.AllowModifyAnnotations = true;
-        if ((permissions & Aspose.Pdf.Permissions.FillForm) != 0) dp.AllowFillIn = true;
-        if ((permissions & Aspose.Pdf.Permissions.ExtractContentWithDisabilities) != 0) dp.AllowScreenReaders = true;
-        if ((permissions & Aspose.Pdf.Permissions.AssembleDocument) != 0) dp.AllowAssembly = true;
-        if ((permissions & Aspose.Pdf.Permissions.PrintingQuality) != 0) dp.HighQualityPrinting = true;
-        Encrypt(userPassword, ownerPassword, dp, cryptoAlgorithm);
-    }
-
-    /// <summary>
-    /// Change the password on the bound document. Reads the current
-    /// permissions, then re-encrypts with the supplied new passwords
-    /// (owner-password is required to authorise the change).
-    /// </summary>
-    public void ChangePasswords(string ownerPassword, string newUserPassword, string newOwnerPassword)
-    {
-        var existing = new DocumentPrivilege(Permissions);
-        Encrypt(newUserPassword, newOwnerPassword, existing, Aspose.Pdf.CryptoAlgorithm.AESx128);
-    }
-
-    /// <summary>Remove encryption from the document.</summary>
-    public void Decrypt()
-    {
-        _encryptor = null;
-        // Remove Encrypt entry from trailer so the saved PDF is unencrypted
-        _reader.Trailer?.Remove("Encrypt");
-    }
-
-    private PdfEncryptor? _encryptor;
-
-#pragma warning disable CS0649
-    private bool _forceWriteId;
-
-#pragma warning restore CS0649
-
-    private static int GetPermissionFlags(DocumentPrivilege priv)
-    {
-        var flags = unchecked((int)0xFFFFF0C0); // Required reserved bits
-        if (priv.AllowPrint) flags |= 1 << 2;
-        if (priv.AllowModifyContents) flags |= 1 << 3;
-        if (priv.AllowCopy) flags |= 1 << 4;
-        if (priv.AllowModifyAnnotations) flags |= 1 << 5;
-        if (priv.AllowFillIn) flags |= 1 << 8;
-        if (priv.AllowScreenReaders) flags |= 1 << 9;
-        if (priv.AllowAssembly) flags |= 1 << 10;
-        if (priv.HighQualityPrinting) flags |= 1 << 11;
-        return flags;
-    }
-
-    /// <summary>
-    /// Optimize document resources by removing unused objects and deduplicating streams,
-    /// and linearize the document for fast web view. Both are applied on the next save.
-    /// </summary>
-    public void Optimize()
-    {
-        OptimizeResources();
-        // Optimize() also enables fast-web-view (linearization) on the next save,
-        // so that Document.Optimize() produces a
-        // linearized output. LinearizeDocument() sets the same flag.
-        _linearize = true;
-    }
-
-    /// <summary>
-    /// Process paragraphs in the document (layout step before save).
-    /// Renders queued paragraphs (TextFragment, Heading, Table, HtmlFragment, ...) and
-    /// applies TOC info to each page's content stream. Idempotent; the same pass runs
-    /// again at Save but each page is gated by Page.LayoutApplied.
-    /// </summary>
-    public void ProcessParagraphs() => ApplyPageContent();
-
-    /// <summary>
-    /// Gets or sets a flag indicating whether the document should be optimized for size on save.
-    /// When true, redundant data is removed during save to reduce file size.
-    /// </summary>
-    public bool OptimizeSize { get; set; }
-
-    /// <summary>When true, the standard 14 PostScript fonts (Helvetica /
-    /// Times / Courier × 4 styles + Symbol + ZapfDingbats) are embedded
-    /// into the saved document so the output renders identically without
-    /// relying on viewer-side font fallbacks. Stored only; the saver does
-    /// not currently embed the Standard 14 font files.</summary>
-    public bool EmbedStandardFonts { get; set; }
-
-    /// <summary>When true, the parser tolerates corrupted indirect-object
-    /// declarations (extra/garbled bytes between objects) instead of
-    /// throwing. Stored only; the parser is already lenient about most
-    /// malformed input.</summary>
-    public bool IgnoreCorruptedObjects { get; set; }
-
-    private Aspose.Pdf.Optimization.OptimizationOptions? _optimizationOptions;
-
-    private HashSet<int>? _reachableObjects;
-
-    private bool _prunedFontsThisSave;
-
-    // ── PDF/A conversion ────────────────────────────────────────────────────
-
-    /// <summary>True for a CONFORMANCE target (PDF/A, PDF/X, PDF/UA …) as opposed to a
-    /// plain version target. Only a conformance target carries the embed-everything
-    /// requirement that overrides a face's licence.</summary>
-    private static bool IsConformanceTarget(Aspose.Pdf.PdfFormat format) =>
-        format is not (Aspose.Pdf.PdfFormat.v_1_0 or Aspose.Pdf.PdfFormat.v_1_1
-            or Aspose.Pdf.PdfFormat.v_1_2 or Aspose.Pdf.PdfFormat.v_1_3 or Aspose.Pdf.PdfFormat.v_1_4
-            or Aspose.Pdf.PdfFormat.v_1_5 or Aspose.Pdf.PdfFormat.v_1_6 or Aspose.Pdf.PdfFormat.v_1_7
-            or Aspose.Pdf.PdfFormat.v_2_0 or Aspose.Pdf.PdfFormat.Pdf);
-
     /// <summary>
     /// Convert the document to the specified PDF/A conformance level.
     /// Applies automatic fixes for common violations when ErrorAction is Delete.
@@ -411,6 +107,7 @@ public sealed partial class Document : IDisposable
     {
         // Each conversion decides afresh whether its save packs objects into streams.
         _packObjectsOnSave = false;
+        _savesBelowObjectStreams = false;
         // Converting to PDF 2.0 with a pending RC4 encryption cannot succeed —
         // 2.0 removes the RC4 crypt filters (ISO 32000-2 §7.6) — so the request
         // is refused instead of producing a file that violates its own header.
@@ -429,7 +126,7 @@ public sealed partial class Document : IDisposable
                 or Aspose.Pdf.PdfFormat.v_1_5 or Aspose.Pdf.PdfFormat.v_1_6 or Aspose.Pdf.PdfFormat.v_1_7
                 or Aspose.Pdf.PdfFormat.v_2_0 or Aspose.Pdf.PdfFormat.Pdf))
         {
-            var blocked = Optimization.PdfAValidator.PermissionBlocked(options.TargetFormat);
+            var blocked = Optimization.PdfAValidator.PermissionBlocked(options.TargetFormat, PermanentFileIdHex());
             if (!string.IsNullOrEmpty(options.LogFileName))
             {
                 using var fs = File.Create(options.LogFileName);
@@ -505,31 +202,6 @@ public sealed partial class Document : IDisposable
         return result;
     }
 
-    /// <summary>The document's permanent file ID (first trailer /ID entry) as
-    /// uppercase hex, or null when the trailer carries no /ID — the value the
-    /// signed-file refusal stamps as the log problem's ObjectID.</summary>
-    private string? PermanentFileIdHex()
-    {
-        var id = Id?.Original;
-        return string.IsNullOrEmpty(id) ? null : id;
-    }
-
-    private Aspose.Pdf.PdfFormat? _lastConvertedFormat;
-
-    /// <summary>A size-optimized conversion asked the next save to pack objects into
-    /// compressed object streams even when the source had none.</summary>
-    private bool _packObjectsOnSave;
-
-    /// <summary>True once a PDF/A conversion succeeded on this instance. Validation
-    /// of file-structure rules that conversion repairs on save (e.g. the PDF/A-1
-    /// xref-stream prohibition) treats the document as already fixed.</summary>
-    internal bool PdfAConversionApplied => _lastConvertedFormat is not null;
-
-    /// <summary>The last conformance format a successful Convert applied on this
-    /// instance, for validation rules that treat conversion-repaired dimensions
-    /// as fixed (see <see cref="PdfAConversionApplied"/>).</summary>
-    internal Aspose.Pdf.PdfFormat? LastConvertedFormat => _lastConvertedFormat;
-
     /// <summary>
     /// Convert the document to a specific PDF/A format with a log file.
     /// </summary>
@@ -572,6 +244,411 @@ public sealed partial class Document : IDisposable
         return Convert(options);
     }
 
+    private static Document OpenWithLoadOptions(string srcFileName, LoadOptions loadOptions) => loadOptions switch
+    {
+        HtmlLoadOptions h => Open(srcFileName, h),
+        MdLoadOptions md => Open(srcFileName, md),
+        SvgLoadOptions svg => Open(srcFileName, svg),
+        _ => Open(srcFileName),
+    };
+
+    private static Document OpenWithLoadOptions(Stream srcStream, LoadOptions loadOptions)
+    {
+        if (loadOptions is HtmlLoadOptions h) return new Document(srcStream, h);
+        if (loadOptions is MdLoadOptions md)
+            return Open(ReadStreamBytes(srcStream), md);
+        if (loadOptions is SvgLoadOptions svg)
+            return Open(ReadStreamBytes(srcStream), svg);
+        return new Document(srcStream);
+    }
+
+    private static byte[] ReadStreamBytes(Stream s)
+    {
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    private static void SaveWithSaveOptions(Document doc, string dst, SaveOptions saveOptions)
+    {
+        if (saveOptions is HtmlSaveOptions h) doc.Save(dst, h);
+        else if (saveOptions is PdfToMarkdown.MarkdownSaveOptions) doc.Save(dst, saveOptions);
+        else doc.Save(dst);
+    }
+
+    private static void SaveWithSaveOptions(Document doc, Stream dst, SaveOptions saveOptions)
+    {
+        if (saveOptions is HtmlSaveOptions h) doc.Save(dst, h);
+        else if (saveOptions is PdfToMarkdown.MarkdownSaveOptions) doc.Save(dst, saveOptions);
+        else doc.Save(dst);
+    }
+
+    private void ApplyRotateFixup(bool targetLandscape)
+    {
+        for (var i = 1; i <= PageCount; i++)
+        {
+            var page = Pages[i];
+            var media = page.MediaBox;
+            var existing = (int)(page.Dict.Get("Rotate") is Aspose.Pdf.Core.PdfInteger n ? n.Value : 0);
+            // Displayed orientation depends on /Rotate: a 90°/270° rotation swaps
+            // the media box's width and height on screen.
+            var norm = ((existing % 360) + 360) % 360;
+            var quarterTurned = norm == 90 || norm == 270;
+            var displaysLandscape = quarterTurned ? media.Height > media.Width : media.Width > media.Height;
+            // Already in the requested orientation — leave the page untouched.
+            if (displaysLandscape == targetLandscape) continue;
+            // Otherwise a single 90° clockwise turn flips landscape↔portrait.
+            page.Dict.Set("Rotate", new Aspose.Pdf.Core.PdfInteger((existing + 90) % 360));
+        }
+    }
+
+    private static void LogFixup(Stream? logStream, string line)
+    {
+        if (logStream is null || logStream == Stream.Null) return;
+        try
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(line + "\n");
+            logStream.Write(bytes, 0, bytes.Length);
+        }
+        catch { /* the fix-up log is best effort - a failed write does not stop the conversion */ }
+    }
+
+    /// <summary>
+    /// The raw PDF catalog dictionary for power-user access.
+    /// </summary>
+    internal PdfDictionary Catalog => _reader.Catalog;
+
+    /// <summary>
+    /// The internal reader (for sub-components that need object resolution).
+    /// </summary>
+    internal PdfReader Reader => _reader;
+
+    /// <summary>
+    /// Encrypt the document with the specified algorithm, passwords, and permissions.
+    /// Encryption is applied on the next save.
+    /// </summary>
+    public void Encrypt(string userPassword, string ownerPassword,
+        DocumentPrivilege? permissions = null, CryptoAlgorithm algorithm = Aspose.Pdf.CryptoAlgorithm.AESx128)
+    {
+        // Encryption is gated on the SIGNATURE TYPE, not the mere
+        // presence of a signature:
+        // a DocMDP CERTIFICATION signature refuses encryption (it would break the
+        // certification), while an ordinary APPROVAL signature encrypts normally.
+        // So an approval signature succeeds; a certified (DocMDP) one throws.
+        if (HasCertificationSignature())
+            throw new PdfException(
+                "You cannot change this document because it is certified.");
+
+        var p = permissions is not null
+            ? GetPermissionFlags(permissions)
+            : -4; // all permissions
+
+        // With no owner password, the empty one would open the file with owner rights and
+        // void the permissions and any user password: a random one, known to no one, stands in.
+        if (string.IsNullOrEmpty(ownerPassword))
+            ownerPassword = Compat.ToHexString(Compat.RandomBytes(RandomOwnerPasswordBytes));
+
+        _encryptor = algorithm switch
+        {
+            Aspose.Pdf.CryptoAlgorithm.RC4x40 => PdfEncryptor.CreateRC4x40(userPassword, ownerPassword, p),
+            Aspose.Pdf.CryptoAlgorithm.RC4x128 => PdfEncryptor.CreateRC4x128(userPassword, ownerPassword, p),
+            Aspose.Pdf.CryptoAlgorithm.AESx128 => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p,
+                encryptMetadata: EncryptMetadata),
+            Aspose.Pdf.CryptoAlgorithm.AESx256 => PdfEncryptor.CreateAES256(userPassword, ownerPassword, p,
+                encryptMetadata: EncryptMetadata),
+            _ => PdfEncryptor.CreateAES128(userPassword, ownerPassword, p,
+                encryptMetadata: EncryptMetadata),
+        };
+    }
+
+    /// <summary>
+    /// Encrypt overload accepting an explicit <c>usePdf20</c> flag.
+    /// With <c>usePdf20</c> true, AES-256 writes the ISO 32000-2 revision-6
+    /// handler (the existing AES-256 path already derives revision-6 values);
+    /// deprecated combinations throw <see cref="DeprecatedFeatureException"/>.
+    /// </summary>
+    public void Encrypt(string userPassword, string ownerPassword,
+        DocumentPrivilege? privileges, CryptoAlgorithm cryptoAlgorithm, bool usePdf20)
+    {
+        GuardPdf20Encryption(cryptoAlgorithm, usePdf20);
+        Encrypt(userPassword, ownerPassword, privileges, cryptoAlgorithm);
+    }
+
+    /// <summary>
+    /// Encrypt overload accepting the <see cref="Permissions"/> flags enum and
+    /// an explicit <c>usePdf20</c> flag. Same usePdf20 contract as the
+    /// DocumentPrivilege-typed overload above.
+    /// </summary>
+    public void Encrypt(string userPassword, string ownerPassword,
+        Aspose.Pdf.Permissions permissions, CryptoAlgorithm cryptoAlgorithm, bool usePdf20)
+    {
+        GuardPdf20Encryption(cryptoAlgorithm, usePdf20);
+        Encrypt(userPassword, ownerPassword, permissions, cryptoAlgorithm);
+    }
+
+    /// <summary>
+    /// Encrypt overload accepting the legacy <see cref="Permissions"/> flags
+    /// enum. Maps each flag to the corresponding bit and forwards to the
+    /// DocumentPrivilege overload.
+    /// </summary>
+    public void Encrypt(string userPassword, string ownerPassword,
+        Aspose.Pdf.Permissions permissions, CryptoAlgorithm cryptoAlgorithm = Aspose.Pdf.CryptoAlgorithm.AESx128)
+    {
+        var dp = new DocumentPrivilege();
+        if (((int)permissions & (int)Aspose.Pdf.Permissions.PrintDocument) != 0) dp.AllowPrint = true;
+        if (((int)permissions & (int)Aspose.Pdf.Permissions.ModifyContent) != 0) dp.AllowModifyContents = true;
+        if (((int)permissions & (int)Aspose.Pdf.Permissions.ExtractContent) != 0) dp.AllowCopy = true;
+        if (((int)permissions & (int)Aspose.Pdf.Permissions.ModifyTextAnnotations) != 0) dp.AllowModifyAnnotations = true;
+        if (((int)permissions & (int)Aspose.Pdf.Permissions.FillForm) != 0) dp.AllowFillIn = true;
+        if (((int)permissions & (int)Aspose.Pdf.Permissions.ExtractContentWithDisabilities) != 0) dp.AllowScreenReaders = true;
+        if (((int)permissions & (int)Aspose.Pdf.Permissions.AssembleDocument) != 0) dp.AllowAssembly = true;
+        if (((int)permissions & (int)Aspose.Pdf.Permissions.PrintingQuality) != 0) dp.HighQualityPrinting = true;
+        Encrypt(userPassword, ownerPassword, dp, cryptoAlgorithm);
+    }
+
+    /// <summary>
+    /// Whether the next encryption carries the document's METADATA with
+    /// everything else, or leaves the packet in the clear for a reader that
+    /// indexes it without the password.
+    ///
+    /// ⚠ Only the crypt-filter handlers can express it: from revision 4 on, the
+    /// choice is part of the key. A 40-bit RC4 document has no way to say it and
+    /// ignores this.
+    ///
+    /// Default true, which is what a document says by writing nothing.
+    /// </summary>
+    public bool EncryptMetadata { get; set; } = true;
+
+    /// <summary>True when the document carries a DocMDP certification (author) signature.
+    /// A certification is recorded in the catalog as <c>/Perms &lt;&lt; /DocMDP &lt;sigref&gt; &gt;&gt;</c>
+    /// (PDF 32000-1 §12.8.2.2), so it is detected by a direct catalog lookup rather than by
+    /// enumerating the AcroForm fields — the latter can recurse on a pathological field tree.
+    /// Ordinary approval signatures leave /Perms absent, so they are not blocked.</summary>
+    internal bool HasCertificationSignature() => CertificationAccessLevel() > 0;
+
+    /// <summary>Whether the catalog names a DocMDP certification at all, holding or not.</summary>
+    internal bool NamesCertification()
+    {
+        try { return _reader.ResolveDict(_reader.Catalog?.Get("Perms"))?.Get("DocMDP") is not null; }
+        catch { return false; }
+    }
+
+    // The DocMDP access level that permits no change at all, and the one a certification states by default
+    // (form filling and signing allowed; ISO 32000-1 12.8.2.2).
+    internal const int NoChangesAccessLevel = 1;
+    private const int DefaultAccessLevel = 2;
+
+    /// <summary>The /P access level of the DocMDP certification the document carries; 0 when it carries none
+    /// that still holds - no /Perms /DocMDP, or a certification signature whose byte range does not frame its
+    /// /Contents in the bytes the document was read from (the file was rewritten after it was certified, so
+    /// the certification covers none of it).</summary>
+    internal int CertificationAccessLevel()
+    {
+        try
+        {
+            var perms = _reader.ResolveDict(_reader.Catalog?.Get("Perms"));
+            if (perms?.Get("DocMDP") is not { } docMdp) return 0;
+            if (_reader.ResolveDict(docMdp) is not { } signature) return DefaultAccessLevel;
+            if (_reader.Resolve(signature.Get("ByteRange")) is PdfArray { Count: 4 } range
+                && !FramesContents(range, _reader.RawData))
+                return 0;
+            return DocMdpAccessLevel(signature);
+        }
+        catch
+        {
+            // A malformed catalog must not turn encryption into a crash — treat it as
+            // "not certified" and let encryption proceed (the pre-enforcement behaviour).
+            return 0;
+        }
+    }
+
+    /// <summary>Whether the byte range's gap is the signature's hex /Contents in these bytes.</summary>
+    private static bool FramesContents(PdfArray range, byte[] data)
+    {
+        if (range[1] is not PdfInteger gapStart || range[2] is not PdfInteger gapEnd || range[3] is not PdfInteger tail)
+            return false;
+        return gapStart.Value >= 0 && gapStart.Value < gapEnd.Value && gapEnd.Value + tail.Value <= data.Length
+            && data[gapStart.Value] == '<' && data[gapEnd.Value - 1] == '>';
+    }
+
+    /// <summary>The /P of the signature's DocMDP transform parameters.</summary>
+    private int DocMdpAccessLevel(PdfDictionary signature)
+    {
+        if (_reader.Resolve(signature.Get("Reference")) is not PdfArray references) return DefaultAccessLevel;
+        foreach (var item in references)
+        {
+            var reference = _reader.ResolveDict(item);
+            if (reference?.GetName("TransformMethod") != "DocMDP") continue;
+            var parameters = _reader.ResolveDict(reference.Get("TransformParams"));
+            return (int)(parameters?.GetInt("P", DefaultAccessLevel) ?? DefaultAccessLevel);
+        }
+        return DefaultAccessLevel;
+    }
+
+    /// <summary>
+    /// PDF 2.0 (ISO 32000-2 §7.6) keeps only the AES-256 revision-6 security
+    /// handler: the RC4 crypt filters are removed outright, and on a document
+    /// that is already PDF 2.0 the legacy handlers (RC4, AESV2, and the interim
+    /// AES-256 revision 5 selected by <c>usePdf20:false</c>) are deprecated too.
+    /// </summary>
+    private void GuardPdf20Encryption(CryptoAlgorithm algorithm, bool usePdf20)
+    {
+        var isRc4 = algorithm is Aspose.Pdf.CryptoAlgorithm.RC4x40 or Aspose.Pdf.CryptoAlgorithm.RC4x128;
+        if (usePdf20 && isRc4)
+            throw new DeprecatedFeatureException(
+                "RC4 encryption is deprecated in PDF 2.0; use AES-256.");
+        if (!usePdf20 && Version == "2.0")
+            throw new DeprecatedFeatureException(
+                "Legacy security handlers are deprecated in PDF 2.0; use AES-256 with usePdf20 set to true.");
+    }
+
+    /// <summary>
+    /// Change the password on the bound document. Reads the current
+    /// permissions, then re-encrypts with the supplied new passwords
+    /// (owner-password is required to authorise the change).
+    /// </summary>
+    public void ChangePasswords(string ownerPassword, string newUserPassword, string newOwnerPassword)
+    {
+        // The passwords are the owner's to change, whichever password opened the document.
+        if (!AuthenticatesAsOwner(ownerPassword))
+            throw new PdfException(NotOwnerPasswordMessage);
+        var existing = new DocumentPrivilege(Permissions);
+        Encrypt(newUserPassword, newOwnerPassword, existing, Aspose.Pdf.CryptoAlgorithm.AESx128);
+    }
+
+    internal const string NotOwnerPasswordMessage =
+        "Security properties can't be changed because provided owner password is not true owner password.";
+
+    /// <summary>Whether the password opens the encryption the document was read with as its owner (or as a
+    /// user whose password is the owner's too); true for a document read without encryption.</summary>
+    internal bool AuthenticatesAsOwner(string? password)
+    {
+        if (_reader.ResolveDict(_reader.Trailer.Get("Encrypt")) is not { } encryptDict) return true;
+        try
+        {
+            return PdfDecryptor.TryCreate(encryptDict, _reader.Trailer.Get("ID") as PdfArray, password ?? "")
+                is { IsOwnerAuthentication: true } or { OwnerPasswordEqualsUserPassword: true };
+        }
+        catch
+        {
+            return false; // a malformed dictionary authenticates no one
+        }
+    }
+
+    /// <summary>Remove encryption from the document.</summary>
+    public void Decrypt()
+    {
+        _encryptor = null;
+        // Remove Encrypt entry from trailer so the saved PDF is unencrypted
+        _reader.Trailer?.Remove("Encrypt");
+    }
+
+    private PdfEncryptor? _encryptor;
+
+    /// <summary>Random bytes behind a stand-in owner password: as hex, 32 characters, the most
+    /// the RC4 handlers' padded password holds.</summary>
+    private const int RandomOwnerPasswordBytes = 16;
+
+#pragma warning disable CS0649
+    private bool _forceWriteId;
+
+#pragma warning restore CS0649
+
+    private static int GetPermissionFlags(DocumentPrivilege priv)
+    {
+        var flags = unchecked((int)0xFFFFF0C0); // Required reserved bits
+        if (priv.AllowPrint) flags |= 1 << 2;
+        if (priv.AllowModifyContents) flags |= 1 << 3;
+        if (priv.AllowCopy) flags |= 1 << 4;
+        if (priv.AllowModifyAnnotations) flags |= 1 << 5;
+        if (priv.AllowFillIn) flags |= 1 << 8;
+        if (priv.AllowScreenReaders) flags |= 1 << 9;
+        if (priv.AllowAssembly) flags |= 1 << 10;
+        if (priv.HighQualityPrinting) flags |= 1 << 11;
+        return flags;
+    }
+
+    /// <summary>
+    /// Optimize document resources by removing unused objects and deduplicating streams,
+    /// and linearize the document for fast web view. Both are applied on the next save.
+    /// </summary>
+    public void Optimize()
+    {
+        OptimizeResources();
+        // Optimize() also enables fast-web-view (linearization) on the next save,
+        // so that Document.Optimize() produces a
+        // linearized output. LinearizeDocument() sets the same flag.
+        _linearize = true;
+    }
+
+    /// <summary>
+    /// Process paragraphs in the document (layout step before save).
+    /// Renders queued paragraphs (TextFragment, Heading, Table, HtmlFragment, ...) and
+    /// applies TOC info to each page's content stream. Idempotent; the same pass runs
+    /// again at Save but each page is gated by Page.LayoutApplied.
+    /// </summary>
+    public void ProcessParagraphs() => ApplyPageContent();
+
+    /// <summary>
+    /// Gets or sets a flag indicating whether the document should be optimized for size on save.
+    /// When true, redundant data is removed during save to reduce file size.
+    /// </summary>
+    public bool OptimizeSize { get; set; }
+
+    /// <summary>When true, the standard 14 PostScript fonts (Helvetica /
+    /// Times / Courier × 4 styles + Symbol + ZapfDingbats) are embedded
+    /// into the saved document so the output renders identically without
+    /// relying on viewer-side font fallbacks. Stored only; the saver does
+    /// not currently embed the Standard 14 font files.</summary>
+    public bool EmbedStandardFonts { get; set; }
+
+    /// <summary>When true, the parser tolerates corrupted indirect-object
+    /// declarations (extra/garbled bytes between objects) instead of
+    /// throwing. Stored only; the parser is already lenient about most
+    /// malformed input.</summary>
+    public bool IgnoreCorruptedObjects { get; set; }
+
+    private HashSet<int>? _reachableObjects;
+
+    private bool _prunedFontsThisSave;
+
+    // ── PDF/A conversion ────────────────────────────────────────────────────
+
+    /// <summary>True for a CONFORMANCE target (PDF/A, PDF/X, PDF/UA …) as opposed to a
+    /// plain version target. Only a conformance target carries the embed-everything
+    /// requirement that overrides a face's licence.</summary>
+    private static bool IsConformanceTarget(Aspose.Pdf.PdfFormat format) =>
+        format is not (Aspose.Pdf.PdfFormat.v_1_0 or Aspose.Pdf.PdfFormat.v_1_1
+            or Aspose.Pdf.PdfFormat.v_1_2 or Aspose.Pdf.PdfFormat.v_1_3 or Aspose.Pdf.PdfFormat.v_1_4
+            or Aspose.Pdf.PdfFormat.v_1_5 or Aspose.Pdf.PdfFormat.v_1_6 or Aspose.Pdf.PdfFormat.v_1_7
+            or Aspose.Pdf.PdfFormat.v_2_0 or Aspose.Pdf.PdfFormat.Pdf);
+
+    /// <summary>The document's permanent file ID (first trailer /ID entry) as
+    /// uppercase hex, or null when the trailer carries no /ID — the value the
+    /// signed-file refusal stamps as the log problem's ObjectID.</summary>
+    private string? PermanentFileIdHex()
+    {
+        var id = Id?.Original;
+        return string.IsNullOrEmpty(id) ? null : id;
+    }
+
+    private Aspose.Pdf.PdfFormat? _lastConvertedFormat;
+
+    /// <summary>A size-optimized conversion, or OptimizeResources with CompressObjects, asked
+    /// the next save to pack objects into compressed object streams even when the source had
+    /// none.</summary>
+    private bool _packObjectsOnSave;
+
+    /// <summary>True once a PDF/A conversion succeeded on this instance. Validation
+    /// of file-structure rules that conversion repairs on save (e.g. the PDF/A-1
+    /// xref-stream prohibition) treats the document as already fixed.</summary>
+    internal bool PdfAConversionApplied => _lastConvertedFormat is not null;
+
+    /// <summary>The last conformance format a successful Convert applied on this
+    /// instance, for validation rules that treat conversion-repaired dimensions
+    /// as fixed (see <see cref="PdfAConversionApplied"/>).</summary>
+    internal Aspose.Pdf.PdfFormat? LastConvertedFormat => _lastConvertedFormat;
+
     // The 4 public static Convert(src, LoadOptions, dst, SaveOptions)
     // overloads are deferred: in this FOSS branch HtmlLoadOptions /
     // MdLoadOptions / SvgLoadOptions don't derive from LoadOptions, so a
@@ -602,7 +679,8 @@ public sealed partial class Document : IDisposable
     /// Internal conversion implementation.
     /// </summary>
     /// <summary>Round content-stream real literals whose magnitude exceeds the PDF/A-1
-    /// implementation limit (32767) and that carry a fractional part, to plain integers.
+    /// implementation limit (32767), to plain integers. A real token is a real whatever its
+    /// fraction: "84295.000000" breaks the limit, "84295" (an integer) does not.
     /// String (…), hex &lt;…&gt; and comment regions are left untouched. Returns the
     /// rewritten bytes, or null when nothing needed changing.</summary>
     private static byte[]? RoundOutOfRangeReals(byte[] content)
@@ -678,7 +756,9 @@ public sealed partial class Document : IDisposable
                     var token = System.Text.Encoding.ASCII.GetString(content, start, i - start);
                     if (double.TryParse(token, System.Globalization.NumberStyles.Float,
                             System.Globalization.CultureInfo.InvariantCulture, out var v)
-                        && Math.Abs(v) >= 32767 && v != Math.Truncate(v))
+#pragma warning disable S1244 // integrality test - exact by definition
+                        && Math.Abs(v) >= 32767 && (Math.Abs(v) > 32767 || v != Math.Truncate(v)))
+#pragma warning restore S1244
                     {
                         var repl = Math.Round(v).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
                         foreach (var rb in System.Text.Encoding.ASCII.GetBytes(repl)) outBytes.Add(rb);

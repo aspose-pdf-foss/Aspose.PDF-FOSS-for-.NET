@@ -17,7 +17,7 @@ public partial class WatermarkArtifact : Artifact
         {
             var rad2 = Rotation * Math.PI / 180;
             var rc = Math.Cos(rad2); var rs = Math.Sin(rad2);
-            var cx2 = tw.pageWidth / 2; var cy2 = tw.pageHeight / 2;
+            var (cx2, cy2) = RotationPivot(tw.pageWidth, tw.pageHeight);
             double re = tw.x * rc - tw.y * rs + cx2 * (1 - rc) + cy2 * rs;
             double rf = tw.x * rs + tw.y * rc + cy2 * (1 - rc) - cx2 * rs;
             // [rotation] × [pageRot] (row-vector composition).
@@ -49,8 +49,7 @@ public partial class WatermarkArtifact : Artifact
             var rad = Rotation * Math.PI / 180;
             var cos = Math.Cos(rad);
             var sin = Math.Sin(rad);
-            var cx = tw.pageWidth / 2;
-            var cy = tw.pageHeight / 2;
+            var (cx, cy) = RotationPivot(tw.pageWidth, tw.pageHeight);
             tw.rotationCm = $"{WatermarkNum(tw, cos)} {WatermarkNum(tw, sin)} {WatermarkNum(tw, -sin)} {WatermarkNum(tw, cos)} " +
                 $"{WatermarkNum(tw, tw.x * cos - tw.y * sin + cx * (1 - cos) + cy * sin)} " +
                 $"{WatermarkNum(tw, tw.x * sin + tw.y * cos + cy * (1 - cos) - cx * sin)} cm";
@@ -66,5 +65,10 @@ public partial class WatermarkArtifact : Artifact
             tw.inner.Append($"({EscapeTextLiteral(tw.lines[i])}) Tj\n");
         }
     }
+    /// <summary>The point a rotated watermark turns about: the Position the caller gave its text box, else the page
+    /// centre the aligned text is placed around.</summary>
+    private (double x, double y) RotationPivot(double pageWidth, double pageHeight)
+        => Position is { } pos ? (pos.X, pos.Y) : (pageWidth / 2, pageHeight / 2);
+
     private static string WatermarkNum(TextWatermarkBuildState tw, double v) => v.ToString("0.####", tw.ci);
 }

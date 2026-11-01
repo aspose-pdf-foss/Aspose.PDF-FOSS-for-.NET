@@ -9,13 +9,13 @@ public sealed partial class TableAbsorber
     // The model, fitted to the expected row counts on the two probed fixtures:
     //  * a line splits into CELLS at any horizontal gap wider than
     //    BorderlessCellGapEm of the line's font size (a word space is ~0.3 em, a
-    //    column gap at least one);
+    //    column gap at least one),
     //  * a line with at least two cells is TABULAR; a region is a run of tabular
     //    lines in which each line's cells overlap the columns seen so far (a cell
-    //    bridging two columns merges them);
+    //    bridging two columns merges them),
     //  * a tabular line filling fewer than half the region's columns continues the
     //    row above it (wrapped cell content) whether or not it aligns; it does not
-    //    open a row;
+    //    open a row,
     //  * single-cell lines (titles, prose) bound the region on either side.
 
     /// <summary>Horizontal gap, in em of the line's font size, that separates two

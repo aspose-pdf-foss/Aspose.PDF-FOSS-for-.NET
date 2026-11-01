@@ -18,16 +18,16 @@ internal static partial class HtmlToPdfConverter
     // Measured geometry:
     //  - the page keeps the A4 height and GROWS its width to the wrapper:
     //    90 + 1007 px · 0.75 + 90 = 935.25 pt (the expected page measures
-    //    935.1 × 842);
+    //    935.1 × 842),
     //  - the html canvas colour fills exactly the CONTENT box (margins stay
     //    white), the body border-top strokes 10 px black across it, and the
-    //    55 px #header paints its own white over the wrapper's #ccc;
+    //    55 px #header paints its own white over the wrapper's #ccc,
     //  - the wrapper's #ccc runs from the header's bottom to the bottom of
-    //    the #col2 input row (196.3 pt from the top);
+    //    the #col2 input row (196.3 pt from the top),
     //  - the .welcome list sets its first glyph top 15.1 pt under the banner
     //    top and paces 12 pt per item (16 px lines of the .85em body), text
     //    40 px inside the content edge (UA ul padding), bullets 6.3 pt left
-    //    of the text;
+    //    of the text,
     //  - both text inputs render the default 157.5 px × ~22 px sunken box
     //    (the header's at the float-cleared 220 px, the col2 one at the
     //    content edge), the empty submit is a 19×9 px bevel right of the
@@ -82,16 +82,16 @@ internal static partial class HtmlToPdfConverter
             || po.html.IndexOf("sButton", System.StringComparison.Ordinal) < 0) return null;
 
         po.inv = System.Globalization.CultureInfo.InvariantCulture;
-        po.wrapM = Regex.Match(po.html, @"#wrapper\s*\{[^}]*(?<![-\w])width\s*:\s*([\d.]+)\s*px",
+        po.wrapM = SafeRegex.Match(po.html, @"#wrapper\s*\{[^}]*(?<![-\w])width\s*:\s*([\d.]+)\s*px",
             RegexOptions.IgnoreCase);
         if (!po.wrapM.Success) return null;
         po.wrapPt = PortalPx(po, po.wrapM.Groups[1].Value);
 
-        po.hdrM = Regex.Match(po.html, @"#header\s*\{[^}]*(?<![-\w])height\s*:\s*([\d.]+)\s*px",
+        po.hdrM = SafeRegex.Match(po.html, @"#header\s*\{[^}]*(?<![-\w])height\s*:\s*([\d.]+)\s*px",
             RegexOptions.IgnoreCase);
         po.headerPt = po.hdrM.Success ? PortalPx(po, po.hdrM.Groups[1].Value) : 41.25;
 
-        po.barM = Regex.Match(po.html, @"(?<![-\w])body\s*\{[^}]*border-top\s*:\s*solid\s+([\d.]+)\s*px",
+        po.barM = SafeRegex.Match(po.html, @"(?<![-\w])body\s*\{[^}]*border-top\s*:\s*solid\s+([\d.]+)\s*px",
             RegexOptions.IgnoreCase);
         po.barPt = po.barM.Success ? PortalPx(po, po.barM.Groups[1].Value) : 7.5;
 
@@ -99,7 +99,7 @@ internal static partial class HtmlToPdfConverter
         po.wrapBg = PortalCssColor(po, "#wrapper", (0.8, 0.8, 0.8));
 
         po.fs = 10.2;
-        po.bodyFsM = Regex.Match(po.html, @"(?<![-\w])body\s*\{[^}]*font-size\s*:\s*(\.?[\d.]+)\s*em",
+        po.bodyFsM = SafeRegex.Match(po.html, @"(?<![-\w])body\s*\{[^}]*font-size\s*:\s*(\.?[\d.]+)\s*em",
             RegexOptions.IgnoreCase);
         if (po.bodyFsM.Success && double.TryParse(po.bodyFsM.Groups[1].Value,
                 System.Globalization.NumberStyles.Float, po.inv, out var bodyEm) && bodyEm > 0)
@@ -108,7 +108,6 @@ internal static partial class HtmlToPdfConverter
         po.pageW = System.Math.Max(PsA4WidthPt, PsMarginLr * 2 + po.wrapPt);
         po.pageH = PsA4HeightPt;
         po.left = PsMarginLr;
-        po.right = po.left + po.wrapPt;
         po.top = PsMarginTb;
         po.bottom = po.pageH - PsMarginTb;
 
@@ -135,7 +134,7 @@ internal static partial class HtmlToPdfConverter
         PortalRect(po, po.subX + 2.0, po.subTop + 2.0, PsSubmitWPt - 4.0, PsSubmitHPt - 4.0, (0.66, 0.66, 0.66));
 
         po.items = new List<string>();
-        po.welcomeM = Regex.Match(po.html,
+        po.welcomeM = SafeRegex.Match(po.html,
             @"class=""welcome""[^>]*>(?<b>[\s\S]*?)</ul\s*>", RegexOptions.IgnoreCase);
         RenderPortalPanels(po);
 

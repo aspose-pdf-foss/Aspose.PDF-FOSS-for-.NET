@@ -235,8 +235,8 @@ internal static class XfdfAppearanceCodec
     private static byte[] FromHex(string text)
     {
         var compact = new StringBuilder(text.Length);
-        foreach (var c in text)
-            if (!char.IsWhiteSpace(c)) compact.Append(c);
+        foreach (var c in text.Where(c => !char.IsWhiteSpace(c)))
+            compact.Append(c);
         return Compat.FromHexString(compact.ToString());
     }
 }

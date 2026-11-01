@@ -41,7 +41,7 @@ internal static partial class HtmlToPdfConverter
     {
         var body = DnnInnerDiv(dw.inner, dw.openIdx);
         if (body is null) { dw.pos = dw.openIdx + dw.open.Length; return; }
-        var wm = Regex.Match(dw.st, @"width\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
+        var wm = SafeRegex.Match(dw.st, @"width\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
         if (wm.Success) dw.runX += DtpNum(wm.Groups[1].Value);
         if (dw.row is { Pairs.Count: > 0 } && dw.row.Pairs[^1].Value.Length == 0)
         {
@@ -56,7 +56,7 @@ internal static partial class HtmlToPdfConverter
     {
         var body = DnnInnerDiv(dw.inner, dw.openIdx);
         if (body is null) { dw.pos = dw.openIdx + dw.open.Length; return; }
-        var wm = Regex.Match(dw.st, @"width\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
+        var wm = SafeRegex.Match(dw.st, @"width\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
         // Controls.css .ContainerFieldLabelHoriz { width: 170px } —
         // inline widths override; border-box, text pads 10px inside.
         var wpx = wm.Success ? DtpNum(wm.Groups[1].Value) : 170.0;

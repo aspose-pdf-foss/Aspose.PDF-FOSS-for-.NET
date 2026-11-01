@@ -43,8 +43,10 @@ internal static partial class AutoTagger
                 pw.TableCells[i] = map;
                 pw.Tables.RemoveAt(j);
                 pw.TableCells.RemoveAt(j);
+#pragma warning disable S127 // an entry before the cursor was removed from the list - the cursor moves back with it
                 if (j < i) i--;
                 j = ruledCount - 1;
+#pragma warning restore S127
             }
     }
 

@@ -24,17 +24,17 @@ internal static partial class HtmlToPdfConverter
         if (cfg.tblClassDecl is not null && cfg.tblClassDecl.TryGetValue("border", out var obv))
         {
             var t = obv.Trim();
-            if (!t.StartsWith("0") && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
+            if (!t.StartsWith('0') && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
             {
                 double obw = 1 * PxToPt;
-                var wm = Regex.Match(t, @"(\d+(?:\.\d+)?)\s*px");
+                var wm = SafeRegex.Match(t, @"(\d+(?:\.\d+)?)\s*px");
                 if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var obwv) && obwv > 0)
                     obw = obwv * PxToPt;
                 cfg.outerBorder = new BorderInfo(BorderSide.Box, obw, ParseCssColor(t) ?? Color.Black);
             }
         }
-        // A class rule that declares all FOUR border-side longhands (".blackBorder {
-        // border-top: 1px solid black; border-right: …; }") boxes what carries the
+        // A class rule that declares all FOUR border-side longhands (".blackBorder { border-top:
+        // 1px solid black; border-right: …; }") boxes what carries the
         // class. This markup shape repeats the class on the table AND on every cell
         // (the same repetition CellClassRule reads), so the sides become a box on
         // every cell and the collapsed grid's outer frame alike — the "top border
@@ -46,11 +46,11 @@ internal static partial class HtmlToPdfConverter
             && cfg.tblClassDecl.TryGetValue("border-left", out var clsBl))
         {
             static bool Visible(string v) =>
-                !v.Trim().StartsWith("0") && v.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0;
+                !v.Trim().StartsWith('0') && v.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0;
             if (Visible(clsBt) && Visible(clsBr) && Visible(clsBb) && Visible(clsBl))
             {
                 double clsBw = 1 * PxToPt;
-                var wm = Regex.Match(clsBt, @"(\d+(?:\.\d+)?)\s*px");
+                var wm = SafeRegex.Match(clsBt, @"(\d+(?:\.\d+)?)\s*px");
                 if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var clsBwv) && clsBwv > 0)
                     clsBw = clsBwv * PxToPt;
                 var clsBc = ParseCssColor(clsBt) ?? Color.Black;
@@ -63,10 +63,10 @@ internal static partial class HtmlToPdfConverter
             if (tdRule.TryGetValue("border-top", out var btv))
             {
                 var t = btv.Trim();
-                if (!t.StartsWith("0") && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
+                if (!t.StartsWith('0') && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     double bw2 = 1 * PxToPt;
-                    var wm = Regex.Match(t, @"(\d+(?:\.\d+)?)\s*px");
+                    var wm = SafeRegex.Match(t, @"(\d+(?:\.\d+)?)\s*px");
                     if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var bwv) && bwv > 0)
                         bw2 = bwv * PxToPt;
                     cfg.cellSideBorder = new BorderInfo(BorderSide.Top, bw2, ParseCssColor(t) ?? Color.Black);
@@ -80,10 +80,10 @@ internal static partial class HtmlToPdfConverter
             if (thRule.TryGetValue("border-bottom", out var hbv))
             {
                 var t = hbv.Trim();
-                if (!t.StartsWith("0") && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
+                if (!t.StartsWith('0') && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     double hw = 1 * PxToPt;
-                    var wm = Regex.Match(t, @"(\d+(?:\.\d+)?)\s*px");
+                    var wm = SafeRegex.Match(t, @"(\d+(?:\.\d+)?)\s*px");
                     if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var hwv) && hwv > 0)
                         hw = hwv * PxToPt;
                     ps.headerBorder = new BorderInfo(BorderSide.Bottom, hw, ParseCssColor(t) ?? Color.Black);

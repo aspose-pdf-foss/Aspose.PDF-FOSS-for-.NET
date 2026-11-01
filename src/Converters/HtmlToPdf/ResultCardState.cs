@@ -25,7 +25,6 @@ private sealed class ResultCardState
     public double contentX;
     public double contentW;
     public (double asc, double sum) arial;
-    public (double asc, double sum) serif;
     public System.Text.StringBuilder sb = null!;
     public System.Globalization.CultureInfo inv = null!;
     public double y;

@@ -20,10 +20,10 @@ internal static partial class HtmlToPdfConverter
         var uaSpacerSeg = false;
         if (fbk.cv.profile.uaBareDoc
             && HtmlFragment.StripHtmlTags(seg).Trim().Length == 0
-            && Regex.IsMatch(seg, @"<p\b[^>]*>\s*<br\b", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(seg, @"<p\b[^>]*>\s*<br\b", RegexOptions.IgnoreCase))
         {
-            var segTrim = Regex.Replace(seg, @"^\s*</p\s*>", "", RegexOptions.IgnoreCase);
-            segTrim = Regex.Replace(segTrim, @"<p\b[^>]*>\s*$", "", RegexOptions.IgnoreCase);
+            var segTrim = SafeRegex.Replace(seg, @"^\s*</p\s*>", "", RegexOptions.IgnoreCase);
+            segTrim = SafeRegex.Replace(segTrim, @"<p\b[^>]*>\s*$", "", RegexOptions.IgnoreCase);
             seg = segTrim;
             uaSpacerSeg = true;
         }
@@ -79,7 +79,7 @@ internal static partial class HtmlToPdfConverter
         // (`</table><br><span><br>text`) is an ordinary line box and costs one line, not a
         // paragraph — marking it too put a whole extra empty line under every such table.
         if (fbk.cv.profile.uaBareDoc && segIdx > 0 && segs[segIdx - 1].isTable
-            && Regex.IsMatch(seg, @"^\s*(?:<br\b[^>]*>\s*)*</?p\b", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(seg, @"^\s*(?:<br\b[^>]*>\s*)*</?p\b", RegexOptions.IgnoreCase))
             for (var sb3 = before; sb3 < fbk.list.Count; sb3++)
             {
                 if (!fbk.list[sb3].IsHardBreak) break;
@@ -89,7 +89,7 @@ internal static partial class HtmlToPdfConverter
                 // (a UA-grid document's bare breaks between its tables are line boxes of the UA base font)
                 ?? (fbk.cv.profile.uaBareDoc || (fbk.cv.profile.uaGridSheet) ? "Times New Roman" : null)) is { } segBrFace
             && WinMetricsFor(segBrFace) is { } segBr)
-            foreach (Match _ in Regex.Matches(seg, @"<br\b[^>]*>", RegexOptions.IgnoreCase))
+            foreach (Match _ in SafeRegex.Matches(seg, @"<br\b[^>]*>", RegexOptions.IgnoreCase))
                 fbk.list.Add(new Block
                 {
                     Text = "", IsHardBreak = true, IsLineBreak = true,
@@ -108,7 +108,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var (isTable, html) in segs.Take(segIdx))
         {
             if (isTable) continue;
-            foreach (Match m in SplitContainerTagRx.Matches(html))
+            foreach (Match m in SafeRegex.Matches(SplitContainerTagRx, html))
             {
                 var tag = m.Groups["tag"].Value.ToLowerInvariant();
                 if (m.Groups["close"].Length > 0)
@@ -128,18 +128,18 @@ internal static partial class HtmlToPdfConverter
         //  stretch after a grid only through it)
         var sb = new StringBuilder();
         foreach (var (_, text) in open)
-            if (ReopenTypographyRx.IsMatch(text)
-                || (fieldsClass is not null && Regex.IsMatch(text, @"class\s*=\s*[""']?(?:[^""'>]*\s)?" + Regex.Escape(fieldsClass) + @"(?:[\s""'>]|$)", RegexOptions.IgnoreCase)))
+            if (SafeRegex.IsMatch(ReopenTypographyRx, text)
+                || (fieldsClass is not null && SafeRegex.IsMatch(text, @"class\s*=\s*[""']?(?:[^""'>]*\s)?" + Regex.Escape(fieldsClass) + @"(?:[\s""'>]|$)", RegexOptions.IgnoreCase)))
                 sb.Append(text);
         return sb.ToString();
     }
 
     /// <summary>The typography a re-opened container must carry to be worth re-opening.</summary>
     private static readonly Regex ReopenTypographyRx = new Regex(
-        @"(?<![-\w])(font-size|font-family|font-weight)\s*:", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"(?<![-\w])(font-size|font-family|font-weight)\s*:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The inline container tags a table can split: they style what follows them.</summary>
     private static readonly Regex SplitContainerTagRx = new Regex(
         @"<(?<close>/?)(?<tag>div|span|font|center|b|i|u|strong|em)\b(?<attrs>[^>]*)>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 }

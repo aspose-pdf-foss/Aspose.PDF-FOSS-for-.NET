@@ -41,6 +41,21 @@ public sealed partial class Document
         if (markInfo.Get("Suspects") is not null) markInfo.Set("Suspects", PdfBoolean.False);
     }
 
+    // PDF 1.4, which PDF/A-1 is written against, defines /Marked alone; the later parts sit on
+    // a PDF that also defines the other two.
+    private static readonly string[] PartOneMarkInfoEntries = ["Marked"];
+    private static readonly string[] MarkInfoEntries = ["Marked", "UserProperties", "Suspects"];
+
+    /// <summary>The mark information dictionary keeps only the entries the target's PDF
+    /// defines: a producer's private flag beside /Marked is one a validator rejects.</summary>
+    private void DropNonStandardMarkInfoEntries(string? part)
+    {
+        if (_reader.ResolveDict(_reader.Catalog.Get("MarkInfo")) is not { } markInfo) return;
+        var standard = part == "1" ? PartOneMarkInfoEntries : MarkInfoEntries;
+        foreach (var key in markInfo.Keys.Where(k => !standard.Contains(k)).ToList())
+            markInfo.Remove(key);
+    }
+
     /// <summary>Report each distinct structure type used in the tree that is
     /// neither standard nor role-mapped (following /RoleMap chains) to a
     /// standard type — the clause-6.8.3.4 vocabulary, which parts 2 and 3 number
@@ -85,7 +100,21 @@ public sealed partial class Document
         Walk(structRoot, 0);
     }
 
-    private void CheckImplementationLimits(PdfFormatConversionOptions options, string part)
+    /// <summary>The content problems a conversion reports - the implementation limits of parts 1 and 2, a shown
+    /// .notdef glyph in parts 2 and 3 - found the same way for a validation, which changes nothing. The .notdef
+    /// shows are the conversion's to settle: once it has run on this document, what it left of them (a show that
+    /// mixes CID 0 with visible text) stands as its repaired state, as the cross-reference rule does.</summary>
+    internal List<PdfAViolation> ReportContentProblems(string part)
+    {
+        var log = new List<PdfAViolation>();
+        if (part is "1" or "2") CheckImplementationLimits(log, part, repairReals: false);
+        if (part is "2" or "3" && !PdfAConversionApplied) ReportNotdefGlyphReferences(log, rememberFonts: false);
+        return log;
+    }
+
+    /// <summary>The implementation limits of PDF/A-1 and PDF/A-2, logged into <paramref name="log"/>; a conversion
+    /// also repairs the out-of-range reals of PDF/A-1 (<paramref name="repairReals"/>), a validation only reports.</summary>
+    private void CheckImplementationLimits(List<PdfAViolation> log, string part, bool repairReals)
     {
         // Probed thresholds: effective q/Q nesting caps at 28 (the page's depth at
         // the Do, plus one implicit save entering the form, plus the form's own
@@ -95,51 +124,24 @@ public sealed partial class Document
         var maxString = part == "1" ? 32767 : 16383;
         var clause = part == "1" ? "6.1.12" : "6.1.13";
 
-        void AddNesting() => options.ConversionLog.Add(new PdfAViolation
+        void AddNesting() => log.Add(new PdfAViolation
         {
             Rule = "ImplementationLimits",
             Clause = clause,
             Convertable = false,
             Description = "Maximum number of q/Q operators nesting levels exceeded",
         });
-        void AddString() => options.ConversionLog.Add(new PdfAViolation
+        void AddString() => log.Add(new PdfAViolation
         {
             Rule = "ImplementationLimits",
             Clause = clause,
             Convertable = false,
             Description = "The PDF string object length is larger that allowed by implementation limits",
         });
-        void CheckShow(Operator op)
-        {
-            if (op is Aspose.Pdf.Operators.ShowText st && st.Text is { } t && t.Length > maxString)
-                AddString();
-        }
-
         foreach (var page in Pages)
         {
-            int depth = 0, maxDepth = 0, depthAtFirstDo = 0;
-            var sawDo = false;
-            try
-            {
-                foreach (var op in page.Contents)
-                {
-                    switch (op)
-                    {
-                        case Aspose.Pdf.Operators.GSave:
-                            depth++;
-                            if (depth > maxDepth) maxDepth = depth;
-                            break;
-                        case Aspose.Pdf.Operators.GRestore:
-                            depth--;
-                            break;
-                        case Aspose.Pdf.Operators.Do when !sawDo:
-                            sawDo = true;
-                            depthAtFirstDo = depth;
-                            break;
-                    }
-                    CheckShow(op);
-                }
-            }
+            int maxDepth, depthAtFirstDo;
+            try { (maxDepth, depthAtFirstDo) = ScanOperatorLimits(page.Contents, maxString, AddString); }
             catch { continue; /* unparsable content: no limits verdict for this page */ }
             if (maxDepth > maxNesting) AddNesting();
 
@@ -147,32 +149,57 @@ public sealed partial class Document
             for (var i = 1; i <= forms.Count; i++)
             {
                 var form = forms[i];
-                int fDepth = 0, fMax = 0;
-                try
-                {
-                    foreach (var op in form.Contents)
-                    {
-                        if (op is Aspose.Pdf.Operators.GSave) { fDepth++; if (fDepth > fMax) fMax = fDepth; }
-                        else if (op is Aspose.Pdf.Operators.GRestore) fDepth--;
-                        CheckShow(op);
-                    }
-                }
+                int fMax;
+                try { (fMax, _) = ScanOperatorLimits(form.Contents, maxString, AddString); }
                 catch { continue; }
                 // Call-chain contribution: the page depth where the form is invoked
                 // plus the implicit graphics-state save on entering the XObject.
                 if (depthAtFirstDo + 1 + fMax > maxNesting) AddNesting();
 
-                if (part == "1")
-                    FlagAndFixFormOutOfRangeReals(form, clause, options);
+                if (part == "1" && repairReals)
+                    FlagAndFixFormOutOfRangeReals(form, clause, log);
             }
         }
+    }
+
+    /// <summary>The deepest q/Q nesting over the operators and the depth at the first Do, with
+    /// <paramref name="overlongString"/> called for every Tj whose text exceeds
+    /// <paramref name="maxString"/>. The operators are scanned by name, their lines not kept,
+    /// and a show string is parsed in full only when its literal is long enough to exceed the
+    /// limit, since escapes and hex pairs only shorten the text it decodes to.</summary>
+    private static (int maxDepth, int depthAtFirstDo) ScanOperatorLimits(OperatorCollection contents, int maxString, Action overlongString)
+    {
+        int depth = 0, maxDepth = 0, depthAtFirstDo = 0;
+        var sawDo = false;
+        contents.ScanOperators(op =>
+        {
+            switch (op.Name)
+            {
+                case "q":
+                    depth++;
+                    if (depth > maxDepth) maxDepth = depth;
+                    break;
+                case "Q":
+                    depth--;
+                    break;
+                case "Do" when !sawDo:
+                    sawDo = true;
+                    depthAtFirstDo = depth;
+                    break;
+                case "Tj" when op.NameAt - 2 > maxString:
+                    if (TypedOperatorParser.Parse(op.Line) is Aspose.Pdf.Operators.ShowText st && st.Text is { } t && t.Length > maxString)
+                        overlongString();
+                    break;
+            }
+        });
+        return (maxDepth, depthAtFirstDo);
     }
 
     /// <summary>PDF/A-1 object-level real check: a numeric in the form XObject's
     /// dictionary arrays (BBox / Matrix) whose magnitude exceeds 32767 while carrying
     /// a non-zero fraction is logged (convertable) and repaired by truncating the
     /// fraction toward zero.</summary>
-    private void FlagAndFixFormOutOfRangeReals(XForm form, string clause, PdfFormatConversionOptions options)
+    private void FlagAndFixFormOutOfRangeReals(XForm form, string clause, List<PdfAViolation> log)
     {
         const double maxReal = 32767;
         var flagged = false;
@@ -182,18 +209,54 @@ public sealed partial class Document
             for (var i = 0; i < arr.Count; i++)
             {
                 if (arr[i] is not PdfReal r) continue;
+#pragma warning disable S1244 // integrality test - exact by definition
                 if (Math.Abs(r.Value) <= maxReal || r.Value == Math.Truncate(r.Value)) continue;
+#pragma warning restore S1244
                 arr.ReplaceAt(i, new PdfReal(Math.Truncate(r.Value)));
                 flagged = true;
             }
         }
         if (flagged)
-            options.ConversionLog.Add(new PdfAViolation
+            log.Add(new PdfAViolation
             {
                 Rule = "ImplementationLimits",
                 Clause = clause,
                 Description = "Real value is outside the implementation limits",
             });
+    }
+
+    /// <summary>ISO 19005-1 clause 6.1.11: a PDF/A-1 file embeds no file. The embedded-files
+    /// name tree goes, and with it the catalog entries that exist only to present or relate
+    /// embedded files: the associated-files array and the portfolio. A tree that lists no
+    /// file is an empty key and goes whatever the action; under ConvertErrorAction.None
+    /// files stay and the conversion reports failure.</summary>
+    private void RemoveEmbeddedFilesForPartOne(PdfAConvertState pa)
+    {
+        var names = _reader.ResolveDict(_reader.Catalog.Get("Names"));
+        var hasTree = names?.ContainsKey("EmbeddedFiles") ?? false;
+        if (!hasTree && !_reader.Catalog.ContainsKey("AF")) return;
+
+        var tree = _reader.ResolveDict(names?.Get("EmbeddedFiles"));
+        var holdsFiles = _reader.Resolve(_reader.Catalog.Get("AF")) is PdfArray { Count: > 0 }
+            || (tree is not null && (tree.ContainsKey("Kids")
+                || _reader.Resolve(tree.Get("Names")) is PdfArray { Count: > 0 }));
+        if (holdsFiles)
+        {
+            pa.options.ConversionLog.Add(new PdfAViolation
+            {
+                Rule = "EmbeddedFiles",
+                Clause = "6.1.11",
+                Description = "The key 'EmbeddedFiles' is prohibited for PDF object Names",
+                Convertable = pa.strip,
+            });
+            if (!pa.strip) return;
+        }
+
+        names?.Remove("EmbeddedFiles");
+        if (names is not null && !names.Keys.Any()) _reader.Catalog.Remove("Names");
+        _reader.Catalog.Remove("AF");
+        _reader.Catalog.Remove("Collection");
+        _embeddedFiles = null; // collection re-materialises from the tree
     }
 
     /// <summary>Move a FileAttachment annotation's embedded payload into the
@@ -262,7 +325,7 @@ public sealed partial class Document
 
         for (var i = arr.Count - 2; i >= 0; i -= 2)
         {
-            var fsDict = _reader.ResolveDict(arr[i + 1]);
+            var fsDict = ResolveFileSpecification(arr[i + 1]);
             var ef = fsDict is null ? null : _reader.ResolveDict(fsDict.Get("EF"));
             var stream = ef is null ? null : _reader.ResolveStream(ef.Get("F"));
             if (stream is null) continue;
@@ -383,7 +446,7 @@ public sealed partial class Document
         {
             var key = (_reader.Resolve(arr[i]) as PdfString)?.ToText() ?? string.Empty;
             var fsRef = arr[i + 1];
-            var fsDict = _reader.ResolveDict(fsRef);
+            var fsDict = ResolveFileSpecification(fsRef);
             if (fsDict is null) continue;
 
             // The invoice XML is the alternative representation of the document's content.
@@ -426,17 +489,22 @@ public sealed partial class Document
         var names = _reader.ResolveDict(_reader.Catalog.Get("Names"));
         var efTree = names is not null ? _reader.ResolveDict(names.Get("EmbeddedFiles")) : null;
         var arr = efTree is not null ? _reader.Resolve(efTree.Get("Names")) as PdfArray : null;
-        if (arr is null) return;
+        // The files of the file attachments the conversion kept are associated files as well.
+        var attachments = _attachmentFileSpecs;
+        _attachmentFileSpecs = null;
+        if (arr is null && attachments is null) return;
 
         var afArray = _reader.Resolve(_reader.Catalog.Get("AF")) as PdfArray ?? new PdfArray();
         var present = new HashSet<int>();
         foreach (var item in afArray)
             if (item is PdfIndirectRef r) present.Add(r.ObjectNumber);
 
-        for (var i = 0; i + 1 < arr.Count; i += 2)
+        var specs = new List<PdfObject>();
+        for (var i = 0; arr is not null && i + 1 < arr.Count; i += 2) specs.Add(arr[i + 1]);
+        if (attachments is not null) specs.AddRange(attachments);
+        foreach (var fsRef in specs)
         {
-            var fsRef = arr[i + 1];
-            var fsDict = _reader.ResolveDict(fsRef);
+            var fsDict = ResolveFileSpecification(fsRef);
             if (fsDict is null) continue;
 
             if (fsDict.Get("AFRelationship") is null)
@@ -523,6 +591,43 @@ public sealed partial class Document
         if (Metadata is null) return;
         Metadata.Remove("pdfaid:part");
         Metadata.Remove("pdfaid:conformance");
+    }
+
+    /// <summary>The form's fields carry actions of their own, apart from their widgets on the pages: a
+    /// calculation or format script sits in the /AA of the field, which no page lists. Each prohibited one
+    /// is logged, and removed when the conversion strips.</summary>
+    private void RemoveProhibitedFieldActions(PdfFormatConversionOptions options, bool strip)
+    {
+        var form = _reader.ResolveDict(_reader.Catalog.Get("AcroForm"));
+        if (form is null || _reader.Resolve(form.Get("Fields")) is not PdfArray roots) return;
+        var visited = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        var stack = new Stack<PdfObject>(roots);
+        while (stack.Count > 0)
+        {
+            var field = _reader.ResolveDict(stack.Pop());
+            if (field is null || !visited.Add(field)) continue;
+            if (IsProhibitedAction(field.Get("A"), options) && strip) field.Remove("A");
+            if (_reader.ResolveDict(field.Get("AA")) is { } additional)
+            {
+                var prohibited = additional.Keys.Where(key => IsProhibitedAction(additional.Get(key), options)).ToList();
+                if (strip) foreach (var key in prohibited) additional.Remove(key);
+                if (strip && !additional.Keys.Any()) field.Remove("AA");
+            }
+            if (_reader.Resolve(field.Get("Kids")) is PdfArray kids)
+                foreach (var kid in kids) stack.Push(kid);
+        }
+    }
+
+    private bool IsProhibitedAction(PdfObject? value, PdfFormatConversionOptions options)
+    {
+        var type = _reader.ResolveDict(value)?.GetName("S");
+        if (type is null || !ConvertProhibitedActionTypes.Contains(type)) return false;
+        options.ConversionLog.Add(new PdfAViolation
+        {
+            Rule = "ActionType",
+            Description = $"Action type '{type}' is not allowed in PDF/A",
+        });
+        return true;
     }
 
     private static readonly HashSet<string> ConvertProhibitedActionTypes = new(StringComparer.Ordinal)
@@ -646,12 +751,6 @@ public sealed partial class Document
         }
     }
 
-    private bool HasOutputIntent()
-    {
-        var outputIntents = _reader.Resolve(_reader.Catalog.Get("OutputIntents"));
-        return outputIntents is PdfArray { Count: > 0 };
-    }
-
     /// <summary>True when /OutputIntents already carries a /GTS_PDFA1 intent.
     /// The PDF/A conversion must add one otherwise — a source with only a PDF/X
     /// (GTS_PDFX) intent still fails the validator's PDF/A output-intent gate.</summary>
@@ -728,7 +827,9 @@ public sealed partial class Document
         outputIntentDict.Set("OutputConditionIdentifier",
             new PdfString(Compat.Latin1.GetBytes(oci)));
         outputIntentDict.Set("RegistryName",
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
             new PdfString(Compat.Latin1.GetBytes("http://www.color.org")));
+#pragma warning restore S5332
 
         // Embed ICC profile if provided
         if (options.IccProfileFileName is not null && File.Exists(options.IccProfileFileName))
@@ -761,9 +862,18 @@ public sealed partial class Document
         outputIntentDict.Set("Type", new PdfName("OutputIntent"));
         outputIntentDict.Set("S", new PdfName("GTS_PDFA1"));
         outputIntentDict.Set("OutputConditionIdentifier",
-            new PdfString(Compat.Latin1.GetBytes("sRGB IEC61966-2.1")));
+            new PdfString(Compat.Latin1.GetBytes(SrgbIccProfile.ConditionIdentifier)));
         outputIntentDict.Set("RegistryName",
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
             new PdfString(Compat.Latin1.GetBytes("http://www.color.org")));
+#pragma warning restore S5332
+
+        // The intent carries the profile it names (ISO 19005-1 6.2.2): device colours in the
+        // file are only defined through it. The stream sits in the dictionary and the writer
+        // gives it an object of its own.
+        var profile = new PdfDictionary();
+        profile.Set("N", new PdfInteger(SrgbIccProfile.Components));
+        outputIntentDict.Set("DestOutputProfile", new PdfStream(profile, (byte[])SrgbIccProfile.Bytes.Clone()));
 
         var outputIntents = _reader.Resolve(_reader.Catalog.Get("OutputIntents")) as PdfArray;
         if (outputIntents is null)

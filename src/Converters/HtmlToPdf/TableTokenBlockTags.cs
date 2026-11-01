@@ -5,7 +5,7 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>The block and cell tags of a table: the headings, the divs, the cells themselves and the tags that open a run inside one.</summary>
-    private static void OpenTableBlockTag(TableStyleConfig cfg, TableParseState ps, TableColumnModel colModel, Table table, Token tok, string tag, string? cssRunFace)
+    private static void OpenTableBlockTag(TableStyleConfig cfg, TableParseState ps, TableColumnModel colModel, Table table, Token tok, string tag)
     {
         switch (tag)
         {
@@ -38,10 +38,10 @@ internal static partial class HtmlToPdfConverter
                 OpenPreformattedBlock(cfg, ps, colModel, tok);
                 break;
             case "br":
-                OpenLineBreak(cfg, ps, table);
+                OpenLineBreak(cfg, ps);
                 break;
             case "img":
-                HandleImgOpen(ps, colModel, table, tok, tag, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.widenProbe, cfg.redlineCells, cfg.breakAnywhereDoc, cfg.cellFontShorthand, cfg.chainBase, cfg.chainSpacingPt, cfg.chainUnbold, cfg.cssBaseFamily, cfg.cssBasePt, cfg.defaultCellFace, cfg.formGridStrutDropPt, cfg.hasBorder, cfg.inlineFaceRatio, cfg.overDeclaredDraw, cfg.padSide, cfg.uaDocGrid, cfg.uaSerifMin, cfg.ptCellWidths, cfg.bandDialect, cfg.cellLineHeightPt, cssRunFace, cfg.formGridDialect, cfg.formGridStrutPt, cfg.liftNestedTables, cfg.tightExtras, cfg.uaCellBoxes, cfg.borderWidth, cfg.pad, cfg.css, cfg.docCss, cfg.chainRules, cfg.cssAncestors, cfg.inlineSvgs, cfg.nestedHtml, cfg.makeRadio, cfg.availWidthPt, cfg.defaultCellFontPt, cfg.tblStyle, cfg.docElementGrid, cfg.pinnedBodyGrid, cfg.authoredCellChrome, cfg.chainBorderSeparate, cfg.elemRuleBorder, cfg.wordMailCells);
+                HandleImgOpen(ps, table, tok, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.widenProbe, cfg.redlineCells, cfg.cellFontShorthand, cfg.overDeclaredDraw, cfg.padSide, cfg.liftNestedTables, cfg.pad, cfg.inlineSvgs, cfg.wordMailCells, SheetImgMaxWidth(cfg));
                 break;
             case "ol":
             case "ul":
@@ -53,12 +53,15 @@ internal static partial class HtmlToPdfConverter
             case "select":
                 if (cfg.dwFormCells && ps.cell is not null && !tok.IsClose)
                 { ps.dwSelectDepth = 1; ps.dwSelectedOpt = null; ps.dwFirstOpt = null; ps.dwSawSelected = false; }
+                OpenGridFieldCapture(cfg, ps, tok, tag);
                 break;
             case "option":
                 OpenSelectOption(cfg, ps, tok);
+                OpenGridFieldOption(ps, tok);
                 break;
             case "textarea":
                 OpenTextArea(cfg, ps, tok);
+                OpenGridFieldCapture(cfg, ps, tok, tag);
                 break;
             case "input":
                 OpenInputControl(cfg, ps, table, tok);

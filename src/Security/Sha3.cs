@@ -160,8 +160,10 @@ namespace Aspose.Pdf.Security
         }
     }
 
+#pragma warning disable S101, S2257 // public API named after the FIPS 202 algorithm; own managed SHA-3 by design
     /// <summary>SHA3-256 (FIPS 202) — own Keccak implementation.</summary>
     public sealed class Sha3_256 : HashAlgorithm
+#pragma warning restore S101, S2257
     {
         private readonly Sha3Core _core = new Sha3Core(32);
         public Sha3_256() { HashSizeValue = 256; }
@@ -171,8 +173,10 @@ namespace Aspose.Pdf.Security
         protected override byte[] HashFinal() => _core.Digest();
     }
 
+#pragma warning disable S101, S2257 // public API named after the FIPS 202 algorithm; own managed SHA-3 by design
     /// <summary>SHA3-384 (FIPS 202) — own Keccak implementation.</summary>
     public sealed class Sha3_384 : HashAlgorithm
+#pragma warning restore S101, S2257
     {
         private readonly Sha3Core _core = new Sha3Core(48);
         public Sha3_384() { HashSizeValue = 384; }
@@ -182,8 +186,10 @@ namespace Aspose.Pdf.Security
         protected override byte[] HashFinal() => _core.Digest();
     }
 
+#pragma warning disable S101, S2257 // public API named after the FIPS 202 algorithm; own managed SHA-3 by design
     /// <summary>SHA3-512 (FIPS 202) — own Keccak implementation.</summary>
     public sealed class Sha3_512 : HashAlgorithm
+#pragma warning restore S101, S2257
     {
         private readonly Sha3Core _core = new Sha3Core(64);
         public Sha3_512() { HashSizeValue = 512; }
@@ -202,11 +208,19 @@ namespace Aspose.Pdf.Security
     /// </summary>
     public static class HashAlgorithmFactory
     {
+#pragma warning disable S4790 // a digest the caller names, or a content fingerprint; not a password hash
+        /// <summary>An MD5 hash - a content fingerprint (two renders of one page compare equal by
+        /// it), not a signing digest, so it stays off <see cref="DigestHashAlgorithm"/>.</summary>
+        internal static HashAlgorithm CreateMd5() => MD5.Create();
+#pragma warning restore S4790
+
         public static HashAlgorithm CreateHashAlgorithm(DigestHashAlgorithm algorithm)
         {
             switch (algorithm)
             {
+#pragma warning disable S4790 // a digest the caller names, or a content fingerprint; not a password hash
                 case DigestHashAlgorithm.Sha1: return SHA1.Create();
+#pragma warning restore S4790
                 case DigestHashAlgorithm.Sha256: return SHA256.Create();
                 case DigestHashAlgorithm.Sha384: return SHA384.Create();
                 case DigestHashAlgorithm.Sha512: return SHA512.Create();

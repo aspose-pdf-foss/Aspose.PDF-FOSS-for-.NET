@@ -49,7 +49,7 @@ internal static partial class ScanlineFiller
         // Polygon's integer-pixel vertical extent. Floor/ceiling outward so sub-pixel
         // strokes that barely enter row (y-1) or (y+1) still get their partial sf.coverage.
         double yMaxD = double.MinValue;
-        foreach (var e in edges) if (e.YMax > yMaxD) yMaxD = e.YMax;
+        foreach (var yMax in edges.Select(e => e.YMax).Where(yMax => yMax > yMaxD)) yMaxD = yMax;
         var yStart = Math.Max(0, (int)Math.Floor(sf.sorted[0].YMin));
         var yEnd = Math.Min(sf.pixelH, (int)Math.Ceiling(yMaxD));
         if (yStart >= yEnd) return;
@@ -200,7 +200,7 @@ internal static partial class ScanlineFiller
 
         double yMinD = sorted[0].YMin;
         double yMaxD = double.MinValue;
-        foreach (var e in edges) if (e.YMax > yMaxD) yMaxD = e.YMax;
+        foreach (var yMax in edges.Select(e => e.YMax).Where(yMax => yMax > yMaxD)) yMaxD = yMax;
 
         var yStart = Math.Max(0, (int)Math.Floor(yMinD));
         var yEnd = Math.Min(pixelH, (int)Math.Ceiling(yMaxD));
@@ -255,9 +255,10 @@ internal static partial class ScanlineFiller
     public static void StrokeLine(byte[] pixels, int pixelW, int pixelH,
         double x0, double y0, double x1, double y1,
         byte r, byte g, byte b, byte a, double lineWidth, byte[]? clipMask = null,
-        string blendMode = "Normal", bool knockout = false, byte[]? softMask = null)
+        string blendMode = "Normal", bool knockout = false, byte[]? softMask = null,
+        bool strokeCentredOnPath = false)
     {
-        (x0, y0, x1, y1, lineWidth) = HintAxisAlignedStroke(x0, y0, x1, y1, lineWidth);
+        (x0, y0, x1, y1, lineWidth) = HintAxisAlignedStroke(x0, y0, x1, y1, lineWidth, strokeCentredOnPath);
 
         var hw = lineWidth * 0.5;
         // Clamp to 0.5 so a zero-width line still appears as a single-pixel-wide band
@@ -289,7 +290,11 @@ internal static partial class ScanlineFiller
     ///   1. Offset the path coordinate by <c>+hw</c> (half the raw pixel line width).
     ///      PDF strokes are centred on the path, but this device places them so the
     ///      path becomes the **top** edge in pixel coordinates — without this shift,
-    ///      interior 1pt strokes land one row too high.
+    ///      interior 1pt strokes land one row too high. That shift is the half pixel
+    ///      the edge convention lacks; a caller whose coordinates already carry it
+    ///      (the pixel-centre convention) asks for the stroke centred on its path,
+    ///      else the two halves add up to a whole pixel and a rule on the last row
+    ///      of the page leaves the canvas.
     ///   2. Snap to the nearest X.0 or X.5 — X.0 produces 2-pixel 50/50 AA straddling
     ///      the row boundary, X.5 produces 1-pixel bilevel on a single row.
     ///   3. When the shifted position lands on X.25 or X.75 (equidistant from both
@@ -301,7 +306,7 @@ internal static partial class ScanlineFiller
     /// </summary>
     /// <returns>The stroke's endpoints and width, snapped when it is a one-pixel axis-aligned line; unchanged otherwise.</returns>
     private static (double x0, double y0, double x1, double y1, double lineWidth) HintAxisAlignedStroke(double x0, double y0,
-        double x1, double y1, double lineWidth)
+        double x1, double y1, double lineWidth, bool strokeCentredOnPath)
     {
         var roundedW = (int)Math.Round(lineWidth);
         if (roundedW != 1) return (x0, y0, x1, y1, lineWidth);
@@ -313,7 +318,7 @@ internal static partial class ScanlineFiller
         if (!isHorizontal && !isVertical) return (x0, y0, x1, y1, lineWidth);
 
         var pos = isHorizontal ? y0 : x0;
-        var shifted = pos + lineWidth * 0.5;
+        var shifted = strokeCentredOnPath ? pos : pos + lineWidth * 0.5;
         // Nearest snap candidate on the 0.5-pixel grid. The midway positions — X.25
         // and X.75 — sit 0.25 away from both the integer and the half-integer, which
         // we deliberately leave unsnapped so pure-AA 75/25 splits emerge there.

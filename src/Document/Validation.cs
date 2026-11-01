@@ -31,9 +31,9 @@ public sealed partial class Document
         var result = Optimization.PdfAValidator.Validate(this, format);
         // Ownership of the log stream depends on what the caller handed over, and both
         // behaviours are pinned by the corpus:
-        //   - a FILE stream is consumed: `var f = new FileStream(path, Create);
-        //     doc.Validate(f, fmt); f = new FileStream(path, Create);` re-opens the same
-        //     path immediately, which throws unless the first stream was disposed here;
+        //   - a FILE stream is consumed: `var f = new FileStream(path, Create); doc.Validate(f,
+        //     fmt); f = new FileStream(path, Create);` re-opens the same
+        //     path immediately, which throws unless the first stream was disposed here,
         //   - any OTHER stream stays OPEN: callers pass a MemoryStream and read the log
         //     back with Seek(0) after the call.
         if (logStream is not null)
@@ -52,7 +52,7 @@ public sealed partial class Document
                     WriteValidationLogXml(writer, format, result);
                 }
             }
-            catch { }
+            catch { /* the validation log is best effort - a failed write does not change the verdict */ }
         }
         return result.IsValid;
     }

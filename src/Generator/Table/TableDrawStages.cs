@@ -36,7 +36,6 @@ public partial class Table : BaseParagraph
         tk.padLeft = tk.padding?.Left ?? 2;
         tk.padRight = tk.padding?.Right ?? 2;
         tk.padTop = tk.padding?.Top ?? 2;
-        tk.padBottom = tk.padding?.Bottom ?? 2;
 
         tk.bgColor = tk.cell.BackgroundColor ?? tk.row.BackgroundColor;
         if (tk.bgColor is not null)
@@ -59,7 +58,6 @@ public partial class Table : BaseParagraph
         tk.textState = tk.cell.DefaultCellTextState ?? tk.row.DefaultCellTextState ?? DefaultCellTextState;
         tk.fontSize = ResolveCellFontSize(tk.cell, tk.row);
         tk.textX = tk.cellX + tk.padLeft;
-        tk.textY = tk.cellTopY - tk.padTop - tk.fontSize;
 
         foreach (var paragraph in tk.cell.Paragraphs)
         {
@@ -109,7 +107,6 @@ public partial class Table : BaseParagraph
             }
 
             tk.builder.EndText();
-            tk.textY -= fragFontSize * 1.2;
         }
     }
 }

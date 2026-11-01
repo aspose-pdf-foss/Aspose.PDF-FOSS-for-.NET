@@ -25,7 +25,7 @@ internal static partial class HtmlToPdfConverter
             $"<{Compat.ToHexString(hex)}> Tj ET Q"));
     }
 
-    private static double MeasureAr(AuditLetterState al, string t, string variant, double fs)
+    private static double MeasureAr(string t, string variant, double fs)
         => MeasureFaceText("Arial" + (variant.Length > 0 ? " " + variant : ""), t, fs);
 
     private static void FillRect(AuditLetterState al, double x, double yTop, double w, double h, Color col)
@@ -56,25 +56,27 @@ internal static partial class HtmlToPdfConverter
         var langDepth = 0; var langStack = new Stack<bool>();
         var colStack = new Stack<Color>();
         var abbrStack = new Stack<bool>(); var abbrDepth = 0;
-        foreach (Match m in al.pRunRx.Matches(tdInner))
+        foreach (var groups in SafeRegex.Matches(al.pRunRx, tdInner).Select(m => m.Groups))
         {
-            if (m.Groups[5].Success)
+            if (groups[5].Success)
             {
                 if (cur is null) continue;
-                var txt = DecodeEntities(m.Groups[5].Value);
+                var txt = DecodeEntities(groups[5].Value);
                 if (txt.Length == 0) continue;
                 // inter-tag whitespace never OPENS a lazy div paragraph —
                 // but an &nbsp; (U+00A0, surviving the space trim) does
                 if (!curAdded && txt.Trim(' ').Length == 0) continue;
-                var col = colStack.Count > 0 ? colStack.Peek()
-                    : abbrDepth > 0 ? al.inkAbbr : al.inkEditor;
+                Color col;
+                if (colStack.Count > 0) col = colStack.Peek();
+                else if (abbrDepth > 0) col = al.inkAbbr;
+                else col = al.inkEditor;
                 if (!curAdded) { paras.Add(cur); curAdded = true; }
                 cur.Add((txt, langDepth > 0, col));
                 continue;
             }
-            var tag = m.Groups[2].Value.ToLowerInvariant();
-            var closeT = m.Groups[1].Value == "/";
-            var selfC = m.Groups[4].Value == "/";
+            var tag = groups[2].Value.ToLowerInvariant();
+            var closeT = groups[1].Value == "/";
+            var selfC = groups[4].Value == "/";
             if (tag == "p")
             {
                 if (!closeT)
@@ -84,7 +86,7 @@ internal static partial class HtmlToPdfConverter
             }
             // a content div carries its own line when it holds direct text
             // (the manual-editor '&nbsp;' and 'test' blocks)
-            if (tag == "div" && m.Groups[3].Value.Contains("editor-content-readonly",
+            if (tag == "div" && groups[3].Value.Contains("editor-content-readonly",
                     StringComparison.Ordinal))
             {
                 if (!closeT) { cur = new List<(string, bool, Color)>(); curAdded = false; }
@@ -95,8 +97,8 @@ internal static partial class HtmlToPdfConverter
             {
                 if (!closeT)
                 {
-                    var hasLang = m.Groups[3].Value.Contains("lang=", StringComparison.OrdinalIgnoreCase);
-                    var isAbbr = m.Groups[3].Value.Contains("abbrSpan", StringComparison.OrdinalIgnoreCase);
+                    var hasLang = groups[3].Value.Contains("lang=", StringComparison.OrdinalIgnoreCase);
+                    var isAbbr = groups[3].Value.Contains("abbrSpan", StringComparison.OrdinalIgnoreCase);
                     langStack.Push(hasLang); if (hasLang) langDepth++;
                     abbrStack.Push(isAbbr); if (isAbbr) abbrDepth++;
                 }
@@ -110,7 +112,7 @@ internal static partial class HtmlToPdfConverter
             {
                 if (!closeT)
                 {
-                    var fcM = Regex.Match(m.Groups[3].Value, @"color\s*=\s*[""']?(#?\w+)");
+                    var fcM = SafeRegex.Match(groups[3].Value, @"color\s*=\s*[""']?(#?\w+)");
                     colStack.Push(fcM.Success && ParseCssColor(fcM.Groups[1].Value) is { } fc
                         ? fc : al.inkEditor);
                 }
@@ -126,7 +128,7 @@ internal static partial class HtmlToPdfConverter
         const double fs = 12.0; const double lh = 13.5;
         var flat = new List<(string word, bool it, Color col)>();
         foreach (var (t, it, col) in runs)
-            foreach (var piece in Regex.Split(t, @"(?<= )"))
+            foreach (var piece in SafeRegex.Split(t, @"(?<= )"))
                 if (piece.Length > 0) flat.Add((piece, it, col));
         if (flat.Count == 0)
         {
@@ -147,17 +149,17 @@ internal static partial class HtmlToPdfConverter
                 EmitRun(al, t, fs, it ? "Italic" : "", x, al.y + Drop(al, fs, lh), col);
                 // Arial's italic advances match the upright — measure the
                 // upright face so wrap and seats stay off the real widths
-                x += MeasureAr(al, t, "", fs);
+                x += MeasureAr(t, "", fs);
             }
             al.y += lh;
             lineRuns.Clear(); lineW = 0;
         }
         foreach (var (word, it, col) in flat)
         {
-            var wWidth = MeasureAr(al, word, "", fs);
+            var wWidth = MeasureAr(word, "", fs);
             // a word's TRAILING space hangs past the wrap edge — the fit
             // check measures the trimmed word, the advance keeps the space
-            var wFit = MeasureAr(al, word.TrimEnd(' '), "", fs);
+            var wFit = MeasureAr(word.TrimEnd(' '), "", fs);
             if (lineW + wFit > al.contentRight - ArTdXPt && lineRuns.Count > 0
                 && word.Trim().Length > 0)
                 FlushLine();
@@ -215,7 +217,7 @@ internal static partial class HtmlToPdfConverter
                 // the lira glyph measures as a plain cap in the sheet's
                 // solve (our width table lacks it)
                 if (curLn.Length > 0
-                    && MeasureAr(al, cand.Replace('₺', 'T'), variant, 9.0) > availW)
+                    && MeasureAr(cand.Replace('₺', 'T'), variant, 9.0) > availW)
                 { outLines.Add(curLn); curLn = tok; }
                 else curLn = cand;
             }
@@ -223,20 +225,20 @@ internal static partial class HtmlToPdfConverter
             return outLines.Count > 0 ? outLines.ToArray() : new[] { "" };
         }
         var ths = new List<string>();
-        foreach (Match thM in Regex.Matches(tdInner, @"<th[^>]*>(.*?)</th>",
+        foreach (Match thM in SafeRegex.Matches(tdInner, @"<th[^>]*>(.*?)</th>",
             RegexOptions.IgnoreCase | RegexOptions.Singleline))
-            ths.Add(CollapseWs(DecodeEntities(Regex.Replace(thM.Groups[1].Value, "<[^>]+>", " "))).Trim());
+            ths.Add(CollapseWs(DecodeEntities(SafeRegex.Replace(thM.Groups[1].Value, "<[^>]+>", " "))).Trim());
         var rows = new List<List<string>>();
         var bodyIdx = tdInner.IndexOf("<tbody", StringComparison.OrdinalIgnoreCase);
         if (bodyIdx >= 0)
-            foreach (Match trM in Regex.Matches(tdInner[bodyIdx..], @"<tr\b[^>]*>(.*?)</tr>",
+            foreach (Match trM in SafeRegex.Matches(tdInner[bodyIdx..], @"<tr\b[^>]*>(.*?)</tr>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
             {
                 var cells = new List<string>();
-                foreach (Match tdM in Regex.Matches(trM.Groups[1].Value, @"<td[^>]*>(.*?)</td>",
+                foreach (Match tdM in SafeRegex.Matches(trM.Groups[1].Value, @"<td[^>]*>(.*?)</td>",
                     RegexOptions.IgnoreCase | RegexOptions.Singleline))
                     cells.Add(CollapseWs(DecodeEntities(
-                        Regex.Replace(tdM.Groups[1].Value, "<[^>]+>", " "))).Trim());
+                        SafeRegex.Replace(tdM.Groups[1].Value, "<[^>]+>", " "))).Trim());
                 if (cells.Count > 0) rows.Add(cells);
             }
 
@@ -312,13 +314,13 @@ internal static partial class HtmlToPdfConverter
         {
             // a plain value row: ': value' at the label size; a badge span
             // draws its pill; wrapped continuation re-seats at the td x
-            var badgeM = Regex.Match(tdInner,
+            var badgeM = SafeRegex.Match(tdInner,
                 @"<span class=""badge-grey[^""]*""[^>]*>([^<]*)</span>", RegexOptions.IgnoreCase);
             var valTxt = CollapseWs(DecodeEntities(
-                Regex.Replace(Regex.Replace(tdInner,
+                SafeRegex.Replace(SafeRegex.Replace(tdInner,
                     @"<span class=""badge-grey.*?</span>", "", RegexOptions.Singleline),
                     "<[^>]+>", " "))).Trim();
-            var linkVal = Regex.IsMatch(tdInner, @"<a\b", RegexOptions.IgnoreCase);
+            var linkVal = SafeRegex.IsMatch(tdInner, @"<a\b", RegexOptions.IgnoreCase);
             var first = ": " + valTxt;
             var avail = al.contentRight - ArDotXPt;
             var lines = MeasuredWordWrap(first, avail, "Arial", 9.0);
@@ -332,8 +334,8 @@ internal static partial class HtmlToPdfConverter
             if (badgeM.Success)
             {
                 var bTxt = CollapseWs(DecodeEntities(badgeM.Groups[1].Value)).Trim();
-                var bX = ArDotXPt + MeasureAr(al, ": " + valTxt, "", 9.0) + 7.5;
-                var bW = MeasureAr(al, bTxt, "", ArBadgeFsPt) + 5.0;
+                var bX = ArDotXPt + MeasureAr(": " + valTxt, "", 9.0) + 7.5;
+                var bW = MeasureAr(bTxt, "", ArBadgeFsPt) + 5.0;
                 FillRect(al, bX, rowTop + 0.9, bW, 14.3,
                     ParseCssColor("#617778") ?? Color.FromArgb(97, 119, 120));
                 EmitRun(al, bTxt, ArBadgeFsPt, "", bX + 2.2, rowTop + 10.9,

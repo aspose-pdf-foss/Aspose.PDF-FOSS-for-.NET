@@ -205,7 +205,7 @@ public class PdfDecryptionTests
 
         var encryptOffset = ms.Position;
         Write($"4 0 obj\n<< /Filter /Standard /V {v} /R {r} /Length {keyBits} " +
-              $"/P {permissions} /O <{Compat.ToHexString(oValue)}> /U <{Compat.ToHexString(uValue)}> >>\nendobj\n");
+              FormattableString.Invariant($"/P {permissions} /O <{Compat.ToHexString(oValue)}> /U <{Compat.ToHexString(uValue)}> >>\nendobj\n"));
 
         var xrefOffset = ms.Position;
         Write("xref\n0 5\n");
@@ -243,7 +243,7 @@ public class PdfDecryptionTests
 
         var encryptOffset = ms.Position;
         Write($"4 0 obj\n<< /Filter /Standard /V {v} /R {r} /Length {keyBits} " +
-              $"/P {permissions} /O <{Compat.ToHexString(oValue)}> /U <{Compat.ToHexString(uValue)}> >>\nendobj\n");
+              FormattableString.Invariant($"/P {permissions} /O <{Compat.ToHexString(oValue)}> /U <{Compat.ToHexString(uValue)}> >>\nendobj\n"));
 
         var contentOffset = ms.Position;
         Write($"5 0 obj\n<< /Length {encryptedContent.Length} >>\nstream\n");
@@ -288,7 +288,7 @@ public class PdfDecryptionTests
 
         var encryptOffset = ms.Position;
         Write($"4 0 obj\n<< /Filter /Standard /V 4 /R 4 /Length 128 " +
-              $"/P {permissions} " +
+              FormattableString.Invariant($"/P {permissions} ") +
               $"/O <{Compat.ToHexString(oValue)}> /U <{Compat.ToHexString(uValue)}> " +
               "/StmF /StdCF /StrF /StdCF " +
               "/CF << /StdCF << /Type /CryptFilter /CFM /AESV2 /Length 16 >> >> >>\nendobj\n");

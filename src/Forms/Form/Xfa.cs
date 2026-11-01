@@ -16,12 +16,20 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     /// </summary>
     public string? GetXfaFieldValue(string path) => GetXfaFieldValueCore(path, strict: false);
 
+    /// <summary>The value a field's path reads through <see cref="XFA"/>: as <see cref="GetXfaFieldValue"/>, and a
+    /// field that binds no data reads the value of its widget, where the form keeps one.</summary>
+    internal string? GetXfaFieldValueOrWidget(string path) => GetXfaFieldValueCore(path, strict: false, widgetWhenUnbound: true);
+
     /// <summary>Strict variant used when the document carries NO form-packet instance
     /// record: a path binds only when every segment resolves to exactly ONE data node
     /// (a repeated data group's fields stay empty in that case).</summary>
     internal string? GetXfaFieldValueStrict(string path) => GetXfaFieldValueCore(path, strict: true);
 
-    private string? GetXfaFieldValueCore(string path, bool strict)
+    /// <summary>The value the datasets hold for a field at its own path or where its binding leads, never one a
+    /// name lookup guesses: what a merge of the datasets into the fields may take.</summary>
+    internal string? BoundXfaFieldValueOrNull(string path) => GetXfaFieldValueCore(path, strict: false, boundOnly: true);
+
+    private string? GetXfaFieldValueCore(string path, bool strict, bool widgetWhenUnbound = false, bool boundOnly = false)
     {
         var xv = new XfaFieldValueState();
         xv.path = path;
@@ -42,13 +50,33 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             }
         }
         if (xml is null) return null;
-        xv.result = FindXfaNodeValue(xml, xv.path, xv.strict);
-        if (!string.IsNullOrEmpty(xv.result)) return xv.result;
+        xv.result = FindXfaNodeValue(xv, xml, xv.path);
+        // A value matched by its leaf name alone is a guess: the template's binding, below, may
+        // place the field in a section the data leaves empty, and then the guess must not show.
+        if (!string.IsNullOrEmpty(xv.result) && !xv.leafFallback) return xv.result;
+        if (xv.datasets is not null)
+        {
+            switch (BoundXfaFieldValue(xv.datasets, path, out var bound))
+            {
+                // A node the binding reaches is the field's, empty or not.
+                case XfaDataBinding.Found: return bound;
+                // An instance the reference names beyond the data is empty, not the last instance there.
+                case XfaDataBinding.Missing: return string.Empty;
+                // A field that binds no data keeps a value written to it under its data group, else in its widget,
+                // where the form has one.
+                case XfaDataBinding.Unbound when bound is not null: return bound;
+                case XfaDataBinding.Unbound when widgetWhenUnbound && Type == FormType.Static && FindFieldOrNull(path) is { } widgetField:
+                    return widgetField.Value;
+            }
+        }
+        if (boundOnly) return null;
 
         // Template-based data binding resolution:
         // Walk the template to find the field, resolve <bind match="dataRef" ref="$.xxx"/>
         // and skip presentation-only subforms (those with <bind match="none"/>).
-        return ResolveXfaFieldValue(xv, xml);
+        var resolved = ResolveXfaFieldValue(xv, xml);
+        // A choice a viewer saved for a field without a data node lives in the form packet alone.
+        return string.IsNullOrEmpty(resolved) ? FormPacketValue(path) ?? resolved : resolved;
     }
 
     /// <summary>Resolve a SOM (template) field path to the corresponding XFA *datasets* path using
@@ -62,26 +90,16 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     {
         try
         {
-            var templateXml = GetXfaTemplateXml();
-            if (templateXml is null) return null;
-            var templateDoc = new XmlDocument();
-            templateDoc.LoadXml(templateXml);
-            if (templateDoc.DocumentElement is null) return null;
+            // The template as the read path holds it, parsed once: a fill asks at every field.
+            var templateDoc = GetXfaTemplateDocument();
+            if (templateDoc?.DocumentElement is null) return null;
 
             var parts = SplitSomPath(path);
             if (parts.Length < 2) return null;
 
-            // The template's name attributes are UN-indexed (name="FilerNameSub"), while SOM parts
-            // carry an occurrence index (FilerNameSub[0]); strip it for the template walk.
-            static string Bare(string p)
-            {
-                var m = Regex.Match(p, @"^(.+)\[(\d+)\]$");
-                return m.Success ? m.Groups[1].Value : p;
-            }
-
             XmlNode? templateNode = templateDoc.DocumentElement;
             for (int i = 0; i < parts.Length && templateNode is not null; i++)
-                templateNode = FindTemplateChild(templateNode, Bare(parts[i]));
+                templateNode = StepTemplate(templateNode, parts[i]);
             if (templateNode is null) return null;
 
             var bindNode = FindBindElement(templateNode);
@@ -92,17 +110,11 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 var refAttr = bindNode.Attributes?["ref"];
                 if (matchAttr?.Value == "dataRef" && refAttr?.Value is { } r && r.StartsWith("$."))
                     bindRef = r.Substring(2); // may itself be multi-segment, e.g. "FilingInstitutionInformation.FilerName"
+                else if (matchAttr?.Value == "dataRef" && RecordRelativeRef(refAttr?.Value) is { } fromRecord)
+                    return RecordDataPath(parts, fromRecord);
             }
 
-            var dataPathParts = new List<string>();
-            for (int i = 0; i < parts.Length - 1; i++)
-            {
-                XmlNode? checkNode = templateDoc.DocumentElement;
-                for (int j = 0; j <= i && checkNode is not null; j++)
-                    checkNode = FindTemplateChild(checkNode, Bare(parts[j]));
-                if (checkNode is not null && HasBindNone(checkNode)) continue; // presentation-only subform: not in data
-                dataPathParts.Add(parts[i]);
-            }
+            var dataPathParts = AncestorDataPath(templateDoc, parts, out _, out _);
             dataPathParts.Add(bindRef ?? parts[^1]);
 
             var resolvedPath = string.Join(".", dataPathParts);
@@ -111,26 +123,61 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         catch { return null; }
     }
 
-    /// <summary>Find a subform or field child by name in an XFA template node.</summary>
-    private static XmlNode? FindTemplateChild(XmlNode parent, string name)
+    /// <summary>The head of a bind reference that starts at the data record instead of the field's own data context.</summary>
+    private const string RecordRefHead = "$record.";
+
+    /// <summary>The path below the record of a bind reference that starts there ("$record.A.B" gives
+    /// "A.B"); null for any other reference, and for one that addresses a set of nodes ("[*]").</summary>
+    private static string? RecordRelativeRef(string? bindRef)
+        => bindRef is not null && bindRef.StartsWith(RecordRefHead, StringComparison.Ordinal) && !bindRef.Contains('*')
+            ? bindRef.Substring(RecordRefHead.Length)
+            : null;
+
+    /// <summary>The data path of a reference from the record: the record is the data node of the
+    /// form's root subform, the first segment of every field path, whatever subforms lie between.</summary>
+    private static string RecordDataPath(string[] parts, string fromRecord) => parts[0] + "." + fromRecord;
+
+    /// <summary>True for a SOM segment that addresses an unnamed node by its class ("#field[1]").</summary>
+    private static bool IsUnnamedSomSegment(string segment) => segment.StartsWith('#');
+
+    /// <summary>One step of a template walk along a SOM path: the child the segment names - the
+    /// segment's index picks among same-named siblings the template declares (a table's rows), and a
+    /// repeated instance beyond those takes the first - or, for an unnamed segment, the child of that
+    /// class at the segment's index.</summary>
+    private static XmlNode? StepTemplate(XmlNode parent, string segment)
     {
+        var m = SafeRegex.Match(segment, @"^(.+?)(?:\[(\d+)\])?$");
+        var name = m.Success ? m.Groups[1].Value : segment;
+        var index = m.Groups[2].Success ? int.Parse(m.Groups[2].Value) : 0;
+        if (!IsUnnamedSomSegment(name)) return FindTemplateChild(parent, name, index);
+        return FindClassTemplateNode(parent, name[1..], index);
+    }
+
+    /// <summary>Find a subform or field child by name in an XFA template node: the <paramref name="index"/>-th
+    /// of the same-named children when the template declares that many, else the first. A named area or subform
+    /// set is a step of the field paths the template lists, so a segment may name one.</summary>
+    private static XmlNode? FindTemplateChild(XmlNode parent, string name, int index = 0)
+    {
+        XmlNode? first = null;
+        var seen = 0;
         foreach (XmlNode child in parent.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
             var ln = child.LocalName;
-            if (ln is "subform" or "field" or "exclGroup" or "draw")
+            if (ln is "subform" or "field" or "exclGroup" or "draw" or "area" or "subformSet" && child.Attributes?["name"]?.Value == name)
             {
-                if (child.Attributes?["name"]?.Value == name)
-                    return child;
+                first ??= child;
+                if (seen++ == index) return child;
             }
         }
-        // Also search inside unnamed subforms
+        if (first is not null) return first;
+        // Also search inside unnamed subforms, and inside areas and subform sets, which no SOM name passes through
         foreach (XmlNode child in parent.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
-            if (child.LocalName == "subform" && child.Attributes?["name"] is null)
+            if ((child.LocalName == "subform" && child.Attributes?["name"] is null) || child.LocalName is "area" or "subformSet")
             {
-                var found = FindTemplateChild(child, name);
+                var found = FindTemplateChild(child, name, index);
                 if (found is not null) return found;
             }
         }
@@ -213,15 +260,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             var changed = false;
             foreach (var pair in values)
             {
-                // Prefer the field's own SOM path; if that names no existing datasets node, fall
-                // back to the template-resolved data path (honours a <bind match="dataRef"> + skips
-                // bind="none" subforms — the SAME mapping the read path uses) BEFORE creating a new
-                // node, so a bound field (e.g. filerName → <sarx:FilerName>) lands on the node the
-                // reader returns rather than spawning a stray sibling.
-                var node = FindXfaNode(doc, pair.Key);
-                if (node is null && ResolveSomToDataPath(pair.Key) is { } resolved)
-                    node = FindXfaNode(doc, resolved);
-                node ??= CreateXfaNodePath(doc, pair.Key);
+                var node = XfaWriteNode(doc, pair.Key);
                 if (node is null) continue;
                 node.InnerText = pair.Value;
                 changed = true;
@@ -236,14 +275,27 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             stream.Dict.Set("Length", new PdfInteger(newData.Length));
             stream.Dict.Remove("Filter");
             MarkXfaStreamDirty(stream);
+            // A single-stream form's template packet is as it was: the resolved template stays.
+            if (ReferenceEquals(stream, _xfaSingleSource)) _xfaSingleRaw = newData;
         }
-        catch { }
+        catch { /* XFA datasets that do not parse or write back keep the stream as it was */ }
+    }
+
+    /// <summary>The content type an image's bytes declare by their signature: how an XFA image
+    /// field's data node is tagged (a JPEG as <c>image/jpg</c>, the tag viewers write).</summary>
+    internal static string ImageContentType(byte[] b)
+    {
+        if (b.Length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpg";
+        if (b.Length >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "image/png";
+        if (b.Length >= 3 && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46) return "image/gif";
+        if (b.Length >= 2 && b[0] == 0x42 && b[1] == 0x4D) return "image/bmp";
+        return "image/jpg";
     }
 
     /// <summary>Write a base64 image into the XFA datasets node for
     /// <paramref name="path"/> and tag it with the given <paramref name="contentType"/>
-    /// (e.g. <c>image/jpg</c>) — how XFA image fields carry their picture. Returns
-    /// false when there is no datasets packet or the node can't be resolved.</summary>
+    /// (e.g. <c>image/jpg</c>) — how XFA image fields carry their picture. A form without a
+    /// datasets packet is given one. Returns false when the node can't be resolved.</summary>
     public bool SetXfaFieldImage(string path, string base64, string contentType)
     {
         var (stream, xml) = GetXfaPart("datasets");
@@ -261,13 +313,18 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 }
             }
         }
+        if (xml is null || stream is null)
+        {
+            stream = EnsureXfaDatasetsStreamInArray();
+            if (stream is not null) xml = Encoding.UTF8.GetString(stream.RawData);
+        }
         if (xml is null || stream is null) return false;
 
         try
         {
             var doc = new XmlDocument();
             doc.LoadXml(xml);
-            if ((FindXfaNode(doc, path) ?? CreateXfaNodePath(doc, path)) is not XmlElement el)
+            if (XfaWriteNode(doc, path) is not XmlElement el)
                 return false;
             el.InnerText = base64;
             el.SetAttribute("contentType", contentType);
@@ -292,19 +349,21 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     {
         var dirtyReader = ResolvedReader;
         if (OwnerDocument is null || dirtyReader is null) return;
-        foreach (var entry in dirtyReader.XRefTable.Entries.Values)
+        // Pages laid out from the packets are behind once a packet changes.
+        OwnerDocument.XfaPacketsChanged();
+        foreach (var objectNumber in dirtyReader.XRefTable.Entries.Values.Select(entry => entry.ObjectNumber))
         {
             var resolved = dirtyReader.Resolve(
-                new PdfIndirectRef(entry.ObjectNumber, 0));
+                new PdfIndirectRef(objectNumber, 0));
             if (ReferenceEquals(resolved, stream))
             {
-                OwnerDocument.MarkDirty(entry.ObjectNumber, stream);
+                OwnerDocument.MarkDirty(objectNumber, stream);
                 return;
             }
             // Also check if the resolved object's Dict matches the stream's Dict
             if (resolved is PdfStream s && ReferenceEquals(s.Dict, stream.Dict))
             {
-                OwnerDocument.MarkDirty(entry.ObjectNumber, stream);
+                OwnerDocument.MarkDirty(objectNumber, stream);
                 return;
             }
         }

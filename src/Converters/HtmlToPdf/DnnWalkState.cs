@@ -18,7 +18,7 @@ private sealed class DnnWalkState
     public bool brRun;
     public string inner = default!;
     public double indentPx = 0;
-    public List<DnnBlock> blocks = default!;
+    public List<IDnnBlock> blocks = default!;
     public bool inRowPad = false;
     public System.Text.RegularExpressions.Match m = null!;
     public int openIdx;

@@ -21,18 +21,15 @@ public sealed partial class SvgDevice
         m1[4] * m2[1] + m1[5] * m2[3] + m2[5],
     };
 
-    /// <summary>An SVG colour as #rrggbbAA. The ALPHA pair is upper case because the reference
-    /// spells it so and a hex assertion is case-sensitive; the RGB digits keep their original lower
-    /// case because NOTHING evidences a change there - the only two corpus assertions are
-    /// #000000FF, whose RGB half is zeros and therefore case-blind. ⚠ If a probe ever
-    /// shows the reference writes #FF0000FF for a non-zero colour, this is where it changes. The alpha byte is always written, opaque included
-    /// (#000000FF), which is the spelling the reference emits; expressing it here rather than in
-    /// the companion fill-opacity/stroke-opacity attribute is written TOO, because the reference
-    /// writes both (a corpus assertion pins it). SVG multiplies them, so translucent content carries its alpha
-    /// twice - that is the reference's behaviour and matching it is the contract, not a mistake
-    /// to correct here.</summary>
+    /// <summary>A text colour as #RRGGBBAA: a text run states its alpha in its fill colour alone, opaque
+    /// included (#000000FF), and carries no companion opacity that would apply the alpha twice.</summary>
     private static string FormatHex(double r, double g, double b, double a = 1.0) =>
-        $"#{ClampByte(r):x2}{ClampByte(g):x2}{ClampByte(b):x2}{ClampByte(a):X2}";
+        $"{FormatOpaqueHex(r, g, b)}{ClampByte(a):X2}";
+
+    /// <summary>A path colour as #RRGGBB, the colour syntax SVG 1.1 knows: a path states its alpha in its
+    /// fill-opacity or stroke-opacity attribute.</summary>
+    private static string FormatOpaqueHex(double r, double g, double b) =>
+        $"#{ClampByte(r):X2}{ClampByte(g):X2}{ClampByte(b):X2}";
 
     private static int ClampByte(double v) => Compat.Clamp((int)Math.Round(v * 255), 0, 255);
 
@@ -180,7 +177,15 @@ public sealed partial class SvgDevice
             return;
         }
         if (subtype != "Form") return;
+        RenderForm(xobj, resources, reader, sb, depth, gs, usedBlendModes, links);
+    }
 
+    /// <summary>Render a Form XObject's content with its own /Resources (falling back to the
+    /// parent's) and its optional /Matrix composed into the CTM.</summary>
+    private void RenderForm(PdfStream xobj, PdfDictionary? resources, PdfReader reader,
+        StringBuilder sb, int depth, GState gs, ISet<string> usedBlendModes,
+        List<LinkRect>? links)
+    {
         byte[] formBytes;
         try { formBytes = reader.DecodeStream(xobj); }
         catch { return; }
@@ -199,6 +204,8 @@ public sealed partial class SvgDevice
             };
             formGs.Ctm = MulAffine(m, formGs.Ctm);
         }
+        // A pattern the form sets is placed in the form's own space (PDF 32000-1 §8.7.3.1).
+        formGs.PatternBase = formGs.Ctm;
 
         RenderToSvg(formBytes, formResources, reader, sb, depth + 1, formGs, usedBlendModes, links);
     }
@@ -260,7 +267,7 @@ public sealed partial class SvgDevice
             var ly = Math.Min(y0, y1);
             var w = Math.Abs(x1 - x0);
             var h = Math.Abs(y1 - y0);
-            sb.AppendLine($"<image x=\"{F(lx)}\" y=\"{F(ly)}\" width=\"{F(w)}\" height=\"{F(h)}\" " +
+            sb.AppendLine($"<image{ClipAttribute(gs)} x=\"{F(lx)}\" y=\"{F(ly)}\" width=\"{F(w)}\" height=\"{F(h)}\" " +
                 $"preserveAspectRatio=\"none\" xlink:href=\"{href}\" />");
         }
         else
@@ -268,7 +275,7 @@ public sealed partial class SvgDevice
             // General placement: the unit square flips vertically under the page
             // transform, so fold the flip into the matrix and draw at (0,-1).
             var transform = $"matrix({F(m[0])} {F(m[1])} {F(m[2])} {F(m[3])} {F(m[4])} {F(m[5])})";
-            sb.AppendLine($"<image x=\"0\" y=\"-1\" width=\"1\" height=\"1\" " +
+            sb.AppendLine($"<image{ClipAttribute(gs)} x=\"0\" y=\"-1\" width=\"1\" height=\"1\" " +
                 $"preserveAspectRatio=\"none\" transform=\"{transform} scale(1,-1)\" xlink:href=\"{href}\" />");
         }
         if (link is not null) sb.AppendLine("</a>");
@@ -336,6 +343,21 @@ public sealed partial class SvgDevice
             }
         }
         return result;
+    }
+
+    /// <summary>The parts of a page's content array joined with a newline between them.</summary>
+    private static byte[] JoinContentStreams(List<byte[]> parts)
+    {
+        if (parts.Count == 1) return parts[0];
+        var joined = new byte[parts.Sum(p => p.Length + 1)];
+        var at = 0;
+        foreach (var part in parts)
+        {
+            Buffer.BlockCopy(part, 0, joined, at, part.Length);
+            at += part.Length;
+            joined[at++] = (byte)'\n';
+        }
+        return joined;
     }
 
     private static PdfArray ParseArray(PdfLexer lexer)

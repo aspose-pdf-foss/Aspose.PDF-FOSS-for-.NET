@@ -27,7 +27,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     // mixed-script emit: CJK runs in SimSun, latin in Arial, at one baseline
-    private static double Mixed(CjkOrderReportState co, double fs, double x, double glyphTopTd, string text, bool bold)
+    private static void Mixed(CjkOrderReportState co, double fs, double x, double glyphTopTd, string text, bool bold)
     {
         var i = 0;
         while (i < text.Length)
@@ -50,7 +50,6 @@ internal static partial class HtmlToPdfConverter
             }
             i = j;
         }
-        return x;
     }
 
     private static void Box(CjkOrderReportState co, double x0, double topTd, double x1, double botTd)
@@ -65,21 +64,18 @@ internal static partial class HtmlToPdfConverter
         => co.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(co.invc,
             $"q 0 0 0 RG 0.75 w {x:0.##} {co.pageHeight - y0Td:0.##} m {x:0.##} {co.pageHeight - y1Td:0.##} l S Q\n")));
 
-    private static string Flat(CjkOrderReportState co, string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
+    private static bool Leaf(string body) => !body.Contains("<table", StringComparison.OrdinalIgnoreCase);
 
-    private static bool Leaf(CjkOrderReportState co, string body) => !body.Contains("<table", StringComparison.OrdinalIgnoreCase);
-
-    private static List<List<string>> Rows(CjkOrderReportState co, string t)
+    private static List<List<string>> Rows(string t)
     {
         var rows = new List<List<string>>();
-        foreach (Match trM in Regex.Matches(t, @"<tr\b[^>]*>(?<r>[\s\S]*?)</tr>",
+        foreach (Match trM in SafeRegex.Matches(t, @"<tr\b[^>]*>(?<r>[\s\S]*?)</tr>",
             RegexOptions.IgnoreCase))
         {
             var cells = new List<string>();
-            foreach (Match cM in Regex.Matches(trM.Groups["r"].Value,
+            foreach (Match cM in SafeRegex.Matches(trM.Groups["r"].Value,
                 @"<t[dh]\b[^>]*>(?<c>[\s\S]*?)</t[dh]>", RegexOptions.IgnoreCase))
-                cells.Add(Flat(co, cM.Groups["c"].Value));
+                cells.Add(Flat(cM.Groups["c"].Value));
             if (cells.Count > 0) rows.Add(cells);
         }
         return rows;
@@ -103,7 +99,7 @@ internal static partial class HtmlToPdfConverter
             if (lead.Length <= 8 && !tail.Contains("Less"))
                 Mixed(co, 10, x + co.MixedW(12.5, lead, false) + 4, seat, tail, false);
             else
-                foreach (var seg in Regex.Split(tail, @"(?<=\))\s+"))
+                foreach (var seg in SafeRegex.Split(tail, @"(?<=\))\s+"))
                 {
                     Mixed(co, 10, x, seat + extra - 4, seg, false);
                     extra += 13.0;
@@ -121,7 +117,7 @@ internal static partial class HtmlToPdfConverter
         for (var c = 0; c < CjkActCols.Length; c++)
             VL(co, CjkActCols[c], tableTop, tableBot);
         if (ti < 0 || ti >= co.tables.Count) return;
-        var rows = Rows(co, co.tables[ti].body);
+        var rows = Rows(co.tables[ti].body);
         if (rows.Count == 0) return;
         // header cells: bold CJK centred, wrapping per character
         for (var c = 0; c < rows[0].Count && c + 1 < CjkActCols.Length; c++)

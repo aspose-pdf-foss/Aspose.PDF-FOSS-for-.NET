@@ -16,15 +16,15 @@ public partial class Table
     {
         if (pp.pendingAnchors is not { Count: > 0 }) return null;
         List<(double XOff, double W, Hyperlink Link)>? runs = null;
-        for (var ai = 0; ai < pp.pendingAnchors.Count; ai++)
+        var ai = 0;
+        while (ai < pp.pendingAnchors.Count)
         {
             var (atext, url) = pp.pendingAnchors[ai];
             var idx = atext.Length > 0 ? lineText.IndexOf(atext, StringComparison.Ordinal) : -1;
-            if (idx < 0) continue;
+            if (idx < 0) { ai++; continue; }
             (runs ??= new()).Add((idx > 0 ? measure(lineText[..idx]) : 0,
                 measure(atext), new WebHyperlink(url)));
             pp.pendingAnchors.RemoveAt(ai);
-            ai--;
         }
         return runs;
     }

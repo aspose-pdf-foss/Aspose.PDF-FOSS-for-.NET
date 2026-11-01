@@ -12,7 +12,8 @@ internal static partial class HtmlToPdfConverter
     {
         var fsEff = Math.Floor(rawFontSizePt * 1000.0) / 1000.0;
         double w = 0;
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             int cp = s[i];
             if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
@@ -25,6 +26,7 @@ internal static partial class HtmlToPdfConverter
             w += parser is null || gid == 0
                 ? UnmappedAdvance(cp, fsEff)
                 : parser.GetAdvanceWidth(gid) * fsEff / upm;
+            i++;
         }
         return w;
     }
@@ -56,13 +58,31 @@ internal static partial class HtmlToPdfConverter
         if (st < word.Length) yield return word[st..];
     }
 
+    /// <summary>The advance, in em, of a CJK punctuation mark the face lacks, in the face the draw falls
+    /// back to for that mark (see PreferredFallbackFaces), so a line is measured as it is drawn; null
+    /// when the mark has no preferred face or that face is not installed.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, double?> _fallbackPunctuationEm = new();
+
+    private static double? FallbackPunctuationAdvanceEm(int cp)
+    {
+        if (cp > char.MaxValue || PreferredFallbackFaces(((char)cp).ToString()).Length == 0) return null;
+        // (resolved the way the draw resolves the mark, so the line is measured in the face it is drawn in)
+        return _fallbackPunctuationEm.GetOrAdd(cp, c =>
+        {
+            if (ResolveUnicodeFont(((char)c).ToString())?.SourceFontData?.TtfData is not { } ttf) return null;
+            var parser = new Text.GlyphOutlineParser(ttf);
+            return parser.CMap.TryGetValue(c, out var g) && g != 0 ? parser.GetAdvanceWidth(g) / (double)parser.UnitsPerEm : null;
+        });
+    }
+
     private static double MeasureFaceText(string faceName, string s, double fontSizePt)
     {
         var face = PosFace(faceName);
         s = ShapedAsDrawn(face, s);
         double w = 0;
         var prevGid = 0;
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             int cp = s[i];
             if (char.IsHighSurrogate(s[i]) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
@@ -85,15 +105,16 @@ internal static partial class HtmlToPdfConverter
             // Probed: a greedy wrap on the unrounded advance reproduces all 23 lines of the
             // complaint report's narrative for any box in 427.00..427.38 (its real box is
             // 427.364), while the rounded measure breaks line 11 a word late at every width.
-            w += face.parser is null || gid == 0
-                ? (IsFullWidthCp(cp) ? 1.0 : 0.5) * fontSizePt
-                : face.parser.GetAdvanceWidth(gid) * fontSizePt / face.upm;
+            if ((face.parser is null || gid == 0) && FallbackPunctuationAdvanceEm(cp) is { } fallbackEm) w += fallbackEm * fontSizePt;
+            else if (face.parser is null || gid == 0) w += (IsFullWidthCp(cp) ? 1.0 : 0.5) * fontSizePt;
+            else w += face.parser.GetAdvanceWidth(gid) * fontSizePt / face.upm;
             // …and the face's pair kerning between this glyph and the one before it (probed:
             // every adjacent pair inside a run, the TTF kern table's unrounded units, space
             // pairs included; a line fits when its KERNED width does).
             if (face.parser is not null && gid != 0 && prevGid != 0)
                 w += face.parser.GetKernAdjustment(prevGid, gid) * fontSizePt / face.upm;
             prevGid = gid;
+            i++;
         }
         return w;
     }
@@ -164,11 +185,11 @@ internal static partial class HtmlToPdfConverter
     private static string? SpanRunFamily(string style)
     {
         string? fam = null;
-        var ff = Regex.Match(style, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var ff = SafeRegex.Match(style, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (ff.Success) fam = FirstFontFamily(ff.Groups[1].Value.Trim());
         else
         {
-            var sh = Regex.Match(style, @"(?<![-\w])font\s*:\s*[\d.]+\s*(?:pt|px)\s*([^;]+)", RegexOptions.IgnoreCase);
+            var sh = SafeRegex.Match(style, @"(?<![-\w])font\s*:\s*[\d.]+\s*(?:pt|px)\s*([^;]+)", RegexOptions.IgnoreCase);
             if (sh.Success) fam = FirstFontFamily(sh.Groups[1].Value.Trim());
         }
         return fam is { Length: > 0 } && RunFace(fam).ttf is not null ? fam : null;

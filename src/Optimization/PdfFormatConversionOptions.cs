@@ -110,8 +110,10 @@ public sealed class PdfFormatConversionOptions
         SurroundPuaTextWithEmptyActualText = 2,
     }
 
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
     /// <summary>Segment alignment strategy applied during conversion.</summary>
     public SegmentAlignStrategy AlignStrategy;
+#pragma warning restore S1104
 
     /// <summary>When true, the converter aligns adjacent text fragments according to <see cref="AlignStrategy"/>.</summary>
     public bool AlignText { get; set; }

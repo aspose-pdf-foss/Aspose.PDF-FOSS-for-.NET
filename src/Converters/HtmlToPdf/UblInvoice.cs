@@ -30,7 +30,7 @@ internal static partial class HtmlToPdfConverter
         ub.html = html;
         ub.pageWidth = pageWidth;
         ub.pageHeight = pageHeight;
-        if (!Regex.IsMatch(ub.html, @"id\s*=\s*[""']invoice-frame[""']", RegexOptions.IgnoreCase)
+        if (!SafeRegex.IsMatch(ub.html, @"id\s*=\s*[""']invoice-frame[""']", RegexOptions.IgnoreCase)
             || ub.html.IndexOf("invoice-viewer", StringComparison.OrdinalIgnoreCase) < 0
             || ub.html.IndexOf("UBLInvoiceLine", StringComparison.OrdinalIgnoreCase) < 0)
             return null;

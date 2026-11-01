@@ -45,13 +45,30 @@ public sealed partial class Document
         return target;
     }
 
+    /// <summary>Static Merge: build a fresh Document containing every
+    /// page from <paramref name="files"/>, then apply <paramref name="mergeOptions"/>.</summary>
+    public static Document MergeDocuments(MergeOptions mergeOptions, params Document[] files)
+    {
+        var target = Create();
+        target.Merge(mergeOptions, files);
+        return target;
+    }
+
+    /// <summary>Static Merge: file-paths variant.</summary>
+    public static Document MergeDocuments(MergeOptions mergeOptions, params string[] files)
+    {
+        var target = Create();
+        target.Merge(mergeOptions, files);
+        return target;
+    }
+
     /// <summary>Merge every page of each <paramref name="documents"/> entry
     /// into this document, preserving source order.</summary>
     public void Merge(params Document[] documents)
     {
         if (documents is null) return;
-        foreach (var d in documents)
-            if (d is not null) Pages.Add(d.Pages);
+        foreach (var d in documents.Where(d => d is not null))
+            Pages.Add(d.Pages);
     }
 
     /// <summary>Merge every page of each file in <paramref name="files"/>
@@ -82,23 +99,6 @@ public sealed partial class Document
     {
         Merge(files);
         ApplyMergeOptions(mergeOptions);
-    }
-
-    /// <summary>Static Merge: build a fresh Document containing every
-    /// page from <paramref name="files"/>, then apply <paramref name="mergeOptions"/>.</summary>
-    public static Document MergeDocuments(MergeOptions mergeOptions, params Document[] files)
-    {
-        var target = Create();
-        target.Merge(mergeOptions, files);
-        return target;
-    }
-
-    /// <summary>Static Merge: file-paths variant.</summary>
-    public static Document MergeDocuments(MergeOptions mergeOptions, params string[] files)
-    {
-        var target = Create();
-        target.Merge(mergeOptions, files);
-        return target;
     }
 
     private void ApplyMergeOptions(MergeOptions? options)

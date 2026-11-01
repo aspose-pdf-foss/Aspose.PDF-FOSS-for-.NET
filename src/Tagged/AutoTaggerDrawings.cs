@@ -45,7 +45,7 @@ internal static partial class AutoTagger
     private const double LabelReach = 30.0;
     private const int MaxLabelWords = 4;
     private static readonly System.Text.RegularExpressions.Regex CaptionStart = new(
-        @"^\s*(Fig(ure)?|Table|Chart|Exhibit|Source)(?![A-Za-z])", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        @"^\s*(Fig(ure)?|Table|Chart|Exhibit|Source)(?![A-Za-z])", System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
     /// <summary>Find the page's drawings - clusters of painted paths that are neither ruling
     /// nor a frame nor a background - and list each among the page's figures, its member
@@ -72,7 +72,7 @@ internal static partial class AutoTagger
 
         // Union-find over the boxes: two paths within the gap of each other share a drawing.
         var parent = Enumerable.Range(0, members.Count).ToArray();
-        int Root(int k) { while (parent[k] != k) k = parent[k] = parent[parent[k]]; return k; }
+        int Root(int k) { while (parent[k] != k) { k = parent[k] = parent[parent[k]]; } return k; }
         for (var a = 0; a < members.Count; a++)
             for (var b = a + 1; b < members.Count; b++)
                 if (Near(pw.Ops[members[a]], pw.Ops[members[b]])) parent[Root(a)] = Root(b);
@@ -105,6 +105,9 @@ internal static partial class AutoTagger
             if (!mark && paths.Count < MinDrawingPaints && paths.Sum(k => pw.Ops[k].Curves) < MinDrawingCurves) continue;
             if (!mark && (box.Width < MinDrawingSide || box.Height < MinDrawingSide) || box.Width * box.Height >= MaxDrawingPageShare * pageArea) continue;
             if (pw.Tables.Any(t => Overlap(box, t.region) >= DrawingInTableShare * box.Width * box.Height)) continue;
+            // Paths ruling two of the page's ruled boxes or more are the page's layout of boxes - a heading box over a
+            // map's and its legend's, joined where they touch - no drawing, as a page background is none.
+            if (paths.Select(k => RuledGridOf(pw, pw.Ops[k])).Where(g => g >= 0).Distinct().Skip(1).Any()) continue;
             if (IsFrame(pw, paths, box) || (!mark && RulesOneWay(pw, paths))) continue;
             var inside = rows.Where(l => l.Running == 0 && InsideBox(l, box.LLX, box.LLY, box.URX, box.URY)).ToList();
             // (labels across it - "X1 ... Xm" over a diagram's columns, each a mark of a few characters - are no prose)
@@ -156,6 +159,20 @@ internal static partial class AutoTagger
                && Side(down, p => Middle(p.Llx, p.Urx), box.URX, p => (p.Lly, p.Ury), box.Height);
     }
 
+    /// <summary>The page's ruled grid a path is a line of - a side of its box, a rule between its rows or columns:
+    /// straight and thin, its middle on one of the grid's lines, running inside the grid - or -1.</summary>
+    private static int RuledGridOf(PageWork pw, ContentOp op)
+    {
+        var w = op.Urx - op.Llx;
+        var h = op.Ury - op.Lly;
+        if (op.Curves > 0 || Math.Min(w, h) > RuleThicknessShare * Math.Max(w, h)) return -1;
+        var across = w > h;
+        var at = across ? (op.Lly + op.Ury) / 2 : (op.Llx + op.Urx) / 2;
+        return pw.RuledGrids.FindIndex(g => op.Llx >= g.region.LLX - FrameReach && op.Urx <= g.region.URX + FrameReach
+                                            && op.Lly >= g.region.LLY - FrameReach && op.Ury <= g.region.URY + FrameReach
+                                            && (across ? g.rowY : g.colX).Any(line => Math.Abs(line - at) <= MinPaintSize));
+    }
+
     /// <summary>Whether a cluster of paths is straight rules only, all running one way (the lines under a column's links, a
     /// rule over its next entry) - ruling, no drawing: a chart's or a diagram's lines run both ways, or curve, or are filled.</summary>
     private static bool RulesOneWay(PageWork pw, List<int> ops)
@@ -176,7 +193,7 @@ internal static partial class AutoTagger
     {
         if (line.Frags.Count == 0 || line.Size > bodySize + 0.5 || Words(line) > MaxLabelWords) return false;
         var text = string.Concat(line.Frags.Select(f => f.Text));
-        if (CaptionStart.IsMatch(text)) return false;
+        if (SafeRegex.IsMatch(CaptionStart, text)) return false;
         // The last line of a paragraph standing over the drawing is the paragraph's: a line of prose over it, a pitch or
         // two up, starts where it does.
         if (rows.Any(o => o != line && o.Running == 0 && o.Y > line.Y && o.Y - line.Y <= LabelParagraphPitches * Math.Max(line.Size, 1)

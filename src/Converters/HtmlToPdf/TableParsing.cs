@@ -14,23 +14,23 @@ internal static partial class HtmlToPdfConverter
     internal static double CssBlockLeftIndentPt(string? html, HtmlLoadOptions? options)
     {
         if (string.IsNullOrEmpty(html)) return 0;
-        if (html!.IndexOf("<style", StringComparison.OrdinalIgnoreCase) < 0
+        if (html.IndexOf("<style", StringComparison.OrdinalIgnoreCase) < 0
             && html.IndexOf("<link", StringComparison.OrdinalIgnoreCase) < 0) return 0;
 
         var withCss = InlineLinkedStylesheets(html, options);
         var css = new StringBuilder();
-        foreach (Match sm in Regex.Matches(withCss, @"<style\b[^>]*>([\s\S]*?)</style\s*>",
+        foreach (Match sm in SafeRegex.Matches(withCss, @"<style\b[^>]*>([\s\S]*?)</style\s*>",
                      RegexOptions.IgnoreCase))
             css.Append(sm.Groups[1].Value).Append('\n');
         if (css.Length == 0) return 0;
 
         // selector token -> left offset in pt, for single-token selectors only.
         var rules = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match rm in Regex.Matches(css.ToString().Replace("\r", ""),
-                     @"([^{}]+)\{([^{}]*)\}"))
+        foreach (var groups in SafeRegex.Matches(css.ToString().Replace("\r", ""),
+                     @"([^{}]+)\{([^{}]*)\}").Select(rm => rm.Groups))
         {
-            var decls = rm.Groups[2].Value;
-            var lm = Regex.Match(decls,
+            var decls = groups[2].Value;
+            var lm = SafeRegex.Match(decls,
                 @"(?<![-\w])(?:margin|padding)-left\s*:\s*(-?\d+(?:\.\d+)?)\s*(px|pt)?",
                 RegexOptions.IgnoreCase);
             if (!lm.Success) continue;
@@ -38,7 +38,7 @@ internal static partial class HtmlToPdfConverter
             if (val <= 0) continue;
             if (!lm.Groups[2].Success || lm.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase))
                 val *= 0.75;
-            foreach (var selRaw in rm.Groups[1].Value.Split(','))
+            foreach (var selRaw in groups[1].Value.Split(','))
             {
                 var sel = selRaw.Trim();
                 // Single-token selectors only: a descendant/compound selector styles a
@@ -50,17 +50,22 @@ internal static partial class HtmlToPdfConverter
         if (rules.Count == 0) return 0;
 
         // The outermost block container in document order wins.
-        foreach (Match em in Regex.Matches(withCss,
+        foreach (var emGroups in SafeRegex.Matches(withCss,
                      @"<(div|section|article|main|aside|header|footer|nav|p|h[1-6]|ul|ol|table)\b([^>]*)>",
-                     RegexOptions.IgnoreCase))
+                     RegexOptions.IgnoreCase).Select(em => em.Groups))
         {
-            var tag = em.Groups[1].Value.ToLowerInvariant();
-            var attrs = em.Groups[2].Value;
-            var idm = Regex.Match(attrs, @"\bid\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))", RegexOptions.IgnoreCase);
-            var id = idm.Success ? (idm.Groups[1].Success ? idm.Groups[1].Value
-                : idm.Groups[2].Success ? idm.Groups[2].Value : idm.Groups[3].Value) : null;
+            var tag = emGroups[1].Value.ToLowerInvariant();
+            var attrs = emGroups[2].Value;
+            var idm = SafeRegex.Match(attrs, @"\bid\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))", RegexOptions.IgnoreCase);
+            string? id = null;
+            if (idm.Success)
+            {
+                if (idm.Groups[1].Success) id = idm.Groups[1].Value;
+                else if (idm.Groups[2].Success) id = idm.Groups[2].Value;
+                else id = idm.Groups[3].Value;
+            }
             if (id is { Length: > 0 } && rules.TryGetValue("#" + id, out var byId)) return byId;
-            var clm = Regex.Match(attrs, @"\bclass\s*=\s*(?:""([^""]*)""|'([^']*)')", RegexOptions.IgnoreCase);
+            var clm = SafeRegex.Match(attrs, @"\bclass\s*=\s*(?:""([^""]*)""|'([^']*)')", RegexOptions.IgnoreCase);
             if (clm.Success)
             {
                 var classes = (clm.Groups[1].Success ? clm.Groups[1].Value : clm.Groups[2].Value)
@@ -75,7 +80,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>True when the markup contains an HTML &lt;table&gt; element.</summary>
     internal static bool ContainsTable(string? html) =>
-        !string.IsNullOrEmpty(html) && Regex.IsMatch(html!, @"<\s*table\b", RegexOptions.IgnoreCase);
+        !string.IsNullOrEmpty(html) && SafeRegex.IsMatch(html, @"<\s*table\b", RegexOptions.IgnoreCase);
 
     /// <summary>True when a table in the markup states its width in CSS — its own inline style, or
     /// a `table { width: … }` rule in the fragment's sheet. Such a width outranks a presentational
@@ -85,10 +90,9 @@ internal static partial class HtmlToPdfConverter
     internal static bool DeclaresCssTableWidth(string? html)
     {
         if (string.IsNullOrEmpty(html)) return false;
-        foreach (Match t in Regex.Matches(html!, @"<\s*table\b[^>]*>", RegexOptions.IgnoreCase))
-            if (Regex.IsMatch(DivStyleOf(t.Value), @"(?<![-\w])width\s*:", RegexOptions.IgnoreCase))
-                return true;
-        return ParseStyleSheet(html!).TryGetValue("table", out var rule)
+        if (SafeRegex.Matches(html, @"<\s*table\b[^>]*>", RegexOptions.IgnoreCase).Any(t => SafeRegex.IsMatch(DivStyleOf(t.Value), @"(?<![-\w])width\s*:", RegexOptions.IgnoreCase)))
+            return true;
+        return ParseStyleSheet(html).TryGetValue("table", out var rule)
             && rule.ContainsKey("width");
     }
 
@@ -109,13 +113,13 @@ internal static partial class HtmlToPdfConverter
         if (string.IsNullOrEmpty(html)) return spans;
         var css = ParseStyleSheet(html);
         if (css.Count == 0) return spans;
-        // Blank out style/script bodies and comments so a selector's own text (".x {
-        // border … }") cannot be read back as markup — the same trick SegmentHtmlTables
+        // Blank out style/script bodies and comments so a selector's own text (".x { border
+        // … }") cannot be read back as markup — the same trick SegmentHtmlTables
         // uses, keeping indices into the ORIGINAL string valid.
-        var scan = Regex.Replace(html,
+        var scan = SafeRegex.Replace(html,
             @"<(script|style)\b[^>]*>(?:(?!</\1)[\s\S])*?</\1\s*>|<!--[\s\S]*?-->",
             mm => new string(' ', mm.Length), RegexOptions.IgnoreCase);
-        foreach (Match open in Regex.Matches(scan,
+        foreach (Match open in SafeRegex.Matches(scan,
                      @"<(?<tag>div|section|article|blockquote)\b(?<attrs>[^>]*)>",
                      RegexOptions.IgnoreCase))
         {
@@ -129,16 +133,16 @@ internal static partial class HtmlToPdfConverter
                     foreach (var kv in d) decls[kv.Key] = kv.Value;
             }
             Take(tag);
-            var clsM = Regex.Match(attrs, @"\bclass\s*=\s*(['""])(?<v>[^'""]*)\1",
+            var clsM = SafeRegex.Match(attrs, @"\bclass\s*=\s*(['""])(?<v>[^'""]*)\1",
                 RegexOptions.IgnoreCase);
             if (clsM.Success)
                 foreach (var c in clsM.Groups["v"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 { Take("." + c); Take(tag + "." + c); }
-            var styleM = Regex.Match(attrs, @"\bstyle\s*=\s*(['""])(?<v>[^'""]*)\1",
+            var styleM = SafeRegex.Match(attrs, @"\bstyle\s*=\s*(['""])(?<v>[^'""]*)\1",
                 RegexOptions.IgnoreCase);
             if (styleM.Success)
-                foreach (Match d in StyleDeclRx.Matches(styleM.Groups["v"].Value))
-                    decls[d.Groups[1].Value.Trim().ToLowerInvariant()] = d.Groups[2].Value.Trim();
+                foreach (var groups in SafeRegex.Matches(StyleDeclRx, styleM.Groups["v"].Value).Select(d => d.Groups))
+                    decls[groups[1].Value.Trim().ToLowerInvariant()] = groups[2].Value.Trim();
             if (decls.Count == 0) continue;
 
             var bs = new BlockStyle();
@@ -151,7 +155,7 @@ internal static partial class HtmlToPdfConverter
             if (decls.TryGetValue("padding-top", out var pv)
                 || decls.TryGetValue("padding", out pv))
             {
-                var pm = Regex.Match(pv, @"([\d.]+)\s*(px|pt)?", RegexOptions.IgnoreCase);
+                var pm = SafeRegex.Match(pv, @"([\d.]+)\s*(px|pt)?", RegexOptions.IgnoreCase);
                 if (pm.Success && double.TryParse(pm.Groups[1].Value,
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out var pn))
@@ -161,11 +165,11 @@ internal static partial class HtmlToPdfConverter
 
             // The matching close, by same-name depth — a framed div holding divs of its
             // own closes at ITS close tag, not the first one after it.
-            var anyRx = new Regex($@"<(?<close>/?){tag}\b[^>]*>", RegexOptions.IgnoreCase);
+            var anyRx = new Regex($@"<(?<close>/?){tag}\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
             var depth = 1;
             var end = -1;
-            for (var m2 = anyRx.Match(scan, open.Index + open.Length); m2.Success;
-                 m2 = anyRx.Match(scan, m2.Index + m2.Length))
+            for (var m2 = SafeRegex.Match(anyRx, scan, open.Index + open.Length); m2.Success;
+                 m2 = SafeRegex.Match(anyRx, scan, m2.Index + m2.Length))
             {
                 if (m2.Value.EndsWith("/>", StringComparison.Ordinal)) continue;
                 depth += m2.Groups["close"].Length > 0 ? -1 : 1;
@@ -185,7 +189,7 @@ internal static partial class HtmlToPdfConverter
         // Table tags inside script/style bodies or comments are STRINGS, not
         // markup (jQuery's source mentions "<table>") — scan a same-length copy
         // with those regions blanked and slice the ORIGINAL by index.
-        var scanHtml = Regex.Replace(html,
+        var scanHtml = SafeRegex.Replace(html,
             @"<(script|style)\b[^>]*>(?:(?!</\1)[\s\S])*?</\1\s*>|<!--[\s\S]*?-->",
             mm => new string(' ', mm.Length), RegexOptions.IgnoreCase);
         // A <table> inside a subtree whose inline style hides it (display:none /
@@ -200,16 +204,16 @@ internal static partial class HtmlToPdfConverter
         var hiddenRanges = new List<(int start, int end)>();
         var hidOpenRx = new Regex(
             @"<(div|span|section|article|form|fieldset|center|p|li|ul|ol)\b[^>]*\bstyle\s*=\s*(['""])[^'""]*?(?:display\s*:\s*none|visibility\s*:\s*hidden)[^'""]*?\2[^>]*>",
-            RegexOptions.IgnoreCase);
-        for (var hm = hidOpenRx.Match(scanHtml); hm.Success;
-             hm = hidOpenRx.Match(scanHtml, hm.Index + hm.Length))
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        for (var hm = SafeRegex.Match(hidOpenRx, scanHtml); hm.Success;
+             hm = SafeRegex.Match(hidOpenRx, scanHtml, hm.Index + hm.Length))
         {
             if (hm.Value.EndsWith("/>", StringComparison.Ordinal)) continue;
             var hTag = hm.Groups[1].Value;
-            var hRx = new Regex(@"<(?<c>/?)" + Regex.Escape(hTag) + @"\b[^>]*>", RegexOptions.IgnoreCase);
+            var hRx = new Regex(@"<(?<c>/?)" + Regex.Escape(hTag) + @"\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
             var hDepth = 1;
-            for (var hs = hRx.Match(scanHtml, hm.Index + hm.Length); hs.Success;
-                 hs = hRx.Match(scanHtml, hs.Index + hs.Length))
+            for (var hs = SafeRegex.Match(hRx, scanHtml, hm.Index + hm.Length); hs.Success;
+                 hs = SafeRegex.Match(hRx, scanHtml, hs.Index + hs.Length))
             {
                 hDepth += hs.Groups["c"].Length > 0 ? -1 : 1;
                 if (hDepth == 0) { hiddenRanges.Add((hm.Index, hs.Index + hs.Length)); break; }
@@ -221,14 +225,14 @@ internal static partial class HtmlToPdfConverter
                 if (pos >= r.start && pos < r.end) return true;
             return false;
         }
-        var openRx = new Regex(@"<table\b[^>]*>", RegexOptions.IgnoreCase);
-        var anyRx = new Regex(@"<(?<close>/?)table\b[^>]*>", RegexOptions.IgnoreCase);
-        var m = openRx.Match(scanHtml);
+        var openRx = new Regex(@"<table\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        var anyRx = new Regex(@"<(?<close>/?)table\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        var m = SafeRegex.Match(openRx, scanHtml);
         while (m.Success)
         {
             if (InHiddenRange(m.Index))
             {
-                m = openRx.Match(scanHtml, m.Index + m.Length);
+                m = SafeRegex.Match(openRx, scanHtml, m.Index + m.Length);
                 continue;
             }
             // A table segment runs to the close MATCHING its open — a table nested
@@ -236,8 +240,8 @@ internal static partial class HtmlToPdfConverter
             // match used to truncate the outer table at the inner </table>).
             var depth = 1;
             var end = -1;
-            for (var scan = anyRx.Match(scanHtml, m.Index + m.Length); scan.Success;
-                 scan = anyRx.Match(scanHtml, scan.Index + scan.Length))
+            for (var scan = SafeRegex.Match(anyRx, scanHtml, m.Index + m.Length); scan.Success;
+                 scan = SafeRegex.Match(anyRx, scanHtml, scan.Index + scan.Length))
             {
                 depth += scan.Groups["close"].Length > 0 ? -1 : 1;
                 if (depth == 0) { end = scan.Index + scan.Length; break; }
@@ -246,7 +250,7 @@ internal static partial class HtmlToPdfConverter
             if (m.Index > idx) result.Add((false, html.Substring(idx, m.Index - idx)));
             result.Add((true, html.Substring(m.Index, end - m.Index)));
             idx = end;
-            m = openRx.Match(scanHtml, idx);
+            m = SafeRegex.Match(openRx, scanHtml, idx);
         }
         if (idx < html.Length) result.Add((false, html.Substring(idx)));
         return result;
@@ -262,7 +266,7 @@ internal static partial class HtmlToPdfConverter
         if (html.IndexOf("<table", StringComparison.OrdinalIgnoreCase) < 0) return html;
         // Tags inside script/style bodies or comments are STRINGS, not markup —
         // scan a same-length blanked copy and slice the original by index.
-        var scanHtml = Regex.Replace(html,
+        var scanHtml = SafeRegex.Replace(html,
             @"<(script|style)\b[^>]*>(?:(?!</\1)[\s\S])*?</\1\s*>|<!--[\s\S]*?-->",
             mm => new string(' ', mm.Length), RegexOptions.IgnoreCase);
         // One pass over table/tr/td tokens: a tr or td marks the INNERMOST open
@@ -271,7 +275,7 @@ internal static partial class HtmlToPdfConverter
         var closeOf = new Dictionary<int, (int start, int len)>();   // open idx -> close tag span
         var hasRows = new List<bool>();
         var stack = new Stack<int>();
-        foreach (Match t in Regex.Matches(scanHtml, @"<(?<c>/?)(?<tag>table|tr|td|th)\b[^>]*>",
+        foreach (Match t in SafeRegex.Matches(scanHtml, @"<(?<c>/?)(?<tag>table|tr|td|th)\b[^>]*>",
                      RegexOptions.IgnoreCase))
         {
             var isClose = t.Groups["c"].Length > 0;
@@ -325,16 +329,16 @@ internal static partial class HtmlToPdfConverter
     internal static bool IsLayoutTableHtml(string? html)
     {
         var s = html ?? "";
-        var open = Regex.Match(s, @"<table[^>]*>", RegexOptions.IgnoreCase);
+        var open = SafeRegex.Match(s, @"<table[^>]*>", RegexOptions.IgnoreCase);
         if (!open.Success) return false;
         // the outer table must not draw its own grid
-        var bm = Regex.Match(open.Value, @"border\s*=\s*['""]?(\d+)", RegexOptions.IgnoreCase);
+        var bm = SafeRegex.Match(open.Value, @"border\s*=\s*['""]?(\d+)", RegexOptions.IgnoreCase);
         if (bm.Success && bm.Groups[1].Value != "0") return false;
-        if (Regex.IsMatch(open.Value, @"border\s*:\s*[1-9]", RegexOptions.IgnoreCase)) return false;
+        if (SafeRegex.IsMatch(open.Value, @"border\s*:\s*[1-9]", RegexOptions.IgnoreCase)) return false;
         // and it must actually contain a table inside a cell
         var depth = 0;
         var maxDepth = 0;
-        foreach (Match t in Regex.Matches(s, @"</?table[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match t in SafeRegex.Matches(s, @"</?table[^>]*>", RegexOptions.IgnoreCase))
         {
             depth += t.Value.StartsWith("</", StringComparison.Ordinal) ? -1 : 1;
             if (depth > maxDepth) maxDepth = depth;
@@ -351,19 +355,19 @@ internal static partial class HtmlToPdfConverter
         var open = s.IndexOf("<table", StringComparison.OrdinalIgnoreCase);
         if (open < 0) return 0;
         // only the markup between cells can be fostered: drop every cell's content
-        var outside = Regex.Replace(s[open..],
+        var outside = SafeRegex.Replace(s[open..],
             @"<t[dh]\b[^>]*>[\s\S]*?</t[dh]\s*>", " ", RegexOptions.IgnoreCase);
-        return Regex.Matches(outside, @"<br\b[^>]*>", RegexOptions.IgnoreCase).Count;
+        return SafeRegex.Matches(outside, @"<br\b[^>]*>", RegexOptions.IgnoreCase).Count;
     }
 
     /// <summary>The width a document declares for its body, in points — the containing
     /// block a top-level percentage width resolves against. 0 when none is declared.</summary>
     internal static double DeclaredBodyWidthPt(string? html)
     {
-        var m = Regex.Match(html ?? "", @"<body\b[^>]*style\s*=\s*(['""])([^'""]*)\1",
+        var m = SafeRegex.Match(html ?? "", @"<body\b[^>]*style\s*=\s*(['""])([^'""]*)\1",
             RegexOptions.IgnoreCase);
         if (!m.Success) return 0;
-        var w = Regex.Match(m.Groups[2].Value, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px",
+        var w = SafeRegex.Match(m.Groups[2].Value, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px",
             RegexOptions.IgnoreCase);
         return w.Success
             ? double.Parse(w.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * 0.75
@@ -382,9 +386,8 @@ internal static partial class HtmlToPdfConverter
     {
         var s = (html ?? "").Trim();
         if (s.Length == 0 || s.IndexOf('<') < 0) return null;
-        foreach (Match tg in Regex.Matches(s, "<[^>]*>"))
-            if (!Regex.IsMatch(tg.Value, @"^<\s*/?\s*(del|ins)\b", RegexOptions.IgnoreCase))
-                return null;
+        if (SafeRegex.Matches(s, "<[^>]*>").Any(tg => !SafeRegex.IsMatch(tg.Value, @"^<\s*/?\s*(del|ins)\b", RegexOptions.IgnoreCase)))
+            return null;
         var runs = new List<(string Text, Color? Bg, bool Del, bool Ins)>();
         var pos = 0;
         Color? bg = null;
@@ -394,15 +397,15 @@ internal static partial class HtmlToPdfConverter
             var text = DecodeEntities(raw);
             if (text.Length > 0) runs.Add((text, bg, del, ins));
         }
-        foreach (Match tg in Regex.Matches(s, "<[^>]*>"))
+        foreach (Match tg in SafeRegex.Matches(s, "<[^>]*>"))
         {
             Emit(s[pos..tg.Index]);
             pos = tg.Index + tg.Length;
             var closing = tg.Value.StartsWith("</");
-            var isDel = Regex.IsMatch(tg.Value, @"^<\s*/?\s*del\b", RegexOptions.IgnoreCase);
+            var isDel = SafeRegex.IsMatch(tg.Value, @"^<\s*/?\s*del\b", RegexOptions.IgnoreCase);
             if (closing) { del = false; ins = false; bg = null; continue; }
             if (isDel) del = true; else ins = true;
-            var bgm = Regex.Match(tg.Value, @"background-color\s*:\s*#?([0-9a-fA-F]{6})", RegexOptions.IgnoreCase);
+            var bgm = SafeRegex.Match(tg.Value, @"background-color\s*:\s*#?([0-9a-fA-F]{6})", RegexOptions.IgnoreCase);
             bg = bgm.Success ? Color.FromRgb(System.Drawing.Color.FromArgb(
                 int.Parse(bgm.Groups[1].Value, System.Globalization.NumberStyles.HexNumber))) : null;
         }
@@ -419,11 +422,10 @@ internal static partial class HtmlToPdfConverter
     {
         var parsed = new List<(string Text, double SizePt, Color? Bg)>();
         var s = (html ?? "").Trim();
-        if (!Regex.IsMatch(s, @"^<span\b", RegexOptions.IgnoreCase)) return null;
+        if (!SafeRegex.IsMatch(s, @"^<span\b", RegexOptions.IgnoreCase)) return null;
         // only span tags allowed anywhere
-        foreach (Match tg in Regex.Matches(s, @"<[^>]*>"))
-            if (!Regex.IsMatch(tg.Value, @"^<\s*/?\s*span\b", RegexOptions.IgnoreCase))
-                return null;
+        if (SafeRegex.Matches(s, @"<[^>]*>").Any(tg => !SafeRegex.IsMatch(tg.Value, @"^<\s*/?\s*span\b", RegexOptions.IgnoreCase)))
+            return null;
         var sizeStack = new Stack<double>();
         var bgStack = new Stack<Color?>();
         double curSize = 0;
@@ -434,15 +436,17 @@ internal static partial class HtmlToPdfConverter
         {
             var text = DecodeEntities(raw);
             if (text.Length == 0) return;
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             if (parsed.Count > 0 && parsed[^1].SizePt == curSize && Equals(parsed[^1].Bg, curBg))
+#pragma warning restore S1244
                 parsed[^1] = (parsed[^1].Text + text, curSize, curBg);
             else parsed.Add((text, curSize, curBg));
         }
-        foreach (Match tg in Regex.Matches(s, @"<[^>]*>"))
+        foreach (Match tg in SafeRegex.Matches(s, @"<[^>]*>"))
         {
             Emit(s[pos..tg.Index]);
             pos = tg.Index + tg.Length;
-            if (Regex.IsMatch(tg.Value, @"^<\s*/", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(tg.Value, @"^<\s*/", RegexOptions.IgnoreCase))
             {
                 if (sizeStack.Count > 0) { curSize = sizeStack.Pop(); curBg = bgStack.Pop(); }
                 continue;
@@ -450,17 +454,17 @@ internal static partial class HtmlToPdfConverter
             if (sizeStack.Count > 0) nested = true;
             sizeStack.Push(curSize);
             bgStack.Push(curBg);
-            var st = Regex.Match(tg.Value, @"style\s*=\s*(['""])(?<s>[^'""]*)\1", RegexOptions.IgnoreCase);
+            var st = SafeRegex.Match(tg.Value, @"style\s*=\s*(['""])(?<s>[^'""]*)\1", RegexOptions.IgnoreCase);
             if (st.Success)
             {
                 var css = st.Groups["s"].Value;
-                var fsm = Regex.Match(css, @"font-size\s*:\s*([\d.]+)\s*(pt|px)", RegexOptions.IgnoreCase);
+                var fsm = SafeRegex.Match(css, @"font-size\s*:\s*([\d.]+)\s*(pt|px)", RegexOptions.IgnoreCase);
                 if (fsm.Success)
                 {
                     var v = double.Parse(fsm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
                     curSize = fsm.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase) ? v * 0.75 : v;
                 }
-                var bgm = Regex.Match(css, @"background-color\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+                var bgm = SafeRegex.Match(css, @"background-color\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
                 // a background belongs to its own span, it does not inherit out
                 curBg = bgm.Success ? ParseCssColor(bgm.Groups[1].Value.Trim()) : null;
             }
@@ -522,26 +526,25 @@ internal static partial class HtmlToPdfConverter
     private static List<Block>? TryBuildReportLabelBlocks(string html, double bodyW)
     {
         var blocks = new List<Block>();
-        var inv = System.Globalization.CultureInfo.InvariantCulture;
-        var content = Regex.Match(html, @"(?s)<body\b[^>]*>(.*?)</body>",
+        var content = SafeRegex.Match(html, @"(?s)<body\b[^>]*>(.*?)</body>",
             RegexOptions.IgnoreCase) is { Success: true } bm2 ? bm2.Groups[1].Value : html;
-        content = Regex.Replace(content, @"(?s)<script\b.*?</script>|<!--.*?-->", "");
+        content = SafeRegex.Replace(content, @"(?s)<script\b.*?</script>|<!--.*?-->", "");
         const double fs = ReportFontPt;
         static double Pct(string st)
         {
-            var m2 = Regex.Match(st, @"(?<![-\w])width\s*:\s*([\d.]+)%");
+            var m2 = SafeRegex.Match(st, @"(?<![-\w])width\s*:\s*([\d.]+)%");
             return m2.Success
                 ? double.Parse(m2.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) / 100.0
                 : 0;
         }
         var any = false;
-        foreach (Match dv in Regex.Matches(content, @"(?s)<div>\s*(.*?)\s*</div>", RegexOptions.IgnoreCase))
+        foreach (Match dv in SafeRegex.Matches(content, @"(?s)<div>\s*(.*?)\s*</div>", RegexOptions.IgnoreCase))
         {
             var inner = dv.Groups[1].Value;
-            var lm = Regex.Match(inner,
+            var lm = SafeRegex.Match(inner,
                 @"(?s)<label\b[^>]*style\s*=\s*(['""])(?<st>[^'""]*)\1[^>]*>(?<t>.*?)</label>",
                 RegexOptions.IgnoreCase);
-            var sm2 = Regex.Match(inner,
+            var sm2 = SafeRegex.Match(inner,
                 @"(?s)<span\b[^>]*style\s*=\s*(['""])(?<st>[^'""]*)\1[^>]*>(?<t>.*?)</span>",
                 RegexOptions.IgnoreCase);
             if (lm.Success && sm2.Success)
@@ -549,13 +552,13 @@ internal static partial class HtmlToPdfConverter
                 var labelBox = Pct(lm.Groups["st"].Value) * bodyW;
                 var spanBox = Pct(sm2.Groups["st"].Value) * bodyW;
                 if (labelBox <= 0 || spanBox <= 0) continue;
-                var labelText = Regex.Replace(DecodeEntities(
+                var labelText = SafeRegex.Replace(DecodeEntities(
                     HtmlFragment.StripHtmlTags(lm.Groups["t"].Value)), @"\s+", " ").Trim();
-                var spanText = Regex.Replace(DecodeEntities(
+                var spanText = SafeRegex.Replace(DecodeEntities(
                     HtmlFragment.StripHtmlTags(sm2.Groups["t"].Value)), @"\s+", " ").Trim();
                 any = true;
-                // the label is bold and gives the row's height back to the span;
-                // the span sits past the label's box, its space and its 0.5-em margin
+                // the label is bold and gives the row's height back to the span; the
+                // span sits past the label's box, its space and its 0.5-em margin
                 blocks.Add(new Block
                 {
                     Text = labelText, FontSize = fs, FontRes = "F2", FontFamily = "Arial",
@@ -573,9 +576,9 @@ internal static partial class HtmlToPdfConverter
                 });
                 continue;
             }
-            var hrM = Regex.Match(inner, @"<hr\b[^>]*style\s*=\s*(['""])(?<st>[^'""]*)\1",
+            var hrM = SafeRegex.Match(inner, @"<hr\b[^>]*style\s*=\s*(['""])(?<st>[^'""]*)\1",
                 RegexOptions.IgnoreCase);
-            if (hrM.Success || Regex.IsMatch(inner, @"<hr\b", RegexOptions.IgnoreCase))
+            if (hrM.Success || SafeRegex.IsMatch(inner, @"<hr\b", RegexOptions.IgnoreCase))
                 blocks.Add(new Block
                 {
                     IsHorizontalRule = true, RuleWidth = 1,
@@ -616,7 +619,7 @@ internal static partial class HtmlToPdfConverter
                 }
                 catch { return t.Length * cfs * 0.5; }
             }
-            foreach (var lineText in ctf.Text!.Replace("\r\n", "\n").Split('\n'))
+            foreach (var lineText in ctf.Text.Replace("\r\n", "\n").Split('\n'))
             {
                 var whole = W(lineText);
                 max = Math.Max(max, whole);
@@ -642,8 +645,8 @@ internal static partial class HtmlToPdfConverter
         var css = ParseStyleSheet(html);
         if (css.TryGetValue("body", out var bodyRule)) declared.Add(bodyRule);
         // The element's own style attribute wins over the type rule, so it is read last.
-        if (Regex.Match(html, @"<body\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } bodyTag
-            && Regex.Match(bodyTag.Value, @"style\s*=\s*(""([^""]*)""|'([^']*)')",
+        if (SafeRegex.Match(html, @"<body\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } bodyTag
+            && SafeRegex.Match(bodyTag.Value, @"style\s*=\s*(""([^""]*)""|'([^']*)')",
                 RegexOptions.IgnoreCase) is { Success: true } styleAttr)
         {
             var inline = styleAttr.Groups[2].Success ? styleAttr.Groups[2].Value : styleAttr.Groups[3].Value;
@@ -672,7 +675,7 @@ internal static partial class HtmlToPdfConverter
             // plus an ascent below the content top). Relative values stay with the
             // face's normal box.
             if (rule.TryGetValue("line-height", out var lh)
-                && Regex.IsMatch(lh.Trim(), @"^[\d.]+\s*(px|pt)$", RegexOptions.IgnoreCase)
+                && SafeRegex.IsMatch(lh.Trim(), @"^[\d.]+\s*(px|pt)$", RegexOptions.IgnoreCase)
                 && TryParseLength(lh.Trim()) is { } lhPt && lhPt > 0)
                 lineHeightPt = lhPt;
             if (rule.TryGetValue("font-family", out var ff))
@@ -688,6 +691,18 @@ internal static partial class HtmlToPdfConverter
     }
 
     internal static Table? BuildTableFromHtml(string html) => BuildTableFromHtml(html, 0).result;
+
+    /// <summary>Build a generator Table from an HTML &lt;table&gt;. When it has no explicit column
+    /// widths, columns auto-fit to content: max-content (no wrapping) if the table fits
+    /// <paramref name="availWidthPt"/>, otherwise min-content (each column shrinks to its widest
+    /// word). <paramref name="availWidthPt"/> ≤ 0 means unconstrained (always max-content).
+    /// <c>naturalWidthPt</c> returns the total width the chosen columns occupy.</summary>
+    internal static (Table? result, double naturalWidthPt) BuildTableFromHtml(string html, double availWidthPt)
+        => BuildTableFromHtml(html, availWidthPt, null, null);
+
+    internal static (Table? result, double naturalWidthPt) BuildTableFromHtml(string html, double availWidthPt,
+        HtmlLoadOptions? options, List<byte[]>? inlineSvgs)
+        => BuildTableFromHtml(html, availWidthPt, options, inlineSvgs, null);
 
     /// <summary>The UA stylesheet's own <c>td, th { padding: 1px }</c>, in points —
     /// the vertical half of the cell's default content inset.</summary>
@@ -714,11 +729,10 @@ internal static partial class HtmlToPdfConverter
     {
         double widthPt = default;
         Color? color = default;
-        const double PxToPt = 0.75;
         // CSS default when the shorthand names a style but no width.
         const double MediumBorderPx = 3.0;
-        widthPt = 0; color = null;
-        var dm = Regex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        color = null;
+        var dm = SafeRegex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (!dm.Success) return null;
         var hasStyle = false;
         double? px = null;
@@ -727,7 +741,7 @@ internal static partial class HtmlToPdfConverter
             var t = tok.Trim();
             if (Array.Exists(BorderStyleKeywords, k => string.Equals(k, t, StringComparison.OrdinalIgnoreCase)))
             { hasStyle = true; continue; }
-            var wm = Regex.Match(t, @"^([\d.]+)\s*(px|pt)$", RegexOptions.IgnoreCase);
+            var wm = SafeRegex.Match(t, @"^([\d.]+)\s*(px|pt)$", RegexOptions.IgnoreCase);
             if (wm.Success && double.TryParse(wm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var wv))
@@ -746,18 +760,6 @@ internal static partial class HtmlToPdfConverter
         return (widthPt, color);
     }
 
-    /// <summary>Build a generator Table from an HTML &lt;table&gt;. When it has no explicit column
-    /// widths, columns auto-fit to content: max-content (no wrapping) if the table fits
-    /// <paramref name="availWidthPt"/>, otherwise min-content (each column shrinks to its widest
-    /// word). <paramref name="availWidthPt"/> ≤ 0 means unconstrained (always max-content).
-    /// <c>naturalWidthPt</c> returns the total width the chosen columns occupy.</summary>
-    internal static (Table? result, double naturalWidthPt) BuildTableFromHtml(string html, double availWidthPt)
-        => BuildTableFromHtml(html, availWidthPt, null, null);
-
-    internal static (Table? result, double naturalWidthPt) BuildTableFromHtml(string html, double availWidthPt,
-        HtmlLoadOptions? options, List<byte[]>? inlineSvgs)
-        => BuildTableFromHtml(html, availWidthPt, options, inlineSvgs, null);
-
     // Widen-probe run markers embedded in measure lines:
     // U+E000 bold open, U+E001 bold close, U+E002 sup/sub open, U+E003 sup/sub close.
     private static readonly char[] ProbeSentinels = { '\uE000', '\uE001', '\uE002', '\uE003' };
@@ -770,7 +772,7 @@ internal static partial class HtmlToPdfConverter
         IReadOnlyDictionary<string, Dictionary<string, string>> css, string sel)
     {
         if (!css.TryGetValue(sel, out var d) || !d.TryGetValue("font", out var v)) return null;
-        var m = Regex.Match(v, @"([\d.]+)\s*(px|pt)\s*([^/;]*)");
+        var m = SafeRegex.Match(v, @"([\d.]+)\s*(px|pt)\s*([^/;]*)");
         if (!m.Success) return null;
         var size = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         if (m.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase)) size *= 0.75;

@@ -19,14 +19,14 @@ internal static partial class HtmlToPdfConverter
     // (body font-size 14 px, so 1 em = 10.5 pt):
     //  - the column is min(1025 px, content) CENTRED in the page's content box
     //    (measured: the first title opens at 36.12 on the 841 pt sheet with
-    //    1 pt margins — (1118.7 − 1025)/2 px + the margin, to 0.02);
+    //    1 pt margins — (1118.7 − 1025)/2 px + the margin, to 0.02),
     //  - a field advances by its own width + its 2 px borders + the 1 em
     //    right margin (7em→123.04, 27em→419.96, 24em→301.54, 10em→419.96 …
-    //    every measured field lands within 0.1 pt);
+    //    every measured field lands within 0.1 pt),
     //  - a row advances 6.28 em = 65.94 pt — the 3.28 em field height plus the
-    //    3 em bottom margin (measured on five consecutive row pairs);
-    //  - the control box is the field box inset half a stroke, stroked 1 pt;
-    //    the title's glyph top sits 14.44 pt above the box top, and the value's
+    //    3 em bottom margin (measured on five consecutive row pairs),
+    //  - the control box is the field box inset half a stroke, stroked 1 pt; the
+    //    title's glyph top sits 14.44 pt above the box top, and the value's
     //    11.65 pt below it.
     private const double CfEmPx = 14.0;                 // 1 em in css px
     private const double CfMaxWidthPx = 1025.0;
@@ -76,11 +76,10 @@ internal static partial class HtmlToPdfConverter
         public bool HasControl = true;
     }
 
-    private static Document? TryRenderContactForm(string html, HtmlLoadOptions? options, double pageWidth, double pageHeight, double marginLeft, double marginRight, double marginTop)
+    private static Document? TryRenderContactForm(string html, double pageWidth, double pageHeight, double marginLeft, double marginRight, double marginTop)
     {
         var cf = new ContactFormRenderState();
         cf.html = html;
-        cf.options = options;
         cf.pageWidth = pageWidth;
         cf.pageHeight = pageHeight;
         cf.marginLeft = marginLeft;
@@ -89,30 +88,29 @@ internal static partial class HtmlToPdfConverter
         if (!cf.html.Contains("contact-form-row", System.StringComparison.Ordinal)
             || !cf.html.Contains("contact-form-field", System.StringComparison.Ordinal)) return null;
 
-        cf.css = ParseStyleSheet(cf.html);
         cf.inv = System.Globalization.CultureInfo.InvariantCulture;
         cf.clsW = new Dictionary<string, (double W, double H)>(System.StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(cf.html, @"\.(?<c>contact-form-field-[\w-]+)\s*\{(?<b>[^}]*)\}"))
+        foreach (var groups in SafeRegex.Matches(cf.html, @"\.(?<c>contact-form-field-[\w-]+)\s*\{(?<b>[^}]*)\}").Select(m => m.Groups))
         {
-            var body = m.Groups["b"].Value;
-            var wm = Regex.Match(body, @"(?<![-\w])width\s*:\s*([\d.]+)em");
-            var hm = Regex.Match(body, @"(?<![-\w])height\s*:\s*([\d.]+)em");
+            var body = groups["b"].Value;
+            var wm = SafeRegex.Match(body, @"(?<![-\w])width\s*:\s*([\d.]+)em");
+            var hm = SafeRegex.Match(body, @"(?<![-\w])height\s*:\s*([\d.]+)em");
             if (!wm.Success) continue;
-            cf.clsW[m.Groups["c"].Value] = (
+            cf.clsW[groups["c"].Value] = (
                 double.Parse(wm.Groups[1].Value, cf.inv),
                 hm.Success ? double.Parse(hm.Groups[1].Value, cf.inv) : CfFieldHeightEm);
         }
         if (cf.clsW.Count == 0) return null;
 
-        cf.bodyM = Regex.Match(cf.html, @"<body[^>]*>(?<b>[\s\S]*)</body\s*>", RegexOptions.IgnoreCase);
+        cf.bodyM = SafeRegex.Match(cf.html, @"<body[^>]*>(?<b>[\s\S]*)</body\s*>", RegexOptions.IgnoreCase);
         if (!cf.bodyM.Success) return null;
         cf.body2 = cf.bodyM.Groups["b"].Value;
 
         cf.blocks = new List<(string Kind, string Text, List<CfField> Fields)>();
         cf.tokRx = new Regex(
             @"<h2\b[^>]*>(?<h2>[\s\S]*?)</h2\s*>|<div\b[^>]*class=""[^""]*\bcontact-form-row\b[^""]*""[^>]*>",
-            RegexOptions.IgnoreCase);
-        cf.divRx = new Regex(@"<(?<c>/?)div\b[^>]*>", RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        cf.divRx = new Regex(@"<(?<c>/?)div\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         cf.scanPos = 0;
         while (cf.scanPos < cf.body2.Length)
         {
@@ -147,17 +145,17 @@ internal static partial class HtmlToPdfConverter
         Dictionary<string, (double W, double H)> clsW)
     {
         var fields = new List<CfField>();
-        var openRx = new Regex(@"<div\b[^>]*class=""(?<cls>[^""]*\bcontact-form-field[\w-]*[^""]*)""[^>]*>", RegexOptions.IgnoreCase);
-        var divRx = new Regex(@"<(?<c>/?)div\b[^>]*>", RegexOptions.IgnoreCase);
+        var openRx = new Regex(@"<div\b[^>]*class=""(?<cls>[^""]*\bcontact-form-field[\w-]*[^""]*)""[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        var divRx = new Regex(@"<(?<c>/?)div\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var pos = 0;
         while (pos < rowHtml.Length)
         {
-            var m = openRx.Match(rowHtml, pos);
+            var m = SafeRegex.Match(openRx, rowHtml, pos);
             if (!m.Success) break;
             var depth = 1;
             var end = -1;
-            for (var s = divRx.Match(rowHtml, m.Index + m.Length); s.Success;
-                 s = divRx.Match(rowHtml, s.Index + s.Length))
+            for (var s = SafeRegex.Match(divRx, rowHtml, m.Index + m.Length); s.Success;
+                 s = SafeRegex.Match(divRx, rowHtml, s.Index + s.Length))
             {
                 depth += s.Groups["c"].Length > 0 ? -1 : 1;
                 if (depth == 0) { end = s.Index; break; }
@@ -172,45 +170,45 @@ internal static partial class HtmlToPdfConverter
 
             // The control: a text input's value attribute, a select's selected
             // option, a textarea's body, or a radio group.
-            var radios = Regex.Matches(inner, @"<input\b[^>]*type=""radio""[^>]*>", RegexOptions.IgnoreCase);
+            var radios = SafeRegex.Matches(inner, @"<input\b[^>]*type=""radio""[^>]*>", RegexOptions.IgnoreCase);
             if (radios.Count > 0)
             {
                 f.IsRadioGroup = true;
-                foreach (Match rm in radios)
+                foreach (var value in radios.Select(rm => rm.Value))
                 {
-                    var idm = Regex.Match(rm.Value, @"\bid=""(?<v>[^""]*)""");
-                    var lab = idm.Success
-                        ? Regex.Match(inner,
+                    var idm = SafeRegex.Match(value, @"\bid=""(?<v>[^""]*)""");
+                    string lab = "";
+                    if (idm.Success)
+                        lab = SafeRegex.Match(inner,
                             @"<label\b[^>]*for=""" + Regex.Escape(idm.Groups["v"].Value) + @"""[^>]*>(?<b>[\s\S]*?)</label\s*>",
                             RegexOptions.IgnoreCase) is { Success: true } lm
-                            ? Regex.Replace(DecodeEntities(Regex.Replace(lm.Groups["b"].Value, "<[^>]+>", "")), @"\s+", " ").Trim()
-                            : ""
-                        : "";
-                    f.Radios.Add((lab, rm.Value.Contains("checked", System.StringComparison.OrdinalIgnoreCase)));
+                            ? SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(lm.Groups["b"].Value, "<[^>]+>", "")), @"\s+", " ").Trim()
+                            : "";
+                    f.Radios.Add((lab, value.Contains("checked", System.StringComparison.OrdinalIgnoreCase)));
                 }
             }
-            else if (Regex.Match(inner, @"<select\b[\s\S]*?</select\s*>", RegexOptions.IgnoreCase) is { Success: true } sel)
+            else if (SafeRegex.Match(inner, @"<select\b[\s\S]*?</select\s*>", RegexOptions.IgnoreCase) is { Success: true } sel)
             {
-                var opt = Regex.Match(sel.Value, @"<option\b[^>]*selected[^>]*>(?<b>[\s\S]*?)</option\s*>", RegexOptions.IgnoreCase);
-                if (!opt.Success) opt = Regex.Match(sel.Value, @"<option\b[^>]*>(?<b>[\s\S]*?)</option\s*>", RegexOptions.IgnoreCase);
+                var opt = SafeRegex.Match(sel.Value, @"<option\b[^>]*selected[^>]*>(?<b>[\s\S]*?)</option\s*>", RegexOptions.IgnoreCase);
+                if (!opt.Success) opt = SafeRegex.Match(sel.Value, @"<option\b[^>]*>(?<b>[\s\S]*?)</option\s*>", RegexOptions.IgnoreCase);
                 if (opt.Success) f.Value = DecodeEntities(opt.Groups["b"].Value).Trim();
             }
-            else if (Regex.Match(inner, @"<textarea\b[^>]*>(?<b>[\s\S]*?)</textarea\s*>", RegexOptions.IgnoreCase) is { Success: true } ta)
+            else if (SafeRegex.Match(inner, @"<textarea\b[^>]*>(?<b>[\s\S]*?)</textarea\s*>", RegexOptions.IgnoreCase) is { Success: true } ta)
             {
-                f.Value = DecodeEntities(Regex.Replace(ta.Groups["b"].Value, "<[^>]+>", "")).Trim();
+                f.Value = DecodeEntities(SafeRegex.Replace(ta.Groups["b"].Value, "<[^>]+>", "")).Trim();
             }
-            else if (Regex.Match(inner, @"<input\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } inp)
+            else if (SafeRegex.Match(inner, @"<input\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } inp)
             {
-                var vm = Regex.Match(inp.Value, @"\bvalue=""(?<v>[^""]*)""");
+                var vm = SafeRegex.Match(inp.Value, @"\bvalue=""(?<v>[^""]*)""");
                 if (vm.Success) f.Value = DecodeEntities(vm.Groups["v"].Value).Trim();
             }
             else
             {
                 // No control at all — an attachment list or a plain text field.
                 f.HasControl = false;
-                var text = Regex.Replace(inner, @"<h3\b[\s\S]*?</h3\s*>", "", RegexOptions.IgnoreCase);
-                text = Regex.Replace(text, "<[^>]+>", " ");
-                f.Value = Regex.Replace(DecodeEntities(text), @"\s+", " ").Trim();
+                var text = SafeRegex.Replace(inner, @"<h3\b[\s\S]*?</h3\s*>", "", RegexOptions.IgnoreCase);
+                text = SafeRegex.Replace(text, "<[^>]+>", " ");
+                f.Value = SafeRegex.Replace(DecodeEntities(text), @"\s+", " ").Trim();
             }
 
             fields.Add(f);
@@ -220,18 +218,18 @@ internal static partial class HtmlToPdfConverter
         {
             // The question row wraps each option group in its own <fieldset> (inside
             // one class-less div), so the fieldsets — not the divs — are the fields.
-            foreach (Match fs in Regex.Matches(rowHtml, @"<fieldset\b[^>]*>(?<b>[\s\S]*?)</fieldset\s*>",
+            foreach (Match fs in SafeRegex.Matches(rowHtml, @"<fieldset\b[^>]*>(?<b>[\s\S]*?)</fieldset\s*>",
                          RegexOptions.IgnoreCase))
             {
                 var bin = fs.Groups["b"].Value;
                 var bf = new CfField { Title = FirstClassText(bin, "form-input-title") };
-                foreach (Match rm in Regex.Matches(bin, @"<input\b[^>]*type=""radio""[^>]*>", RegexOptions.IgnoreCase))
+                foreach (Match rm in SafeRegex.Matches(bin, @"<input\b[^>]*type=""radio""[^>]*>", RegexOptions.IgnoreCase))
                 {
                     bf.IsRadioGroup = true;
                     var after = bin[(rm.Index + rm.Length)..];
-                    var lab = Regex.Match(after, @"^[^<]{0,24}");
+                    var lab = SafeRegex.Match(after, @"^[^<]{0,24}");
                     bf.Radios.Add((
-                        Regex.Replace(DecodeEntities(lab.Value), @"\s+", " ").Trim(),
+                        SafeRegex.Replace(DecodeEntities(lab.Value), @"\s+", " ").Trim(),
                         rm.Value.Contains("checked", System.StringComparison.OrdinalIgnoreCase)));
                 }
                 if (bf.IsRadioGroup) fields.Add(bf);

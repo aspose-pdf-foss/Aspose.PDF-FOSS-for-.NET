@@ -47,9 +47,85 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         {
             drawnWidened = FillRoundPenOutline(path, state, pen);
         }
+        if (!drawnWidened && IsClosedFigureNoWiderThanPen(path, state.LineWidth))
+            drawnWidened = StrokeSegmentsWithRoundPen(path, pen);
         if (!drawnWidened)
             _g.DrawPath(pen, path);
         _g.CompositingQuality = savedScq;
+    }
+
+    /// <summary>The fewest device pixels across a degenerate subpath's dot is drawn.</summary>
+    private const double MinimumDotPx = 1.0;
+
+    /// <summary>Paint the mark a round or projecting cap leaves where a subpath has no length
+    /// (see <see cref="PenGeometry.DegenerateSubpathPoints"/>), in user space under the
+    /// surface's transform: the GDI+ pen draws nothing along a segment of no length, so the
+    /// dots of stroked lettering and dotted drawings vanished at every width.</summary>
+    private void PaintDegenerateSubpathDots(IReadOnlyList<PathCommand> segments, GraphicsState state)
+    {
+        if (PenGeometry.DegenerateSubpathPoints(segments, state.LineCap) is not { } dots) return;
+        var stretch = PenGeometry.CtmMaxScale(state.Ctm) * _scale;
+        if (!(stretch > 0)) return;
+        var size = (float)Math.Max(state.LineWidth, MinimumDotPx / stretch);
+        using var brush = new SolidBrush(ColorFrom(state.StrokeR, state.StrokeG, state.StrokeB, state.StrokeAlpha));
+        foreach (var (x, y) in dots)
+        {
+            var box = new RectangleF((float)x - size / 2, (float)y - size / 2, size, size);
+            if (state.LineCap == PenGeometry.RoundCap) _g.FillEllipse(brush, box);
+            else _g.FillRectangle(brush, box);
+        }
+    }
+
+    /// <summary>True when every figure of the path is closed and the path fits in a box no wider or
+    /// taller than the pen (a chart marker is a 2.5 pt circle stroked 15 pt wide). The pen's widening
+    /// of such a figure turns its inner offset loop inside out and leaves a hole in the middle of a
+    /// stroke that in fact covers the whole figure and its surroundings.</summary>
+    private static bool IsClosedFigureNoWiderThanPen(GraphicsPath path, double lineWidth)
+    {
+        if (path.PointCount == 0) return false;
+        var bounds = path.GetBounds();
+        if (bounds.Width > lineWidth || bounds.Height > lineWidth) return false;
+        var types = path.PathTypes;
+        for (var i = 0; i < types.Length; i++)
+        {
+            var lastOfFigure = i + 1 == types.Length
+                || (types[i + 1] & (byte)PathPointType.PathTypeMask) == (byte)PathPointType.Start;
+            if (lastOfFigure && (types[i] & (byte)PathPointType.CloseSubpath) == 0) return false;
+        }
+        return true;
+    }
+
+    /// <summary>Stroke the flattened path one segment at a time with round caps: the union of those
+    /// strokes is the stroke region, with no offset loop to turn inside out. The joins differ from the
+    /// pen's only within the figure, which the strokes cover anyway. Reports false when the path
+    /// could not be flattened, so the pen can draw instead.</summary>
+    private bool StrokeSegmentsWithRoundPen(GraphicsPath path, Pen pen)
+    {
+        PointF[] points;
+        byte[] types;
+        try
+        {
+            using var flat = (GraphicsPath)path.Clone();
+            flat.Flatten();
+            points = flat.PathPoints;
+            types = flat.PathTypes;
+        }
+        catch
+        {
+            return false;
+        }
+        using var roundPen = new Pen(pen.Color, pen.Width) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        var figureStart = 0;
+        for (var i = 0; i < points.Length; i++)
+        {
+            if ((types[i] & (byte)PathPointType.PathTypeMask) == (byte)PathPointType.Start)
+                figureStart = i;
+            else
+                _g.DrawLine(roundPen, points[i - 1], points[i]);
+            if ((types[i] & (byte)PathPointType.CloseSubpath) != 0)
+                _g.DrawLine(roundPen, points[i], points[figureStart]);
+        }
+        return true;
     }
 
     /// <summary>Widen the path on the page with a round pen of the width the
@@ -90,9 +166,23 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     }
 
     /// <summary>Fills the path with its flat colour: through the blended filler under a soft mask or a non-Normal blend, else a solid brush, a sub-pixel sliver painted as a faint rectangle, and the aliased-fill mode on the exact world matrix when enabled.</summary>
+    /// <summary>A bar at least a pixel across over <paramref name="db"/> (device pixels), its alpha the box's
+    /// geometric coverage floored at an eighth; nothing for an empty box. Drawn with the transform reset.</summary>
+    private void FillFaintBar(RectangleF db, GraphicsState state)
+    {
+        if (!(db.Width > 0f && db.Height > 0f)) return;
+        var thinnest = Math.Min(Math.Min(db.Width, db.Height), 1f);
+        using var faint = new SolidBrush(ColorFrom(state.FillR, state.FillG, state.FillB,
+            state.FillAlpha * Math.Max(thinnest, 0.125f)));
+        _g.FillRectangle(faint, db.X, db.Y, Math.Max(db.Width, 1f), Math.Max(db.Height, 1f));
+    }
+
     private void FillPathFlat(GraphicsPath path, GdiMatrix world, RectangleF pathBounds, GraphicsState state)
     {
         var blend = Rasterizer.BlendModes.Parse(state.BlendMode);
+        if (blend == Rasterizer.BlendMode.Normal
+            && SoftwarePageRenderer.IsOverprintedSpot(_reader, _scope.ColorSpaces, state.OverprintFill, state.FillColorSpace))
+            blend = Rasterizer.BlendMode.Multiply;
         var softMask = state.SoftMask is { } sm ? GetSoftMaskAlpha(sm) : null;
         if (softMask is not null)
         {
@@ -126,19 +216,28 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                 // geometric coverage (floored at ~1/8 so a vanishingly thin
                 // rule stays faintly visible) - the probed reference law is
                 // true coverage, never a solid bump.
-                using var faint = new SolidBrush(ColorFrom(state.FillR, state.FillG, state.FillB,
-                    state.FillAlpha * Math.Max(thinnest, 0.125f)));
                 var cur = _g.Transform;
                 _g.ResetTransform();
-                _g.FillRectangle(faint, db.X, db.Y, Math.Max(db.Width, 1f), Math.Max(db.Height, 1f));
+                // A path of several subpaths - a row of dots - is thin as a whole, but its dots
+                // are its marks: each draws its own bar, not one bar over the whole row.
+                using var parts = new GraphicsPathIterator(path);
+                if (parts.SubpathCount <= 1)
+                {
+                    FillFaintBar(db, state);
+                }
+                else
+                {
+                    using var part = new GraphicsPath();
+                    while (parts.NextSubpath(part, out _) > 0) FillFaintBar(part.GetBounds(world), state);
+                }
                 _g.Transform = cur;
                 cur.Dispose();
             }
             else
             {
                 // Blend a semi-transparent fill in straight sRGB.
-                // The page keeps gamma-corrected compositing for text AA;
-                // applying it to /ca fills composites them visibly lighter than the
+                // The page keeps gamma-corrected compositing for text AA; applying
+                // it to /ca fills composites them visibly lighter than the
                 // platform convention. Scoped to the shape-fill call so glyph
                 // rendering is unaffected.
                 // A near-white opaque fill is composited the same way: gamma-corrected

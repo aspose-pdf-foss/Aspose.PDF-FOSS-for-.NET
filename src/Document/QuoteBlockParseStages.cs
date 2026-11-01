@@ -15,7 +15,7 @@ public sealed partial class Document
         var t = m.Value;
         if (t.StartsWith("<div", StringComparison.OrdinalIgnoreCase))
         {
-            if (Regex.IsMatch(t, @"page-break-after\s*:\s*always", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(t, @"page-break-after\s*:\s*always", RegexOptions.IgnoreCase))
                 qb.blocks.Add(new QsBlock { Kind = "pagebreak" });
             return;
         }
@@ -26,7 +26,7 @@ public sealed partial class Document
         }
         if (t.StartsWith("<img", StringComparison.OrdinalIgnoreCase))
         {
-            var srcM = Regex.Match(t, @"src\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase);
+            var srcM = SafeRegex.Match(t, @"src\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase);
             if (!srcM.Success) return;
             var raw = System.Net.WebUtility.HtmlDecode(srcM.Groups[1].Value);
             var path = raw;
@@ -46,7 +46,7 @@ public sealed partial class Document
         if (t.StartsWith("<p", StringComparison.OrdinalIgnoreCase))
         {
             var blk = new QsBlock { Kind = "para" };
-            if (Regex.Match(t, @"class\s*=\s*""([^""]*)""", RegexOptions.IgnoreCase)
+            if (SafeRegex.Match(t, @"class\s*=\s*""([^""]*)""", RegexOptions.IgnoreCase)
                     is { Success: true } clsM)
                 foreach (var cn in clsM.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                     if (qb.css.TryGetValue(cn, out var rule))
@@ -55,9 +55,9 @@ public sealed partial class Document
                         blk.Centre |= rule.centre;
                         blk.Underline |= rule.underline;
                     }
-            blk.Bold = Regex.IsMatch(t, @"<b\b|<strong\b", RegexOptions.IgnoreCase);
-            blk.Italic = Regex.IsMatch(t, @"<i\b|<em\b", RegexOptions.IgnoreCase);
-            blk.Underline |= Regex.IsMatch(t, @"<u\b", RegexOptions.IgnoreCase);
+            blk.Bold = SafeRegex.IsMatch(t, @"<b\b|<strong\b", RegexOptions.IgnoreCase);
+            blk.Italic = SafeRegex.IsMatch(t, @"<i\b|<em\b", RegexOptions.IgnoreCase);
+            blk.Underline |= SafeRegex.IsMatch(t, @"<u\b", RegexOptions.IgnoreCase);
             blk.Text = Flat(t);
             // a paragraph holding only a hard space is a bare line box
             if (blk.Text.Length == 0)
@@ -69,16 +69,16 @@ public sealed partial class Document
             return;
         }
         var tbl = new QsBlock { Kind = "table" };
-        foreach (Match rm in Regex.Matches(t, @"<tr\b[^>]*>([\s\S]*?)</tr>", RegexOptions.IgnoreCase))
+        foreach (Match rm in SafeRegex.Matches(t, @"<tr\b[^>]*>([\s\S]*?)</tr>", RegexOptions.IgnoreCase))
         {
             var cells = new List<QsCell>();
-            foreach (Match cm in Regex.Matches(rm.Groups[1].Value,
-                @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(rm.Groups[1].Value,
+                @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(cm => cm.Groups))
             {
-                var attrs = cm.Groups[1].Value;
-                var inner = cm.Groups[2].Value;
+                var attrs = groups[1].Value;
+                var inner = groups[2].Value;
                 var cell = new QsCell { Text = Flat(inner) };
-                if (Regex.Match(attrs, @"class\s*=\s*""([^""]*)""", RegexOptions.IgnoreCase)
+                if (SafeRegex.Match(attrs, @"class\s*=\s*""([^""]*)""", RegexOptions.IgnoreCase)
                         is { Success: true } ccm)
                     foreach (var cn in ccm.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                         if (qb.css.TryGetValue(cn, out var rule))
@@ -87,12 +87,12 @@ public sealed partial class Document
                             if (rule.fontPx > 0) cell.FontPx = rule.fontPx;
                             cell.Centre |= rule.centre;
                         }
-                if (Regex.Match(attrs, @"colspan\s*=\s*""?(\d+)", RegexOptions.IgnoreCase)
+                if (SafeRegex.Match(attrs, @"colspan\s*=\s*""?(\d+)", RegexOptions.IgnoreCase)
                         is { Success: true } spanM
                     && int.TryParse(spanM.Groups[1].Value, out var sp) && sp > 1)
                     cell.ColSpan = sp;
-                cell.Bold = Regex.IsMatch(inner, @"<b\b|<strong\b", RegexOptions.IgnoreCase);
-                cell.Italic = Regex.IsMatch(inner, @"<i\b|<em\b", RegexOptions.IgnoreCase);
+                cell.Bold = SafeRegex.IsMatch(inner, @"<b\b|<strong\b", RegexOptions.IgnoreCase);
+                cell.Italic = SafeRegex.IsMatch(inner, @"<i\b|<em\b", RegexOptions.IgnoreCase);
                 cells.Add(cell);
             }
             if (cells.Count > 0) tbl.Rows.Add(cells);
@@ -101,7 +101,7 @@ public sealed partial class Document
     }
 
     /// <summary>The text of a tag run: markup stripped, entities decoded, whitespace collapsed.</summary>
-    private static string Flat(string s) => Regex.Replace(
-        System.Net.WebUtility.HtmlDecode(Regex.Replace(s, @"<[^>]+>", ""))
+    private static string Flat(string s) => SafeRegex.Replace(
+        System.Net.WebUtility.HtmlDecode(SafeRegex.Replace(s, @"<[^>]+>", ""))
             .Replace(' ', ' '), @"\s+", " ").Trim();
 }

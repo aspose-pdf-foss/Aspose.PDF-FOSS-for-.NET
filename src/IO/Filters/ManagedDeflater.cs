@@ -57,6 +57,13 @@ internal static class ManagedDeflater
         return result;
     }
 
+    /// <summary>Deflate for image samples: greedy matching, which on raster rows is both faster
+    /// and smaller than the lazy default (on corpus images 2.8 times the speed and 1 to 9
+    /// percent smaller output; on text and fonts the default is the smaller).</summary>
+    public static byte[] DeflateSamples(byte[] data) => DeflateZlib(data, DeflateLevel.Fast);
+
+    public static byte[] DeflateSamples(byte[] data, int offset, int count) => DeflateZlib(data, offset, count, DeflateLevel.Fast);
+
     public static byte[] DeflateRaw(byte[] data, int offset, int count, DeflateLevel level = DeflateLevel.Default)
     {
         var writer = new DeflateBitWriter(count / 2 + 64);
@@ -246,10 +253,12 @@ internal sealed class Lz77Encoder
             DeflateLevel.Best => (256, DeflateTables.MaxMatch, true, 16, 128),
             _ => (128, 128, true, 8, 16),
         };
+#pragma warning disable S3010 // per-thread scratch buffers, reused across instances on purpose
         _head = t_head ??= new int[HashSize];
         _prev = t_prev ??= new int[DeflateTables.WindowSize];
         _tokenLength = t_tokenLength ??= new ushort[MaxBlockTokens];
         _tokenValue = t_tokenValue ??= new ushort[MaxBlockTokens];
+#pragma warning restore S3010
         Compat.Fill(_head, NoPosition);
     }
 

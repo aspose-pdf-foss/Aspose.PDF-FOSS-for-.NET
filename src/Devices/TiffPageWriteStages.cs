@@ -54,8 +54,15 @@ public sealed partial class TiffDevice : ImageDevice
     /// <summary></summary>
     private void WriteTiffStripAndDirectory(TiffPageWriteState tp)
     {
-        var (strip, compressionTag) = EncodeStrip(tp.stripInput, tp.compression);
+        var (strip, compressionTag) = EncodeStrip(tp);
         tp.stripSize = strip.Length;
+
+        // The directory after the strip, with its out-of-line payloads, stays far under this.
+        const int DirectoryFootprint = 512;
+        if (tp.output.Position + strip.Length + DirectoryFootprint > ClassicTiffLimit)
+            throw new PdfException(
+                $"The TIFF output would pass {ClassicTiffLimit} bytes, beyond what a classic TIFF's 32-bit offsets address: "
+                + "lower the resolution, compress the frames or convert fewer pages at a time.");
 
         tp.stripOffset = (uint)tp.output.Position;
         tp.bw.Write(strip);
@@ -89,10 +96,10 @@ public sealed partial class TiffDevice : ImageDevice
         // exactly. Without these tags, readers (System.Drawing, ImageSharp) fall back
         // to a hard-coded 96 DPI, which broke any test that asserted on the saved DPI.
         uint xResOffset = (uint)tp.output.Position;
-        tp.bw.Write((uint)Resolution.X);
+        tp.bw.Write((uint)tp.dpi.X);
         tp.bw.Write((uint)1);
         uint yResOffset = (uint)tp.output.Position;
-        tp.bw.Write((uint)Resolution.Y);
+        tp.bw.Write((uint)tp.dpi.Y);
         tp.bw.Write((uint)1);
 
         tp.ifdOffset = (uint)tp.output.Position;
@@ -118,10 +125,14 @@ public sealed partial class TiffDevice : ImageDevice
         else
             WriteTag(tp.bw, 258, 3, tp.isAlpha ? 4u : 3u, bpsOffset);         // BitsPerSample offset → [8,8,8(,8)]
         WriteTag(tp.bw, 259, 3, 1, compressionTag);                        // Compression
-        tp.photometric = (tp.isPalette || tp.is4bpp) ? 3u : tp.isBilevel ? 0u : 2u;
+        if (tp.isPalette || tp.is4bpp) tp.photometric = 3u;
+        else if (tp.isBilevel) tp.photometric = 0u;
+        else tp.photometric = 2u;
         WriteTag(tp.bw, 262, 3, 1, tp.photometric);                            // PhotometricInterpretation
         WriteTag(tp.bw, 273, 4, 1, tp.stripOffset);                           // StripOffsets
-        tp.samplesPerPixel = (tp.isPalette || tp.is4bpp || tp.isBilevel) ? 1u : tp.isAlpha ? 4u : 3u;
+        if (tp.isPalette || tp.is4bpp || tp.isBilevel) tp.samplesPerPixel = 1u;
+        else if (tp.isAlpha) tp.samplesPerPixel = 4u;
+        else tp.samplesPerPixel = 3u;
         WriteTag(tp.bw, 277, 3, 1, tp.samplesPerPixel);                        // SamplesPerPixel
         WriteTag(tp.bw, 278, 3, 1, (uint)tp.h);                               // RowsPerStrip
         WriteTag(tp.bw, 279, 4, 1, (uint)tp.stripSize);                       // StripByteCounts

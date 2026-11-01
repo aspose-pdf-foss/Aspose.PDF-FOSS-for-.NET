@@ -18,11 +18,28 @@ public sealed partial class TextReplacer
         var replacedText = _isRegex && _regexPattern is not null
             ? _regexPattern.Replace(tj.normalizedCombined, tj.replacement)
             : tj.normalizedCombined.Replace(tj.normalizedSearch, tj.replacement, StringComparison.Ordinal);
-        var replacedBytes = EncodeString(replacedText, tj.toUnicode, tj.fontDict);
+        var replacedBytes = EncodeString(replacedText, tj.toUnicode, tj.fontDict, tj.reader);
         var useHex = tj.parts.Count > 0 && tj.parts[0].isHex;
         var flat = new PdfArray();
         flat.Add(new PdfString(replacedBytes, useHex));
         return flat;
+    }
+
+    /// <summary>The byte offset in the array's string <paramref name="arrIdx"/> at which its first
+    /// <paramref name="chars"/> decoded characters end. A simple font writes a character per byte; a
+    /// composite font's codes are walked by its codespace, each decoded to the characters it reads as.</summary>
+    private static int ByteOffsetOfChars(TjReplaceState tj, int arrIdx, int chars)
+    {
+        if (tj.codespace is null || tj.arr[arrIdx] is not PdfString s) return chars;
+        var bytes = s.Value;
+        int at = 0, read = 0;
+        while (at < bytes.Length && read < chars)
+        {
+            var len = tj.codespace.CodeLength(bytes, at);
+            read += DecodeString(bytes[at..(at + len)], tj.toUnicode, tj.fontDict, tj.reader).Length;
+            at += len;
+        }
+        return at;
     }
 
     // Offset-inside-string = count of prior chars mapped to the same arrIdx

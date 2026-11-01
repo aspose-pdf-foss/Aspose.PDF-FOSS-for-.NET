@@ -100,7 +100,7 @@ public sealed partial class PdfFileSignature
         if (docMdpSignature is null) throw new ArgumentNullException(nameof(docMdpSignature));
         var cert = RequireCertificate(docMdpSignature.Signature);
         CertifyCore(cert, fieldName: null, page, SigReason, SigContact, SigLocation,
-            visible, annotRect, docMdpSignature.AccessPermissions);
+            visible, annotRect, docMdpSignature.AccessPermissions, docMdpSignature.Signature.TimestampSettings);
     }
 
     /// <summary>Certify an existing blank signature field by name.</summary>
@@ -112,7 +112,8 @@ public sealed partial class PdfFileSignature
             docMdpSignature.Signature.Reason,
             docMdpSignature.Signature.ContactInfo,
             docMdpSignature.Signature.Location,
-            visible: false, default, docMdpSignature.AccessPermissions);
+            visible: false, default, docMdpSignature.AccessPermissions,
+            docMdpSignature.Signature.TimestampSettings);
     }
 
     /// <summary>Extract the /AP /N (normal appearance) stream of the named
@@ -145,6 +146,10 @@ public sealed partial class PdfFileSignature
         }
         return null;
     }
+
+    /// <summary>Returns the image shown in the appearance of the named signature, or null when there is none or the name is null.</summary>
+    public Stream? ExtractImage(SignatureName signName)
+        => signName is null ? null : ExtractImage(signName.FullName);
 
     /// <summary>Return the image embedded in a signature appearance Form XObject:
     /// the first /Subtype /Image in its /Resources /XObject. For DCT/JPX-coded
@@ -215,10 +220,6 @@ public sealed partial class PdfFileSignature
         };
     }
 
-    /// <summary>Returns the image shown in the appearance of the named signature, or null when there is none or the name is null.</summary>
-    public Stream? ExtractImage(SignatureName signName)
-        => signName is null ? null : ExtractImage(signName.FullName);
-
     private static Aspose.Pdf.Core.PdfStream? FindAppearanceStream(
         Aspose.Pdf.Core.PdfDictionary fieldDict, Aspose.Pdf.IO.PdfReader reader)
     {
@@ -230,7 +231,7 @@ public sealed partial class PdfFileSignature
     private void SignCore(Security.PdfCertificate cert, string? fieldName,
         int page, string? reason, string? contact, string? location,
         bool visible, System.Drawing.Rectangle annotRect, Forms.Signature? sig,
-        int? docMdpPermissions = null)
+        int? docMdpPermissions = null, TimestampSettings? timestamp = null)
     {
         // PDF 2.0 (ISO 32000-2 §12.8.3) removes the SHA-1-era signature
         // subfilters — adbe.x509.rsa_sha1 (PKCS#1) and the enveloping
@@ -250,10 +251,9 @@ public sealed partial class PdfFileSignature
             return;
         }
 
-        // A CERTIFIED (DocMDP) document refuses further signing for the same reason it
-        // refuses encryption: appending a signature rewrites bytes the certification
-        // covers, so the author's certificate would no longer validate. An ordinary
-        // approval signature leaves /Perms absent and does not block a second signature.
+        // A document CERTIFIED with no changes allowed (DocMDP /P 1) refuses further signing:
+        // the certification would no longer validate. Levels 2 and 3 permit signatures. An
+        // ordinary approval signature leaves /Perms absent and does not block a second signature.
         // Measured on an already-certified document (it throws with
         // this message) and on an uncertified one signed by the same certificate (it signs).
         if (docMdpPermissions is null && BoundDocumentIsCertified())
@@ -268,6 +268,7 @@ public sealed partial class PdfFileSignature
             FieldName = fieldName,
             Password = _password,
             DocMdpPermissions = docMdpPermissions,
+            PageNumber = page,
         };
         // Honour Forms.Signature signer knobs when present.
         if (sig is not null)
@@ -287,16 +288,19 @@ public sealed partial class PdfFileSignature
             opts.Digest = sig.RequestedDigest;
             if (sig.UseLtv) opts.UseLtv = true;
             // /SubFilter reflects the concrete signature subtype so the reloaded
-            // signature round-trips to the same type (an enveloping PKCS7 vs a
-            // detached PKCS7 — the CMS bytes are detached either way here).
+            // signature round-trips to the same type; the signer shapes /Contents
+            // after it (an enveloping PKCS7 CMS, a detached one, a bare PKCS#1 value).
             opts.SubFilter = sig switch
             {
                 Forms.ExternalSignature ext => ext.Detached ? "adbe.pkcs7.detached" : "adbe.pkcs7.sha1",
                 Forms.PKCS7Detached => "adbe.pkcs7.detached",
                 Forms.PKCS7 => "adbe.pkcs7.sha1",
+                Forms.PKCS1 => Security.PdfSigner.SubFilterRsaSha1,
                 _ => opts.SubFilter,
             };
         }
+        ApplySignatureTimestamp(opts, sig?.TimestampSettings ?? timestamp,
+            explicitLength: sig is { DefaultSignatureLength: > 0 } || opts.AvoidEstimating);
         var appearance = visible ? BuildAppearance(page, annotRect, sig) : null;
         if (appearance is not null)
             appearance.ImageBytes = ResolveAppearanceImageBytes();
@@ -318,22 +322,39 @@ public sealed partial class PdfFileSignature
     private void CertifyCore(Security.PdfCertificate cert, string? fieldName,
         int page, string? reason, string? contact, string? location,
         bool visible, System.Drawing.Rectangle annotRect,
-        Forms.DocMDPAccessPermissions accessPermissions)
+        Forms.DocMDPAccessPermissions accessPermissions, TimestampSettings? timestamp)
     {
         // The /DocMDP transform reference and catalog /Perms are written by the
         // signer BEFORE the ByteRange is hashed, so the certifying reference is
         // covered by (and does not invalidate) the signature.
         SignCore(cert, fieldName, page, reason, contact, location, visible, annotRect,
-            sig: null, docMdpPermissions: (int)accessPermissions);
+            sig: null, docMdpPermissions: (int)accessPermissions, timestamp);
+    }
+
+    /// <summary>Have the certificate signature timestamped by the TSA the signature names.
+    /// Only an absolute http(s) address is a TSA: a bare host (an NTP server, say) is not
+    /// one and is passed over, as before. Unless the caller fixed the signature length, the
+    /// reservation grows by the room a token takes. A bare PKCS#1 signature has no CMS to carry one.</summary>
+    private static void ApplySignatureTimestamp(Security.SignatureOptions opts, TimestampSettings? settings,
+        bool explicitLength)
+    {
+        if (settings is null || opts.SubFilter == Security.PdfSigner.SubFilterRsaSha1
+            || !Uri.TryCreate(settings.ServerUrl, UriKind.Absolute, out var url)
+            || (url.Scheme != Uri.UriSchemeHttp && url.Scheme != Uri.UriSchemeHttps))
+            return;
+        opts.TimestampUrl = settings.ServerUrl;
+        opts.TimestampBasicAuth = settings.BasicAuthCredentials;
+        opts.TimestampDigest = settings.DigestHashAlgorithm;
+        if (!explicitLength) opts.ContentsSize += Security.SignatureOptions.TimestampTokenReserve;
     }
 
     private byte[]? ResolveAppearanceImageBytes()
     {
-        if (_signatureAppearanceStream is not null)
+        if (SignatureAppearanceStream is not null)
         {
-            if (_signatureAppearanceStream.CanSeek) _signatureAppearanceStream.Position = 0;
+            if (SignatureAppearanceStream.CanSeek) SignatureAppearanceStream.Position = 0;
             using var ms = new MemoryStream();
-            _signatureAppearanceStream.CopyTo(ms);
+            SignatureAppearanceStream.CopyTo(ms);
             return ms.ToArray();
         }
         if (!string.IsNullOrEmpty(_signatureAppearanceFile) && File.Exists(_signatureAppearanceFile))
@@ -358,11 +379,26 @@ public sealed partial class PdfFileSignature
         // Honour a custom appearance's font and size. A shaped appearance also keeps
         // every metadata label it did not switch off, empty or not, and can spell the
         // signer as the subject attributes it lists ("CN=trent, O=glority").
+        // A picture is drawn with the banner over it only while the properties are shown.
+        appearance.ShowText = sig?.ShowProperties ?? true;
         if (sig?.CustomAppearance is { } ca)
         {
             appearance.FontFamily = ca.FontFamilyName;
             if (ca.FontSize > 0) appearance.FontSize = ca.FontSize;
-            appearance.Labels = new Security.BannerLabels(ca.ShowReason, ca.ShowLocation, ca.ShowContactInfo);
+            appearance.TextColor = ca.ForegroundColor;
+            appearance.BackgroundColor = ca.BackgroundColor;
+            appearance.ForegroundImage = ca.IsForegroundImage;
+            appearance.Labels = new Security.BannerLabels(ca.ShowReason, ca.ShowLocation, ca.ShowContactInfo)
+            {
+                SignedLabel = ca.DigitalSignedLabel ?? string.Empty,
+                DateLabel = ca.DateSignedAtLabel ?? string.Empty,
+                ReasonLabel = ca.ReasonLabel ?? string.Empty,
+                LocationLabel = ca.LocationLabel ?? string.Empty,
+                ContactLabel = ca.ContactInfoLabel ?? string.Empty,
+                DateFormat = ca.DateTimeFormat,
+                LocalDateFormat = ca.DateTimeLocalFormat,
+                Culture = ca.Culture ?? System.Globalization.CultureInfo.InvariantCulture,
+            };
             if (ca.UseDigitalSubjectFormat && ca.DigitalSubjectFormat is { Length: > 0 } format
                 && sig.Certificate?.FormatSubject(SubjectAbbreviations(format)) is { } subject)
                 appearance.SignerName = subject;

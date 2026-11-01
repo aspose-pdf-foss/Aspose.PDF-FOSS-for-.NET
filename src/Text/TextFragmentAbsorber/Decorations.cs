@@ -43,6 +43,12 @@ public sealed partial class TextFragmentAbsorber
         });
     }
 
+    /// <summary>The tallest fill, in ems of the text's size, read as the text's own highlight.</summary>
+    private const double MaxHighlightHeightEm = 2.5;
+
+    /// <summary>How far, in ems, a highlight may reach past either end of its text.</summary>
+    private const double MaxHighlightPadEm = 1.0;
+
     // Detect a background highlight: a filled rect tall enough to cover the glyph body
     // (not a thin underline/strikeout bar) that spans the fragment horizontally and
     // vertically encloses its baseline band. Captured under ToAttemptGetUnderlineFromSource
@@ -54,6 +60,11 @@ public sealed partial class TextFragmentAbsorber
         var fragWidth = rect.URX - rect.LLX;
         if (fragWidth <= 0) return null;
         var minThickness = Math.Max(2.0, 0.5 * fontSize);
+        // A highlight is the text's own: about a line tall and about as wide as the text. A taller
+        // or wider fill - a text box, a table cell, a panel behind a whole label - belongs to the
+        // page, and a replacement that spliced it out would erase it for everything else it backs.
+        var maxHeight = MaxHighlightHeightEm * fontSize;
+        var maxWidth = fragWidth + 2 * MaxHighlightPadEm * fontSize;
         // A match straddles the baseline (Lly ≤ baselineY ≤ Ury − 0.3·fontSize). Taller
         // matches are caught by the index's always-tested tall list; a thin one (rare, only
         // for tiny fonts) has its midpoint within Margin of the band.
@@ -61,6 +72,7 @@ public sealed partial class TextFragmentAbsorber
         {
             if (fr.Ury - fr.Lly < minThickness) return false;      // thin bar = underline/strikeout
             if (fr.Lly > baselineY || fr.Ury < baselineY + 0.3 * fontSize) return false; // must straddle the glyph band
+            if (fr.Ury - fr.Lly > maxHeight || fr.Urx - fr.Llx > maxWidth) return false;
             var ox = Math.Max(0, Math.Min(rect.URX, fr.Urx) - Math.Max(rect.LLX, fr.Llx));
             if (ox * 2 < fragWidth) return false;
             return true;
@@ -114,7 +126,7 @@ public sealed partial class TextFragmentAbsorber
     private static bool IsStandardSymbolFamily(string? baseFont)
     {
         if (string.IsNullOrEmpty(baseFont)) return false;
-        var name = baseFont!;
+        var name = baseFont;
         var plus = name.IndexOf('+');
         if (plus >= 0 && plus < name.Length - 1) name = name[(plus + 1)..];
         return name.StartsWith("Symbol", StringComparison.OrdinalIgnoreCase)
@@ -179,7 +191,7 @@ public sealed partial class TextFragmentAbsorber
     /// row order left-to-right, and a line-break sentinel separates rows. Every
     /// downstream consumer indexes the same reordered list, so match→run mapping
     /// and geometry are untouched.</summary>
-    private List<RawTextRun> ReorderRunsForFlatten(List<RawTextRun> runs)
+    private static List<RawTextRun> ReorderRunsForFlatten(List<RawTextRun> runs)
     {
         var items = new List<(RawTextRun run, double y, double x)>();
         foreach (var r in runs)
@@ -189,7 +201,9 @@ public sealed partial class TextFragmentAbsorber
             items.Add((r, py, px));
         }
         if (items.Count == 0) return runs;
+#pragma warning disable S1244 // sort key tie-break - exact equality keeps the comparison consistent
         items.Sort((a, b) => a.y != b.y ? b.y.CompareTo(a.y) : a.x.CompareTo(b.x));
+#pragma warning restore S1244
 
         var result = new List<RawTextRun>(runs.Count);
         var i = 0;
@@ -228,6 +242,31 @@ public sealed partial class TextFragmentAbsorber
         if ((run.RenderingMode == 1 || run.RenderingMode == 5) && run.StrokingColor is { } sc)
             return sc;
         return run.FillColor ?? Color.Black;
+    }
+
+    /// <summary>The least and the greatest slant (the tangent of the angle off the upright)
+    /// a matrix gives upright-running text for the slant to read as a faked italic: producers
+    /// shear by 0.2 to 0.35, and a wider shear is a drawing effect, not a face.</summary>
+    private const double MinSyntheticItalicShear = 0.1;
+    private const double MaxSyntheticItalicShear = 0.6;
+    /// <summary>How far off level, as a fraction of its length, a baseline may run and still count as level.</summary>
+    private const double LevelBaselineTolerance = 1e-6;
+
+    /// <summary>
+    /// Whether a run is italic: its face says so, or its glyphs are sheared forward along a
+    /// level baseline, the way a producer without the italic face draws one.
+    /// </summary>
+    private static bool IsItalicRun(RawTextRun run)
+    {
+        if (run.IsItalic) return true;
+        if (run.TmC == 0 && run.Ctm.C == 0) return false; // no shear anywhere: every ordinary run
+        var baseX = run.TmA * run.Ctm.A + run.TmB * run.Ctm.C;
+        var baseY = run.TmA * run.Ctm.B + run.TmB * run.Ctm.D;
+        var upX = run.TmC * run.Ctm.A + run.TmD * run.Ctm.C;
+        var upY = run.TmC * run.Ctm.B + run.TmD * run.Ctm.D;
+        if (baseX <= 0 || upY <= 0 || Math.Abs(baseY) > LevelBaselineTolerance * baseX) return false;
+        var shear = upX / upY;
+        return shear >= MinSyntheticItalicShear && shear <= MaxSyntheticItalicShear;
     }
 
     /// <summary>Map each nameless Type3 font resource key in <paramref name="resourceDict"/>'s

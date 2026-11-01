@@ -21,7 +21,7 @@ public sealed partial class Document
     // (round(lineHeight px) - ascent - descent), maxed against the
     // 16px serif strut; the first baseline sits `above` under the
     // cursor and lines advance by (above + below).
-    private bool RenderInlineEmphasisRuns(string iface, double ipt, List<(string text, bool bold, bool underline, bool italic)> iruns, FlowLayout flow, Page page, double marginLeft, double marginRight)
+    private static bool RenderInlineEmphasisRuns(string iface, double ipt, List<(string text, bool bold, bool underline, bool italic)> iruns, FlowLayout flow, Page page, double marginLeft, double marginRight)
     {
         var ie = new InlineEmphasisRunsState();
         ie.iface = iface;
@@ -61,7 +61,7 @@ public sealed partial class Document
         ie.atoms = new List<(string text, bool bold, bool underline, bool space)>();
         TokeniseInlineEmphasisRuns(ie);
 
-        ie.contentW = ie.page.Width - ie.marginLeft - ie.marginRight;
+        ie.contentW = ie.page.LayoutFrameWidth - ie.marginLeft - ie.marginRight;
         ie.lines2 = new List<List<(string text, bool bold, bool underline, double x, double w)>>();
         ie.cur = new List<(string, bool, bool, double, double)>();
         ie.curW = 0;
@@ -82,22 +82,21 @@ public sealed partial class Document
         return true;
     }
 
-    private void RenderUaSerifChunk(string chunk, double uaWrapPt, HtmlFragment html,
+    private void RenderUaSerifChunk(string chunk, double uaWrapPt,
         FlowLayout flow, double marginLeft)
     {
         var uc = new UaSerifChunkState();
         uc.chunk = chunk;
         uc.uaWrapPt = uaWrapPt;
-        uc.html = html;
         uc.flow = flow;
         uc.marginLeft = marginLeft;
-        uc.uaBody = System.Text.RegularExpressions.Regex.Replace(uc.chunk,
+        uc.uaBody = SafeRegex.Replace(uc.chunk,
             @"(?s)<head\b.*?</head>|<!--.*?-->", "",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        // only p/h elements and inline span/emphasis tags carry text;
-        // structural tags (html, body, div, ...) leave the scan so their
+        // only p/h elements and inline span/emphasis tags carry text; structural
+        // tags (html, body, div, ...) leave the scan so their
         // names never surface as content
-        uc.uaBody = System.Text.RegularExpressions.Regex.Replace(uc.uaBody,
+        uc.uaBody = SafeRegex.Replace(uc.uaBody,
             @"</(?!p\b|h[1-6]\b|span\b|strong\b|b\b|em\b|i\b|br\b)[^>]*>" +
             @"|<(?!/|p\b|h[1-6]\b|span\b|strong\b|b\b|em\b|i\b|br\b)[^>]*>", "",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
@@ -108,7 +107,9 @@ public sealed partial class Document
         uc.uaAfterHead = false;
         uc.uaAtBoxEdge = true;
         foreach (System.Text.RegularExpressions.Match em in
-            System.Text.RegularExpressions.Regex.Matches(uc.uaBody,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+            SafeRegex.Matches(uc.uaBody,
+#pragma warning restore S3267
                 @"(?s)<(?<tag>p|h[1-6])\b[^>]*>(?<in>.*?)</\k<tag>>|<br\b[^>]*>|(?<bare>[^<]+)",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
         {

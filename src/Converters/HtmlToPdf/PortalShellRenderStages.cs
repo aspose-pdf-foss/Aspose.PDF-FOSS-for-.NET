@@ -12,7 +12,7 @@ internal static partial class HtmlToPdfConverter
     // Canvas + wrapper colours, straight from their rules.
     private static (double R, double G, double B) PortalCssColor(PortalShellRenderState po, string selector, (double, double, double) fallback)
     {
-        var m = Regex.Match(po.html, Regex.Escape(selector)
+        var m = SafeRegex.Match(po.html, Regex.Escape(selector)
             + @"\s*\{[^}]*background(?:-color)?\s*:\s*#(?<h>[0-9a-fA-F]{3,6})",
             RegexOptions.IgnoreCase);
         if (!m.Success) return fallback;
@@ -37,10 +37,10 @@ internal static partial class HtmlToPdfConverter
     private static void RenderPortalPanels(PortalShellRenderState po)
     {
         if (po.welcomeM.Success)
-            foreach (Match li in Regex.Matches(po.welcomeM.Groups["b"].Value,
+            foreach (Match li in SafeRegex.Matches(po.welcomeM.Groups["b"].Value,
                          @"<li\b[^>]*>(?<t>[\s\S]*?)</li\s*>", RegexOptions.IgnoreCase))
-                po.items.Add(Regex.Replace(DecodeEntities(
-                    Regex.Replace(li.Groups["t"].Value, "<[^>]+>", "")), @"\s+", " ").Trim());
+                po.items.Add(SafeRegex.Replace(DecodeEntities(
+                    SafeRegex.Replace(li.Groups["t"].Value, "<[^>]+>", "")), @"\s+", " ").Trim());
 
         po.sb.Append(Compat.Format(po.inv, $"q {PsInk:0.###} {PsInk:0.###} {PsInk:0.###} rg\n"));
         po.page.AddContentStream(Encoding.ASCII.GetBytes(po.sb.ToString()));
@@ -65,7 +65,7 @@ internal static partial class HtmlToPdfConverter
         PortalRect(po, po.goX, PsCol2InputTopPt, PsGoWPt, PsGoHPt, (0.25, 0.25, 0.25));
         PortalRect(po, po.goX + 0.5, PsCol2InputTopPt + 0.5, PsGoWPt - 1.0, PsGoHPt - 1.0, (0.83, 0.83, 0.83));
         PortalRect(po, po.goX + 2.0, PsCol2InputTopPt + 2.0, PsGoWPt - 4.0, PsGoHPt - 4.0, (0.94, 0.94, 0.94));
-        po.goValM = Regex.Match(po.html, @"<input\b[^>]*value=""(?<v>[^""]+)""[^>]*type=""submit""[^>]*>|<input\b[^>]*type=""submit""[^>]*value=""(?<v>[^""]+)""[^>]*>",
+        po.goValM = SafeRegex.Match(po.html, @"<input\b[^>]*value=""(?<v>[^""]+)""[^>]*type=""submit""[^>]*>|<input\b[^>]*type=""submit""[^>]*value=""(?<v>[^""]+)""[^>]*>",
             RegexOptions.IgnoreCase);
         po.goLabel = po.goValM.Success ? po.goValM.Groups["v"].Value : "Go";
         po.goLabelW = MeasureFaceText("Arial", po.goLabel, PsGoLabelPt);

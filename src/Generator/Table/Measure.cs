@@ -1,5 +1,6 @@
 ﻿using System.Collections;
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
@@ -28,7 +29,7 @@ public partial class Table
         return kept.ToArray();
     }
 
-    private static List<string> WrapText(string text, double fontSize, double availWidth, Func<string, double>? measure = null, bool overflowLongWords = false, bool noBreakBefore = false, bool hangingBreakSpace = false)
+    internal static List<string> WrapText(string text, double fontSize, double availWidth, Func<string, double>? measure = null, bool overflowLongWords = false, bool noBreakBefore = false, bool hangingBreakSpace = false)
     {
         var wt = new WrapTextState();
         wt.text = text;
@@ -46,7 +47,7 @@ public partial class Table
 
         wt.words = JoinNoBreakBefore(wt.text.Split(' '), noBreakBefore);
         wt.spaceW = WrapMeasureWidth(wt, " ", wt.fontSize);
-        wt.currentLine = "";
+        wt.currentLine.Clear();
         wt.currentWidth = 0;
 
         wt.lineStarted = false;
@@ -62,7 +63,7 @@ public partial class Table
             var withSpaceW = wt.currentWidth + wt.spaceW + wordW;
             if (withSpaceW <= wt.availWidth + 1e-6)
             {
-                wt.currentLine += " " + word;
+                wt.currentLine.Append(' ').Append(word);
                 wt.currentWidth = withSpaceW;
             }
             else if (!TryZeroWidthSplit(wt, word))
@@ -70,13 +71,13 @@ public partial class Table
                 // The break falls on the space between the two words: a hanging
                 // policy keeps it on the line it broke, where it renders past
                 // the measure without displacing anything.
-                wt.lines.Add(wt.hangingBreakSpace ? wt.currentLine + " " : wt.currentLine);
+                wt.lines.Add(wt.hangingBreakSpace ? wt.currentLine.ToString() + " " : wt.currentLine.ToString());
                 StartWithWord(wt, word, wordW);
             }
         }
 
         if (wt.currentLine.Length > 0)
-            wt.lines.Add(wt.currentLine);
+            wt.lines.Add(wt.currentLine.ToString());
 
         if (wt.lines.Count == 0)
             wt.lines.Add("");
@@ -135,8 +136,10 @@ public partial class Table
                 foreach (var word in line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
                 {
                     // With exact the bare AFM advance, as MaxLineWidth takes it.
-                    var wWidth = faceMeasure is not null ? faceMeasure(word)
-                        : exact ? MeasureWidthExactAfm(word, fs) : MeasureWidth(word, fs);
+                    double wWidth;
+                    if (faceMeasure is not null) wWidth = faceMeasure(word);
+                    else if (exact) wWidth = MeasureWidthExactAfm(word, fs);
+                    else wWidth = MeasureWidth(word, fs);
                     if (wWidth > max) max = wWidth;
                 }
         }
@@ -187,8 +190,10 @@ public partial class Table
             if (string.IsNullOrEmpty(text)) continue;
             foreach (var line in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
             {
-                var lw = faceMeasure is not null ? faceMeasure(line)
-                    : exact ? MeasureWidthExactAfm(line, fs) : MeasureWidth(line, fs);
+                double lw;
+                if (faceMeasure is not null) lw = faceMeasure(line);
+                else if (exact) lw = MeasureWidthExactAfm(line, fs);
+                else lw = MeasureWidth(line, fs);
                 if (lw > max) max = lw;
             }
         }
@@ -233,23 +238,27 @@ public partial class Table
     private const double FormGridUnmappedAdvanceEm = 1229.0 / 2048.0;
 
     /// <summary>The installed variant's face name ("Verdana Bold Italic").</summary>
-    private static string CellFaceName(string family, bool bold, bool italic) =>
-        bold && italic ? family + " Bold Italic"
-        : bold ? family + " Bold"
-        : italic ? family + " Italic"
-        : family;
+    private static string CellFaceName(string family, bool bold, bool italic)
+    {
+        if (bold && italic) return family + " Bold Italic";
+        if (bold) return family + " Bold";
+        if (italic) return family + " Italic";
+        return family;
+    }
 
-    private static byte[]? CellFaceTtf(string family, bool bold, bool italic = false)
+    /// <summary>The program a cell draws a run of the face in: the installed variant, else the face itself
+    /// (the HTML grid measure reads its advances from the same program).</summary>
+    internal static byte[]? CellFaceTtf(string family, bool bold, bool italic = false)
     {
         lock (_cellFaceTtfs)
         {
             if (_cellFaceTtfs.TryGetValue((family, bold, italic), out var cached)) return cached;
             byte[]? ttf = null;
             try { ttf = Aspose.Pdf.Text.FontRepository.GetTtfData(CellFaceName(family, bold, italic)); }
-            catch { }
+            catch { /* a font that cannot be found or read leaves the fallback in place */ }
             if (ttf is null && (bold || italic))
                 try { ttf = Aspose.Pdf.Text.FontRepository.GetTtfData(family); }
-                catch { }
+                catch { /* a font that cannot be found or read leaves the fallback in place */ }
             _cellFaceTtfs[(family, bold, italic)] = ttf;
             return ttf;
         }
@@ -482,11 +491,14 @@ public partial class Table
 
     private static Aspose.Pdf.Text.GlyphOutlineParser? GetInlineGlyphParser(byte[] ttf)
     {
-        if (_inlineGlyphParsers.TryGetValue(ttf, out var cached)) return cached;
-        Aspose.Pdf.Text.GlyphOutlineParser? p = null;
-        try { p = new Aspose.Pdf.Text.GlyphOutlineParser(ttf); } catch { }
-        _inlineGlyphParsers[ttf] = p;
-        return p;
+        lock (_inlineGlyphParsers)
+        {
+            if (_inlineGlyphParsers.TryGetValue(ttf, out var cached)) return cached;
+            Aspose.Pdf.Text.GlyphOutlineParser? p = null;
+            try { p = new Aspose.Pdf.Text.GlyphOutlineParser(ttf); } catch { /* a font program that does not parse leaves the fallback metrics in place */ }
+            _inlineGlyphParsers[ttf] = p;
+            return p;
+        }
     }
 
     /// <summary>Width of <paramref name="s"/> in points using an embedded font's real glyph
@@ -498,7 +510,8 @@ public partial class Table
         if (gp is null) return MeasureWidthExact(s, fontSize);
         var upm = gp.UnitsPerEm > 0 ? gp.UnitsPerEm : 1000;
         double total = 0;
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             // Codepoint walk: a plane-2 ideograph arrives as a surrogate pair and
             // must price as ONE glyph, not two notdef advances.
@@ -514,10 +527,11 @@ public partial class Table
                 // measure path prices missing glyphs at the face's average char
                 // width); zero keeps the legacy
                 // notdef advance.
-                if (unmappedEm > 0) { total += unmappedEm * upm; continue; }
+                if (unmappedEm > 0) { total += unmappedEm * upm; i++; continue; }
                 g = 0;
             }
             total += gp.GetAdvanceWidth(g);
+            i++;
         }
         return total * fontSize / upm;
     }
@@ -569,22 +583,11 @@ public partial class Table
             var f = Aspose.Pdf.Text.FontRepository.TryFindFont(face);
             if (f is not null) return f.MeasureString(s, fontSize);
         }
-        catch { }
+        catch { /* a font that cannot be found or read leaves the fallback in place */ }
         return MeasureWidthExact(s, fontSize);
     }
 
-    private static double MeasureWidthExact(string s, double fontSize)
-    {
-        var total = 0;
-        foreach (var ch in s)
-        {
-            var code = (int)ch;
-            var w = code is >= 0 and <= 255 ? Standard14Fonts.GetWidth("Helvetica", code) : 0;
-            if (w <= 0) w = Standard14Fonts.GetDefaultWidth("Helvetica");
-            total += w;
-        }
-        return total * fontSize / 1000.0;
-    }
+    private static double MeasureWidthExact(string s, double fontSize) => MeasureWidthExactAfm(s, fontSize);
 
     /// <summary>
     /// Register a Helvetica font in the page resources and return the font resource name.
@@ -593,8 +596,9 @@ public partial class Table
     /// register an embedded Type0 font for Arabic/Unicode cell text.</summary>
     internal static PdfDictionary ResolvePageFontDict(Page page)
     {
-        var resources = page.Reader.ResolveDict(page.Dict.Get("Resources"));
-        if (resources is null) { resources = new PdfDictionary(); page.Dict.Set("Resources", resources); }
+        // A page that inherits its resources from the page tree gets its own copy first:
+        // a fresh dictionary here would hide every inherited font and image.
+        var resources = Aspose.Pdf.Forms.Form.EnsureOwnPageResources(page.Dict, page.Reader);
         var fontDict = page.Reader.ResolveDict(resources.Get("Font"));
         if (fontDict is null) { fontDict = new PdfDictionary(); resources.Set("Font", fontDict); }
         return fontDict;
@@ -602,10 +606,16 @@ public partial class Table
 
     internal static string RegisterFont(Page page) => RegisterFont(page, "Helvetica");
 
-    /// <summary>True for the standard faces whose glyphs are symbols under an encoding
-    /// of their own: Symbol and ZapfDingbats.</summary>
-    internal static bool IsSymbolicStandardFace(string baseFont) =>
-        baseFont is "Symbol" or "ZapfDingbats";
+    /// <summary>Drop the font resource <paramref name="name"/> from <paramref name="page"/> when the page's
+    /// <paramref name="content"/> never names it: a continuation page registered the default face for text
+    /// that is all in another face carried an unused font.</summary>
+    internal static void DropFontUnnamedBy(Page page, string name, byte[] content)
+    {
+        var text = Compat.Latin1.GetString(content);
+        if (System.Text.RegularExpressions.Regex.IsMatch(text, "/" + System.Text.RegularExpressions.Regex.Escape(name) + @"(?![\w.-])")) return;
+        var resources = page.Reader.ResolveDict(page.Dict.Get("Resources"));
+        page.Reader.ResolveDict(resources?.Get("Font"))?.Remove(name);
+    }
 
     /// <summary>Register a standard Type1 base font (e.g. "Helvetica",
     /// "Helvetica-Bold") on the page's resource dictionary, reusing an existing
@@ -615,12 +625,8 @@ public partial class Table
         // Resolve indirect /Resources and /Font in place; a bare cast would miss a
         // PdfReference and replace the real dictionary with an empty one, dropping
         // the page's existing fonts and XObjects (e.g. a background image).
-        var resources = page.Reader.ResolveDict(page.Dict.Get("Resources"));
-        if (resources is null)
-        {
-            resources = new PdfDictionary();
-            page.Dict.Set("Resources", resources);
-        }
+        // A page that inherits its resources from the page tree gets its own copy first.
+        var resources = Aspose.Pdf.Forms.Form.EnsureOwnPageResources(page.Dict, page.Reader);
         var fontDict = page.Reader.ResolveDict(resources.Get("Font"));
         if (fontDict is null)
         {
@@ -649,8 +655,8 @@ public partial class Table
         font.Set("Type", new PdfName("Font"));
         font.Set("Subtype", new PdfName("Type1"));
         font.Set("BaseFont", new PdfName(baseFont));
-        // Cell text is written as WinAnsi bytes (see ContentStreamBuilder.ToWinAnsi);
-        // without the matching /Encoding the CP1252 0x80-0x9F range (€, dashes,
+        // Cell text is written as WinAnsi bytes (see ContentStreamBuilder.ToWinAnsi); without
+        // the matching /Encoding the CP1252 0x80-0x9F range (€, dashes,
         // curly quotes) is undefined in the font's default StandardEncoding.
         // The two symbolic faces keep their built-in encodings: their codes are not
         // Latin letters, and a WinAnsi one would have a reader show Symbol's alpha
@@ -660,4 +666,9 @@ public partial class Table
         fontDict.Set(name, font);
         return name;
     }
+
+    /// <summary>True for the standard faces whose glyphs are symbols under an encoding
+    /// of their own: Symbol and ZapfDingbats.</summary>
+    internal static bool IsSymbolicStandardFace(string baseFont) =>
+        baseFont is "Symbol" or "ZapfDingbats";
 }

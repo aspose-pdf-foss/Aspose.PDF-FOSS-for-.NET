@@ -3,10 +3,12 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.LogicalStructure;
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>An object reference (role "OBJR") — links a structure element to a PDF object on a
 /// page (typically an annotation, e.g. a Link's widget). <see cref="Obj"/> resolves the
 /// referenced object so callers can wrap it (e.g. <c>new LinkAnnotation(objr.Obj, doc)</c>).</summary>
 public sealed class OBJRElement : StructureElement
+#pragma warning restore S101
 {
     internal OBJRElement() : base("OBJR") { }
     internal OBJRElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }

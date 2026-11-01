@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO.Filters;
 
@@ -28,79 +28,88 @@ internal static class CcittFaxDecodeFilter
         var columns = parms is not null ? (int)parms.GetInt("Columns", 1728) : 1728;
         var rows = parms is not null ? (int)parms.GetInt("Rows", 0) : 0;
         var encodedByteAlign = parms is not null && parms.GetBool("EncodedByteAlign");
+        var endOfLine = parms is not null && parms.GetBool("EndOfLine");
         var blackIs1 = parms is not null && parms.GetBool("BlackIs1");
 
         var reader = new CcittBitReader(data);
         var rowBytes = (columns + 7) / 8;
-        var output = new List<byte>();
+        // Sized for the declared rows up front: a fax page of 35,000 rows grew a list by
+        // doubling, copying and zeroing a hundred megabytes more than it decoded.
+        var output = new MemoryStream(rows > 0 && (long)rows * rowBytes <= int.MaxValue ? rows * rowBytes : 0);
 
         if (k == 0)
         {
             // Group 3 1D
-            DecodeGroup31D(reader, columns, rows, encodedByteAlign, output, rowBytes, oneDimensionalRows);
+            DecodeGroup31D(reader, columns, rows, encodedByteAlign, endOfLine, output, oneDimensionalRows);
         }
         else if (k > 0)
         {
             // Group 3 2D
-            DecodeGroup32D(reader, columns, rows, encodedByteAlign, output, rowBytes, oneDimensionalRows);
+            DecodeGroup32D(reader, columns, rows, encodedByteAlign, endOfLine, output, oneDimensionalRows);
         }
         else
         {
             // Group 4 (k < 0)
             DecodeGroup4(reader, columns, rows, encodedByteAlign, output, rowBytes, group4ColumnShift);
-            for (var row = 0; oneDimensionalRows is not null && row < output.Count / rowBytes; row++) oneDimensionalRows.Add(false);
+            for (var row = 0; oneDimensionalRows is not null && row < output.Length / rowBytes; row++) oneDimensionalRows.Add(false);
         }
 
+        var bytes = output.ToArray();
         // Invert if BlackIs1 is false (default: white=0, black=1 in CCITT,
         // but PDF default expects black=0)
         if (!blackIs1)
         {
-            for (var i = 0; i < output.Count; i++)
-                output[i] = (byte)~output[i];
+            for (var i = 0; i < bytes.Length; i++)
+                bytes[i] = (byte)~bytes[i];
         }
 
-        return output.ToArray();
+        return bytes;
     }
 
     private static void DecodeGroup31D(CcittBitReader reader, int columns, int rows,
-        bool byteAlign, List<byte> output, int rowBytes, List<bool>? oneDimensionalRows)
+        bool byteAlign, bool endOfLine, MemoryStream output, List<bool>? oneDimensionalRows)
     {
         var maxRows = rows > 0 ? rows : int.MaxValue;
+        var line = new Row(columns);
         for (var row = 0; row < maxRows; row++)
         {
-            if (byteAlign) reader.AlignToByte();
-            // Skip the optional EOL that precedes each line in /EndOfLine streams.
-            reader.TrySkipEol();
-
-            var line = new bool[columns]; // false=white
+            SkipToLineStart(reader, byteAlign, endOfLine);
+            line.Clear();
             if (!Decode1DLine(reader, line, columns))
                 break;
-            OutputLine(line, output, rowBytes);
+            output.Write(line.Bits, 0, line.Bits.Length);
             oneDimensionalRows?.Add(true);
         }
+    }
+
+    /// <summary>Move to the first code of a Group 3 line: past the optional EOL and, when
+    /// the lines are byte-aligned, past the fill bits. A stream that declares its EOLs puts
+    /// each one right before its line (T.4 fill goes before the EOL, never after it), so the
+    /// EOL is the line start wherever it begins and aligning first would skip into its
+    /// zeros and leave its tail to be read as a code; only a line with no EOL is aligned.</summary>
+    private static void SkipToLineStart(CcittBitReader reader, bool byteAlign, bool endOfLine)
+    {
+        if (endOfLine && reader.TrySkipEol()) return;
+        if (byteAlign) reader.AlignToByte();
+        reader.TrySkipEol();
     }
 
     /// <summary>Mixed Group 3 lines: each line's tag bit (T.4 §4.2.1) says how it is coded,
     /// 1 one-dimensionally, 0 two-dimensionally against the line above. K only bounds how
     /// many two-dimensional lines an encoder may run; the decoder follows the tags.</summary>
     private static void DecodeGroup32D(CcittBitReader reader, int columns, int rows,
-        bool byteAlign, List<byte> output, int rowBytes, List<bool>? oneDimensionalRows)
+        bool byteAlign, bool endOfLine, MemoryStream output, List<bool>? oneDimensionalRows)
     {
         var maxRows = rows > 0 ? rows : int.MaxValue;
-        var refLine = new bool[columns];
-
+        var refLine = new Row(columns);
+        var line = new Row(columns);
         for (var row = 0; row < maxRows; row++)
         {
-            if (byteAlign) reader.AlignToByte();
-            // Skip the optional EOL that precedes each line in /EndOfLine streams.
-            reader.TrySkipEol();
-
-            var line = new bool[columns];
-
+            SkipToLineStart(reader, byteAlign, endOfLine);
+            line.Clear();
             // Read tag bit: 1=1D, 0=2D
             var tag = reader.ReadBit();
             if (tag < 0) break;
-
             if (tag == 1)
             {
                 if (!Decode1DLine(reader, line, columns)) break;
@@ -109,20 +118,20 @@ internal static class CcittFaxDecodeFilter
             {
                 if (!Decode2DLine(reader, refLine, line, columns)) break;
             }
-
-            OutputLine(line, output, rowBytes);
+            output.Write(line.Bits, 0, line.Bits.Length);
             oneDimensionalRows?.Add(tag == 1);
-            Array.Copy(line, refLine, columns);
+            line.SettleChanges();
+            (refLine, line) = (line, refLine);
         }
     }
 
     private static void DecodeGroup4(CcittBitReader reader, int columns, int rows,
-        bool byteAlign, List<byte> output, int rowBytes, bool columnShift)
+        bool byteAlign, MemoryStream output, int rowBytes, bool columnShift)
     {
         var maxRows = rows > 0 ? rows : int.MaxValue;
-        var refLine = new bool[columns]; // all white
-
-        var shifted = new bool[columns];
+        var refLine = new Row(columns); // all white
+        var line = new Row(columns);
+        var shifted = new byte[rowBytes];
         for (var row = 0; row < maxRows; row++)
         {
             // With /EncodedByteAlign each scan line's coded data is padded to a byte
@@ -131,7 +140,7 @@ internal static class CcittFaxDecodeFilter
             // stream desyncs after row 0 and decoding bails after a single (blank) row.
             if (byteAlign) reader.AlignToByte();
 
-            var line = new bool[columns];
+            line.Clear();
             if (!Decode2DLine(reader, refLine, line, columns))
                 break;
             if (columnShift)
@@ -142,16 +151,16 @@ internal static class CcittFaxDecodeFilter
                 // that convention by shifting the decoded line one column left on
                 // output. The pre-shift line is retained as the reference for
                 // the next row so the 2D run-coding state remains consistent.
-                for (var i = 0; i < columns - 1; i++) shifted[i] = line[i + 1];
-                shifted[columns - 1] = false;
-                OutputLine(shifted, output, rowBytes);
+                ShiftLeftOneColumn(line.Bits, shifted);
+                output.Write(shifted, 0, shifted.Length);
             }
             else
             {
                 // JBIG2 embedded MMR is strict T.6 with no producer column-shift quirk.
-                OutputLine(line, output, rowBytes);
+                output.Write(line.Bits, 0, line.Bits.Length);
             }
-            Array.Copy(line, refLine, columns);
+            line.SettleChanges();
+            (refLine, line) = (line, refLine);
         }
     }
 
@@ -164,19 +173,29 @@ internal static class CcittFaxDecodeFilter
     internal static byte[] DecodeGroup4Region(CcittBitReader reader, int columns, int rows)
     {
         var rowBytes = (columns + 7) / 8;
-        var output = new List<byte>(rowBytes * (rows > 0 ? rows : 0));
-        var refLine = new bool[columns];
+        var output = new MemoryStream(rowBytes * (rows > 0 ? rows : 0));
+        var refLine = new Row(columns);
+        var line = new Row(columns);
         for (var row = 0; row < rows; row++)
         {
-            var line = new bool[columns];
+            line.Clear();
             if (!Decode2DLine(reader, refLine, line, columns)) break;
-            OutputLine(line, output, rowBytes);
-            Array.Copy(line, refLine, columns);
+            output.Write(line.Bits, 0, line.Bits.Length);
+            line.SettleChanges();
+            (refLine, line) = (line, refLine);
         }
         return output.ToArray();
     }
 
-    private static bool Decode1DLine(CcittBitReader reader, bool[] line, int columns)
+    /// <summary>The row's pixels one column to the left: bit 0 of each byte takes the next
+    /// byte's top bit, and the last column the padding past the width, which is white.</summary>
+    private static void ShiftLeftOneColumn(byte[] bits, byte[] shifted)
+    {
+        for (var i = 0; i < bits.Length; i++)
+            shifted[i] = (byte)((bits[i] << 1) | (i + 1 < bits.Length ? bits[i + 1] >> 7 : 0));
+    }
+
+    private static bool Decode1DLine(CcittBitReader reader, Row line, int columns)
     {
         var pos = 0;
         var isWhite = true; // start with white
@@ -187,21 +206,18 @@ internal static class CcittFaxDecodeFilter
             if (runLength < 0) return false;
 
             var end = Math.Min(pos + runLength, columns);
-            if (!isWhite)
-            {
-                for (var i = pos; i < end; i++)
-                    line[i] = true;
-            }
+            if (!isWhite) line.PaintBlack(pos, end);
             pos = end;
             isWhite = !isWhite;
         }
         return true;
     }
 
-    private static bool Decode2DLine(CcittBitReader reader, bool[] refLine, bool[] line, int columns)
+    private static bool Decode2DLine(CcittBitReader reader, Row refLine, Row line, int columns)
     {
         var a0 = -1; // position before start (conceptually at -1)
         var isWhite = true;
+        var refIndex = 0;
 
         while (a0 < columns)
         {
@@ -212,14 +228,10 @@ internal static class CcittFaxDecodeFilter
             {
                 case Mode2D.Pass:
                 {
-                    var b1 = FindB1(refLine, a0, isWhite, columns);
-                    var b2 = FindNextChange(refLine, b1, columns);
+                    var b1 = FindB1(refLine, a0, isWhite, ref refIndex);
+                    var b2 = refLine.ChangeAfter(b1, columns);
                     // Fill a0 to b2 with current color
-                    if (!isWhite)
-                    {
-                        for (var i = Math.Max(0, a0); i < b2 && i < columns; i++)
-                            line[i] = true;
-                    }
+                    if (!isWhite) line.PaintBlack(a0, b2);
                     a0 = b2;
                     // color does NOT change on pass
                     break;
@@ -233,18 +245,9 @@ internal static class CcittFaxDecodeFilter
                     if (run2 < 0) return false;
 
                     var start = Math.Max(0, a0);
-                    // First run
-                    if (!isWhite)
-                    {
-                        for (var i = start; i < start + run1 && i < columns; i++)
-                            line[i] = true;
-                    }
-                    // Second run (opposite color)
-                    if (isWhite)
-                    {
-                        for (var i = start + run1; i < start + run1 + run2 && i < columns; i++)
-                            line[i] = true;
-                    }
+                    // First run, then the second (opposite colour)
+                    if (!isWhite) line.PaintBlack(start, start + run1);
+                    else line.PaintBlack(start + run1, start + run1 + run2);
                     a0 = start + run1 + run2;
                     break;
                 }
@@ -262,15 +265,10 @@ internal static class CcittFaxDecodeFilter
                         _ => 0,
                     };
 
-                    var b1 = FindB1(refLine, a0, isWhite, columns);
-                    var a1 = b1 + offset;
-                    a1 = Compat.Clamp(a1, 0, columns);
+                    var b1 = FindB1(refLine, a0, isWhite, ref refIndex);
+                    var a1 = Compat.Clamp(b1 + offset, 0, columns);
 
-                    if (!isWhite)
-                    {
-                        for (var i = Math.Max(0, a0); i < a1 && i < columns; i++)
-                            line[i] = true;
-                    }
+                    if (!isWhite) line.PaintBlack(a0, a1);
                     a0 = a1;
                     isWhite = !isWhite;
                     break;
@@ -280,43 +278,20 @@ internal static class CcittFaxDecodeFilter
         return true;
     }
 
-    private static int FindB1(bool[] refLine, int a0, bool isWhiteA0Color, int columns)
+    /// <summary>b1: the first changing element of the reference line to the right of a0 whose
+    /// colour is opposite to a0's (ITU-T T.6 §2) - a changing element being a pixel whose colour
+    /// differs from the pixel before it, white before position 0. The reference line's changing
+    /// elements alternate in colour, the first to black, so the element wanted is the first
+    /// past a0 of the right parity; <paramref name="refIndex"/> carries the search forward from
+    /// one code to the next, since a0 only moves right in a well-formed line.</summary>
+    private static int FindB1(Row refLine, int a0, bool isWhiteA0Color, ref int refIndex)
     {
-        // b1 = first CHANGING element on reference line to the right of a0 whose
-        // colour is OPPOSITE to a0 (ITU-T T.6 §2). A "changing element" is a
-        // pixel whose colour differs from the previous pixel on that line —
-        // not merely any pixel of opposite colour. Skipping the changing-element
-        // requirement (just scanning for the first opposite-colour pixel) lands
-        // b1 on positions inside same-colour runs, which throws V0/VR/VL coding
-        // off and compounds across rows — one scanned page decoded 108 valid rows
-        // before the bit-stream drifted out of sync and Read2DMode hit a long
-        // zero prefix.
-        // wantBlack=true when a0 is white (need opposite-colour changing element).
-        var wantBlack = isWhiteA0Color;
-        var refColor = false; // implicit white before position 0
-        for (var i = 0; i < columns; i++)
-        {
-            var newColor = refLine[i];
-            if (newColor != refColor)
-            {
-                // i is a changing element; its colour is newColor (true=black).
-                if (i > a0 && newColor == wantBlack)
-                    return i;
-                refColor = newColor;
-            }
-        }
-        return columns;
-    }
-
-    private static int FindNextChange(bool[] line, int pos, int columns)
-    {
-        if (pos >= columns) return columns;
-        var color = line[pos];
-        for (var i = pos + 1; i < columns; i++)
-        {
-            if (line[i] != color) return i;
-        }
-        return columns;
+        var changes = refLine.Changes;
+        while (refIndex > 0 && changes[refIndex - 1] > a0) refIndex--;
+        while (refIndex < refLine.ChangeCount && changes[refIndex] <= a0) refIndex++;
+        var index = refIndex;
+        if (((index & 1) == 0) != isWhiteA0Color) index++;   // an even index changes to black
+        return index < refLine.ChangeCount ? changes[index] : refLine.Columns;
     }
 
     private static int DecodeRunLength(CcittBitReader reader, bool isWhite)
@@ -332,18 +307,77 @@ internal static class CcittFaxDecodeFilter
         return total;
     }
 
-    private static void OutputLine(bool[] line, List<byte> output, int rowBytes)
+    /// <summary>A decoded row: its pixels packed a bit each, 1 for black, in the bytes the
+    /// filter outputs, and - once settled - its changing elements, the positions where the
+    /// colour changes, in order, the first of them to black (a row is white before its first
+    /// pixel), which the row coded against it reads instead of its pixels.</summary>
+    private sealed class Row
     {
-        for (var byteIdx = 0; byteIdx < rowBytes; byteIdx++)
+        public readonly byte[] Bits;
+        public readonly int[] Changes;
+        public int ChangeCount;
+        public readonly int Columns;
+
+        public Row(int columns)
         {
-            var b = 0;
-            for (var bit = 0; bit < 8; bit++)
+            Columns = columns;
+            Bits = new byte[(columns + 7) / 8];
+            Changes = new int[columns + 1];
+        }
+
+        /// <summary>All white, no changing elements.</summary>
+        public void Clear()
+        {
+            Array.Clear(Bits, 0, Bits.Length);
+            ChangeCount = 0;
+        }
+
+        /// <summary>Paint columns <paramref name="from"/> up to <paramref name="to"/> black,
+        /// clipped to the row; black over black stays black.</summary>
+        public void PaintBlack(int from, int to)
+        {
+            from = Math.Max(0, from);
+            to = Math.Min(to, Columns);
+            if (from >= to) return;
+            int firstByte = from >> 3, lastByte = (to - 1) >> 3;
+            if (firstByte == lastByte)
             {
-                var pixel = byteIdx * 8 + bit;
-                if (pixel < line.Length && line[pixel])
-                    b |= (128 >> bit);
+                Bits[firstByte] |= (byte)((0xFF >> (from & 7)) & (0xFF << (7 - ((to - 1) & 7))));
+                return;
             }
-            output.Add((byte)b);
+            Bits[firstByte] |= (byte)(0xFF >> (from & 7));
+            for (var i = firstByte + 1; i < lastByte; i++) Bits[i] = 0xFF;
+            Bits[lastByte] |= (byte)(0xFF << (7 - ((to - 1) & 7)));
+        }
+
+        /// <summary>Read the changing elements off the pixels: a byte wholly of the current
+        /// colour is skipped, any other examined bit by bit.</summary>
+        public void SettleChanges()
+        {
+            ChangeCount = 0;
+            var black = false;
+            for (var i = 0; i < Bits.Length; i++)
+            {
+                var b = Bits[i];
+                if (b == (black ? 0xFF : 0x00)) continue;
+                var end = Math.Min(8, Columns - i * 8);
+                for (var k = 0; k < end; k++)
+                {
+                    var bit = ((b >> (7 - k)) & 1) != 0;
+                    if (bit == black) continue;
+                    Changes[ChangeCount++] = i * 8 + k;
+                    black = bit;
+                }
+            }
+        }
+
+        /// <summary>The changing element after the one at <paramref name="position"/>, or the
+        /// row's width when none follows.</summary>
+        public int ChangeAfter(int position, int columns)
+        {
+            if (position >= columns) return columns;
+            var index = Array.BinarySearch(Changes, 0, ChangeCount, position);
+            return index >= 0 && index + 1 < ChangeCount ? Changes[index + 1] : columns;
         }
     }
 
@@ -424,10 +458,10 @@ internal static class CcittFaxDecodeFilter
     }
 
     // White and black Huffman code tables for Group 3
-    private static int ReadWhiteCode(CcittBitReader reader) => ReadHuffmanCode(reader, WhiteCodes);
-    private static int ReadBlackCode(CcittBitReader reader) => ReadHuffmanCode(reader, BlackCodes);
+    private static int ReadWhiteCode(CcittBitReader reader) => ReadHuffmanCode(reader, WhiteRuns);
+    private static int ReadBlackCode(CcittBitReader reader) => ReadHuffmanCode(reader, BlackRuns);
 
-    private static int ReadHuffmanCode(CcittBitReader reader, (int bits, int code, int runLength)[] table)
+    private static int ReadHuffmanCode(CcittBitReader reader, Dictionary<int, int> runs)
     {
         var accumulated = 0;
         var bitsRead = 0;
@@ -439,13 +473,26 @@ internal static class CcittFaxDecodeFilter
             accumulated = (accumulated << 1) | bit;
             bitsRead++;
 
-            foreach (var (bits, code, runLength) in table)
-            {
-                if (bits == bitsRead && code == accumulated)
-                    return runLength;
-            }
+            if (runs.TryGetValue(CodeKey(bitsRead, accumulated), out var runLength))
+                return runLength;
         }
         return -1; // not found
+    }
+
+    // A code by its length and value; the code values fit 13 bits.
+    private static int CodeKey(int bits, int code) => (bits << 16) | code;
+
+    // The code tables keyed for one probe per bit read; the first entry of a code wins, as
+    // the in-order scan of the table it replaces chose.
+    private static Dictionary<int, int> RunsByCode((int bits, int code, int runLength)[] table)
+    {
+        var runs = new Dictionary<int, int>(table.Length);
+        foreach (var (bits, code, runLength) in table)
+        {
+            var key = CodeKey(bits, code);
+            if (!runs.ContainsKey(key)) runs[key] = runLength;
+        }
+        return runs;
     }
 
     // Terminating codes (0-63) + Make-up codes (64, 128, . 2560)
@@ -672,6 +719,10 @@ internal static class CcittFaxDecodeFilter
         (12, 0b000000011110, 2496),
         (12, 0b000000011111, 2560),
     ];
+
+    // Built from the tables above, so declared after them.
+    private static readonly Dictionary<int, int> WhiteRuns = RunsByCode(WhiteCodes);
+    private static readonly Dictionary<int, int> BlackRuns = RunsByCode(BlackCodes);
 
     internal sealed class CcittBitReader
     {

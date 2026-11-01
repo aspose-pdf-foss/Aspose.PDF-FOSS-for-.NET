@@ -37,7 +37,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             using (var wclone = tl.world.Clone()) tl.lg.Transform = wclone;
 
             _g = tl.lg; _bitmap = tl.layer; _blendScratch = null;
-            RenderTilingCells(tl.path, tl.pd, tl.content, tl.patMatrix, tl.xstep, tl.ystep, tl.iMin, tl.iMax, tl.jMin, tl.jMax);
+            if (!TryFillWithPeriodicTile(tl, UncolouredCellState(tl)))
+                RenderTilingCells(tl.path, tl.pd, tl.content, tl.patMatrix, tl.xstep, tl.ystep, tl.iMin, tl.iMax, tl.jMin, tl.jMax, UncolouredCellState(tl));
             _g.Flush();
         }
         finally
@@ -97,16 +98,6 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         tl.jMin = (int)Math.Floor((pMinY - tl.by1) / tl.ystep);
         tl.jMax = (int)Math.Ceiling((pMaxY - tl.by0) / tl.ystep);
         if (tl.iMax < tl.iMin || tl.jMax < tl.jMin) return false;
-        if ((long)(tl.iMax - tl.iMin + 1) * (tl.jMax - tl.jMin + 1) > 8000)
-        {
-            // Too many tiles to execute the cell per-tile (a fine screen/dither over a
-            // large area). Rasterise one cell to a device-sized tile and let GDI+ repeat
-            // it with a TextureBrush instead of bailing (which would leave the region
-            // blank). Scoped to the over-guard case, so the exact per-tile path for
-            // normal-sized fills is unchanged.
-            FillWithTiledBrush(tl.path, tl.pd, tl.content, tl.bx0, tl.by0, tl.bx1, tl.by1, tl.xstep, tl.ystep, tl.patMatrix, tl.world);
-            return false;
-        }
         return true;
     }
 }

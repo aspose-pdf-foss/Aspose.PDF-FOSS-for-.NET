@@ -14,27 +14,31 @@ namespace Aspose.Pdf.Forms.Xfa;
 // ---------------------------------------------------------------------------------------------
 // AST
 // ---------------------------------------------------------------------------------------------
-internal abstract class XNode { }
+internal interface IXNode { }
 
-internal sealed class XLiteral : XNode { public object? Value; }
-internal sealed class XIdent : XNode { public string Name = ""; }
-internal sealed class XThis : XNode { }
-internal sealed class XMember : XNode { public XNode Obj = default!; public string Name = ""; }
-internal sealed class XCall : XNode { public XNode Callee = default!; public List<XNode> Args = new(); }
-internal sealed class XUnary : XNode { public string Op = ""; public XNode Operand = default!; }
-internal sealed class XBinary : XNode { public string Op = ""; public XNode L = default!, R = default!; }
-internal sealed class XLogical : XNode { public string Op = ""; public XNode L = default!, R = default!; }
-internal sealed class XCond : XNode { public XNode Test = default!, Then = default!, Else = default!; }
-internal sealed class XAssign : XNode { public XNode Target = default!; public XNode Value = default!; }
+internal sealed class XLiteral : IXNode { public object? Value; }
+internal sealed class XIdent : IXNode { public string Name = ""; }
+internal sealed class XThis : IXNode { }
+internal sealed class XMember : IXNode { public IXNode Obj = default!; public string Name = ""; }
+internal sealed class XCall : IXNode { public IXNode Callee = default!; public List<IXNode> Args = new(); }
+internal sealed class XUnary : IXNode { public string Op = ""; public IXNode Operand = default!; }
+internal sealed class XBinary : IXNode { public string Op = ""; public IXNode L = default!, R = default!; }
+internal sealed class XLogical : IXNode { public string Op = ""; public IXNode L = default!, R = default!; }
+internal sealed class XCond : IXNode { public IXNode Test = default!, Then = default!, Else = default!; }
+internal sealed class XAssign : IXNode { public IXNode Target = default!; public IXNode Value = default!; }
 
-internal abstract class XStmt { }
-internal sealed class XExprStmt : XStmt { public XNode Expr = default!; }
-internal sealed class XVar : XStmt { public string Name = ""; public XNode? Init; }
-internal sealed class XIf : XStmt { public XNode Test = default!; public List<XStmt> Then = new(); public List<XStmt> Else = new(); }
-internal sealed class XBlock : XStmt { public List<XStmt> Body = new(); }
-internal sealed class XSwitch : XStmt { public XNode Disc = default!; public List<(XNode? test, List<XStmt> body)> Cases = new(); }
-internal sealed class XBreak : XStmt { }
-internal sealed class XNop : XStmt { }
+internal interface IXStmt { }
+internal sealed class XExprStmt : IXStmt { public IXNode Expr = default!; }
+internal sealed class XVar : IXStmt { public string Name = ""; public IXNode? Init; }
+internal sealed class XIf : IXStmt { public IXNode Test = default!; public List<IXStmt> Then = new(); public List<IXStmt> Else = new(); }
+internal sealed class XBlock : IXStmt { public List<IXStmt> Body = new(); }
+internal sealed class XSwitch : IXStmt { public IXNode Disc = default!; public List<(IXNode? test, List<IXStmt> body)> Cases = new(); }
+internal sealed class XBreak : IXStmt { }
+internal sealed class XNop : IXStmt { }
+/// <summary>A try statement: the guarded block, the handler blocks and the finally blocks.</summary>
+internal sealed class XTry : IXStmt { public List<IXStmt> Body = new(), Catch = new(), Finally = new(); }
+/// <summary>A loop the interpreter does not run: what it would have computed is unknown.</summary>
+internal sealed class XSkipped : IXStmt { }
 
 // ---------------------------------------------------------------------------------------------
 // Lexer
@@ -46,11 +50,12 @@ internal sealed class XToken
     public object? Value;
 }
 
-internal sealed class XLexer
+internal sealed partial class XLexer
 {
     private readonly string _s;
     private int _i;
-    public XLexer(string s) { _s = s; }
+    private readonly bool _full;
+    public XLexer(string s, bool full = false) { _s = s; _full = full; }
 
     private static readonly string[] Puncs =
     {
@@ -67,11 +72,12 @@ internal sealed class XLexer
             if (char.IsWhiteSpace(c)) { _i++; continue; }
             // comments
             if (c == '/' && _i + 1 < _s.Length && _s[_i + 1] == '/')
-            { while (_i < _s.Length && _s[_i] != '\n') _i++; continue; }
+            { while (_i < _s.Length && _s[_i] != '\n') { _i++; } continue; }
             if (c == '/' && _i + 1 < _s.Length && _s[_i + 1] == '*')
-            { _i += 2; while (_i + 1 < _s.Length && !(_s[_i] == '*' && _s[_i + 1] == '/')) _i++; _i += 2; continue; }
+            { _i += 2; while (_i + 1 < _s.Length && !(_s[_i] == '*' && _s[_i + 1] == '/')) { _i++; } _i += 2; continue; }
             // string
             if (c == '"' || c == '\'') { toks.Add(ReadString(c)); continue; }
+            if (_full && c == '/' && RegexMayStart(toks) && ReadRegex() is { } regex) { toks.Add(regex); continue; }
             // number
             if (char.IsDigit(c) || (c == '.' && _i + 1 < _s.Length && char.IsDigit(_s[_i + 1])))
             { toks.Add(ReadNumber()); continue; }
@@ -80,8 +86,12 @@ internal sealed class XLexer
             { toks.Add(ReadIdent()); continue; }
             // punctuator (longest match)
             string? p = null;
+            if (_full && _i + 1 < _s.Length && (c == '+' || c == '-') && _s[_i + 1] == c) p = c == '+' ? "++" : "--";
             foreach (var cand in Puncs)
-                if (_i + cand.Length <= _s.Length && _s.Substring(_i, cand.Length) == cand) { p = cand; break; }
+            {
+                if (p is not null) break;
+                if (_i + cand.Length <= _s.Length && _s.Substring(_i, cand.Length) == cand) p = cand;
+            }
             if (p is null) { _i++; continue; }           // unknown char — skip (tolerant)
             _i += p.Length;
             toks.Add(new XToken { Type = "punc", Text = p });
@@ -126,11 +136,12 @@ internal sealed class XLexer
 // ---------------------------------------------------------------------------------------------
 // Parser (recursive descent + precedence climbing, with statement-level error recovery)
 // ---------------------------------------------------------------------------------------------
-internal sealed class XParser
+internal sealed partial class XParser
 {
     private readonly List<XToken> _t;
     private int _p;
-    public XParser(List<XToken> toks) { _t = toks; }
+    private readonly bool _full;
+    public XParser(List<XToken> toks, bool full = false) { _t = toks; _full = full; }
 
     private XToken Cur => _t[_p];
     private bool IsEof => Cur.Type == "eof";
@@ -139,13 +150,13 @@ internal sealed class XParser
     private XToken Next() => _t[_p++];
     private void Eat(string punc) { if (IsPunc(punc)) _p++; }
 
-    public List<XStmt> ParseProgram()
+    public List<IXStmt> ParseProgram()
     {
-        var body = new List<XStmt>();
+        var body = new List<IXStmt>();
         while (!IsEof)
         {
             int before = _p;
-            XStmt? s = null;
+            IXStmt? s = null;
             try { s = ParseStmt(); } catch { s = null; }
             if (s is not null) body.Add(s);
             if (_p == before) SkipToStmtBoundary();          // recovery: never loop forever
@@ -160,21 +171,39 @@ internal sealed class XParser
         if (IsPunc(";") || IsPunc("}")) _p++;
     }
 
-    private XStmt ParseStmt()
+    private IXStmt ParseStmt()
     {
+        if (_full && ParseFullStmt() is { } full) return full;
         if (IsPunc(";")) { _p++; return new XNop(); }
         if (IsPunc("{")) return ParseBlock();
         if (IsKw("var") || IsKw("let") || IsKw("const")) return ParseVar();
         if (IsKw("if")) return ParseIf();
         if (IsKw("switch")) return ParseSwitch();
         if (IsKw("break")) { _p++; Eat(";"); return new XBreak(); }
-        if (IsKw("return")) { _p++; if (!IsPunc(";") && !IsPunc("}")) ParseExpr(); Eat(";"); return new XNop(); }
+        if (IsKw("return")) { _p++; if (!IsPunc(";") && !IsPunc("}")) { ParseExpr(); } Eat(";"); return new XNop(); }
         // for / while / function / try: not needed by load-time scripts — skip their whole body
-        if (IsKw("for") || IsKw("while") || IsKw("function") || IsKw("try") || IsKw("do"))
-        { SkipConstruct(); return new XNop(); }
+        if (IsKw("try")) return ParseTry();
+        if (IsKw("function")) { SkipConstruct(); return new XNop(); }
+        if (IsKw("for") || IsKw("while") || IsKw("do"))
+        { SkipConstruct(); return new XSkipped(); }
         var e = ParseExpr();
         Eat(";");
         return new XExprStmt { Expr = e };
+    }
+
+    /// <summary>try { body } catch (e) { … } finally { … }, each block kept apart so the runner chooses which run.</summary>
+    private XTry ParseTry()
+    {
+        _p++;                                   // try
+        var node = new XTry();
+        if (IsPunc("{")) node.Body = ParseBlock().Body;
+        while (IsKw("catch") || IsKw("finally"))
+        {
+            var into = IsKw("catch") ? node.Catch : node.Finally;
+            while (!IsEof && !IsPunc("{")) _p++;
+            if (IsPunc("{")) into.AddRange(ParseBlock().Body);
+        }
+        return node;
     }
 
     private void SkipConstruct()
@@ -203,10 +232,10 @@ internal sealed class XParser
         while (!IsEof && !IsPunc("}"))
         {
             int before = _p;
-            XStmt? s = null;
+            IXStmt? s = null;
             try { s = ParseStmt(); } catch { s = null; }
             if (s is not null) b.Body.Add(s);
-            if (_p == before) { if (!IsPunc("}")) _p++; }
+            if (_p == before && !IsPunc("}")) _p++;
         }
         Eat("}");
         return b;
@@ -216,10 +245,11 @@ internal sealed class XParser
     {
         _p++;                                   // var
         var name = Cur.Type == "id" ? Next().Text : "_";
-        XNode? init = null;
+        IXNode? init = null;
         if (IsPunc("=")) { _p++; init = ParseAssign(); }
         // ignore comma-declarations' tail
-        while (IsPunc(",")) { _p++; if (Cur.Type == "id") _p++; if (IsPunc("=")) { _p++; ParseAssign(); } }
+        while (IsPunc(",")) { _p++; if (Cur.Type == "id") _p++;
+        if (IsPunc("=")) { _p++; ParseAssign(); } }
         Eat(";");
         return new XVar { Name = name, Init = init };
     }
@@ -235,11 +265,11 @@ internal sealed class XParser
         return node;
     }
 
-    private List<XStmt> ParseStmtAsList()
+    private List<IXStmt> ParseStmtAsList()
     {
         if (IsPunc("{")) return ParseBlock().Body;
         var s = ParseStmt();
-        return new List<XStmt> { s };
+        return new List<IXStmt> { s };
     }
 
     private XSwitch ParseSwitch()
@@ -250,15 +280,15 @@ internal sealed class XParser
         var sw = new XSwitch { Disc = disc };
         while (!IsEof && !IsPunc("}"))
         {
-            XNode? test = null;
+            IXNode? test = null;
             if (IsKw("case")) { _p++; test = ParseExpr(); Eat(":"); }
             else if (IsKw("default")) { _p++; Eat(":"); }
             else { _p++; continue; }
-            var body = new List<XStmt>();
+            var body = new List<IXStmt>();
             while (!IsEof && !IsPunc("}") && !IsKw("case") && !IsKw("default"))
             {
                 int before = _p;
-                XStmt? s = null;
+                IXStmt? s = null;
                 try { s = ParseStmt(); } catch { s = null; }
                 if (s is not null) body.Add(s);
                 if (_p == before) _p++;
@@ -270,14 +300,14 @@ internal sealed class XParser
     }
 
     // ---- expressions ----
-    private XNode ParseExpr()
+    private IXNode ParseExpr()
     {
         var e = ParseAssign();
         while (IsPunc(",")) { _p++; e = ParseAssign(); }   // comma operator → last value
         return e;
     }
 
-    private XNode ParseAssign()
+    private IXNode ParseAssign()
     {
         var left = ParseCond();
         if (IsPunc("=") || IsPunc("+=") || IsPunc("-="))
@@ -291,7 +321,7 @@ internal sealed class XParser
         return left;
     }
 
-    private XNode ParseCond()
+    private IXNode ParseCond()
     {
         var c = ParseBinary(0);
         if (IsPunc("?"))
@@ -320,7 +350,7 @@ internal sealed class XParser
         _ => -1,
     };
 
-    private XNode ParseBinary(int minPrec)
+    private IXNode ParseBinary(int minPrec)
     {
         var left = ParseUnary();
         while (Cur.Type == "punc")
@@ -337,19 +367,24 @@ internal sealed class XParser
         return left;
     }
 
-    private XNode ParseUnary()
+    private IXNode ParseUnary()
     {
         if (IsPunc("!") || IsPunc("-") || IsPunc("+") || IsPunc("~"))
         {
             var op = Next().Text;
             return new XUnary { Op = op, Operand = ParseUnary() };
         }
+        if (_full && (IsPunc("++") || IsPunc("--")))
+        {
+            var delta = Next().Text == "++" ? 1 : -1;
+            return new XIncDec { Target = ParseUnary(), Delta = delta, Prefix = true };
+        }
         if (IsKw("new")) { _p++; return ParseUnary(); }    // ignore 'new'
         if (IsKw("typeof")) { _p++; return new XUnary { Op = "typeof", Operand = ParseUnary() }; }
         return ParsePostfix();
     }
 
-    private XNode ParsePostfix()
+    private IXNode ParsePostfix()
     {
         var e = ParsePrimary();
         while (true)
@@ -357,7 +392,7 @@ internal sealed class XParser
             if (IsPunc("."))
             {
                 _p++;
-                var name = Cur.Type == "id" ? Next().Text : (Cur.Type == "str" ? Next().Text : "");
+                var name = Cur.Type switch { "id" => Next().Text, "str" => Next().Text, _ => "" };
                 e = new XMember { Obj = e, Name = name };
             }
             else if (IsPunc("["))
@@ -366,7 +401,12 @@ internal sealed class XParser
                 var idx = ParseExpr();
                 Eat("]");
                 // treat obj[expr] as member with computed name when it is a literal; else best-effort
-                e = idx is XLiteral lit ? new XMember { Obj = e, Name = ToStr(lit.Value) } : new XMember { Obj = e, Name = "" };
+                if (_full && idx is not XLiteral) e = new XIndex { Obj = e, Index = idx };
+                else e = idx is XLiteral lit ? new XMember { Obj = e, Name = ToStr(lit.Value) } : new XMember { Obj = e, Name = "" };
+            }
+            else if (_full && (IsPunc("++") || IsPunc("--")))
+            {
+                e = new XIncDec { Target = e, Delta = Next().Text == "++" ? 1 : -1 };
             }
             else if (IsPunc("("))
             {
@@ -385,7 +425,7 @@ internal sealed class XParser
         return e;
     }
 
-    private XNode ParsePrimary()
+    private IXNode ParsePrimary()
     {
         if (IsPunc("("))
         {
@@ -400,10 +440,11 @@ internal sealed class XParser
         if (IsKw("false")) { _p++; return new XLiteral { Value = false }; }
         if (IsKw("null") || IsKw("undefined")) { _p++; return new XLiteral { Value = null }; }
         if (IsKw("this")) { _p++; return new XThis(); }
+        if (_full && ParseFullPrimary() is { } fullPrimary) return fullPrimary;
         if (Cur.Type == "id") return new XIdent { Name = Next().Text };
         // unknown token — consume and yield null so parsing continues
         _p++;
-        return new XLiteral { Value = null };
+        return _full ? new XUnknown() : new XLiteral { Value = null };
     }
 
     private static string ToStr(object? v) => v is double d ? d.ToString(CultureInfo.InvariantCulture) : v?.ToString() ?? "";

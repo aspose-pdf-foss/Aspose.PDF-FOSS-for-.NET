@@ -57,8 +57,11 @@ internal static partial class AutoTagger
 
     private static LogicalStructure.StructureElement MakeBody(TagTreeBuildState tg, Block b)
     {
-        LogicalStructure.StructureElement p = b.Note ? tg.tc.CreateNoteElement() : b.Formula ? tg.tc.CreateFormulaElement()
-            : b.Toc ? tg.tc.CreateTOCIElement() : tg.tc.CreateParagraphElement();
+        LogicalStructure.StructureElement p;
+        if (b.Note) p = tg.tc.CreateNoteElement();
+        else if (b.Formula) p = tg.tc.CreateFormulaElement();
+        else if (b.Toc) p = tg.tc.CreateTOCIElement();
+        else p = tg.tc.CreateParagraphElement();
         StateLayout(p, b.Layout);
         if (b.RuleGapBelow is { } gap) StateRuleBelow(p, gap, b.RuleBox, b.RuleThickness);
         StateRuleAbove(p, b);
@@ -69,7 +72,10 @@ internal static partial class AutoTagger
             box.SetArrayNumberValue(LinesBox(formulaLines).Select(v => (double?)v).ToArray());
             p.Attributes.GetAttributes(LogicalStructure.AttributeOwnerStandard.Layout).SetAttribute(box);
         }
-        var tag = b.Note ? "Note" : b.Formula ? "Formula" : b.Toc ? "TOCI" : "P";
+        string tag = "P";
+        if (b.Note) tag = "Note";
+        else if (b.Formula) tag = "Formula";
+        else if (b.Toc) tag = "TOCI";
         LogicalStructure.MCRElement Segment(int s) =>
             NewSlot(tg, new Slot { Kind = SlotKind.Text, BlockId = b.Id, Segment = s, Tag = tag });
         if (b.Links is { Count: > 0 } links)
@@ -187,7 +193,9 @@ internal static partial class AutoTagger
                 var (rowSpan, colSpan) = cells is not null && r < cells.GetLength(0) && c < cells.GetLength(1)
                     ? CellSpan(cells, r, c) : (1, 1);
                 // A header row's cells head their columns, a header column's cells their rows.
-                var scope = r < headers.Rows && !continued ? "Column" : headers.Col && c == 0 ? "Row" : null;
+                string? scope = null;
+                if (r < headers.Rows && !continued) scope = "Column";
+                else if (headers.Col && c == 0) scope = "Row";
                 var cell = scope is null ? tg.tc.CreateTableTDElement() : HeaderCell(tg, scope);
                 var slot = new Slot { Kind = SlotKind.Cell, BlockId = b.Id, Row = r, Col = c, Tag = scope is null ? "TD" : "TH" };
                 rowSlots.Add(slot);
@@ -210,7 +218,7 @@ internal static partial class AutoTagger
                         scope == "Column" ? pw.Rules : null, (colX[0], colX[^1]), centredColumns);
                     StateTextAlign(cell, align);
                     if (align == LogicalStructure.AttributeName.TextAlign_End && colSpan == 1 && r >= headers.Rows && flushRight[c])
-                        StateEndIndent(cell, widthEdges![c + 1] - (TextIn(pw.Lines, colX[c], colX[c + 1], rowY![b.Rows - r - rowSpan], rowY[b.Rows - r])?.R ?? figureEnds![c]));
+                        StateEndIndent(cell, widthEdges![c + 1] - (TextIn(pw.Lines, colX[c], colX[c + 1], rowY[b.Rows - r - rowSpan], rowY[b.Rows - r])?.R ?? figureEnds![c]));
                 }
                 if (placements is not null && placements.TryGetValue((r, c), out var placement)) StatePlacement(cell, placement);
                 // A label set flush left in its cell states how far in it starts; a cell set any other way states nothing.

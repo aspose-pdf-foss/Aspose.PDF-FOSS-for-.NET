@@ -26,13 +26,13 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     private static partial class ImageDecoder
     {
         public static Bitmap? TryDecode(PdfStream xobj, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false,
-            bool replicateChroma = false)
+            bool replicateChroma = false, int jpegScale = 1)
         {
             var dict = xobj.Dict;
             byte[] decoded;
             try { decoded = reader.DecodeStream(xobj); }
             catch { return null; }
-            return Build(dict, decoded, state, reader, pdfxOverprintSim, replicateChroma);
+            return Build(dict, decoded, state, reader, pdfxOverprintSim, replicateChroma, jpegScale);
         }
 
         public static Bitmap? TryDecodeInline(PdfDictionary dict, byte[] data, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false)
@@ -43,7 +43,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             return Build(dict, decoded, state, reader, pdfxOverprintSim);
         }
 
-        private static Bitmap? Build(PdfDictionary dict, byte[] decoded, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false, bool replicateChroma = false)
+        private static Bitmap? Build(PdfDictionary dict, byte[] decoded, GraphicsState state, PdfReader reader, bool pdfxOverprintSim = false, bool replicateChroma = false, int jpegScale = 1)
         {
             var w = (int)dict.GetInt("Width");
             var h = (int)dict.GetInt("Height");
@@ -66,7 +66,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             var opSim = pdfxOverprintSim && state.OverprintFill;
 
             // JPEG carried verbatim through DCTDecode.
-            if (TryDecodeJpegImage(dict, reader, decoded, csInfo, opSim, replicateChroma) is { } jpegBmp) return jpegBmp;
+            if (TryDecodeJpegImage(dict, reader, decoded, csInfo, opSim, replicateChroma, jpegScale) is { } jpegBmp) return jpegBmp;
 
             // JPEG 2000 (JPXDecode): raw codestream (FF4F) or JP2 box wrapper.
             bool isJ2k = (decoded.Length > 3 && decoded[0] == 0xFF && decoded[1] == 0x4F)
@@ -79,18 +79,25 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                     // A single-component JPX codestream under an /Indexed colour space
                     // carries palette indices, not gray levels — look each sample up in
                     // the palette (a solid-colour glow sprite otherwise renders black).
-                    var bgraJ = jc == 1 && csInfo.Palette is not null
-                        ? IndexedToBgra(jp, jw, jh, 8, csInfo)
-                        : jc >= 3 ? RgbToBgra(jp, jw, jh) : GrayToBgra(jp, jw, jh);
+                    byte[] bgraJ;
+                    if (jc == 1 && csInfo.Palette is not null) bgraJ = IndexedToBgra(jp, jw, jh, 8, csInfo, reader.Resolve(dict.Get("Mask")) as PdfArray);
+                    else if (jc >= 3) bgraJ = RgbToBgra(jp, jw, jh);
+                    else bgraJ = GrayToBgra(jp, jw, jh);
                     var (mb, mw, mh) = ApplyMasks(dict, reader, bgraJ, jw, jh);
                     return FromBgra(mb, mw, mh);
                 }
                 return null;
             }
 
+            // An 8-bit sample is remapped through the image's /Decode before it is read as a colour.
+            if (bpc == 8 && csInfo.Palette is null && csInfo.TintTransform is null
+                && SoftwarePageRenderer.DirectComponents(csInfo.BaseName) is var comps and > 0
+                && Aspose.Pdf.IO.Filters.SampleDecode.Remap(decoded, w * h * comps, comps, dict.Get("Decode"), reader) is { } remapped)
+                decoded = remapped;
+
             byte[]? bgra = null;
             if (csInfo.Palette is not null)
-                bgra = IndexedToBgra(decoded, w, h, bpc, csInfo);
+                bgra = IndexedToBgra(decoded, w, h, bpc, csInfo, reader.Resolve(dict.Get("Mask")) as PdfArray);
             else if (csInfo.TintTransform is not null && csInfo.TintComponents > 1 && bpc == 8)
                 // Multi-colorant /DeviceN image: each pixel is an N-sample tint tuple
                 // mapped through the tint transform into the alternate space.
@@ -256,16 +263,11 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         private static byte[] CmykToBgra(byte[] cmyk, int w, int h)
         {
             var bgra = new byte[w * h * 4];
-            var memo = new Dictionary<int, (byte r, byte g, byte b)>();
+            var memo = new CmykToRgbLut.Memo();
             for (int i = 0, j = 0; i < w * h; i++, j += 4)
             {
                 var s = i * 4;
-                var key = (cmyk[s] << 24) | (cmyk[s + 1] << 16) | (cmyk[s + 2] << 8) | cmyk[s + 3];
-                if (!memo.TryGetValue(key, out var rgb))
-                {
-                    rgb = CmykToRgbLut.Convert(cmyk[s] / 255.0, cmyk[s + 1] / 255.0, cmyk[s + 2] / 255.0, cmyk[s + 3] / 255.0);
-                    memo[key] = rgb;
-                }
+                var rgb = memo.Convert(cmyk[s], cmyk[s + 1], cmyk[s + 2], cmyk[s + 3]);
                 bgra[j + 0] = rgb.b;
                 bgra[j + 1] = rgb.g;
                 bgra[j + 2] = rgb.r;
@@ -278,23 +280,33 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         {
             var bgra = new byte[w * h * 4];
             var rowBytes = (w + 7) / 8;
-            var inv = invert ? 1 : 0;
+            // A pixel is written as one opaque BGRA word; a 1 bit is white unless inverted,
+            // and a pixel past the end of the data is black either way.
+            var pixels = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bgra.AsSpan());
+            var white = System.Runtime.InteropServices.MemoryMarshal.Read<uint>(new byte[] { 255, 255, 255, 255 });
+            var black = System.Runtime.InteropServices.MemoryMarshal.Read<uint>(new byte[] { 0, 0, 0, 255 });
+            var invertMask = invert ? 0xFF : 0;
             for (int y = 0; y < h; y++)
             {
                 var rowBase = y * rowBytes;
-                for (int x = 0; x < w; x++)
+                var row = pixels.Slice(y * w, w);
+                for (int x = 0; x < w; x += 8)
                 {
-                    var bi = rowBase + x / 8;
-                    byte v = 0;
-                    if (bi < data.Length) v = (((data[bi] >> (7 - (x & 7))) & 1) ^ inv) == 1 ? (byte)255 : (byte)0;
-                    var o = (y * w + x) * 4;
-                    bgra[o + 0] = v; bgra[o + 1] = v; bgra[o + 2] = v; bgra[o + 3] = 255;
+                    var bi = rowBase + (x >> 3);
+                    var bits = bi < data.Length ? data[bi] ^ invertMask : 0;
+                    var n = Math.Min(8, w - x);
+                    for (int k = 0; k < n; k++)
+                        row[x + k] = ((bits >> (7 - k)) & 1) == 1 ? white : black;
                 }
             }
             return bgra;
         }
 
-        private static byte[] IndexedToBgra(byte[] data, int w, int h, int bpc, SoftwarePageRenderer.ImageColorSpaceInfo csInfo)
+        /// <param name="indexKey">The image's colour key, a range of palette indices (PDF 32000 §8.9.6.4):
+        /// a pixel whose index lies in it is transparent. The key names indices, so it is applied here,
+        /// before the palette turns them into colours a key never matches.</param>
+        private static byte[] IndexedToBgra(byte[] data, int w, int h, int bpc, SoftwarePageRenderer.ImageColorSpaceInfo csInfo,
+            PdfArray? indexKey = null)
         {
             var palette = csInfo.Palette!;
             var pc = csInfo.PaletteComponents;
@@ -302,16 +314,23 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             var rowBits = w * bpc;
             var rowBytes = (rowBits + 7) / 8;
             var maxIndex = pc > 0 ? palette.Length / pc - 1 : 0;
+            var keyLow = indexKey is { Count: >= 2 } ? (int)NumFrom(indexKey[0]) : int.MaxValue;
+            var keyHigh = indexKey is { Count: >= 2 } ? (int)NumFrom(indexKey[1]) : int.MinValue;
+            // The palette's entries converted once: through a CMYK palette every pixel went
+            // through the colour conversion on its own.
+            var colours = new (byte r, byte g, byte b)[maxIndex + 1];
+            for (var i = 0; i <= maxIndex; i++) colours[i] = PaletteRgb(palette, pc, csInfo.BaseName, i);
             for (int y = 0; y < h; y++)
             {
                 var rowBase = y * rowBytes;
                 for (int x = 0; x < w; x++)
                 {
                     int idx = ReadBits(data, rowBase, x * bpc, bpc);
+                    var keyed = idx >= keyLow && idx <= keyHigh;
                     if (idx > maxIndex) idx = maxIndex;
-                    (byte r, byte g, byte b) = PaletteRgb(palette, pc, csInfo.BaseName, idx);
+                    (byte r, byte g, byte b) = colours[idx];
                     var o = (y * w + x) * 4;
-                    bgra[o + 0] = b; bgra[o + 1] = g; bgra[o + 2] = r; bgra[o + 3] = 255;
+                    bgra[o + 0] = b; bgra[o + 1] = g; bgra[o + 2] = r; bgra[o + 3] = keyed ? (byte)0 : (byte)255;
                 }
             }
             return bgra;
@@ -383,29 +402,22 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             if (!haveSMask && !haveStencil && !haveColorKey) return (bgra, w, h);
 
             // A /Matte entry means the colour samples are pre-blended against the matte
-            // colour (premultiplied). The true colour is recovered per PDF §11.6.5.3:
-            // c = m + (c' - m) / alpha. We only un-premultiply when the mask is (near-)
-            // uniform — a flat translucent overlay (e.g. a tiled background texture)
-            // where leaving the samples pre-blended visibly darkens the result. Shaped
-            // masks (varying coverage, e.g. a vignetted photo) are left untouched: their
-            // opaque interior needs no correction and dividing thin edges by tiny alpha
-            // only blows highlights out to white.
+            // colour (premultiplied). The true colour is recovered per PDF §11.6.5.3,
+            // c = m + (c' - m) / alpha, pixel by pixel with that pixel's own coverage: a
+            // shaped mask's interior is as pre-blended as a flat overlay's, and leaving
+            // it darkens the image by the matte's share (a ring at 90% coverage over a
+            // light grey came out 50 levels too dark).
             byte mB = 0, mG = 0, mR = 0;
             bool unmatte = false;
             if (haveSMask && reader.ResolveStream(dict.Get("SMask"))?.Dict.Get("Matte") is PdfArray matte && matte.Count > 0)
             {
-                int amin = 255, amax = 0;
-                foreach (var a in alpha!) { if (a < amin) amin = a; if (a > amax) amax = a; }
-                if (amax - amin <= 8 && amax > 0)
-                {
-                    unmatte = true;
-                    // Matte components are colour values in [0,1]; Clamp255 rescales that to
-                    // a [0,255] byte. (Multiplying by 255 first double-scales and pins any
-                    // non-zero matte to 255.)
-                    double M(int i) => i < matte.Count ? NumFrom(matte[i]) : 0;
-                    if (matte.Count >= 3) { mR = (byte)Clamp255(M(0)); mG = (byte)Clamp255(M(1)); mB = (byte)Clamp255(M(2)); }
-                    else { var v = (byte)Clamp255(M(0)); mR = mG = mB = v; }
-                }
+                unmatte = true;
+                // Matte components are colour values in [0,1]; Clamp255 rescales that to
+                // a [0,255] byte. (Multiplying by 255 first double-scales and pins any
+                // non-zero matte to 255.)
+                double M(int i) => i < matte.Count ? NumFrom(matte[i]) : 0;
+                if (matte.Count >= 3) { mR = (byte)Clamp255(M(0)); mG = (byte)Clamp255(M(1)); mB = (byte)Clamp255(M(2)); }
+                else { var v = (byte)Clamp255(M(0)); mR = mG = mB = v; }
             }
 
             // Output grid: the finest of the base image and its masks. A mask finer
@@ -425,11 +437,13 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
 
         private static byte Unmatte(byte cPrime, byte matte, byte alpha)
         {
+            // A pixel of no coverage shows nothing, whatever colour it stores.
+            if (alpha == 0) return cPrime;
             // v is already in device [0,255] range; clamp directly. (Clamp255 expects a
             // normalised [0,1] value and rescales by 255, which would blow every non-255
             // channel out to white — the reason Matte'd images lost their mid-tones.)
             double v = matte + (cPrime - matte) * 255.0 / alpha;
-            return (byte)(v < 0 ? 0 : v > 255 ? 255 : v);
+            return (byte)(v switch { < 0 => 0, > 255 => 255, _ => v });
         }
 
         private static Bitmap FromBgra(byte[] bgra, int w, int h)

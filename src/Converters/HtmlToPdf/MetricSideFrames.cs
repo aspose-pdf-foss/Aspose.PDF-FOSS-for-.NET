@@ -8,7 +8,9 @@ internal static partial class HtmlToPdfConverter
     /// <summary>One side of a CSS border after the cascade: width in pt (0 = none), style keyword, colour (null = the current text colour).</summary>
     internal struct CssBorderSide
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double W;
+#pragma warning restore S3218
         public string Style;
         public Color? Col;
     }
@@ -30,7 +32,9 @@ internal static partial class HtmlToPdfConverter
         "thin" => CssBorderThinPt,
         "medium" => CssBorderMediumPt,
         "thick" => CssBorderThickPt,
-        _ => TryParseLength(tok) is { } pt ? pt : IsZeroLength(tok) ? 0.0 : null,
+        _ when TryParseLength(tok) is { } pt => pt,
+        _ when IsZeroLength(tok) => 0.0,
+        _ => null,
     };
 
     /// <summary>The four border sides (top, right, bottom, left) of an inline style after the CSS cascade: longhands and
@@ -41,10 +45,10 @@ internal static partial class HtmlToPdfConverter
         var sides = new CssBorderSide[4];
         for (var i = 0; i < 4; i++) sides[i] = new CssBorderSide { W = CssBorderMediumPt, Style = "none", Col = null };
         var sideNames = new[] { "top", "right", "bottom", "left" };
-        foreach (Match dm in StyleDeclRx.Matches(style))
+        foreach (var groups in SafeRegex.Matches(StyleDeclRx, style).Select(dm => dm.Groups))
         {
-            var prop = dm.Groups[1].Value.ToLowerInvariant();
-            var val = dm.Groups[2].Value.Trim();
+            var prop = groups[1].Value.ToLowerInvariant();
+            var val = groups[2].Value.Trim();
             if (!prop.StartsWith("border", StringComparison.Ordinal)) continue;
             var parts = prop.Split('-');
             var sideIdx = parts.Length >= 2 ? Array.IndexOf(sideNames, parts[1]) : -1;
@@ -108,9 +112,8 @@ internal static partial class HtmlToPdfConverter
     private static void ReadMetricTableClassChrome(MetricTableState mt, Dictionary<string, string> rule)
     {
         var sb = new StringBuilder();
-        foreach (var kv in rule)
-            if (kv.Key.StartsWith("border", StringComparison.OrdinalIgnoreCase))
-                sb.Append(kv.Key).Append(':').Append(kv.Value).Append(';');
+        foreach (var kv in rule.Where(kv => kv.Key.StartsWith("border", StringComparison.OrdinalIgnoreCase)))
+            sb.Append(kv.Key).Append(':').Append(kv.Value).Append(';');
         if (sb.Length > 0)
         {
             var sides = CssBorderSides(sb.ToString());
@@ -130,7 +133,7 @@ internal static partial class HtmlToPdfConverter
     private static void CascadePtFormInlineSides(MetricTableState mt, Dictionary<string, string> ta)
     {
         if (!mt.mps.ptFormCells || mt.mps.sideFrames is not { } classSides || !ta.TryGetValue("style", out var pfSt) || pfSt is null
-            || !Regex.IsMatch(pfSt, @"border", RegexOptions.IgnoreCase)) return;
+            || !SafeRegex.IsMatch(pfSt, @"border", RegexOptions.IgnoreCase)) return;
         var cascade = new StringBuilder();
         var sideNames = new[] { "top", "right", "bottom", "left" };
         for (var i = 0; i < 4; i++)
@@ -147,12 +150,12 @@ internal static partial class HtmlToPdfConverter
     private static void ReadMetricTableSideFrames(MetricTableState mt, Dictionary<string, string> ta)
     {
         if (ta.ContainsKey("border") || !ta.TryGetValue("style", out var st) || st is null
-            || !Regex.IsMatch(st, @"border", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(st, @"border", RegexOptions.IgnoreCase)
             // a `border-style` longhand on a SEPARATED grid frames the table through the inline
             // frame alone (one stroke round the box and its trailing spacing - probed on the test
             // form's cellspacing=5 grids); a cellspacing=0 grid keeps the side frames its greens
             // were calibrated on
-            || (Regex.IsMatch(st, @"(?<![-\w])border-style\s*:", RegexOptions.IgnoreCase)
+            || (SafeRegex.IsMatch(st, @"(?<![-\w])border-style\s*:", RegexOptions.IgnoreCase)
                 && ta.TryGetValue("cellspacing", out var csAttr) && double.TryParse(csAttr.Trim().TrimEnd('p', 'x'),
                     System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var csV) && csV > 0)) return;
         var sides = CssBorderSides(st);
@@ -193,10 +196,13 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>The inline style of a tag's attribute string, or an empty string.</summary>
     private static string InlineStyleOf(string attrs)
-        => Regex.Match(attrs, @"\bstyle\s*=\s*(['""])(.*?)\1", RegexOptions.IgnoreCase | RegexOptions.Singleline) is { Success: true } m
-            ? m.Groups[2].Value
-            // (an unquoted value runs to the next space: the enterprise summary's framed 300 px wrapper)
-            : Regex.Match(attrs, @"\bstyle\s*=\s*([^\s>""']+)", RegexOptions.IgnoreCase) is { Success: true } u ? u.Groups[1].Value : "";
+    {
+        if (SafeRegex.Match(attrs, @"\bstyle\s*=\s*(['""])(.*?)\1", RegexOptions.IgnoreCase | RegexOptions.Singleline) is { Success: true } m)
+            return m.Groups[2].Value;
+        // (an unquoted value runs to the next space: the enterprise summary's framed 300 px wrapper)
+        if (SafeRegex.Match(attrs, @"\bstyle\s*=\s*([^\s>""']+)", RegexOptions.IgnoreCase) is { Success: true } u) return u.Groups[1].Value;
+        return "";
+    }
 
     /// <summary>A wrapper table's CSS chrome: its own border sides (none when a border attribute frames it) and its
     /// single cell's; every box paints its own borders, so both stand between the wrapper's box and its children.</summary>
@@ -205,9 +211,9 @@ internal static partial class HtmlToPdfConverter
         var none = CssBorderSides("");
         // (a `border=0` attribute frames nothing: the CSS sides still paint - measured on the
         // enterprise summary's `border=0 style=border-width:1px;border-style:Solid` wrappers)
-        var tableSides = Regex.IsMatch(wrapperAttrs, @"\bborder\s*=\s*[""']?[1-9]", RegexOptions.IgnoreCase)
+        var tableSides = SafeRegex.IsMatch(wrapperAttrs, @"\bborder\s*=\s*[""']?[1-9]", RegexOptions.IgnoreCase)
             ? none : CssBorderSides(InlineStyleOf(wrapperAttrs));
-        var td = Regex.Match(tableHtml, @"<td\b([^>]*)>", RegexOptions.IgnoreCase);
+        var td = SafeRegex.Match(tableHtml, @"<td\b([^>]*)>", RegexOptions.IgnoreCase);
         var cellSides = td.Success ? CssBorderSides(InlineStyleOf(td.Groups[1].Value)) : none;
         return (tableSides, cellSides);
     }

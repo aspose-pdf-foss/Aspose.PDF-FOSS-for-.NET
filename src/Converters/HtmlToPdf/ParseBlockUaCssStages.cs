@@ -57,8 +57,8 @@ internal static partial class HtmlToPdfConverter
             // …and a UA-grid block's own inline text-align aligns it (`<p style="text-align: center">`).
             if (pb.uaGridBlocks && tok.Attributes is not null && tok.Attributes.TryGetValue("style", out var uaAlignSt) && uaAlignSt is not null)
             {
-                if (Regex.IsMatch(uaAlignSt, "text-align *: *center", RegexOptions.IgnoreCase)) pb.style.AlignCenterAttr = true;
-                else if (Regex.IsMatch(uaAlignSt, "text-align *: *right", RegexOptions.IgnoreCase)) pb.style.AlignRight = true;
+                if (SafeRegex.IsMatch(uaAlignSt, "text-align *: *center", RegexOptions.IgnoreCase)) pb.style.AlignCenterAttr = true;
+                else if (SafeRegex.IsMatch(uaAlignSt, "text-align *: *right", RegexOptions.IgnoreCase)) pb.style.AlignRight = true;
             }
             // …and where the sheet says nothing about the box, the UA's own em margins of
             // the block's (sheet-sized) font (probed: a sheet-less p steps one em).
@@ -80,17 +80,14 @@ internal static partial class HtmlToPdfConverter
                 if (!bmRule.ContainsKey("margin") && !bmRule.ContainsKey("margin-bottom"))
                     pb.style.MarginBottom = (pb.uaGridBlocks ? UaGridElementMarginEm(tag) : UaElementMarginEm(tag)) * pb.style.FontSize;
             }
-            if (pb.sheetElementTypography)
+            // …and a CONTAINER's sheet margin is the calibrated flow's to fold at its close.
+            // (a block the sheet BOXES - background, rules - steps by the sheet's own margins
+            // and its rules' widths; the calibrated heading margins are for bare text, and a
+            // body-line-box sheet's blocks keep the CSS margins resolved above)
+            if (pb.sheetElementTypography && !pb.style.SheetBox && !sheetBoxMargins)
             {
-                // …and a CONTAINER's sheet margin is the calibrated flow's to fold at its close.
-                // (a block the sheet BOXES - background, rules - steps by the sheet's own margins
-                // and its rules' widths; the calibrated heading margins are for bare text, and a
-                // body-line-box sheet's blocks keep the CSS margins resolved above)
-                if (!pb.style.SheetBox && !sheetBoxMargins)
-                {
-                    if (calibratedMt > 0 || !IsTextElementTag(tag)) pb.style.MarginTop = calibratedMt;
-                    if (calibratedMb > 0 || !IsTextElementTag(tag)) pb.style.MarginBottom = calibratedMb;
-                }
+                if (calibratedMt > 0 || !IsTextElementTag(tag)) pb.style.MarginTop = calibratedMt;
+                if (calibratedMb > 0 || !IsTextElementTag(tag)) pb.style.MarginBottom = calibratedMb;
             }
             if (pb.uaGridBlocks)
             {

@@ -17,12 +17,13 @@ internal static partial class HtmlToPdfConverter
             // an <hr> cell is the rule's groove inside its UA margins (0.5 em above and below,
             // in the cell's own size or the browser's default: the loose-doctype form's
             // rating rows pitch 27.75 = a 12.75 text row + a 15 pt rule row)
-            var emptyContent = mc.HrRule
-                ? Math.Max(mc.ImgHPt, 2 * HrCellMarginEm * (mc.FontSize ?? UaDefaultFontPt) + (mc.HrBoxPt > 0 ? mc.HrBoxPt : HrGrooveH))
-                // a cell holding only its checkbox holds the checkbox's line box
-                : mc.LeadCheckboxName is not null
-                ? Math.Max(mc.ImgHPt, MetricCheckboxLineHeight(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.fm, mc, cellFs0))
-                : mc.ImgHPt;
+            double emptyContent;
+            if (mc.HrRule)
+                emptyContent = Math.Max(mc.ImgHPt, 2 * HrCellMarginEm * (mc.FontSize ?? UaDefaultFontPt) + (mc.HrBoxPt > 0 ? mc.HrBoxPt : HrGrooveH));
+            // a cell holding only its checkbox holds the checkbox's line box
+            else if (mc.LeadCheckboxName is not null)
+                emptyContent = Math.Max(mc.ImgHPt, MetricCheckboxLineHeight(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.face, mt.fm, mc, cellFs0));
+            else emptyContent = mc.ImgHPt;
             // …and a cell holding only its text input holds the input's box
             if (mc.InputBoxes is { Count: > 0 }) emptyContent = Math.Max(emptyContent, MetricInputsLineBoxPt(mc));
             mc.ContentH = emptyContent + mc.PadTopPt + mc.PadBottomPt;
@@ -87,11 +88,11 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>A UA block band's height: every hard line wrapped at its own size, each on its own line box.</summary>
-    private static double UaBlockBandHeight(MetricTableState mt, MetricCell mc, MetricDivSeg sg, double wrapW)
-        => UaBlockBandHeightPt(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.boldFace, mt.fm, sg, wrapW);
+    private static double UaBlockBandHeight(MetricTableState mt, MetricDivSeg sg, double wrapW)
+        => UaBlockBandHeightPt(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.face, mt.boldFace, mt.fm, sg, wrapW);
 
     /// <summary>A UA block band's height: every hard line wrapped at the width in its own bold and size.</summary>
-    private static double UaBlockBandHeightPt(MetricParseState mps, bool stdSerif, bool wrapperStacks, double hheaSum,
+    private static double UaBlockBandHeightPt(MetricParseState mps, bool stdSerif, bool wrapperStacks,
         string face, string boldFace, (double asc, double sum) fm, MetricDivSeg sg, double wrapW)
     {
         var h = 0.0;
@@ -101,7 +102,7 @@ internal static partial class HtmlToPdfConverter
             var (lineBold, lineFsOpt) = hi < sg.LineTypo.Count ? sg.LineTypo[hi] : (false, null);
             var probe = new MetricCell { Face = sg.Face, Bold = sg.Bold || lineBold, FontSize = lineFsOpt ?? sg.FontSize };
             var fs = probe.FontSize ?? mps.fontSize;
-            var lineH = CellLineOf(mps, stdSerif, wrapperStacks, hheaSum, face, fm, probe, fs);
+            var lineH = CellLineOf(mps, stdSerif, wrapperStacks, face, fm, probe, fs);
             var text = hardLines[hi].Trim(' ');
             var n = text.Length == 0 ? 1 : MeasuredWordWrap(text, wrapW, CellFaceName(face, boldFace, probe), fs, dashBreaks: true).Length;
             h += n * lineH;
@@ -300,10 +301,10 @@ internal static partial class HtmlToPdfConverter
             minW = Math.Max(minW, StyledMinContentPt(mt.face, mt.boldFace, mc, mcFs,
                 mt.mps.ptFormCells ? GlueColonPieces(mc.Text) : mc.Text, mc.Runs) + mcPads);
         else
-        foreach (var word in MinContentPieces(mt, mc.Text))
-            minW = Math.Max(minW, MeasureFaceText(
-                CellFaceName(mt.face, mt.boldFace, mc), word, mcFs)
-                + mcPads);
+            foreach (var word in MinContentPieces(mt, mc.Text))
+                minW = Math.Max(minW, MeasureFaceText(
+                    CellFaceName(mt.face, mt.boldFace, mc), word, mcFs)
+                    + mcPads);
         // a UA cell's nested grid holds the column open at the grid's own min-content (measured
         // on the lab report: the result column beside a two-line date column solves 213 of 385,
         // the deficit shared against the nested grid's 150 floor - at a zero floor the date
@@ -339,9 +340,10 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The unbreakable pieces of a cell's text: a UA cell breaks at spaces, after a hyphen and
     /// at a zero-width space (the probed UA min-content); the calibrated grids at spaces.</summary>
     private static IEnumerable<string> MinContentPieces(MetricTableState mt, string text)
-        => mt.stdSerif
-            ? DashSegments(mt.mps.ptFormCells ? GlueColonPieces(text.Replace('\u0001', ' ')) : text.Replace('\u0001', ' '))
-            : text.Split(new[] { ' ', '\u0001' }, StringSplitOptions.RemoveEmptyEntries);
+    {
+        if (mt.stdSerif) return DashSegments(mt.mps.ptFormCells ? GlueColonPieces(text.Replace('\u0001', ' ')) : text.Replace('\u0001', ' '));
+        return text.Split(new[] { ' ', '\u0001' }, StringSplitOptions.RemoveEmptyEntries);
+    }
 
     /// <summary>The pt form's label text with no break before a colon: `Last name :` breaks into
     /// `Last` and `name :` (probed: the min-content of the label column is `Description :` whole
@@ -376,28 +378,32 @@ internal static partial class HtmlToPdfConverter
             if (mc.LeadCheckboxOwnLine) leadW = 0;
         }
         if (mc.Text.Length > 0)
-            mc.Lines = mt.mps.bordered && mt.mps.layoutFixed
-                ? new[] { mc.Text.Replace('\u0001', ' ') }
-                // (nowrap keeps each source line whole; an explicit <br> still breaks it)
-                : mc.NoWrap ? Array.ConvertAll(mc.Text.Split('\u0001'), l => l.TrimStart())
-                // +0.05: a column sized to its own max-content must not
-                // wrap on the equality boundary
-                // (a cell whose ink is in several styles wraps on each run's own measure)
-                : mc.Runs is not null ? MeasuredWordWrapStyled(mc.Text, effW - leadW + MetricWrapFitSlackPt, mt.face, mt.boldFace, mc, cellFs, mc.Runs)
-                : MeasuredWordWrap(mc.Text, effW - leadW + MetricWrapFitSlackPt, CellFaceName(mt.face, mt.boldFace, mc), cellFs,
+        {
+            if (mt.mps.bordered && mt.mps.layoutFixed) mc.Lines = new[] { mc.Text.Replace('\u0001', ' ') };
+            // (nowrap keeps each source line whole; an explicit <br> still breaks it)
+            else if (mc.NoWrap) mc.Lines = Array.ConvertAll(mc.Text.Split('\u0001'), l => l.TrimStart());
+            // +0.05: a column sized to its own max-content must not
+            // wrap on the equality boundary
+            // (a cell whose ink is in several styles wraps on each run's own measure)
+            else if (mc.Runs is not null)
+                mc.Lines = MeasuredWordWrapStyled(mc.Text, effW - leadW + MetricWrapFitSlackPt, mt.face, mt.boldFace, mc, cellFs, mc.Runs);
+            else
+                mc.Lines = MeasuredWordWrap(mc.Text, effW - leadW + MetricWrapFitSlackPt, CellFaceName(mt.face, mt.boldFace, mc), cellFs,
                     dashBreaks: mt.stdSerif);
+        }
         // A <p> inside a UA-grid cell keeps its UA block margins: 1.12 em above the first
         // line and below the last (measured: the surgery-lights rows band 43.0 = 13.44 +
         // 13.5 + 13.44 + the cell chrome; the calibrated blank-line gap stays between p's).
         var paraMargin = mt.stdSerif && mc.ParaBlocks > 0 ? UaParagraphMarginPt : 0;
         if (paraMargin > 0) mc.PadTopPt = Math.Max(mc.PadTopPt, paraMargin);
-        mc.ContentH = mc.Lines.Length * CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.fm, mc, cellFs)
-                      // the checkbox's own line box is the em plus its strut descent, and it
-                      // REPLACES the text line it shares (or stands above the text it displaced)
-                      + (mc.LeadCheckboxName is not null
-                          ? MetricCheckboxLineHeight(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.fm, mc, cellFs)
-                            - (mc.LeadCheckboxOwnLine ? 0 : CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.fm, mc, cellFs))
-                          : 0)
+        var cellLine = CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.face, mt.fm, mc, cellFs);
+        // the checkbox's own line box is the em plus its strut descent, and it
+        // REPLACES the text line it shares (or stands above the text it displaced)
+        double checkboxH = 0;
+        if (mc.LeadCheckboxName is not null)
+            checkboxH = MetricCheckboxLineHeight(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.face, mt.fm, mc, cellFs) - (mc.LeadCheckboxOwnLine ? 0 : cellLine);
+        mc.ContentH = mc.Lines.Length * cellLine
+                      + checkboxH
                       + (mc.HasSpan ? 3.0 : 0) + mc.PadTopPt + mc.PadBottomPt + paraMargin
                       // Excel-fragment grid: the in-cell <p>'s margin-bottom
                       // is content height (probed: every row carries it).
@@ -422,24 +428,27 @@ internal static partial class HtmlToPdfConverter
                 : Math.Max(mc.ContentH, mc.ImgHPt);
         if (mc.SubTables is { Count: > 0 })
             foreach (var sub in mc.SubTables)
-                mc.ContentH += mt.mps.bordered
-                    // the bordered draw strokes the row box up front — it
-                    // needs the sub-grid's REAL wrapped extent
-                    ? NestedTableWrappedHeight(sub, mt.lineH, mt.face, mt.mps.fontSize, effW)
-                    // a UA cell's nested grid is as tall as its render SOLVES it (measured on the
-                    // test form: a cellspacing=5 grid of two-line cells bands its row 34.5 and
-                    // centres the sibling cell 3.75 down; the row-count estimate gave 21)
-                    // (a grid inside a fieldset solves in the frame's content box)
-                    : mt.stdSerif ? MetricGridHeightPt(mt, sub, mc, effW - 2 * (mc.HasFieldset ? MetricFieldsetSideInsetPt(mt.mps, cellFs) : 0))
-                    : EstimateNestedTableHeight(sub,
-                        CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.fm, mc, cellFs) + 2 * mt.p,
+            {
+                // the bordered draw strokes the row box up front — it
+                // needs the sub-grid's REAL wrapped extent
+                if (mt.mps.bordered) mc.ContentH += NestedTableWrappedHeight(sub, mt.lineH, mt.face, mt.mps.fontSize, effW);
+                // a UA cell's nested grid is as tall as its render SOLVES it (measured on the
+                // test form: a cellspacing=5 grid of two-line cells bands its row 34.5 and
+                // centres the sibling cell 3.75 down; the row-count estimate gave 21)
+                // (a grid inside a fieldset solves in the frame's content box)
+                else if (mt.stdSerif)
+                    mc.ContentH += MetricGridHeightPt(mt, sub, mc, effW - 2 * (mc.HasFieldset ? MetricFieldsetSideInsetPt(mt.mps, cellFs) : 0));
+                else
+                    mc.ContentH += EstimateNestedTableHeight(sub,
+                        CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.face, mt.fm, mc, cellFs) + 2 * mt.p,
                         2 * mt.p);
+            }
         if (mc.TrailingBreakLines > 0)
-            mc.ContentH += mc.TrailingBreakLines * CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.fm, mc, cellFs);
+            mc.ContentH += mc.TrailingBreakLines * CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.face, mt.fm, mc, cellFs);
         // …and the fieldset box the grid stands in closes above and below it.
         if (mc.HasFieldset)
             mc.ContentH += MetricFieldsetTopInsetPt(mt.mps, mc, cellFs,
-                    CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.hheaSum, mt.face, mt.fm, mc, cellFs))
+                    CellLineOf(mt.mps, mt.stdSerif, mt.wrapperStacks, mt.face, mt.fm, mc, cellFs))
                 + MetricFieldsetBottomInsetPt(cellFs);
     }
 

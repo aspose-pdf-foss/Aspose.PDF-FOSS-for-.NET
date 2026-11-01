@@ -88,7 +88,9 @@ internal readonly struct PsValue : IEquatable<PsValue>
 
     /// <summary>Make a number, integral when it has no fractional part and fits.</summary>
     public static PsValue Num(double value) =>
+#pragma warning disable S1244 // integrality test - exact by definition
         value == Math.Floor(value) && Math.Abs(value) <= int.MaxValue ? Int(value) : Real(value);
+#pragma warning restore S1244
 
     /// <summary>Make a boolean.</summary>
     public static PsValue Bool(bool value) => value ? True : False;
@@ -175,12 +177,16 @@ internal readonly struct PsValue : IEquatable<PsValue>
     /// string of the same characters.</summary>
     public bool Equals(PsValue other)
     {
+#pragma warning disable S1244 // the script language compares numbers exactly - exact by specification
         if (IsNumber && other.IsNumber) return Number == other.Number;
+#pragma warning restore S1244
         if (Type != other.Type) return false;
         return Type switch
         {
             PsType.Null or PsType.Mark => true,
+#pragma warning disable S1244 // the script language compares numbers exactly - exact by specification
             PsType.Boolean or PsType.Save => Number == other.Number,
+#pragma warning restore S1244
             PsType.Name => Text == other.Text,
             _ => ReferenceEquals(Body, other.Body),
         };

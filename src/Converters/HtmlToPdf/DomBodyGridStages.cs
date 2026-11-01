@@ -47,7 +47,9 @@ internal static partial class HtmlToPdfConverter
                 };
                 foreach (var (t, b, it) in ln)
                 {
-                    var res = b ? "F9" : it ? "F10" : "F8";
+                    string res = "F8";
+                    if (b) res = "F9";
+                    else if (it) res = "F10";
                     EmitPositionedRun(gd.cursor.page, res, gd.fontSize, x, gd.pageHeight - (lineTop + gd.drop), t);
                     x += MeasureFaceText(RunFace(gd, b, it), t, gd.fontSize);
                 }
@@ -61,7 +63,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (c.ImgB64 is null) continue;
             byte[] png;
-            try { png = System.Convert.FromBase64String(c.ImgB64); } catch { continue; }
+            try { png = Base64Payload(c.ImgB64); } catch { continue; }
             if (png.Length < 24) continue;
             var natW = (png[16] << 24) | (png[17] << 16) | (png[18] << 8) | png[19];
             var natH = (png[20] << 24) | (png[21] << 16) | (png[22] << 8) | png[23];
@@ -124,18 +126,16 @@ internal static partial class HtmlToPdfConverter
         foreach (var c0 in gd.rows[0]) gd.nCols += c0.ColSpan;
         gd.innerW = gd.contentWidth - GridBorderPt;
         gd.colW = new double[gd.nCols];
+        var colIdx = 0;
+        foreach (var c0 in gd.rows[0])
         {
-            var ci = 0;
-            foreach (var c0 in gd.rows[0])
-            {
-                for (var k = 0; k < c0.ColSpan; k++)
-                    gd.colW[ci + k] = c0.WidthPct / 100.0 * gd.innerW / c0.ColSpan;
-                ci += c0.ColSpan;
-            }
-            double sum0 = 0;
-            for (var c = 0; c < gd.nCols - 1; c++) sum0 += gd.colW[c];
-            gd.colW[gd.nCols - 1] = gd.innerW - sum0;
+            for (var k = 0; k < c0.ColSpan; k++)
+                gd.colW[colIdx + k] = c0.WidthPct / 100.0 * gd.innerW / c0.ColSpan;
+            colIdx += c0.ColSpan;
         }
+        double sum0 = 0;
+        for (var c = 0; c < gd.nCols - 1; c++) sum0 += gd.colW[c];
+        gd.colW[gd.nCols - 1] = gd.innerW - sum0;
         gd.edgeX = new double[gd.nCols + 1];
         gd.edgeX[0] = gd.marginLeft + GridBorderPt / 2;
         for (var c = 0; c < gd.nCols; c++) gd.edgeX[c + 1] = gd.edgeX[c] + gd.colW[c];
@@ -163,7 +163,7 @@ internal static partial class HtmlToPdfConverter
                 {
                     // whitespace runs collapse; a pure-whitespace stretch between
                     // tags carries nothing into the cell
-                    var t = Regex.Replace(tok.Value, @"\s+", " ");
+                    var t = SafeRegex.Replace(tok.Value, @"\s+", " ");
                     if (t != " " || gd.text.Length > 0) gd.text.Append(t);
                 }
                 continue;
@@ -190,7 +190,7 @@ internal static partial class HtmlToPdfConverter
                     if (tok.Attributes is { } ca)
                     {
                         if (ca.TryGetValue("colspan", out var csv)
-                            && int.TryParse(csv.Trim(), out var csn) && csn > 1)
+                            && int.TryParse(csv.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var csn) && csn > 1)
                             gd.cell.ColSpan = csn;
                         if (ca.TryGetValue("width", out var wv) && wv.Trim().EndsWith('%')
                             && double.TryParse(wv.Trim().TrimEnd('%'),
@@ -205,9 +205,9 @@ internal static partial class HtmlToPdfConverter
                             };
                         if (ca.TryGetValue("style", out var st))
                         {
-                            if (Regex.IsMatch(st, @"border-left\s*:\s*0", RegexOptions.IgnoreCase))
+                            if (SafeRegex.IsMatch(st, @"border-left\s*:\s*0", RegexOptions.IgnoreCase))
                                 gd.cell.BorderLeftZero = true;
-                            if (Regex.IsMatch(st, @"border-right\s*:\s*0", RegexOptions.IgnoreCase))
+                            if (SafeRegex.IsMatch(st, @"border-right\s*:\s*0", RegexOptions.IgnoreCase))
                                 gd.cell.BorderRightZero = true;
                         }
                     }
@@ -219,7 +219,7 @@ internal static partial class HtmlToPdfConverter
                     if (gd.cell is not null && tok.Attributes is { } ia)
                     {
                         if (ia.TryGetValue("src", out var src)
-                            && Regex.Match(src, @"^data:image/png;base64,(.+)$",
+                            && SafeRegex.Match(src, @"^data:image/png;base64,(.+)$",
                                 RegexOptions.IgnoreCase | RegexOptions.Singleline) is { Success: true } dm)
                             gd.cell.ImgB64 = dm.Groups[1].Value;
                         if (ia.TryGetValue("width", out var iw) && iw.Trim().EndsWith('%')
@@ -240,16 +240,16 @@ internal static partial class HtmlToPdfConverter
         gd.fontSize = 11;
         gd.marTopPt = 0;
         gd.marBottomPt = 0;
-        if (Regex.Match(gd.tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } tt)
+        if (SafeRegex.Match(gd.tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } tt)
         {
             var tag = tt.Value;
-            var cp = Regex.Match(tag, @"cellpadding\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+            var cp = SafeRegex.Match(tag, @"cellpadding\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
             if (cp.Success) gd.pad = double.Parse(cp.Groups[1].Value, gd.invc) * PxPt;
-            var fs = Regex.Match(tag, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+            var fs = SafeRegex.Match(tag, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
             if (fs.Success) gd.fontSize = double.Parse(fs.Groups[1].Value, gd.invc);
-            var mt = Regex.Match(tag, @"margin-top\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+            var mt = SafeRegex.Match(tag, @"margin-top\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
             if (mt.Success) gd.marTopPt = double.Parse(mt.Groups[1].Value, gd.invc) * PxPt;
-            var mb = Regex.Match(tag, @"margin-bottom\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+            var mb = SafeRegex.Match(tag, @"margin-bottom\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
             if (mb.Success) gd.marBottomPt = double.Parse(mb.Groups[1].Value, gd.invc) * PxPt;
         }
     }

@@ -22,6 +22,9 @@ public sealed class SystemFontSource : FontSource
     /// </summary>
     private static IEnumerable<string> FontFilesUnder(string dir)
     {
+        var stamp = TreeStamp(dir);
+        if (stamp is not null && _filesByDir.TryGetValue(dir, out var listed) && listed.Stamp == stamp)
+            return listed.Files;
         IEnumerable<string> files;
         try
         {
@@ -31,8 +34,46 @@ public sealed class SystemFontSource : FontSource
                 .Where(f => Path.GetExtension(f).ToLowerInvariant() is ".ttf" or ".otf" or ".ttc")
                 .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
         }
-        catch { yield break; }
-        foreach (var f in files) yield return f;
+        catch { return Array.Empty<string>(); }
+        var array = files.ToArray(); // an unreadable folder throws here, as the walk over it did
+        if (stamp is not null) _filesByDir[dir] = (stamp.Value, array);
+        return array;
+    }
+
+    // Font files per directory, listed again only once the directory tree has changed: every
+    // lookup walks the system fonts, and a document looks a font up for each fragment.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime Stamp, string[] Files)> _filesByDir = new();
+
+    /// <summary>The latest write time over a directory and every directory under it - a file
+    /// added, removed or renamed anywhere in the tree moves it; null when it cannot be read.
+    /// Taken again at most once a second: walking the tree costs more than the lookup it
+    /// guards, and a document looks a font up for every fragment.</summary>
+    private static DateTime? TreeStamp(string dir)
+    {
+        var now = DateTime.UtcNow;
+        if (_stampByDir.TryGetValue(dir, out var known) && now - known.CheckedAt < StampRecheck) return known.Stamp;
+        var stamp = WalkStamp(dir);
+        _stampByDir[dir] = (now, stamp);
+        return stamp;
+    }
+
+    private static readonly TimeSpan StampRecheck = TimeSpan.FromSeconds(1);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime CheckedAt, DateTime? Stamp)> _stampByDir = new();
+
+    private static DateTime? WalkStamp(string dir)
+    {
+        try
+        {
+            var stamp = Directory.GetLastWriteTimeUtc(dir);
+            foreach (var sub in Directory.EnumerateDirectories(dir, "*", SearchOption.AllDirectories))
+            {
+                var written = Directory.GetLastWriteTimeUtc(sub);
+                if (written > stamp) stamp = written;
+            }
+            return stamp;
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
     }
 
     private static string[] GetSystemFontDirs()
@@ -66,10 +107,9 @@ public sealed class SystemFontSource : FontSource
             else if (!string.IsNullOrEmpty(home))
                 dirs.Add(Path.Combine(home, ".local", "share", "fonts"));
         }
-        return dirs.Where(Directory.Exists)
-            .SelectMany(SystemFontResolver.WithSubdirectories)
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
+        // The roots only: FontFilesUnder lists each root's whole tree, so a nested folder's
+        // faces are seen under its root, and a pass of its own found nothing new.
+        return dirs.Where(Directory.Exists).Distinct(StringComparer.Ordinal).ToArray();
     }
 
     internal override FontData? FindFont(string name, bool ignoreCase)
@@ -82,7 +122,7 @@ public sealed class SystemFontSource : FontSource
     /// after the filename walk. The public FindFont contract needs it (comic.ttf carries
     /// "Comic Sans MS"); internal pipeline helpers calibrated against filename-level
     /// resolution (<see cref="FontRepository.GetTtfData"/>) pass false.</param>
-    internal FontData? FindFont(string name, bool ignoreCase, bool nameTableScan)
+    internal static FontData? FindFont(string name, bool ignoreCase, bool nameTableScan)
     {
         var comparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         var normalizedName = name.Replace(" ", "").Replace("-", "");
@@ -131,18 +171,7 @@ public sealed class SystemFontSource : FontSource
                 ttp.Parse();
                 var fam = ttp.FamilyName;
                 if (!string.IsNullOrWhiteSpace(fam) && fam != "Unknown")
-                {
-                    // A styled face carries its style in the subfamily; the reported
-                    // name is family+style ("Times New Roman Bold Italic") so an
-                    // embedded round-trip reports the styled face, not the family.
-                    var sub = ttp.SubfamilyName;
-                    realName = !string.IsNullOrWhiteSpace(sub)
-                        && !sub.Equals("Regular", StringComparison.OrdinalIgnoreCase)
-                        && !sub.Equals("Normal", StringComparison.OrdinalIgnoreCase)
-                        && !fam.EndsWith(sub, StringComparison.OrdinalIgnoreCase)
-                        ? fam + " " + sub
-                        : fam;
-                }
+                    realName = FaceName(fam, ttp.SubfamilyName);
             }
             catch { /* keep the query name if the face can't be parsed */ }
 
@@ -153,7 +182,18 @@ public sealed class SystemFontSource : FontSource
         return null;
     }
 
-    private static FontData? SearchDir(string dir, string name, string normalizedName, StringComparison comparison)
+    /// <summary>The name a face reports: its family, and its subfamily after it when that is
+    /// a style the family name does not already carry ("Times New Roman Bold Italic"), so an
+    /// embedded round-trip reports the styled face, not the family.</summary>
+    internal static string FaceName(string family, string? subfamily)
+        => !string.IsNullOrWhiteSpace(subfamily)
+           && !subfamily.Equals("Regular", StringComparison.OrdinalIgnoreCase)
+           && !subfamily.Equals("Normal", StringComparison.OrdinalIgnoreCase)
+           && !family.EndsWith(subfamily, StringComparison.OrdinalIgnoreCase)
+            ? family + " " + subfamily
+            : family;
+
+    internal static FontData? SearchDir(string dir, string name, string normalizedName, StringComparison comparison)
     {
         try
         {
@@ -165,33 +205,43 @@ public sealed class SystemFontSource : FontSource
                     string.Equals(fileBase.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase))
                     // Name the face from its own 'name' table, not the query string, so
                     // FindFont("arial") yields a font whose FontName is "Arial" (real
-                    // family). The query
-                    // string is only used to locate the file; fall back to it if the
-                    // family can't be parsed (e.g. an unusual .ttc layout).
-                    return new FontData(RealFamilyName(file) ?? name, FontType.TrueType, file);
-            }
-
-            foreach (var subDir in Directory.EnumerateDirectories(dir))
-            {
-                var result = SearchDir(subDir, name, normalizedName, comparison);
-                if (result is not null) return result;
+                    // family) and "Times New Roman Italic.ttf", as macOS names it, a face
+                    // whose name keeps its style. The query string is only used to locate
+                    // the file; fall back to it if the face can't be parsed (e.g. an
+                    // unusual .ttc layout).
+                    return new FontData(RealFaceName(file) ?? name, FontType.TrueType, file);
             }
         }
-        catch (UnauthorizedAccessException) { }
-        catch (DirectoryNotFoundException) { }
+        catch (UnauthorizedAccessException) { /* a folder the process cannot read holds no font for it */ }
+        catch (DirectoryNotFoundException) { /* a folder that vanished while being searched holds no font */ }
         return null;
     }
 
-    /// <summary>Read a font file's family name from its 'name' table; null when it
-    /// can't be parsed. Used to report the real font name from a filename match.</summary>
-    private static string? RealFamilyName(string file)
+    /// <summary>Read a font file's face name (<see cref="FaceName"/>) from its 'name' table;
+    /// null when it can't be parsed. Used to report the real font name from a filename match.</summary>
+    private static string? RealFaceName(string file)
+    {
+        DateTime written;
+        try { written = File.GetLastWriteTimeUtc(file); }
+        catch (IOException) { return ReadFaceName(file); }
+        catch (UnauthorizedAccessException) { return ReadFaceName(file); }
+        if (_faceByFile.TryGetValue(file, out var known) && known.Written == written) return known.Face;
+        var face = ReadFaceName(file);
+        _faceByFile[file] = (written, face);
+        return face;
+    }
+
+    // A file's face name, kept while the file is unchanged: reading it parses the whole font.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTime Written, string? Face)> _faceByFile = new();
+
+    private static string? ReadFaceName(string file)
     {
         try
         {
             var ttp = new TrueTypeParser(File.ReadAllBytes(file));
             ttp.Parse();
             var fam = ttp.FamilyName;
-            return string.IsNullOrWhiteSpace(fam) || fam == "Unknown" ? null : fam;
+            return string.IsNullOrWhiteSpace(fam) || fam == "Unknown" ? null : FaceName(fam, ttp.SubfamilyName);
         }
         catch { return null; }
     }

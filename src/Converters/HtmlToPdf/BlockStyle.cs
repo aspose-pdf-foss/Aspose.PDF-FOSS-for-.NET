@@ -77,8 +77,8 @@ internal static partial class HtmlToPdfConverter
         public bool PageBreakBefore; // CSS page-break-before:always on this element
         public bool PageBreakAfter;  // CSS page-break-after:always — break at the close
         public string? PageName;     // CSS3 paged-media `page: <name>` — the named page this element wants
-        // Unitless CSS line-height factor from a class rule (coverStyles mode);
-        // 0 = the flow's own default pitch.
+        // Unitless CSS line-height factor from a class rule (coverStyles mode); 0
+        // = the flow's own default pitch.
         /// <summary>A stylesheet's unitless line-height on the calibrated flow (pitch only).</summary>
         public double SheetLineFactor;
         public double LineFactor;
@@ -86,8 +86,8 @@ internal static partial class HtmlToPdfConverter
         public double UaLineFactor;
         // The element this style opened for (lower case; "" for the root)
         public string Tag = "";
-        // The field-list dialect: this element is the fields box; this element is a direct child of it;
-        // an element has already opened inside this one (a `:first-child` test)
+        // The field-list dialect: this element is the fields box; this element is a direct child of it; an
+        // element has already opened inside this one (a `:first-child` test)
         public bool FieldsBox;
         public bool InFieldsBox;
         public bool ChildOpened;
@@ -104,6 +104,9 @@ internal static partial class HtmlToPdfConverter
         // Absolute width (style="width:680" / "width:680px") on an enclosing div —
         // recorded always, honored as the wrap box only by the form-document dialect.
         public double WidthPx;
+        // That width's box stands where its left margin is auto puts it (margin-left: auto), not where its lines
+        // start: no frame the block's lines are aligned in.
+        public bool WidthBoxAuto;
         // style="padding-top:Npx" on the enclosing div (browser-UA flow only):
         // non-collapsing vertical space above the block.
         public double PadTop;
@@ -116,6 +119,9 @@ internal static partial class HtmlToPdfConverter
         public int BlocksAtOpen = -1;
         // text-align:right (honored by the print-grid dialect only).
         public bool AlignRight;
+        // The base direction (dir / direction: rtl), inherited, and a unicode-bidi override on this element.
+        public bool Rtl;
+        public bool BidiOverride;
         // Print-grid heading band (a ".cls h4" rule's border-bottom).
         public Color? BandColor;
         public double BandPx;
@@ -227,8 +233,11 @@ internal static partial class HtmlToPdfConverter
         public bool FormDialect;
         // The enclosing element's resolved font size — the base an em font-size
         // resolves against (1.75em on a 12pt body = 21pt, regardless of the tag's
-        // legacy default size). Form dialect only.
+        // legacy default size). Form dialect and the metric flow.
         public double ParentFontSize;
+        // The metric flow, which lays the page out by its sheet: a rule's em size is of the
+        // enclosing element's size there too, not of the legacy flow's fixed base.
+        public bool MetricFlow;
         // text-align:center from a class rule — honored by the metric flow only.
         public bool AlignCenter;
         // A CSS text-align:center from anywhere (inline style included) — honored by
@@ -253,6 +262,7 @@ internal static partial class HtmlToPdfConverter
         /// <summary>The `margin:` shorthand's TOP value, recorded for every document and
         /// read only by the float flow.</summary>
         public double ShorthandTopPt;
+        public double ShorthandBottomPt;   // the `margin` shorthand's bottom value, when one is declared
 
         /// <summary>The whole declared `font-family` list, recorded for every document but
         /// read only by the float flow: CSS falls through the stack to the first family

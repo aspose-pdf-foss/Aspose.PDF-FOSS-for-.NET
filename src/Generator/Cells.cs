@@ -95,8 +95,10 @@ public sealed class Cells : IEnumerable<Cell>
     /// <summary>Remove <paramref name="count"/> cells starting at <paramref name="index"/>.</summary>
     public void RemoveRange(int index, int count) => _cells.RemoveRange(index, count);
 
+#pragma warning disable S2953 // public API: the published Dispose()
     /// <summary>Releases per-cell resources. Currently a no-op — cells hold no unmanaged buffers.</summary>
     public void Dispose() => _cells.Clear();
+#pragma warning restore S2953
 
     /// <summary>Get a cell by index.</summary>
     public Cell At(int index) => _cells[index];

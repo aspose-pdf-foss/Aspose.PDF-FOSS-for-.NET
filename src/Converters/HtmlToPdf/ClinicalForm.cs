@@ -29,8 +29,8 @@ internal static partial class HtmlToPdfConverter
     //   24 pt box) and advances a 4px right margin; a radio is 9.75 square,
     //   its bottom on the baseline. `.form-check` indents 1.5em and adds its
     //   2px margin-bottom. The h3 band is 23.4 tall (14.4 line + 5px padding
-    //   + 1px #aaa border) on #ddd, its baseline 16.67 under the band top;
-    //   blocks meet it at the section's collapsed 20px margin.
+    //   + 1px #aaa border) on #ddd, its baseline 16.67 under the band top; blocks
+    //   meet it at the section's collapsed 20px margin.
     //   The widget appearances the era writer emits (a 1 pt black border box
     //   0.5 inside the field rect; a two-bezier 4.375-radius circle) are
     //   drawn as page ink here — the raster compare reads the page content.
@@ -65,7 +65,6 @@ internal static partial class HtmlToPdfConverter
     private const double CfBandPadX = 8.25;          // 10px pad + 1px border
     private const double CfSectionGap = 15.0;        // 20px collapsed margin
     private const double CfH3Mb = 6.0;               // h3 margin-bottom .5rem
-    private const double CfOlMb = 12.0;              // ol margin-bottom 1rem
     private const double CfHeaderTop = 87.75;        // container content top
     private const double CfLogoBase = 118.69;        // alt-text baseline (flex centring)
     private const double CfTitleBandH = 30.0;        // h5 line 18 + pads + 6 mb
@@ -85,7 +84,9 @@ internal static partial class HtmlToPdfConverter
         public string Text = "";
         public int Style;                            // 0 regular, 1 bold, 2 italic, 3 small
         public List<CfAtom>? Group;                  // a <label>'s inline children
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<List<string>>? Rows;             // table cell texts
+#pragma warning restore S3218
     }
 
     private static Document? TryRenderClinicalForm(string html)
@@ -107,8 +108,8 @@ internal static partial class HtmlToPdfConverter
     }
 
     // Tokenise one <li>'s inner HTML into flow atoms. A <label> wraps its
-    // children into one wrap-unit group (unless it is a .form-check block);
-    // radios, bare text inputs, .form-control inputs, <br>, <em>/<strong>/<small>
+    // children into one wrap-unit group (unless it is a .form-check block); radios,
+    // bare text inputs, .form-control inputs, <br>, <em>/<strong>/<small>
     // runs and stray text are flat atoms.
     private static List<CfAtom> ParseCfAtoms(string inner)
     {
@@ -119,14 +120,14 @@ internal static partial class HtmlToPdfConverter
 
     private static void ParseCfInline(string inner, List<CfAtom> atoms, int style)
     {
-        static string Collapse(string s) => Regex.Replace(DecodeEntities(s), @"\s+", " ");
+        static string Collapse(string s) => SafeRegex.Replace(DecodeEntities(s), @"\s+", " ");
         var rx = new Regex(
             @"<label\b([^>]*)>([\s\S]*?)</label>|<input\b([^>]*?)/?>|<textarea\b[^>]*>[\s\S]*?</textarea>"
             + @"|<br\s*/?>|<(em|i|strong|b|small)\b[^>]*>([\s\S]*?)</\4>"
             + @"|<div\b[^>]*class=""[^""]*table-responsive[^""]*""[^>]*>([\s\S]*?)</div>",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var pos = 0;
-        foreach (Match m in rx.Matches(inner))
+        foreach (Match m in SafeRegex.Matches(rx, inner))
         {
             var before = Collapse(inner[pos..m.Index]);
             if (before.Trim().Length > 0 || (before.Contains(' ') && atoms.Count > 0))
@@ -161,7 +162,7 @@ internal static partial class HtmlToPdfConverter
             else if (m.Value.StartsWith("<input", StringComparison.OrdinalIgnoreCase))
             {
                 var attrs = m.Groups[3].Value;
-                var type = Regex.Match(attrs, @"type\s*=\s*""?(\w+)", RegexOptions.IgnoreCase)
+                var type = SafeRegex.Match(attrs, @"type\s*=\s*""?(\w+)", RegexOptions.IgnoreCase)
                     .Groups[1].Value.ToLowerInvariant();
                 if (type == "radio" || type == "checkbox")
                     atoms.Add(new CfAtom { Kind = "radio" });
@@ -177,7 +178,7 @@ internal static partial class HtmlToPdfConverter
             else if (m.Groups[4].Success)
             {
                 var tag = m.Groups[4].Value.ToLowerInvariant();
-                var runStyle = tag is "em" or "i" ? 2 : tag is "strong" or "b" ? 1 : 3;
+                var runStyle = tag switch { "em" or "i" => 2, "strong" or "b" => 1, _ => 3 };
                 var t = Collapse(m.Groups[5].Value);
                 if (t.Trim().Length > 0)
                     atoms.Add(new CfAtom { Kind = "text", Text = t.Trim(), Style = runStyle });
@@ -185,14 +186,14 @@ internal static partial class HtmlToPdfConverter
             else if (m.Groups[6].Success)
             {
                 var rows = new List<List<string>>();
-                foreach (Match rm in Regex.Matches(m.Groups[6].Value, @"<tr\b[^>]*>([\s\S]*?)</tr>",
+                foreach (Match rm in SafeRegex.Matches(m.Groups[6].Value, @"<tr\b[^>]*>([\s\S]*?)</tr>",
                     RegexOptions.IgnoreCase))
                 {
                     var cells = new List<string>();
-                    foreach (Match cm in Regex.Matches(rm.Groups[1].Value,
+                    foreach (Match cm in SafeRegex.Matches(rm.Groups[1].Value,
                         @"<t[dh]\b[^>]*>([\s\S]*?)</t[dh]>", RegexOptions.IgnoreCase))
-                        cells.Add(Regex.Replace(DecodeEntities(
-                            Regex.Replace(cm.Groups[1].Value, @"<[^>]+>", " ")), @"\s+", " ").Trim());
+                        cells.Add(SafeRegex.Replace(DecodeEntities(
+                            SafeRegex.Replace(cm.Groups[1].Value, @"<[^>]+>", " ")), @"\s+", " ").Trim());
                     if (cells.Count > 0) rows.Add(cells);
                 }
                 atoms.Add(new CfAtom { Kind = "table", Rows = rows });

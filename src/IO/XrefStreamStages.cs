@@ -21,11 +21,8 @@ internal sealed partial class XRefTable
             // In hybrid-reference PDFs, the traditional xref marks compressed objects
             // as free while the xref stream has the real entries. Allow in-use entries
             // from the xref stream to override free entries from the traditional table.
-            if (_entries.TryGetValue(objNum, out var existing))
-            {
-                if (existing.InUse || type == 0) continue;
-                // Existing is free but xref stream says in-use — override below
-            }
+            if (_entries.TryGetValue(objNum, out var existing) && (existing.InUse || type == 0)) continue;
+            // Existing is free but xref stream says in-use — override below
 
             switch (type)
             {
@@ -61,7 +58,7 @@ internal sealed partial class XRefTable
     }
 
     /// <summary>The stages of the cross-reference stream read: the /Index parse and one subsection of entries.</summary>
-    private void ReadXrefIndex(XrefStreamState xs)
+    private static void ReadXrefIndex(XrefStreamState xs)
     {
         xs.subsections = new List<(int, int)>();
         for (var i = 0; i < xs.indexArray!.Count; i += 2)

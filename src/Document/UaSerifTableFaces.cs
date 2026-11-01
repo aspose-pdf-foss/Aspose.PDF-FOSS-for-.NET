@@ -55,18 +55,18 @@ public sealed partial class Document
     }
 
     // css line box: whole-css-px rounded hhea line height
-    private static double CssBox(UaSerifTableState ua, Text.TrueTypeParser t, double s) =>
+    private static double CssBox(Text.TrueTypeParser t, double s) =>
         0.75 * Math.Floor((t.Ascent + Math.Abs(t.Descent) + t.LineGap)
             * (s * 96.0 / 72.0) / t.UnitsPerEm + 0.5);
 
-    private static double SeatIn(UaSerifTableState ua, Text.TrueTypeParser t, double s, double box) =>
+    private static double SeatIn(Text.TrueTypeParser t, double s, double box) =>
         t.UsWinAscent * s / t.UnitsPerEm
         + (box - (t.UsWinAscent + t.UsWinDescent) * s / t.UnitsPerEm) / 2;
 
-    private static double GlyphAdv(UaSerifTableState ua, Text.GlyphOutlineParser gp, int gid, double s) =>
+    private static double GlyphAdv(Text.GlyphOutlineParser gp, int gid, double s) =>
         gp.GetAdvanceWidth(gid) * s / (gp.UnitsPerEm > 0 ? gp.UnitsPerEm : 1000.0);
 
-    private static double StyledWidth(UaSerifTableState ua, string t, Text.GlyphOutlineParser gp,
+    private static double StyledWidth(string t, Text.GlyphOutlineParser gp,
         Text.GlyphOutlineParser? gpFb, double s)
     {
         double w = 0;
@@ -76,7 +76,7 @@ public sealed partial class Document
             if (c == UaFallbackChar && gpFb is not null)
             {
                 var gf = gpFb.CMap.TryGetValue(c, out var g2) ? g2 : 0;
-                w += GlyphAdv(ua, gpFb, gf, s);
+                w += GlyphAdv(gpFb, gf, s);
                 prev = -1;
                 continue;
             }
@@ -84,13 +84,13 @@ public sealed partial class Document
             if (prev >= 0)
                 w += gp.GetKernAdjustment(prev, gid) * s
                      / (gp.UnitsPerEm > 0 ? gp.UnitsPerEm : 1000.0);
-            w += GlyphAdv(ua, gp, gid, s);
+            w += GlyphAdv(gp, gid, s);
             prev = gid;
         }
         return w;
     }
 
-    private static double TimesWidth(UaSerifTableState ua, string t)
+    private static double TimesWidth(string t)
     {
         try
         {

@@ -82,12 +82,12 @@ public sealed class ExtractedPath
             double minX = double.MaxValue, minY = double.MaxValue;
             double maxX = double.MinValue, maxY = double.MinValue;
 
-            foreach (var seg in Segments)
+            foreach (var points in Segments.Select(seg => seg.Points))
             {
-                for (var i = 0; i < seg.Points.Length; i += 2)
+                for (var i = 0; i < points.Length; i += 2)
                 {
-                    var x = seg.Points[i];
-                    var y = seg.Points[i + 1];
+                    var x = points[i];
+                    var y = points[i + 1];
                     if (x < minX) minX = x;
                     if (y < minY) minY = y;
                     if (x > maxX) maxX = x;
@@ -95,7 +95,9 @@ public sealed class ExtractedPath
                 }
             }
 
+#pragma warning disable S1244 // double.MaxValue is the none-found seed, only ever copied - exact on purpose
             if (minX == double.MaxValue) return new Rectangle(0, 0, 0, 0);
+#pragma warning restore S1244
             return new Rectangle(minX, minY, maxX, maxY);
         }
     }

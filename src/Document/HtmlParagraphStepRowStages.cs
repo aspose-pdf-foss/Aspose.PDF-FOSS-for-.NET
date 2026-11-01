@@ -15,7 +15,7 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>The row closes: its warning band, a bullet nothing consumed, the column advance and the change-log rule.</summary>
-    private void CloseStepRow(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight)
+    private static void CloseStepRow(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight)
     {
         if (sr.prow.Warn)
         {
@@ -63,7 +63,7 @@ public sealed partial class Document
     }
 
     /// <summary>The row's items in source order: its text, its tables and the boxes they sit in.</summary>
-    private void LayoutStepRowItems(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight)
+    private static void LayoutStepRowItems(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight)
     {
         while (sr.pidx < sr.prow.Items.Count)
         {
@@ -72,7 +72,7 @@ public sealed partial class Document
     }
 
     /// <summary>The row opens: the sheet it starts on, its own top, its bullet and the box it draws in.</summary>
-    private void OpenStepRow(StepRowState sr, List<Converters.HtmlToPdfConverter.StepRow> psRows, int prowIdx, FlowLayout flow, Page page)
+    private static void OpenStepRow(StepRowState sr, List<Converters.HtmlToPdfConverter.StepRow> psRows, int prowIdx, FlowLayout flow, Page page)
     {
 
         // the wrap seats its grid against the left edge of the
@@ -92,46 +92,44 @@ public sealed partial class Document
         // How tall a step will be: the boxes each of its lines
         // really takes at its own size, its tables, its gaps, and the
         // block the renderer reserves for the acknowledgement.
+        var rowNeed = PsRowNeed(sr, page, sr.prow);
+        var pageBudget = flow.ContentTop - flow.BottomMargin;
+
+        // A step keeps the sub-steps indented under it: a number
+        // left at the foot of a sheet with the steps it heads
+        // overleaf is not how the form reads. Only a deeper indent
+        // counts - a step numbered like a child but set at the
+        // parent's own indent stands on its own.
+        var groupNeed = rowNeed;
+        for (var k = prowIdx + 1;
+             k < psRows.Count && psRows[k].IndentPt > sr.prow.IndentPt;
+             k++)
+            groupNeed += 11.25 + PsRowNeed(sr, page, psRows[k]);
+        // a group too tall for any sheet cannot be kept together,
+        // and forcing it over would only empty the sheet it left
+        if (groupNeed > pageBudget) groupNeed = rowNeed;
+
+        // A step travels whole: its number and the content that
+        // belongs to it are not parted across a sheet. It starts a
+        // fresh sheet even when taller than one - it still splits,
+        // but from a clean top; only once something is already on
+        // this sheet, or it would break for ever.
+        var breakForSelf = flow.CurrentY - groupNeed < flow.BottomMargin
+            && (groupNeed <= pageBudget || !sr.psSheetEmpty);
+
+        if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_STEPS") == "1")
+            Console.WriteLine($"    step '{sr.prow.Bullet}' need={rowNeed:0.00} "
+                + $"y={flow.CurrentY:0.00} self={breakForSelf}");
+
+        if (rowNeed > 0 && breakForSelf)
         {
-            var rowNeed = PsRowNeed(sr, page, sr.prow);
-            var pageBudget = flow.ContentTop - flow.BottomMargin;
-
-            // A step keeps the sub-steps indented under it: a number
-            // left at the foot of a sheet with the steps it heads
-            // overleaf is not how the form reads. Only a deeper indent
-            // counts - a step numbered like a child but set at the
-            // parent's own indent stands on its own.
-            var groupNeed = rowNeed;
-            for (var k = prowIdx + 1;
-                 k < psRows.Count && psRows[k].IndentPt > sr.prow.IndentPt;
-                 k++)
-                groupNeed += 11.25 + PsRowNeed(sr, page, psRows[k]);
-            // a group too tall for any sheet cannot be kept together,
-            // and forcing it over would only empty the sheet it left
-            if (groupNeed > pageBudget) groupNeed = rowNeed;
-
-            // A step travels whole: its number and the content that
-            // belongs to it are not parted across a sheet. It starts a
-            // fresh sheet even when taller than one - it still splits,
-            // but from a clean top; only once something is already on
-            // this sheet, or it would break for ever.
-            var breakForSelf = flow.CurrentY - groupNeed < flow.BottomMargin
-                && (groupNeed <= pageBudget || !sr.psSheetEmpty);
-
-            if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_STEPS") == "1")
-                Console.WriteLine($"    step '{sr.prow.Bullet}' need={rowNeed:0.00} "
-                    + $"y={flow.CurrentY:0.00} self={breakForSelf}");
-
-            if (rowNeed > 0 && breakForSelf)
-            {
-                flow.ForceNewPage();
-                // the step's own margin belongs above it wherever it
-                // lands, so it opens a fresh sheet the same distance
-                // down as it would have opened this one. The col-full
-                // generation opens one paragraph line lower still —
-                // its sheet's own rhythm.
-                flow.AdvanceY(11.25 + (sr.prow.ColFull ? 12.0 : 0.0));
-            }
+            flow.ForceNewPage();
+            // the step's own margin belongs above it wherever it
+            // lands, so it opens a fresh sheet the same distance
+            // down as it would have opened this one. The col-full
+            // generation opens one paragraph line lower still —
+            // its sheet's own rhythm.
+            flow.AdvanceY(11.25 + (sr.prow.ColFull ? 12.0 : 0.0));
         }
 
         sr.psBoxTop = 0.0;
@@ -165,7 +163,7 @@ public sealed partial class Document
     }
 
     /// <summary>One item of the row: the text it adds, the table it opens or the box it closes.</summary>
-    private bool LayoutStepRowItem(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight)
+    private static bool LayoutStepRowItem(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight)
     {
         var item = sr.prow.Items[sr.pidx];
         if (sr.prow.Warn)
@@ -215,7 +213,7 @@ public sealed partial class Document
     }
 
     /// <summary>The plain acknowledgement: its signature rules and the labels under them.</summary>
-    private void DrawStepRowSignatureBand(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight)
+    private static void DrawStepRowSignatureBand(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight)
     {
         // Widget cluster (the sr-ack DIV generation), all of
         // its geometry exact to 0.01 pt. The widgets stand
@@ -239,11 +237,11 @@ public sealed partial class Document
         for (var wi = 0; wi < ackN; wi++)
         {
             var w = sr.prow.Acks[wi];
-            var wl = page.Width - ackRightInset - ackCellPitch * (ackN - 1 - wi);
+            var wl = page.LayoutFrameWidth - ackRightInset - ackCellPitch * (ackN - 1 - wi);
             if (w.Kind == "boolean")
             {
-                // the picked option (.box) draws its full frame;
-                // an unpicked one only its bottom rule
+                // the picked option (.box) draws its full frame; an
+                // unpicked one only its bottom rule
                 for (var b = 0; b < Math.Min(2, w.Blanks.Count); b++)
                 {
                     var bx = wl + (b == 0 ? 0 : ackBoolBox2);
@@ -320,10 +318,9 @@ public sealed partial class Document
         {
             // a checkbox cell reserves its label slot even when
             // the label is empty — the shared row keys off it
-            var b = w.Kind == "boolean" && w.Blanks.Count > 0
-                ? sr.relBlankBottom + 9.96
-                : w.Kind == "checkbox" || w.TopLabels.Count > 0
-                    ? sr.relRuleY + 8.08 : 0.0;
+            double b = 0.0;
+            if (w.Kind == "boolean" && w.Blanks.Count > 0) b = sr.relBlankBottom + 9.96;
+            else if (w.Kind == "checkbox" || w.TopLabels.Count > 0) b = sr.relRuleY + 8.08;
             if (b > sr.tr1Base) sr.tr1Base = b;
             if (w.Labels.Count > 0)
             {
@@ -332,8 +329,12 @@ public sealed partial class Document
             }
         }
         sr.tr2Base = (sr.tr1Base > 0 ? sr.tr1Base : sr.relRuleY + 8.08) + 10.5;
-        sr.relBottom = 2.04 + (sr.anyTr2 ? sr.tr2Base + 9.0 * tr2Stack
-            : sr.tr1Base > 0 ? sr.tr1Base : sr.relBlankBottom);
+        sr.relBottom = 2.04 + ((sr.anyTr2, sr.tr1Base) switch
+        {
+            (true, _) => sr.tr2Base + 9.0 * tr2Stack,
+            (_, > 0) => sr.tr1Base,
+            _ => sr.relBlankBottom,
+        });
         if (flow.CurrentY - (sr.gapAbove + sr.relBottom) < flow.BottomMargin)
             PsBreakPage(sr, flow, page, marginRight, psWrapRight);
         else flow.AdvanceY(sr.gapAbove);
@@ -341,7 +342,7 @@ public sealed partial class Document
         sr.tb2 = new Content.ContentStreamBuilder();
         sr.tb2.SaveState();
         sr.lres2 = Table.RegisterFont(flow.CurrentPage, "Helvetica-Bold");
-        sr.tableRight = page.Width - 21.98;
+        sr.tableRight = page.LayoutFrameWidth - 21.98;
         sr.cellX = sr.tableRight - 22.87 - 112.5 * sr.prow.Acks.Count;
         // a filled-in check: two strokes shaped on the 10.5 pt
         // glyph's box, seated on the blank it marks
@@ -354,9 +355,9 @@ public sealed partial class Document
     }
 
     /// <summary>A kept-together line: measured with the line after it, moved to the next sheet when the pair will not fit.</summary>
-    private bool KeepStepRowLineWithNext(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight, Converters.HtmlToPdfConverter.StepItem item)
+    private static bool KeepStepRowLineWithNext(StepRowState sr, FlowLayout flow, Page page, double marginRight, double psWrapRight, Converters.HtmlToPdfConverter.StepItem item)
     {
-        if (item.Line is { } gl && item.KeepWithNext)
+        if (item.Line is { } && item.KeepWithNext)
         {
             var j = sr.pidx;
             var groupH = 0.0;
@@ -404,7 +405,7 @@ public sealed partial class Document
     }
 
     /// <summary>A box end: the frame drawn around the items since it opened, double-ruled when the class says so.</summary>
-    private bool CloseStepRowBox(StepRowState sr, FlowLayout flow, Converters.HtmlToPdfConverter.StepItem item)
+    private static bool CloseStepRowBox(StepRowState sr, FlowLayout flow, Converters.HtmlToPdfConverter.StepItem item)
     {
         if (item.BoxEnd)
         {

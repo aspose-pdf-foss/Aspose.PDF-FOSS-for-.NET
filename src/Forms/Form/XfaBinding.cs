@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -70,9 +70,9 @@ public sealed partial class Form
         catch { return; }
         if (dataNode is null) return;
 
-        foreach (var field in _fields)
+        foreach (var fullName in _fields.Select(field => field.FullName))
         {
-            var full = field.FullName;
+            var full = fullName;
             if (string.IsNullOrEmpty(full)) continue;
             // Leaf segment ("Medewerker_Naam[1]") → name + occurrence index.
             var leaf = full;
@@ -89,9 +89,9 @@ public sealed partial class Form
             if (!refsByLeaf.TryGetValue(leaf, out var refs)) continue;
             var dataRef = occurrence < refs.Count ? refs[occurrence] : refs[^1];
             if (string.IsNullOrEmpty(dataRef)) continue;
-            var value = ResolveXfaDataRef(dataNode, dataRef!);
+            var value = ResolveXfaDataRef(dataNode, dataRef);
             if (string.IsNullOrEmpty(value)) continue;
-            ApplyXfaValueToAcroField(full, value!);
+            ApplyXfaValueToAcroField(full, value);
         }
     }
 
@@ -119,7 +119,7 @@ public sealed partial class Form
                         }
                         break;
                     }
-                    if (!map.TryGetValue(name!, out var list)) map[name!] = list = new List<string?>();
+                    if (!map.TryGetValue(name, out var list)) map[name] = list = new List<string?>();
                     list.Add(dataRef);
                 }
                 continue;
@@ -258,7 +258,45 @@ public sealed partial class Form
     internal void ApplyXfaValueToAcroField(string name, string value)
     {
         if (Type != FormType.Static || string.IsNullOrEmpty(name)) return;
-        switch (FindFieldOrNull(name))
+        ApplyXfaValueToField(FindFieldOrNull(name), value);
+    }
+
+    /// <summary>For a static XFA form, give every field whose widget holds no value the value the datasets bind
+    /// to it: a viewer shows the datasets, so a flatten or a conversion that keeps only the widgets must carry
+    /// those values into them first. A value a widget already holds is left as it is.</summary>
+    internal void MergeXfaDataIntoEmptyFields()
+    {
+        if (Type != FormType.Static) return;
+        var template = GetXfaTemplateDocument()?.DocumentElement;
+        foreach (var field in _fields.ToList())
+        {
+            var empty = field switch
+            {
+                CheckboxField cb => !cb.Checked,
+                TextBoxField or ChoiceField => string.IsNullOrEmpty(field.Value),
+                _ => false,
+            };
+            if (!empty || field.FullName is not { Length: > 0 } name) continue;
+            if (BoundXfaFieldValueOrNull(name) is not { Length: > 0 } value) continue;
+            if (template is not null && IsXfaBarcodeField(template, name))
+            {
+                // A barcode shows its value as the symbol its own appearance draws, never as text: the value is kept
+                // and the appearance is left to the barcode's.
+                field.Dict.Set("V", Field.EncodePdfTextString(value));
+                field.MarkDirty();
+            }
+            else ApplyXfaValueToField(field, value);
+        }
+    }
+
+    /// <summary>True when the template draws the field at that path as a barcode.</summary>
+    private static bool IsXfaBarcodeField(XmlNode template, string path)
+        => WalkTemplateBySomPath(template, path) is { } fieldNode
+           && Aspose.Pdf.Forms.Xfa.XfaFormEngine.FindUiControl(fieldNode)?.LocalName == "barcode";
+
+    private static void ApplyXfaValueToField(Field? field, string value)
+    {
+        switch (field)
         {
             case CheckboxField cb:
                 cb.Checked = !(string.IsNullOrEmpty(value) || value == "0" || value == "Off");

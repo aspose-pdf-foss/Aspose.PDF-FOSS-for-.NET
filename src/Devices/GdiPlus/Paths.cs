@@ -38,7 +38,9 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         bool doStroke = op is "S" or "s" or "B" or "B*" or "b" or "b*";
         bool evenOdd = op is "f*" or "B*" or "b*";
         if (!doFill && !doStroke) return;
+        if (_vectorTarget && doFill) _vectorFills++;
 
+        segments = PenGeometry.ClosedForStroke(op, segments);
         using var path = BuildPath(segments, evenOdd);
         var saved = _g.Transform;
         using var world = WorldMatrix(state.Ctm);
@@ -51,7 +53,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             // scan conversion and smears garbage across the page. Skip the paint —
             // treat such ops as if they were absent.
             var pathBounds = path.GetBounds(world);
-            var pageSpan = Math.Max(_bitmap.Width, _bitmap.Height);
+            var (backingW, backingH) = BackingExtent;
+            var pageSpan = Math.Max(backingW, backingH);
             var sanity = GeometrySanity(pageSpan);
             if (!Compat.IsFinite(pathBounds.X) || !Compat.IsFinite(pathBounds.Y)
                 || !Compat.IsFinite(pathBounds.Width) || !Compat.IsFinite(pathBounds.Height)
@@ -92,6 +95,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             else if (doStroke)
             {
                 StrokePathGdi(path, state, pageSpan);
+                PaintDegenerateSubpathDots(segments, state);
             }
         }
         finally { _g.Transform = saved; }
@@ -128,9 +132,13 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
 
         if (!tl.needsComposite)
         {
-            RenderTilingCells(tl.path, tl.pd, tl.content, tl.patMatrix, tl.xstep, tl.ystep, tl.iMin, tl.iMax, tl.jMin, tl.jMax);
+            if (_vectorTarget && LoneReachingCell(tl) is { } lone)
+                RenderTilingCells(tl.path, tl.pd, tl.content, tl.patMatrix, tl.xstep, tl.ystep, lone.I, lone.I, lone.J, lone.J, UncolouredCellState(tl));
+            else if (!TryFillWithPeriodicTile(tl, UncolouredCellState(tl)))
+                RenderTilingCells(tl.path, tl.pd, tl.content, tl.patMatrix, tl.xstep, tl.ystep, tl.iMin, tl.iMax, tl.jMin, tl.jMax, UncolouredCellState(tl));
             return;
         }
+        if (DeferToPageImage()) return;
 
         tl.pw = _bitmap.Width;
         tl.ph = _bitmap.Height;
@@ -155,7 +163,8 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     }
 
     /// <summary>
-    /// Execute a Type-1 tiling-pattern cell at every tile offset within the fill region,
+    /// Execute a Type-1 tiling-pattern cell at every tile offset within the fill region - the
+    /// fallback for a period too large to rasterise once (see TryFillWithPeriodicTile) -
     /// painting onto the current <see cref="_g"/> (the page, or a transparency layer for the
     /// alpha/soft-mask/blend path). On entry the device transform is the fill's CTM and
     /// <paramref name="path"/> is in user space, so the clip is set first (mapping the path
@@ -165,30 +174,28 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     /// unbalanced q/Q or a stray clip inside a cell cannot leak out.
     /// </summary>
     private void RenderTilingCells(GraphicsPath path, PdfDictionary pd, byte[] content,
-        double[] patMatrix, double xstep, double ystep, int iMin, int iMax, int jMin, int jMax)
+        double[] patMatrix, double xstep, double ystep, int iMin, int iMax, int jMin, int jMax,
+        GraphicsState? cellState)
     {
         _formDepth++;
         var savedScope = _scope;
-        var savedGdi = _g.Save();
+        // The surface is saved natively here and per cell: a page of many pattern fills pays
+        // for a copy of its clip region at every managed save (see NativeGraphicsState).
+        var savedGdi = SaveSurface();
         var savedStack = _gdiStateStack.ToArray(); // top-first
         _gdiStateStack.Clear();
         var savedSm = _g.SmoothingMode;
+        // The outermost fill owns the cells' decoded images (a pattern inside a cell shares them).
+        var ownsCellImages = _tilingCellImages is null;
+        if (ownsCellImages) _tilingCellImages = new();
         try
         {
             if (Environment.GetEnvironmentVariable("Q_PATALIAS") == "1")
                 _g.SmoothingMode = SmoothingMode.None;
-            _g.SetClip(path, CombineMode.Intersect);
+            using (var fillWorld = _g.Transform) IntersectClip(path, fillWorld);
             _g.ResetTransform();
 
-            var patScope = BuildScope(_reader.ResolveDict(pd.Get("Resources")));
-            MergeInto(patScope.XObjects, savedScope.XObjects);
-            MergeInto(patScope.Fonts, savedScope.Fonts);
-            MergeInto(patScope.ExtGStates, savedScope.ExtGStates);
-            patScope.Patterns ??= savedScope.Patterns;
-            patScope.Shadings ??= savedScope.Shadings;
-            patScope.ColorSpaces ??= savedScope.ColorSpaces;
-            patScope.Properties ??= savedScope.Properties;
-            _scope = patScope;
+            _scope = PatternScope(pd, savedScope);
 
             for (int j = jMin; j <= jMax; j++)
             {
@@ -197,10 +204,10 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                     var cellCtm = GraphicsState.MultiplyMatrices(
                         new double[] { 1, 0, 0, 1, i * xstep, j * ystep }, patMatrix);
                     var cellClip = BuildBBoxClip(pd, cellCtm);
-                    var cellGdi = _g.Save();
-                    try { RenderContentStream(content, cellCtm, cellClip); }
+                    var cellGdi = SaveSurface();
+                    try { RenderContentStream(content, cellCtm, cellClip, cellState); }
                     catch { /* one bad tile must not abort the fill */ }
-                    finally { _gdiStateStack.Clear(); _g.Restore(cellGdi); cellClip?.Dispose(); }
+                    finally { _gdiStateStack.Clear(); RestoreSurface(cellGdi); cellClip?.Dispose(); }
                 }
             }
         }
@@ -209,91 +216,38 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             _scope = savedScope;
             _gdiStateStack.Clear();
             for (int k = savedStack.Length - 1; k >= 0; k--) _gdiStateStack.Push(savedStack[k]);
-            _g.Restore(savedGdi);
+            RestoreSurface(savedGdi);
             _g.SmoothingMode = savedSm;
             _formDepth--;
+            if (ownsCellImages)
+            {
+                foreach (var image in _tilingCellImages!.Values) image?.Dispose();
+                _tilingCellImages = null;
+            }
         }
     }
 
-    /// <summary>
-    /// Rasterise a single tiling-pattern cell to a device-sized bitmap and fill
-    /// <paramref name="path"/> by repeating it with a GDI+ <see cref="TextureBrush"/>.
-    /// Used for fills whose tile count is too large to execute the cell per-tile.
-    /// Only axis-aligned pattern matrices are handled (the common case); a rotated or
-    /// skewed pattern falls through to no fill, exactly as the per-tile guard did.
-    /// </summary>
-    private void FillWithTiledBrush(GraphicsPath path, PdfDictionary pd, byte[] content,
-        double bx0, double by0, double bx1, double by1, double xstep, double ystep,
-        double[] patMatrix, GdiMatrix world)
+    /// <summary>The state an uncoloured cell (PaintType 2) starts from: it names no colour of its
+    /// own and is painted in the colour the scn operator set beside the pattern, which the fill's
+    /// state carries. A coloured cell starts from the default state, as before.</summary>
+    private static GraphicsState? UncolouredCellState(TilingPatternFillState tl)
+        => (int)tl.pd.GetInt("PaintType") == UncolouredTilingPattern ? tl.state : null;
+
+    /// <summary>The PaintType of a tiling pattern whose cell takes its colour from the scn operator (PDF 32000 §8.7.3.3).</summary>
+    private const int UncolouredTilingPattern = 2;
+
+    /// <summary>The resources a pattern cell draws with: its own, falling back to those in force at the fill.</summary>
+    private Scope PatternScope(PdfDictionary pd, Scope outer)
     {
-        using var patWorld = WorldMatrix(patMatrix);
-        var e = patWorld.Elements; // [m11, m12, m21, m22, dx, dy]
-        if (Math.Abs(e[1]) > 1e-3 || Math.Abs(e[2]) > 1e-3) return; // not axis-aligned
-        double txDev = Math.Abs(e[0]) * xstep, tyDev = Math.Abs(e[3]) * ystep;
-        int tw = (int)Math.Round(txDev), th = (int)Math.Round(tyDev);
-        if (tw < 1) tw = 1;
-        if (th < 1) th = 1;
-        if ((long)tw * th > 4_000_000) return; // tile itself too large — give up safely
-
-        using var tile = new Bitmap(tw, th, PixelFormat.Format32bppArgb);
-
-        // Render one cell into the tile via a field swap: map the pattern cell's BBox
-        // onto the whole tile bitmap (device Y-down), then restore everything.
-        var savedG = _g; var savedBitmap = _bitmap; var savedScope = _scope;
-        var savedScale = _scale; var savedScaleY = _scaleY; var savedPixelH = _pixelH;
-        var savedMediaBox = _mediaBox; var savedStack = _gdiStateStack.ToArray();
-        _gdiStateStack.Clear();
-        _formDepth++;
-        try
-        {
-            using var tg = Graphics.FromImage(tile);
-            tg.Clear(GdiColor.Transparent);
-            tg.SmoothingMode = SmoothingMode.AntiAlias;
-            tg.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            tg.PixelOffsetMode = PagePom;
-            _g = tg; _bitmap = tile;
-            _scale = tw / xstep; _scaleY = th / ystep; _pixelH = th;
-            _mediaBox = new Rectangle(bx0, by0, bx0 + xstep, by0 + ystep);
-
-            var patScope = BuildScope(_reader.ResolveDict(pd.Get("Resources")));
-            MergeInto(patScope.XObjects, savedScope.XObjects);
-            MergeInto(patScope.Fonts, savedScope.Fonts);
-            MergeInto(patScope.ExtGStates, savedScope.ExtGStates);
-            patScope.Patterns ??= savedScope.Patterns;
-            patScope.Shadings ??= savedScope.Shadings;
-            patScope.ColorSpaces ??= savedScope.ColorSpaces;
-            patScope.Properties ??= savedScope.Properties;
-            _scope = patScope;
-
-            try { RenderContentStream(content, new double[] { 1, 0, 0, 1, 0, 0 }, null); }
-            catch { return; }
-        }
-        finally
-        {
-            _g = savedG; _bitmap = savedBitmap; _scope = savedScope;
-            _scale = savedScale; _scaleY = savedScaleY; _pixelH = savedPixelH;
-            _mediaBox = savedMediaBox;
-            _gdiStateStack.Clear();
-            for (int k = savedStack.Length - 1; k >= 0; k--) _gdiStateStack.Push(savedStack[k]);
-            _formDepth--;
-        }
-
-        // Device point of the cell's top-left corner (pattern (bx0, by1)); the tile's
-        // pixel (0,0) maps there, so anchor the brush at that lattice origin and tile.
-        var anchor = new[] { new PointF((float)bx0, (float)by1) };
-        patWorld.TransformPoints(anchor);
-
-        using var devicePath = (GraphicsPath)path.Clone();
-        devicePath.Transform(world);
-        var savedTransform = _g.Transform;
-        try
-        {
-            using var brush = new TextureBrush(tile) { WrapMode = WrapMode.Tile };
-            brush.TranslateTransform(anchor[0].X, anchor[0].Y);
-            _g.ResetTransform();
-            _g.FillPath(brush, devicePath);
-        }
-        finally { _g.Transform = savedTransform; }
+        var patScope = BuildScope(_reader.ResolveDict(pd.Get("Resources")));
+        MergeInto(patScope.XObjects, outer.XObjects);
+        MergeInto(patScope.Fonts, outer.Fonts);
+        MergeInto(patScope.ExtGStates, outer.ExtGStates);
+        patScope.Patterns ??= outer.Patterns;
+        patScope.Shadings ??= outer.Shadings;
+        patScope.ColorSpaces ??= outer.ColorSpaces;
+        patScope.Properties ??= outer.Properties;
+        return patScope;
     }
 
     /// <summary>
@@ -324,7 +278,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
             || (!string.IsNullOrEmpty(state.BlendMode) && state.BlendMode != "Normal");
         if (needsComposite)
         {
-            FillShadingComposited(path, state, shading, patMatrix);
+            if (!DeferToPageImage()) FillShadingComposited(path, state, shading, patMatrix);
             return;
         }
 
@@ -338,7 +292,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         var savedGdi = _g.Save();
         try
         {
-            _g.SetClip(path, CombineMode.Intersect);
+            using (var fillWorld = _g.Transform) IntersectClip(path, fillWorld);
             if (shading is AxialShading ax) DrawAxialShading(ax, ps, fillRegion: true);
             else if (shading is RadialShading ra) DrawRadialShading(ra, ps);
             else DrawMeshShading(shading, ps);
@@ -436,9 +390,21 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         return alpha;
     }
 
+    /// <summary>Clear the device rectangle of the scratch layer a blend is about to paint
+    /// into and read back - that rectangle alone: clearing the page-sized layer for every
+    /// blended fill was most of a dense page's render at 300 dpi.</summary>
+    private static void ClearScratch(Graphics scratch, int x0, int y0, int x1, int y1)
+    {
+        scratch.CompositingMode = CompositingMode.SourceCopy;
+        using (var clear = new SolidBrush(GdiColor.Transparent))
+            scratch.FillRectangle(clear, x0, y0, x1 - x0, y1 - y0);
+        scratch.CompositingMode = CompositingMode.SourceOver;
+    }
+
     private void FillPathBlended(GraphicsPath path, GdiMatrix world, Rasterizer.BlendMode mode, GraphicsState state,
         byte[]? softMask = null)
     {
+        if (DeferToPageImage()) return;
         int w = _bitmap.Width, h = _bitmap.Height;
         var rb = path.GetBounds(world);
         int x0 = System.Math.Max(0, (int)System.Math.Floor(rb.Left));
@@ -461,7 +427,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         _blendScratch ??= new Bitmap(w, h, PixelFormat.Format32bppArgb);
         using (var sgfx = Graphics.FromImage(_blendScratch))
         {
-            sgfx.Clear(GdiColor.Transparent);
+            ClearScratch(sgfx, x0, y0, x1, y1);
             sgfx.SmoothingMode = SmoothingMode.AntiAlias;
             sgfx.PixelOffsetMode = PagePom;
             sgfx.Transform = world;
@@ -540,16 +506,94 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         try
         {
             // Some producers emit a clip rectangle with coordinates ±~2^28 to mean
-            // "clip to everything" (an effective no-op). Passing such a giant path to
-            // GDI+ produces a broken/empty region (its scan conversion overflows),
-            // which silently clips away all subsequent drawing. Treat a clip whose
-            // device-space bounds dwarf the page as no clip at all.
+            // "clip to everything", and "everything but this box" is the box plus such
+            // a rectangle under W*. Passing a giant path to GDI+ produces a broken/empty
+            // region (its scan conversion overflows), which silently clips away all
+            // subsequent drawing; dropping the clip instead let what it hides show
+            // through. A clip whose device-space bounds dwarf the page is confined to a
+            // guard box round the device (see ClipGuardBox) and set in device space.
             var db = path.GetBounds(world);
-            if (db.Width > _bitmap.Width * 64f || db.Height > _bitmap.Height * 64f)
+            var (backingW, backingH) = BackingExtent;
+            if (db.Width > backingW * 64f || db.Height > backingH * 64f)
+            {
+                if (!Compat.IsFinite(db.Width) || !Compat.IsFinite(db.Height)) return;
+                using var confined = ConfinedDevicePath(path, world, new ClipGuardBox(backingW, backingH));
+                _g.ResetTransform();
+                IntersectClip(confined, null);
                 return;
-            _g.SetClip(path, CombineMode.Intersect);
+            }
+            IntersectClip(path, world);
         }
         finally { _g.Transform = saved; }
+    }
+
+    /// <summary>The path in device space, flattened, with every edge confined to the guard box.</summary>
+    private static GraphicsPath ConfinedDevicePath(GraphicsPath path, GdiMatrix world, ClipGuardBox guard)
+    {
+        using var flat = (GraphicsPath)path.Clone();
+        flat.Transform(world);
+        flat.Flatten();
+        var confined = new GraphicsPath(path.FillMode);
+        if (flat.PointCount == 0) return confined;
+        var points = flat.PathPoints;
+        var types = flat.PathTypes;
+        void Add(double x0, double y0, double x1, double y1) => confined.AddLine((float)x0, (float)y0, (float)x1, (float)y1);
+        var figureStart = 0;
+        for (var i = 0; i < points.Length; i++)
+        {
+            if ((types[i] & (byte)PathPointType.PathTypeMask) == (byte)PathPointType.Start)
+            {
+                confined.StartFigure();
+                figureStart = i;
+                continue;
+            }
+            guard.AddLine(points[i - 1].X, points[i - 1].Y, points[i].X, points[i].Y, Add);
+            if ((types[i] & (byte)PathPointType.CloseSubpath) == 0) continue;
+            guard.AddLine(points[i].X, points[i].Y, points[figureStart].X, points[figureStart].Y, Add);
+            confined.CloseFigure();
+        }
+        return confined;
+    }
+
+    /// <summary>
+    /// Intersects the clip with <paramref name="path"/>, given in the space of <paramref name="world"/>,
+    /// the surface's current transform (null for the identity). A path that is an axis-aligned
+    /// rectangle on the device is set as that rectangle: GDI+ builds a region from a path at
+    /// every call, and a page whose producer wraps each run of text in <c>m l l l h W n</c> - 214
+    /// such clips a page on one 132-page print - spent three seconds a print in those builds, where
+    /// a rectangle costs it nothing.
+    /// </summary>
+    private void IntersectClip(GraphicsPath path, GdiMatrix? world)
+    {
+        if (TryDeviceRectangle(path, world, out var rect))
+        {
+            _g.ResetTransform();
+            _g.SetClip(WidenThinClipRectangle(rect), CombineMode.Intersect);
+            if (world is not null) _g.Transform = world;
+            return;
+        }
+        if (TryIntersectThinClip(path, world)) return;
+        _g.SetClip(path, CombineMode.Intersect);
+    }
+
+    /// <summary>The path's device rectangle when it is a single axis-aligned rectangle there -
+    /// four corners, each sharing an axis with the next, with or without a closing point.</summary>
+    private static bool TryDeviceRectangle(GraphicsPath path, GdiMatrix? world, out RectangleF rect)
+    {
+        rect = RectangleF.Empty;
+        var count = path.PointCount;
+        if (count is not (4 or 5)) return false;
+        var pts = path.PathPoints;
+        if (count == 5 && pts[4] != pts[0]) return false;
+        world?.TransformPoints(pts);
+#pragma warning disable S1244 // corners that share an edge are the same transformed value - exact on purpose
+        var sidesFirst = pts[0].X == pts[1].X && pts[1].Y == pts[2].Y && pts[2].X == pts[3].X && pts[3].Y == pts[0].Y;
+        var topFirst = pts[0].Y == pts[1].Y && pts[1].X == pts[2].X && pts[2].Y == pts[3].Y && pts[3].X == pts[0].X;
+#pragma warning restore S1244
+        if (!sidesFirst && !topFirst) return false;
+        rect = RectangleF.FromLTRB(Math.Min(pts[0].X, pts[2].X), Math.Min(pts[0].Y, pts[2].Y),
+            Math.Max(pts[0].X, pts[2].X), Math.Max(pts[0].Y, pts[2].Y));
+        return true;
     }
 
     /// <summary>Build a <see cref="GraphicsPath"/> in PDF user space from path commands.</summary>
@@ -613,7 +657,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         return path;
     }
 
-    private Pen BuildPen(GraphicsState state)
+    private static Pen BuildPen(GraphicsState state)
     {
         // Line width is in user units; the active world transform scales it into
         // device pixels exactly as the CTM dictates. Width 0 means "thinnest
@@ -658,7 +702,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
     private static int Clamp255(double v)
     {
         var i = (int)(v * 255.0 + 0.5);
-        return i < 0 ? 0 : i > 255 ? 255 : i;
+        return i switch { < 0 => 0, > 255 => 255, _ => i };
     }
 
     // ── Text ────────────────────────────────────────────────────────

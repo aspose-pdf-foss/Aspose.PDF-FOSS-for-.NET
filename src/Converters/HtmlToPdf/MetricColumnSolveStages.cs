@@ -32,7 +32,7 @@ internal static partial class HtmlToPdfConverter
                     if (c < r.Count && r[c].SubTables is { Count: > 0 } pctSubs)
                         foreach (var sub in pctSubs)
                             foreach (var seg in DashSegments(CollapseWs(DecodeEntities(
-                                Regex.Replace(sub, "<[^>]+>", " ")))))
+                                SafeRegex.Replace(sub, "<[^>]+>", " ")))))
                                 mt.minCol[c] = Math.Max(mt.minCol[c], MeasureFaceText(
                                     CellFaceName(mt.face, mt.boldFace, r[c]), seg, r[c].FontSize ?? mt.mps.fontSize) + 2 * mt.p);
                     var sidePads = c < r.Count ? CellPadLeftExtra(r[c], mt.p) + CellPadRightExtra(r[c], mt.p) : 0;
@@ -384,8 +384,7 @@ internal static partial class HtmlToPdfConverter
         }
         mt.usableW = mt.availW - (mt.nCols + 1) * mt.s - mt.mps.tablePadLeftPt;
         mt.uaPctGrid = false;
-        if (mt.stdSerif && !mt.mps.bordered)
-            foreach (var pc in mt.colPct) if (pc > 0) { mt.uaPctGrid = true; break; }
+        if (mt.stdSerif && !mt.mps.bordered && mt.colPct.Any(pc => pc > 0)) { mt.uaPctGrid = true; }
         // (the pt form grid solves every table on its own rule, shares or none)
         if (mt.stdSerif && mt.mps.ptFormCells) mt.uaPctGrid = true;
     }
@@ -402,15 +401,15 @@ internal static partial class HtmlToPdfConverter
     {
         if (string.IsNullOrEmpty(mt.tableHtml)) return;
         var col = 0;
-        foreach (Match cm in MetricColTagRx.Matches(mt.tableHtml))
+        foreach (var value in SafeRegex.Matches(MetricColTagRx, mt.tableHtml).Select(cm => cm.Value))
         {
             if (col >= mt.nCols) break;
             var span = 1;
-            var spanM = Regex.Match(cm.Value, @"(?<![-\w])span\s*=\s*[""']?(\d+)", RegexOptions.IgnoreCase);
+            var spanM = SafeRegex.Match(value, @"(?<![-\w])span\s*=\s*[""']?(\d+)", RegexOptions.IgnoreCase);
             if (spanM.Success && int.TryParse(spanM.Groups[1].Value, out var spanN) && spanN > 1) span = spanN;
             // CSS allows a leading-dot number: `.25%` is a quarter of a percent, and a pattern
             // demanding a leading digit silently drops such a column to auto width.
-            var pctM = Regex.Match(cm.Value,
+            var pctM = SafeRegex.Match(value,
                 @"style\s*=\s*[""'][^""']*(?<![-\w])width\s*:\s*(\d*\.?\d+)\s*%", RegexOptions.IgnoreCase);
             // An ABSOLUTE colgroup width is a MINIMUM on its column, kept in its own slot so it
             // cannot disturb the cell-declared widths (a declared width on a text column is
@@ -421,7 +420,7 @@ internal static partial class HtmlToPdfConverter
             var absPt = 0.0;
             if (!pctM.Success)
             {
-                var absM = Regex.Match(cm.Value,
+                var absM = SafeRegex.Match(value,
                     @"style\s*=\s*[""'][^""']*(?<![-\w])width\s*:\s*(\d*\.?\d+)\s*(em|rem|px|pt|cm|mm|in)",
                     RegexOptions.IgnoreCase);
                 if (absM.Success && double.TryParse(absM.Groups[1].Value,
@@ -435,7 +434,7 @@ internal static partial class HtmlToPdfConverter
             // to the columns that still have slack). It lives beside a percentage, so it is
             // read whether or not the column also declares a width.
             var minAbsPt = 0.0;
-            var minM = Regex.Match(cm.Value,
+            var minM = SafeRegex.Match(value,
                 @"style\s*=\s*[""'][^""']*(?<![-\w])min-width\s*:\s*(\d*\.?\d+)\s*(em|rem|px|pt|cm|mm|in)",
                 RegexOptions.IgnoreCase);
             if (minM.Success && double.TryParse(minM.Groups[1].Value,
@@ -475,7 +474,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>A `col` element of a table's column group.</summary>
     private static readonly Regex MetricColTagRx =
-        new Regex(@"<col\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        new Regex(@"<col\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Scan every cell for its declared width and its natural minimum, column by column.</summary>
     private static void MeasureMetricColumnMinima(MetricTableState mt)
@@ -559,6 +558,6 @@ internal static partial class HtmlToPdfConverter
         // table's chrome pushes its box past the declared width). AUTO layout:
         // a column is max(declared share, min-content) and — under width:100% —
         // the leftover goes to the LAST column (all measured).
-        if (mt.mps.bordered) { FitBorderedColumns(mt.mps, mt.rows, mt.colW, mt.colFixed, mt.colPct, mt.colPx, mt.colPxStyle, mt.nCols, mt.availW, mt.bw, mt.p, mt.pageWidth, mt.pageHeight, mt.marginTop, mt.marginBottom, mt.tableWpt, mt.tablePct, mt.baseFontSize, mt.paragraphCells, mt.tableHtml, mt.s, mt.face, mt.boldFace, mt.symInsetPt, mt.tableFills, mt.stdSerif, mt); }
+        if (mt.mps.bordered) { FitBorderedColumns(mt.mps, mt.rows, mt.colW, mt.colFixed, mt.colPct, mt.colPx, mt.colPxStyle, mt.nCols, mt.availW, mt.bw, mt.p, mt.tableWpt, mt.tablePct, mt.s, mt.face, mt.boldFace, mt.symInsetPt, mt.tableFills, mt.stdSerif, mt); }
     }
 }

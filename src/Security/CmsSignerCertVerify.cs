@@ -60,7 +60,7 @@ internal static partial class CmsBuilder
         var digestInfo = decrypted[i..];
         var diReader = new Asn1Reader(digestInfo).ReadSequence();
         var algoSeq = diReader.ReadSequence();
-        var hashOid = algoSeq.ReadOid();
+        algoSeq.ReadOid();
         var recoveredHash = diReader.ReadOctetString();
 
         if (recoveredHash.AsSpan().SequenceEqual(expectedHash))

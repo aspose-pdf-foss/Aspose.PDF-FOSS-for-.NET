@@ -15,9 +15,10 @@ public sealed partial class Document
             var (bl, bb, br, bt) = box.Border is { } border ? BorderBands(border) : (0, 0, 0, 0);
             var pad = box.Padding;
             var sides = bl + br + (pad?.Left ?? 0) + (pad?.Right ?? 0);
-            var contentWidth = box.Width <= 0
-                ? Math.Max(0, regionWidth - box.Margin.Left - box.Margin.Right - sides)
-                : box.WidthIsFraction ? box.Width * regionWidth : box.Width;
+            double contentWidth;
+            if (box.Width <= 0) contentWidth = Math.Max(0, regionWidth - box.Margin.Left - box.Margin.Right - sides);
+            else if (box.WidthIsFraction) contentWidth = box.Width * regionWidth;
+            else contentWidth = box.Width;
             double content = 0;
             foreach (var paragraph in box.Paragraphs)
             {

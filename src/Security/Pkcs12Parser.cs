@@ -15,9 +15,7 @@ internal static class Pkcs12Parser
     private const string OidPbeWithSha1And3Des = "1.2.840.113549.1.12.1.3";
     private const string OidPbeWithSha1And40Rc2 = "1.2.840.113549.1.12.1.6";
     private const string OidPbes2 = "1.2.840.113549.1.5.13";
-    private const string OidPbkdf2 = "1.2.840.113549.1.5.12";
     private const string OidAes256Cbc = "2.16.840.1.101.3.4.1.42";
-    private const string OidAes128Cbc = "2.16.840.1.101.3.4.1.2";
     private const string OidHmacSha256 = "1.2.840.113549.2.9";
 
     /// <summary>Parse PFX and extract the first certificate (DER) and RSA private key.</summary>
@@ -60,7 +58,7 @@ internal static class Pkcs12Parser
                     var pbeParams = algoSeq.ReadSequence();
                     var salt = pbeParams.ReadOctetString();
                     var iterations = pbeParams.ReadInteger();
-                    var ciphertext = ReadContextImplicit(encContentInfo, 0);
+                    var ciphertext = ReadContextImplicit(encContentInfo);
 
                     var pwBytes = HmacSha.Pkcs12EncodePassword(password);
                     if (algoOid == OidPbeWithSha1And3Des)
@@ -159,7 +157,7 @@ internal static class Pkcs12Parser
 
     private static byte[] DecryptPbes2(Asn1Reader algoSeq, Asn1Reader encContentInfo, string password)
     {
-        var ciphertext = ReadContextImplicit(encContentInfo, 0);
+        var ciphertext = ReadContextImplicit(encContentInfo);
         return DecryptPbes2Data(algoSeq, ciphertext, password);
     }
 
@@ -167,7 +165,7 @@ internal static class Pkcs12Parser
     {
         var pbes2Params = algoSeq.ReadSequence();
         var kdfSeq = pbes2Params.ReadSequence();
-        var kdfOid = kdfSeq.ReadOid(); // must be PBKDF2
+        kdfSeq.ReadOid(); // must be PBKDF2
         var kdfParams = kdfSeq.ReadSequence();
         var salt = kdfParams.ReadOctetString();
         var iterations = kdfParams.ReadInteger();
@@ -202,14 +200,14 @@ internal static class Pkcs12Parser
     private static byte[] ReadContentInfo(Asn1Reader r)
     {
         var ci = r.ReadSequence();
-        var contentType = ci.ReadOid();
+        ci.ReadOid();
         var content = ci.ReadContextConstructed(0);
         return content.ReadOctetString();
     }
 
-    private static byte[] ReadContextImplicit(Asn1Reader r, int n)
+    private static byte[] ReadContextImplicit(Asn1Reader r)
     {
-        var (tag, value) = r.ReadTlv();
+        var (_, value) = r.ReadTlv();
         return value;
     }
 }

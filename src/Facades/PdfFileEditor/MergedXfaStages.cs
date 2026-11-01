@@ -10,7 +10,7 @@ namespace Aspose.Pdf.Facades;
 public sealed partial class PdfFileEditor
 {
     /// <summary>The stages of the merged XFA array: the part collection and the part emit, one part at a time.</summary>
-    private void EmitMergedXfaPart(MergedXfaState xm, int i)
+    private static void EmitMergedXfaPart(MergedXfaState xm, int i)
     {
         var dRoot = xm.parts[i].ds?.DocumentElement;
         if (dRoot is null) return;
@@ -26,7 +26,7 @@ public sealed partial class PdfFileEditor
         }
         foreach (var dc in ElementChildren(thisData))
         {
-            var imported = (XmlElement)xm.mergedDs!.ImportNode(dc, deep: true);
+            var imported = (XmlElement)xm.mergedDs.ImportNode(dc, deep: true);
             if (map.TryGetValue(dc.LocalName, out var nn) && nn != dc.LocalName)
                 imported = RenameElement(xm.mergedDs, imported, nn);
             xm.dsRootEl!.AppendChild(imported);
@@ -73,7 +73,7 @@ public sealed partial class PdfFileEditor
             }
             if (!map.ContainsKey(orig)) map[orig] = newName;
 
-            var imported = (XmlElement)xm.mergedTpl!.ImportNode(sf, deep: true);
+            var imported = (XmlElement)xm.mergedTpl.ImportNode(sf, deep: true);
             imported.SetAttribute("name", newName);
             xm.tplRootSub!.AppendChild(imported);
         }

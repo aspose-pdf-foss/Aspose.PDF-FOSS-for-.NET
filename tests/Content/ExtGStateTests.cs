@@ -145,8 +145,10 @@ public class ExtGStateTests
         var device = new Aspose.Pdf.Devices.SvgDevice();
         var svg = device.Process(page);
 
-        // Text runs carry their presentation in a style attribute.
-        Assert.Contains("fill-opacity:0.5", svg);
+        // Text runs carry their presentation in a style attribute: the alpha rides in the fill colour once,
+        // with no companion opacity applying it a second time.
+        Assert.Contains("fill:#00000080", svg);
+        Assert.DoesNotContain("fill-opacity", svg);
     }
 
     [Fact]

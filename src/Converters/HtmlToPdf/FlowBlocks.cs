@@ -30,7 +30,7 @@ internal static partial class HtmlToPdfConverter
         // (a UA form document grids its tables even when one wrapper table holds every control)
         if (ContainsTable(fbk.frag)
             && (fbk.cv.profile.formDialectTables || !fbk.htmlHasFormInput || fbk.perTableFormGate || fbk.cv.profile.escapedAttrDoc
-                || fbk.cv.profile.uaFormCells))
+                || fbk.cv.profile.uaFormCells || fbk.cv.profile.fieldCellGrids))
         {
             BuildTableSegmentBlocks(fbk);
         }
@@ -43,17 +43,17 @@ internal static partial class HtmlToPdfConverter
     private static string MarkFramedWrapperDiv(string frag, IReadOnlyDictionary<string, Dictionary<string, string>>? css = null)
     {
         if (FindFramedWrapperDiv(frag, css) is not var (open, closeAt)) return frag;
-        var closeLen = Regex.Match(frag[closeAt..], @"</div\b[^>]*>", RegexOptions.IgnoreCase).Length;
+        var closeLen = SafeRegex.Match(frag[closeAt..], @"</div\b[^>]*>", RegexOptions.IgnoreCase).Length;
         var openTag = open.Value;
         // a class-bordered div carries its rule's border on the marker's own style, where the
         // block parser reads the frame from
         if (css is not null && ClassBorderDecl(openTag, css) is { } clsBorder
-            && !Regex.IsMatch(DivStyleOf(openTag), @"(?<![-\w])border\s*:", RegexOptions.IgnoreCase))
+            && !SafeRegex.IsMatch(DivStyleOf(openTag), @"(?<![-\w])border\s*:", RegexOptions.IgnoreCase))
         {
             var st = DivStyleOf(openTag);
             var merged = "border:" + clsBorder + (st.Length > 0 ? ";" + st : "");
-            openTag = Regex.IsMatch(openTag, @"\bstyle\s*=", RegexOptions.IgnoreCase)
-                ? Regex.Replace(openTag, @"\bstyle\s*=\s*([""']).*?\1", "style=\"" + merged.Replace("\"", "'") + "\"", RegexOptions.IgnoreCase)
+            openTag = SafeRegex.IsMatch(openTag, @"\bstyle\s*=", RegexOptions.IgnoreCase)
+                ? SafeRegex.Replace(openTag, @"\bstyle\s*=\s*([""']).*?\1", "style=\"" + merged.Replace("\"", "'") + "\"", RegexOptions.IgnoreCase)
                 : openTag[..^1] + " style=\"" + merged.Replace("\"", "'") + "\">";
         }
         return frag[..open.Index] + "<" + FrameDivTag + openTag[4..]
@@ -63,13 +63,13 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The `border` shorthand a div's class rule declares (a real stroke, not none/0), or null.</summary>
     private static string? ClassBorderDecl(string openTag, IReadOnlyDictionary<string, Dictionary<string, string>> css)
     {
-        var cm = Regex.Match(openTag, @"\bclass\s*=\s*(?:[""']([^""']*)[""']|([\w-]+))", RegexOptions.IgnoreCase);
+        var cm = SafeRegex.Match(openTag, @"\bclass\s*=\s*(?:[""']([^""']*)[""']|([\w-]+))", RegexOptions.IgnoreCase);
         if (!cm.Success) return null;
         var v = cm.Groups[1].Success ? cm.Groups[1].Value : cm.Groups[2].Value;
         foreach (var c in v.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
             foreach (var key in new[] { "." + c, "div." + c })
                 if (css.TryGetValue(key, out var rule) && rule.TryGetValue("border", out var b)
-                    && !Regex.IsMatch(b.Trim(), @"^(none|0(px|pt)?)\b", RegexOptions.IgnoreCase))
+                    && !SafeRegex.IsMatch(b.Trim(), @"^(none|0(px|pt)?)\b", RegexOptions.IgnoreCase))
                     return b.Trim();
         return null;
     }
@@ -78,15 +78,19 @@ internal static partial class HtmlToPdfConverter
     /// closes after its last: its open tag and where its close tag starts; null when there is none.</summary>
     private static (Match open, int closeAt)? FindFramedWrapperDiv(string frag, IReadOnlyDictionary<string, Dictionary<string, string>>? css = null)
     {
-        var firstTable = Regex.Match(frag, @"<table\b", RegexOptions.IgnoreCase);
+        var firstTable = SafeRegex.Match(frag, @"<table\b", RegexOptions.IgnoreCase);
         if (!firstTable.Success) return null;
         var lastTableEnd = frag.LastIndexOf("</table", StringComparison.OrdinalIgnoreCase);
         var candidates = new List<Match>();
-        foreach (Match m in Regex.Matches(frag[..firstTable.Index], @"<div\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match m in SafeRegex.Matches(frag[..firstTable.Index], @"<div\b[^>]*>", RegexOptions.IgnoreCase))
         {
             var st = DivStyleOf(m.Value);
-            if (Regex.IsMatch(st, @"(?<![-\w])border\s*:", RegexOptions.IgnoreCase)
-                && Regex.IsMatch(st, @"(?<![-\w])width\s*:", RegexOptions.IgnoreCase))
+            // a hidden div frames nothing: renamed to the marker it would slip past the table
+            // splitter's hidden ranges and the block parser's hidden check, and draw its box
+            // with everything inside it
+            if (SafeRegex.IsMatch(HiddenInlineRx, st)) continue;
+            if (SafeRegex.IsMatch(st, @"(?<![-\w])border\s*:", RegexOptions.IgnoreCase)
+                && SafeRegex.IsMatch(st, @"(?<![-\w])width\s*:", RegexOptions.IgnoreCase))
                 candidates.Add(m);
             // (a class-bordered div needs no declared width: its frame spans the content box)
             else if (css is not null && ClassBorderDecl(m.Value, css) is not null)
@@ -102,7 +106,7 @@ internal static partial class HtmlToPdfConverter
             // the div's matching close: the first </div> past its open at depth zero
             var depth = 0;
             var closeAt = -1;
-            foreach (Match t in Regex.Matches(frag[(open.Index + open.Length)..], @"<(/?)div\b[^>]*>", RegexOptions.IgnoreCase))
+            foreach (Match t in SafeRegex.Matches(frag[(open.Index + open.Length)..], @"<(/?)div\b[^>]*>", RegexOptions.IgnoreCase))
             {
                 if (t.Groups[1].Value.Length == 0) { depth++; continue; }
                 if (depth == 0) { closeAt = open.Index + open.Length + t.Index; break; }
@@ -122,7 +126,7 @@ internal static partial class HtmlToPdfConverter
         // class rule as in the tag's own style attribute, and the reference reads both. The inline
         // style wins where it declares the same property.
         var st = WrapperDivDeclarations(open.Value, css);
-        if (Regex.Match(st, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is not { Success: true } wm
+        if (SafeRegex.Match(st, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is not { Success: true } wm
             || TryParseLength(wm.Groups[1].Value.Trim()) is not { } wPt) return 0;
         var sides = CssBorderSides(st);
         return wPt + sides[3].W + sides[1].W;
@@ -136,7 +140,7 @@ internal static partial class HtmlToPdfConverter
     {
         var sb = new StringBuilder();
         if (css is not null
-            && Regex.Match(openTag, @"\bclass\s*=\s*(?:[""']([^""']*)[""']|([\w-]+))", RegexOptions.IgnoreCase)
+            && SafeRegex.Match(openTag, @"\bclass\s*=\s*(?:[""']([^""']*)[""']|([\w-]+))", RegexOptions.IgnoreCase)
                is { Success: true } cm)
         {
             var names = (cm.Groups[1].Success ? cm.Groups[1].Value : cm.Groups[2].Value)

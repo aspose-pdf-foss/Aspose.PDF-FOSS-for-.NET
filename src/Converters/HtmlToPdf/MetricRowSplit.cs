@@ -25,7 +25,7 @@ internal static partial class HtmlToPdfConverter
         if (mr.cursor.y - mr.s - mr.rowBoxH >= mr.marginBottom) return false;
         if (mr.cursor.y >= mr.pageHeight - mr.marginTop - 1e-3) return false;
         if (ri < mr.mps.rowHeights.Count && mr.mps.rowHeights[ri] > 0) return false;
-        foreach (var extra in mr.rowSpanExtra) if (extra > 0) return false;
+        if (mr.rowSpanExtra.Any(extra => extra > 0)) return false;
 
         // The paragraph is the tallest text cell in the row; every other text cell is a label
         // that must ride with it. All of them must be as plain as a paragraph - anything
@@ -52,7 +52,7 @@ internal static partial class HtmlToPdfConverter
         }
         if (textCell is null || textCell.Lines.Length < 2) return false;
 
-        var lineH = CellLineOf(mr.mps, mr.stdSerif, mr.wrapperStacks, mr.hheaSum, mr.face, mr.fm, textCell,
+        var lineH = CellLineOf(mr.mps, mr.stdSerif, mr.wrapperStacks, mr.face, mr.fm, textCell,
             textCell.FontSize ?? mr.mps.fontSize);
         if (lineH <= 0 || Math.Abs(textCell.ContentH - textCell.Lines.Length * lineH) > 1e-6) return false;
         var room = mr.cursor.y - mr.s - 2 * mr.p - mr.marginBottom;

@@ -152,7 +152,9 @@ public class OptimizeResourcesTests
         using var doc2 = Document.Open(beforeBytes);
         doc2.OptimizeResources(new OptimizationOptions
         {
-            MaxImageDpi = 10,
+            CompressImages = true,
+            ResizeImages = true,
+            MaxResoultion = 10,
             RemoveUnusedObjects = false,
             RemoveUnusedStreams = false,
             LinkDuplicateStreams = false,

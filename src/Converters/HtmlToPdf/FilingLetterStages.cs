@@ -32,7 +32,7 @@ internal static partial class HtmlToPdfConverter
         {
             var j = fl.body.IndexOf('<', fl.i);
             if (j < 0) j = fl.n;
-            var txt = Regex.Replace(DecodeEntities(fl.body[fl.i..j]).Replace('\u00A0', ' '), @"\s+", " ");
+            var txt = SafeRegex.Replace(DecodeEntities(fl.body[fl.i..j]).Replace('\u00A0', ' '), @"\s+", " ");
             if (txt.Trim().Length > 0 || fl.cur.Length > 0 && txt.Length > 0)
                 fl.cur += fl.cur.Length == 0 ? txt.TrimStart() : txt;
             fl.i = j;
@@ -42,17 +42,17 @@ internal static partial class HtmlToPdfConverter
         if (end < 0) return false;
         var tagStr = fl.body[fl.i..(end + 1)];
         fl.i = end + 1;
-        var nm = Regex.Match(tagStr, @"^</?\s*([A-Za-z][A-Za-z0-9]*)");
+        var nm = SafeRegex.Match(tagStr, @"^</?\s*([A-Za-z][A-Za-z0-9]*)");
         if (!nm.Success) return true;
         var tag = nm.Groups[1].Value.ToLowerInvariant();
         var isClose = tagStr[1] == '/';
-        var style = Regex.Match(tagStr, @"style\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase).Groups[2].Value;
+        var style = SafeRegex.Match(tagStr, @"style\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase).Groups[2].Value;
 
         if (tag == "br") { EndLine(fl, blankIfEmpty: true); return true; }
         if (tag == "img" && !isClose)
         {
             EndLine(fl, blankIfEmpty: false);
-            var sm = Regex.Match(tagStr, @"\bsrc\s*=\s*['""]?([^'""\s>]+)", RegexOptions.IgnoreCase);
+            var sm = SafeRegex.Match(tagStr, @"\bsrc\s*=\s*['""]?([^'""\s>]+)", RegexOptions.IgnoreCase);
             if (sm.Success)
             {
                 fl.parsed.Add(new FilingItem { ImgSrc = sm.Groups[1].Value, ExtraGap = fl.gapNext });
@@ -64,14 +64,14 @@ internal static partial class HtmlToPdfConverter
         {
             EndLine(fl, blankIfEmpty: false);
             if (tag == "p" && !isClose
-                && Regex.IsMatch(style, @"margin-left\s*:\s*1cm", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(style, @"margin-left\s*:\s*1cm", RegexOptions.IgnoreCase))
                 fl.indentDepth = fl.depth + 1;
             if (tag == "div" || tag == "p")
             {
                 if (!isClose)
                 {
                     fl.depth++;
-                    if (Regex.IsMatch(style, @"text-align\s*:\s*left", RegexOptions.IgnoreCase) && fl.leftDepth == 0)
+                    if (SafeRegex.IsMatch(style, @"text-align\s*:\s*left", RegexOptions.IgnoreCase) && fl.leftDepth == 0)
                         fl.leftDepth = fl.depth;
                 }
                 else
@@ -84,7 +84,7 @@ internal static partial class HtmlToPdfConverter
             fl.indent = fl.indentDepth > 0 ? 28.35 : 0;
             return true;
         }
-        if (tag is "td" or "th") { if (!isClose) fl.cur += fl.cur.Length > 0 ? "  " : ""; return true; }
+        if (tag is "td" or "th") { if (!isClose) { fl.cur += fl.cur.Length > 0 ? "  " : ""; } return true; }
         return true;
     }
 }

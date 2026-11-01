@@ -24,7 +24,7 @@ public partial class Table
         if (ResolveColumnCell(col, rp, pc, row, cellMap, gridToCell, effRowSpan)) return true;
         pc.cell = row.Cells.At(pc.origIdx);
         pc.padding = EffectivePad(pc.cell, row);
-        pc.dp = DefaultPad(pc.cell, row);
+        pc.dp = DefaultPad;
         pc.vb = pc.cell.Border ?? row.DefaultCellBorder ?? row.Border ?? DefaultCellBorder;
         pc.borderV = BorderTopBottom(pc.vb);
         // Collapsed borders (the pt-styled fragment's grids): every drawn
@@ -63,7 +63,7 @@ public partial class Table
         pc.cellAlign = ResolveCellAlignment(pc.cell, row);
         pc.lines = new List<CellLine>();
 
-        BuildColumnLines(col, rp, pc, row, colWidths, cellMap, gridToCell, effRowSpan, svgFillHeight);
+        BuildColumnLines(col, rp, pc, row, colWidths, svgFillHeight);
         ClassifyColumnLines(col, rp, pc);
         pc.badgeOnlyCell = NestedTableRender && pc.lines.Count > 0
             && pc.lines.TrueForAll(l => l.Text.Length == 0 && l.Boxes is { Count: > 0 });
@@ -72,7 +72,9 @@ public partial class Table
         pc.genDescEm = pc.genExactStack ? CellFontDescentEm(pc.cell, row).DescentEm : 0;
         MeasureCssColumnStack(col, rp, pc);
 
+#pragma warning disable S1244 // the plain arms set BoxH to FontSize itself; a box that is not that copy is styled - exact on purpose
         pc.hasStyledPara = pc.lines.Exists(l => l.Text.Length > 0 && l.BoxH > 0 && l.BoxH != l.FontSize);
+#pragma warning restore S1244
         if (pc.hasStyledPara)
             while (pc.lines.Count > 0 && pc.lines[0].Text.Length == 0 && !pc.lines[0].ImgReserve
                    && !pc.lines[0].HtmlEngine && pc.lines[0].Boxes is null && !pc.lines[0].MarginSpacer)

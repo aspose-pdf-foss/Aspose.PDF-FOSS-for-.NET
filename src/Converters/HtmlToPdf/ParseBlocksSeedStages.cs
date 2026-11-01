@@ -11,10 +11,11 @@ internal static partial class HtmlToPdfConverter
         pb.styleStack.Push(new BlockStyle
         {
             // UA base = 16px serif (12pt); a caller-set body size replaces the default.
-            FontSize = pb.bodyFontSize > 0 ? pb.bodyFontSize : pb.uaDefaults ? 12 : 11,
+            FontSize = (pb.bodyFontSize, pb.uaDefaults) switch { (> 0, _) => pb.bodyFontSize, (_, true) => 12, _ => 11 },
             FontRes = "F1", MarginTop = 0, MarginBottom = 0, LeftIndent = 0,
             AbsOriginLeftPt = 0, AbsOriginWidthPt = contentWidthPt,
             FormDialect = pb.formDialect,
+            MetricFlow = pb.metricLayout,
             ArticleRhythm = pb.articleRhythm,
             UaSerif = pb.browserUa,
             UaBoxes = pb.uaBoxes,

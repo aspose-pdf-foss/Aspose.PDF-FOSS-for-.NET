@@ -17,23 +17,24 @@ public partial class Table : BaseParagraph
             // A row with NO CELLS reserves nothing: it draws nothing and the generator
             // gives it no height (a `Rows.Add()` with only FixedRowHeight = 0 in front of
             // a fixed-height row leaves that row at the content top, not a line below it).
-            rp.plan.MinBlankHeight = row.Cells.Count == 0 ? 0
-                : rp.plan.LineCount != 0 ? 20
-                : HonorCellFontFaces ? 0
-                // redline grids: a hidden-content row collapses to the tight
-                // spacer drawn for it (3.2 pt — measured net of the next
-                // row's own billed margin-top)
-                : RedlineCellSeat ? 3.2
-                // A column-pagination slice: this row's text lives in another
-                // slice; here it is one line of the row's cell font (the height
-                // the row has where its text renders), not the generic blank slot.
-                : ColumnSliceChild && row.Cells.Count > 0
-                    ? ResolveFragmentDrawSize(row.Cells.At(0), row)
-                // A generator cell with no paragraphs has no line at all: the row is
-                // its padding (probed: 5 + 5 with a 0.5 rule, against 10 + 10 for a
-                // cell holding an empty fragment).
-                : GeneratorCellModel ? rp.maxVertPad
-                : rp.plan.LineHeight;
+        {
+            if (row.Cells.Count == 0) rp.plan.MinBlankHeight = 0;
+            else if (rp.plan.LineCount != 0) rp.plan.MinBlankHeight = 20;
+            else if (HonorCellFontFaces) rp.plan.MinBlankHeight = 0;
+            // redline grids: a hidden-content row collapses to the tight
+            // spacer drawn for it (3.2 pt — measured net of the next
+            // row's own billed margin-top)
+            else if (RedlineCellSeat) rp.plan.MinBlankHeight = 3.2;
+            // A column-pagination slice: this row's text lives in another
+            // slice; here it is one line of the row's cell font (the height
+            // the row has where its text renders), not the generic blank slot.
+            else if (ColumnSliceChild && row.Cells.Count > 0) rp.plan.MinBlankHeight = ResolveFragmentDrawSize(row.Cells.At(0), row);
+            // A generator cell with no paragraphs has no line at all: the row is
+            // its padding (probed: 5 + 5 with a 0.5 rule, against 10 + 10 for a
+            // cell holding an empty fragment).
+            else if (GeneratorCellModel) rp.plan.MinBlankHeight = rp.maxVertPad;
+            else rp.plan.MinBlankHeight = rp.plan.LineHeight;
+        }
         // A whitespace-only row (e.g. a " " spacer) is likewise a tight spacer drawn
         // without cell padding so it reserves just its line.
         // …except in a generator cell, where a " " or "" fragment is one ordinary line
@@ -73,14 +74,17 @@ public partial class Table : BaseParagraph
     }
 
     /// <summary></summary>
-    private void FoldRowCellTotals(RowPlanState rp)
+    private static void FoldRowCellTotals(RowPlanState rp)
     {
         rp.maxCellTotal = 0.0;
         rp.anyExactCell = false;
         rp.maxOwnTotal = 0.0;
         foreach (var (cpv, cn, ctight, cexact, cown) in rp.cellTotals)
         {
-            var ch = cexact > 0 ? cexact : cn == 0 ? 0 : (cn - 1) * rp.plan.LineHeight + ctight;
+            double ch;
+            if (cexact > 0) ch = cexact;
+            else if (cn == 0) ch = 0;
+            else ch = (cn - 1) * rp.plan.LineHeight + ctight;
             if (cexact > 0) rp.anyExactCell = true;
             if (cpv + ch > rp.maxCellTotal) rp.maxCellTotal = cpv + ch;
             if (cn > 0 && cpv + cown > rp.maxOwnTotal) rp.maxOwnTotal = cpv + cown;

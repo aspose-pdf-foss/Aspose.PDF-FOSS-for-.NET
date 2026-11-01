@@ -25,7 +25,7 @@ public sealed partial class PdfToHtmlConverter
         }
         else
         {
-            EmitSpan(fg.sb, fg.groupText.ToString(), fg.ct.groupX, fg.ct.groupY, fg.ct.groupFontSize,
+            EmitSpan(fg.sb, SeparateStandInMarks(fg.groupText.ToString(), fg.ct.IsMintedStandIn), fg.ct.groupX, fg.ct.groupY, fg.ct.groupFontSize,
                 fg.ct.groupFamily, fg.ct.groupWeight, fg.ct.groupStyle, fg.ct.groupR, fg.ct.groupG, fg.ct.groupB, fg.pageHeight,
                 fg.ct.groupRise, transparentText: fg.textOnly,
                 rotationClass: fg.ct.groupAngle != 0 && fg.rotReg is not null
@@ -37,11 +37,12 @@ public sealed partial class PdfToHtmlConverter
     private static void FlushStyledGroup(GroupFlushState fg)
     {
         var sg = new StyledGroupState();
-        sg.color = fg.ct.groupTransparent
-            ? TransparentTextColor
-            : $"#{(int)(Compat.Clamp(fg.ct.groupR, 0, 1) * 255):X2}{(int)(Compat.Clamp(fg.ct.groupG, 0, 1) * 255):X2}{(int)(Compat.Clamp(fg.ct.groupB, 0, 1) * 255):X2}";
+        static int Byte(double c) => (int)(Compat.Clamp(c, 0, 1) * 255);
+        if (fg.ct.groupTransparent) sg.color = TransparentTextColor;
+        else if (fg.ct.groupAlpha < 1.0) sg.color = CssRgba(Byte(fg.ct.groupR), Byte(fg.ct.groupG), Byte(fg.ct.groupB), fg.ct.groupAlpha);
+        else sg.color = $"#{Byte(fg.ct.groupR):X2}{Byte(fg.ct.groupG):X2}{Byte(fg.ct.groupB):X2}";
         sg.fontNum = fg.styleReg!.Font(fg.ct.groupCssFamily, fg.ct.groupFontSize / 12.0, sg.color, null);
-        sg.lhNum = fg.styleReg.LineHeight(fg.ct.groupLineHeight > 0 ? Math.Round(fg.ct.groupLineHeight, 6) : 1.2);
+        sg.lhNum = fg.styleReg.LineHeight(LineHeightClassEm(fg.ct.groupLineHeight));
         sg.fs = Math.Max(0.01, fg.ct.groupFontSize);
         sg.textAll = fg.groupText.ToString();
         sg.face = fg.ct.groupPinned && fg.ct.groupEndX > fg.ct.groupX + 0.01
@@ -56,16 +57,19 @@ public sealed partial class PdfToHtmlConverter
             ? $"{fg.classNamer.Cls("01")} {fg.classNamer.Cls(fg.styleReg.Rotation(Math.Round(fg.ct.groupAngle, 2)))}"
             : fg.classNamer.Cls("01");
         sg.zStyle = fg.zCounter is not null && fg.ct.groupZ > 0 ? $"z-index:{fg.ct.groupZ};" : "";
+        if (fg.ct.model is not null && fg.ct.groupAngle == 0) RecordGroupBox(fg, sg);
         fg.sb.Append($"<div class=\"{sg.divCls}\" style=\"left:{Em4T(sg.left)}em;top:{Em4T(sg.top)}em;{sg.zStyle}\">");
+        // A run whose extent is unknown is judged by half an em per character.
         sg.link = fg.ct.groupIsType3
-            ? null : FindLinkTarget(fg.linkTargets, fg.ct.groupX, fg.ct.groupPenX, fg.ct.groupY);
+            ? null : FindLinkTarget(fg.linkTargets, fg.ct.groupX, fg.ct.groupPenX, fg.ct.groupY,
+                fg.ct.groupX + FallbackGlyphAdvanceEm * sg.fs * sg.textAll.Length, ownSurface: fg.zCounter is null);
         sg.popupItems = sg.link?.PopupItems;
-        sg.linkOpen = sg.link is null || sg.popupItems is not null
-            ? null
-            : $"<a href=\"{EscapeHtml(sg.link.Uri)}\"" +
+        if (sg.link is null || sg.popupItems is not null) sg.linkOpen = null;
+        else
+            sg.linkOpen = $"<a href=\"{EscapeHtml(sg.link.Uri)}\"" +
                 (sg.link.Uri.StartsWith('#') ? ">" : " target=\"_blank\">");
-        // The single-span path opens the anchor around its one span here;
-        // the pinned multi-segment path wraps EACH span in its own anchor.
+        // The single-span path opens the anchor around its one span here; the
+        // pinned multi-segment path wraps EACH span in its own anchor.
         // Wrapped is set only where an anchor is really written: it is what
         // suppresses the click-surface overlay.
         if (sg.linkOpen is not null && sg.face is null)
@@ -91,6 +95,24 @@ public sealed partial class PdfToHtmlConverter
         }
     }
 
+    /// <summary>The group's box for the text-layer model: its div position, the pinned glyph
+    /// edge (else the pen, else half an em per character) as the right edge, and a descender's
+    /// depth under the baseline. Rotated groups carry another div class and are not modelled.</summary>
+    private static void RecordGroupBox(GroupFlushState fg, StyledGroupState sg)
+    {
+        var right = fg.ct.groupPinned && fg.ct.groupEndX > fg.ct.groupX ? fg.ct.groupEndX : fg.ct.groupPenX;
+        if (right <= fg.ct.groupX) right = fg.ct.groupX + FallbackGlyphAdvanceEm * sg.fs * sg.textAll.Length;
+        var shiftL = fg.pageTurnedOver ? fg.pageWidth / 12.0 : 0;
+        var shiftT = fg.pageTurnedOver ? fg.pageHeight / 12.0 : 0;
+        fg.ct.model!.Boxes.Add(new LineBox(sg.left, sg.top, (right - fg.pageLLX) / 12.0 - shiftL,
+            (sg.yTop - fg.ct.groupY + DescentFraction * sg.fs) / 12.0 - shiftT, fg.ct.groupSeq));
+        fg.ct.model.RecordText(sg.top,
+            (sg.yTop - fg.ct.groupY + LineHeightClassEm(fg.ct.groupLineHeight) * sg.fs) / 12.0 - shiftT);
+    }
+
+    /// <summary>The advance assumed per character when a group's extent is unknown.</summary>
+    private const double FallbackGlyphAdvanceEm = 0.5;
+
     /// <summary></summary>
     private static void EmitPlainGroup(GroupFlushState fg, StyledGroupState sg)
     {
@@ -101,10 +123,14 @@ public sealed partial class PdfToHtmlConverter
         // covers the run start becomes CSS text-decoration; a
         // decorated span carries the inline style and drops the
         // trailing &nbsp;.
-        var decoration = FindDecoration(fg.ct.rules, fg.ct.groupX, fg.ct.groupY, fg.ct.groupFontSize,
-            fg.ct.groupR, fg.ct.groupG, fg.ct.groupB);
+        var taken = new List<int>();
+        var decoration = FindDecoration(fg.ct.rules, fg.ct.groupX, fg.ct.groupTextPenX, fg.ct.groupY, fg.ct.groupFontSize,
+            fg.ct.groupR, fg.ct.groupG, fg.ct.groupB, taken);
+        if (decoration is not null)
+            foreach (var ri in taken) EraseSvgElement(fg.ct.svgPaths, fg.ct.rules![ri].SvgStart, fg.ct.rules[ri].SvgEnd);
         fg.sb.Append($"<span class=\"{fg.classNamer.Attr(sg.fontNum, sg.lhNum, lsNum)}\"");
-        var groupWeightCss = StlWeightStyleCss(fg.ct.groupFauxBold, fg.ct.groupDeclStyle);
+        var groupWeightCss = StlWeightStyleCss(fg.ct.groupFauxBold, fg.ct.groupDeclStyle)
+            + BidiOverrideCss(fg.groupText.ToString());
         if (decoration is not null)
             fg.sb.Append($" style=\"{groupWeightCss}text-decoration:{decoration};word-spacing:0em;\"");
         else if (groupWeightCss.Length > 0)
@@ -115,7 +141,7 @@ public sealed partial class PdfToHtmlConverter
         // (the .stl_ sup/sub CSS rules already position them). The
         // rise is baked into `top`, so the tags are purely semantic -
         // see EmitSpan for the non-stl_ counterpart.
-        var stlInner = EscapeHtml(fg.groupText.ToString());
+        var stlInner = EscapeHtml(SeparateStandInMarks(fg.groupText.ToString(), fg.ct.IsMintedStandIn));
         if (fg.ct.groupRawRise > RiseThreshold) stlInner = $"<sup>{stlInner}</sup>";
         else if (fg.ct.groupRawRise < -RiseThreshold) stlInner = $"<sub>{stlInner}</sub>";
         fg.sb.Append(stlInner)
@@ -149,7 +175,7 @@ public sealed partial class PdfToHtmlConverter
             ef.coveredTo = Math.Max(ef.coveredTo, seg.GlyphEnd);
         }
         ef.spaceAdv = HtmlToPdfConverter.MeasureStlExactText(sg.face!, " ", sg.fs);
-        MergeFaceGaps(fg, sg, ef);
+        MergeFaceGaps(sg, ef);
         ef.lastLsNum = 0;
         EmitFaceSegments(fg, sg, ef);
         if (sg.popupItems is not null)
@@ -188,7 +214,7 @@ public sealed partial class PdfToHtmlConverter
             var lsEm = Math.Round((target - natural) / (segText.Length * sg.fs), 4);
             var resid = target - natural - lsEm * segText.Length * sg.fs;
             var spaces = 0;
-            foreach (var ch in segText) if (ch == ' ') spaces++;
+            foreach (var ch in segText.Where(ch => ch == ' ')) spaces++;
             var wsEm = spaces > 0 ? Math.Round(resid / (spaces * sg.fs), 4) : 0;
             var lsNum = fg.styleReg!.LetterSpacing(lsEm);
             // A ten-thousandth-scale residue is letter-spacing
@@ -197,7 +223,7 @@ public sealed partial class PdfToHtmlConverter
             // A bold/italic face carries its weight inline: the emitted
             // font class names the FAMILY only, so a viewer that falls
             // back to a system face would otherwise render the run regular.
-            var weightCss = StlWeightStyleCss(fg.ct.groupFauxBold, fg.ct.groupDeclStyle);
+            var weightCss = StlWeightStyleCss(fg.ct.groupFauxBold, fg.ct.groupDeclStyle) + BidiOverrideCss(segText);
             var wsCss = Math.Abs(wsEm) >= 0.001
                 ? $"word-spacing:{wsEm.ToString("0.####", CultureInfo.InvariantCulture)}em;"
                 : "";
@@ -209,11 +235,12 @@ public sealed partial class PdfToHtmlConverter
             // (see the solver): a row of per-word hotspots gives each
             // word its own href.
             var segLink = sg.popupItems is null && !fg.ct.groupIsType3
-                ? FindLinkTarget(fg.linkTargets, segX, segGlyphEnd, fg.ct.groupY)
+                ? FindLinkTarget(fg.linkTargets, segX, segGlyphEnd, fg.ct.groupY, ownSurface: fg.zCounter is null)
                 : null;
-            var segOpen = segLink is null
-                ? null
-                : $"<a href=\"{EscapeHtml(segLink.Uri)}\"" +
+            string? segOpen;
+            if (segLink is null) segOpen = null;
+            else
+                segOpen = $"<a href=\"{EscapeHtml(segLink.Uri)}\"" +
                     (segLink.Uri.StartsWith('#') ? ">" : " target=\"_blank\">");
             if (segOpen is not null)
             {
@@ -221,7 +248,7 @@ public sealed partial class PdfToHtmlConverter
                 segLink!.Wrapped = true;
             }
             fg.sb.Append($"<span class=\"{fg.classNamer.Attr(sg.fontNum, sg.lhNum, lsNum)}\"{wsAttr}>");
-            var stlSeg = EscapeHtml(segText);
+            var stlSeg = EscapeHtml(SeparateStandInMarks(segText, fg.ct.IsMintedStandIn));
             if (fg.ct.groupRawRise > RiseThreshold) stlSeg = $"<sup>{stlSeg}</sup>";
             else if (fg.ct.groupRawRise < -RiseThreshold) stlSeg = $"<sub>{stlSeg}</sub>";
             fg.sb.Append(stlSeg);
@@ -235,7 +262,7 @@ public sealed partial class PdfToHtmlConverter
     }
 
     /// <summary></summary>
-    private static void MergeFaceGaps(GroupFlushState fg, StyledGroupState sg, FaceGroupState ef)
+    private static void MergeFaceGaps(StyledGroupState sg, FaceGroupState ef)
     {
         for (var si = 0; si + 1 < ef.emit.Count; si++)
         {
@@ -258,7 +285,9 @@ public sealed partial class PdfToHtmlConverter
                 // and re-examine the merged span's new right boundary.
                 ef.emit[si] = (cur.text + headText, cur.startX, nxt.glyphEnd);
                 ef.emit.RemoveAt(si + 1);
+#pragma warning disable S127 // two segments just merged - the scan revisits the merged one
                 si--;
+#pragma warning restore S127
             }
             else
             {

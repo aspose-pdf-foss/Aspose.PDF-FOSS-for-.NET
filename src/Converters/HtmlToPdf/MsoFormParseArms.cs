@@ -38,13 +38,13 @@ internal partial class HtmlToPdfConverter
         FlushText(mp);
         if (tok.Attributes is { } sa && sa.TryGetValue("style", out var sst))
         {
-            var fm = Regex.Match(sst, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+            var fm = SafeRegex.Match(sst, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
             if (fm.Success) mp.fs = DtpNum(fm.Groups[1].Value);
-            else if (Regex.IsMatch(sst, @"font-size\s*:\s*large", RegexOptions.IgnoreCase))
+            else if (SafeRegex.IsMatch(sst, @"font-size\s*:\s*large", RegexOptions.IgnoreCase))
                 mp.fs = 13.5;   // `large` at the Word base (measured header)
-            if (Regex.IsMatch(sst, @"Arial", RegexOptions.IgnoreCase)) mp.face = "Arial";
-            if (Regex.IsMatch(sst, @"color\s*:\s*white", RegexOptions.IgnoreCase)) mp.white = true;
-            if (Regex.IsMatch(sst, @"color\s*:\s*teal", RegexOptions.IgnoreCase)) mp.teal = true;
+            if (SafeRegex.IsMatch(sst, @"Arial", RegexOptions.IgnoreCase)) mp.face = "Arial";
+            if (SafeRegex.IsMatch(sst, @"color\s*:\s*white", RegexOptions.IgnoreCase)) mp.white = true;
+            if (SafeRegex.IsMatch(sst, @"color\s*:\s*teal", RegexOptions.IgnoreCase)) mp.teal = true;
         }
     }
 
@@ -57,7 +57,7 @@ internal partial class HtmlToPdfConverter
             && ((pa.TryGetValue("align", out var al)
                  && al.Trim().Equals("center", StringComparison.OrdinalIgnoreCase))
                 || (pa.TryGetValue("style", out var pst)
-                    && Regex.IsMatch(pst, @"text-align\s*:\s*center", RegexOptions.IgnoreCase))))
+                    && SafeRegex.IsMatch(pst, @"text-align\s*:\s*center", RegexOptions.IgnoreCase))))
             mp.center = true;
     }
 
@@ -73,19 +73,19 @@ internal partial class HtmlToPdfConverter
         if (tok.Attributes is { } ca)
         {
             if (ca.TryGetValue("colspan", out var cs)
-                && int.TryParse(cs.Trim(), out var csn) && csn > 1)
+                && int.TryParse(cs.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var csn) && csn > 1)
                 mp.cell.ColSpan = csn;
             if (ca.TryGetValue("style", out var st))
             {
-                var wm = Regex.Match(st, @"width\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+                var wm = SafeRegex.Match(st, @"width\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
                 if (wm.Success) mp.cell.StyleWPt = DtpNum(wm.Groups[1].Value);
-                if (Regex.IsMatch(st, @"background\s*:\s*teal", RegexOptions.IgnoreCase))
+                if (SafeRegex.IsMatch(st, @"background\s*:\s*teal", RegexOptions.IgnoreCase))
                     mp.cell.BgTeal = true;
                 // border model: `border:none` clears all; `border:solid`
                 // sets all; per-side declarations override afterwards.
-                if (Regex.IsMatch(st, @"(?<!-)border\s*:\s*none", RegexOptions.IgnoreCase))
+                if (SafeRegex.IsMatch(st, @"(?<!-)border\s*:\s*none", RegexOptions.IgnoreCase))
                     mp.cell.BTop = mp.cell.BLeft = mp.cell.BRight = mp.cell.BBottom = false;
-                else if (Regex.IsMatch(st, @"(?<!-)border\s*:\s*solid", RegexOptions.IgnoreCase))
+                else if (SafeRegex.IsMatch(st, @"(?<!-)border\s*:\s*solid", RegexOptions.IgnoreCase))
                     mp.cell.BTop = mp.cell.BLeft = mp.cell.BRight = mp.cell.BBottom = true;
                 foreach (var (side, setter) in new (string, Action<bool>)[]
                 {
@@ -93,11 +93,11 @@ internal partial class HtmlToPdfConverter
                     ("right", v => mp.cell.BRight = v), ("bottom", v => mp.cell.BBottom = v),
                 })
                 {
-                    var bm = Regex.Match(st, @"border-" + side + @"\s*:\s*(none|solid)",
+                    var bm = SafeRegex.Match(st, @"border-" + side + @"\s*:\s*(none|solid)",
                         RegexOptions.IgnoreCase);
                     if (bm.Success) setter(bm.Groups[1].Value.Equals("solid",
                         StringComparison.OrdinalIgnoreCase));
-                    var bs = Regex.Match(st, @"border-" + side + @"-style\s*:\s*(none|solid)",
+                    var bs = SafeRegex.Match(st, @"border-" + side + @"-style\s*:\s*(none|solid)",
                         RegexOptions.IgnoreCase);
                     if (bs.Success) setter(bs.Groups[1].Value.Equals("solid",
                         StringComparison.OrdinalIgnoreCase));
@@ -113,9 +113,9 @@ internal partial class HtmlToPdfConverter
         mp.row = new MsoRow();
         if (tok.Attributes is { } tra && tra.TryGetValue("style", out var trst))
         {
-            var hm = Regex.Match(trst, @"height\s*:\s*([\d.]+)\s*in", RegexOptions.IgnoreCase);
+            var hm = SafeRegex.Match(trst, @"height\s*:\s*([\d.]+)\s*in", RegexOptions.IgnoreCase);
             if (hm.Success) mp.row.StyleHPt = DtpNum(hm.Groups[1].Value) * 72.0;
-            var hp = Regex.Match(trst, @"height\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+            var hp = SafeRegex.Match(trst, @"height\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
             if (hp.Success) mp.row.StyleHPt = DtpNum(hp.Groups[1].Value);
         }
     }

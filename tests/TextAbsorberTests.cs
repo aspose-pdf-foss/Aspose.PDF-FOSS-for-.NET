@@ -21,6 +21,20 @@ public class TextAbsorberTests
     }
 
     [Fact]
+    public void Visit_RunUnderAFontKeyThePageCarriesNowhere_YieldsNoText()
+    {
+        // The page's resources hold /F1 only: the second run's bytes address the glyphs of a
+        // font no one has, so they are not read as characters.
+        var content = Encoding.ASCII.GetBytes("BT /F1 12 Tf (Shown) Tj ET BT /F9 9 Tf (stamp.pdf) Tj ET");
+        var data = PdfBuilder.BuildWithTextContent(content);
+        using var doc = Document.Open(data);
+        var absorber = new TextAbsorber();
+        absorber.Visit(doc.Pages[1]);
+        Assert.Contains("Shown", absorber.Text);
+        Assert.DoesNotContain("stamp.pdf", absorber.Text);
+    }
+
+    [Fact]
     public void Visit_Document_ExtractsFromAllPages()
     {
         var data = PdfBuilder.BuildMinimal();

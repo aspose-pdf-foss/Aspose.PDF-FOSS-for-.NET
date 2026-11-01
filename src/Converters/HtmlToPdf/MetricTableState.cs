@@ -34,8 +34,8 @@ private sealed class MetricTableState
     public Color frameColor = Color.Black;
     // width: 100% from the sheet's table rule — the grid fills the content box.
     public bool tableFills;
-    // Parse the table structure. Geometry attributes sit on the <table> tag;
-    // a class rule's MARGIN-LEFT indents the whole table box.
+    // Parse the table structure. Geometry attributes sit on the <table> tag; a
+    // class rule's MARGIN-LEFT indents the whole table box.
     public double s;
     public double p;
     public double indent;
@@ -131,7 +131,6 @@ private sealed class MetricTableState
     public double[] colW = null!;
     public double availW;
     public double tableX;
-    public double hheaSum;
     public System.Globalization.CultureInfo invc = null!;
     public List<List<Aspose.Pdf.Converters.HtmlToPdfConverter.MetricCell>> rowsIn = null!;
     public int[] order = null!;

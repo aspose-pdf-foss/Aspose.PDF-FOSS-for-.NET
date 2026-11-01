@@ -85,24 +85,28 @@ public partial class Table
             builder.Stroke();
             if (!string.IsNullOrEmpty(bval))
             {
-                var vFont = fontPage is not null
-                    ? RegisterFont(fontPage, bmono ? "Courier" : "Helvetica")
-                    : fontName;
+                string vFont;
+                if (fontPage is not null) vFont = RegisterFont(fontPage, bmono ? "Courier" : "Helvetica");
+                else vFont = fontName;
                 var fit = bval;
                 // dw values measure in the real UI sans with the
                 // tight 2 pt clip inset ('creatio' stays
                 // visible in the 177px precis box).
                 while (fit.Length > 1
-                       && (bmono ? fit.Length * 0.6 * DwValuePt
-                           : DwFormCells ? MeasureHelvetica(fit, DwValuePt)
-                           : MeasureWidth(fit, DwValuePt))
+                       && ((bmono, DwFormCells) switch
+                       {
+                           (true, _) => fit.Length * 0.6 * DwValuePt,
+                           (_, true) => MeasureHelvetica(fit, DwValuePt),
+                           _ => MeasureWidth(fit, DwValuePt),
+                       })
                            > bw - (DwFormCells && !bmono ? 2 : 4))
                     fit = fit[..^1];
-                var vBase = bmono
-                    ? boxBottom + bh - DwValuePt
+                double vBase;
+                if (bmono)
+                    vBase = boxBottom + bh - DwValuePt
                         + (DwFormCells
-                            ? Converters.HtmlToPdfConverter.DwMonoValueRaisePt : -1.5)
-                    : boxBottom + (bh - DwValuePt) / 2 + 1.5;
+                            ? Converters.HtmlToPdfConverter.DwMonoValueRaisePt : -1.5);
+                else vBase = boxBottom + (bh - DwValuePt) / 2 + 1.5;
                 builder.BeginText();
                 builder.SetFont(vFont, DwValuePt);
                 builder.SetFillColor(0, 0, 0);

@@ -37,6 +37,21 @@ public sealed partial class PdfFileEditor
     private static readonly HashSet<string> SkipRemapKeys =
         ["Parent", "StructParent", "StructParents"];
 
+    // The shift that says an object's parent-tree keys are not copied: nothing in the output
+    // would answer them.
+    private const int DropStructParents = -1;
+
+    /// <summary>A page's /StructParents and the /StructParent of an annotation or XObject are
+    /// keys into the parent tree of their input. When that tree is merged into the output
+    /// they are kept, moved by the same shift the tree's own keys take.</summary>
+    private static void KeepStructParentKey(string key, PdfDictionary source, PdfDictionary clone,
+        PdfReader reader, int shift)
+    {
+        if (shift == DropStructParents || key == "Parent") return;
+        if (reader.Resolve(source.Get(key)) is PdfInteger number)
+            clone.Set(key, new PdfInteger(number.Value + shift));
+    }
+
     /// <summary>
     /// Remap a source PdfObject into the output stream.
     /// Indirect references are assigned new output object numbers via
@@ -88,8 +103,11 @@ public sealed partial class PdfFileEditor
             kids.Add(ExtractWidget(second));
     }
 
+    /// <param name="pageNumbers">The source pages the caller writes itself: a reference to one of them
+    /// is given the page's output number instead of a copy of the page.</param>
     private static PdfObject RemapObject(PdfObject obj, PdfReader reader,
-        Dictionary<int, int> objRemap, PdfWriter writer, int depth = 0)
+        Dictionary<int, int> objRemap, PdfWriter writer, int depth = 0,
+        int structParentShift = DropStructParents, HashSet<int>? pageNumbers = null)
     {
         if (depth > 200) return obj; // guard against StackOverflow on deeply nested/circular structures
         if (obj is PdfIndirectRef indRef)
@@ -103,13 +121,16 @@ public sealed partial class PdfFileEditor
             // allocations that PdfWriter.WriteDictionary makes internally.
             var outputNum = writer.AllocateObjectNumber();
             objRemap[indRef.ObjectNumber] = outputNum;
+            // A page (a link's destination, an annotation's /P) is the caller's to write.
+            if (pageNumbers is not null && pageNumbers.Contains(indRef.ObjectNumber))
+                return new PdfIndirectRef(outputNum, 0);
 
             var resolved = reader.Resolve(obj);
             if (resolved is null)
                 return new PdfIndirectRef(outputNum, 0); // unresolvable — placeholder
 
             // Recursively remap the resolved object and write it.
-            var remapped = RemapObject(resolved, reader, objRemap, writer, depth + 1);
+            var remapped = RemapObject(resolved, reader, objRemap, writer, depth + 1, structParentShift, pageNumbers);
             writer.WriteIndirectObject(outputNum, remapped);
 
             return new PdfIndirectRef(outputNum, 0);
@@ -122,10 +143,15 @@ public sealed partial class PdfFileEditor
                 var clone = new PdfDictionary();
                 foreach (var key in dict.Keys)
                 {
-                    if (SkipRemapKeys.Contains(key)) continue;
+                    if (SkipRemapKeys.Contains(key))
+                    {
+                        KeepStructParentKey(key, dict, clone, reader, structParentShift);
+                        continue;
+                    }
+                    if (Forms.SignatureField.IsSignatureValue(dict, key)) continue;
                     var val = dict.Get(key);
                     if (val is not null)
-                        clone.Set(key, RemapObject(val, reader, objRemap, writer, depth + 1));
+                        clone.Set(key, RemapObject(val, reader, objRemap, writer, depth + 1, structParentShift, pageNumbers));
                 }
                 return clone;
             }
@@ -134,7 +160,7 @@ public sealed partial class PdfFileEditor
             {
                 var clonedArr = new PdfArray();
                 foreach (var item in arr)
-                    clonedArr.Add(RemapObject(item, reader, objRemap, writer, depth + 1));
+                    clonedArr.Add(RemapObject(item, reader, objRemap, writer, depth + 1, structParentShift, pageNumbers));
                 return clonedArr;
             }
 
@@ -143,10 +169,14 @@ public sealed partial class PdfFileEditor
                 var clonedDict = new PdfDictionary();
                 foreach (var key in stream.Dict.Keys)
                 {
-                    if (SkipRemapKeys.Contains(key)) continue;
+                    if (SkipRemapKeys.Contains(key))
+                    {
+                        KeepStructParentKey(key, stream.Dict, clonedDict, reader, structParentShift);
+                        continue;
+                    }
                     var val = stream.Dict.Get(key);
                     if (val is not null)
-                        clonedDict.Set(key, RemapObject(val, reader, objRemap, writer, depth + 1));
+                        clonedDict.Set(key, RemapObject(val, reader, objRemap, writer, depth + 1, structParentShift, pageNumbers));
                 }
                 var dataCopy = new byte[stream.RawData.Length];
                 Array.Copy(stream.RawData, dataCopy, stream.RawData.Length);
@@ -219,7 +249,7 @@ public sealed partial class PdfFileEditor
                 };
                 if (styleStr is not null) dict.Set("S", new PdfName(styleStr));
                 if (!string.IsNullOrEmpty(prefix))
-                    dict.Set("P", new PdfString(Compat.Latin1.GetBytes(prefix!)));
+                    dict.Set("P", Aspose.Pdf.Forms.Field.EncodePdfTextString(prefix));
                 if (st != 1) dict.Set("St", new PdfInteger(st));
                 nums.Add(dict);
             }
@@ -272,8 +302,8 @@ public sealed partial class PdfFileEditor
 
             foreach (var (kidDict, kidSrcNum) in TopStructElements(root, reader))
             {
-                // The hoisted child is cloned by hand so its /P can point at the wrapper;
-                // pre-seeding its source number makes every deeper /P reference to it
+                // The hoisted child is cloned by hand so its /P can point at the wrapper; pre-seeding
+                // its source number makes every deeper /P reference to it
                 // resolve to this same clone instead of a duplicate.
                 var outNum = writer.AllocateObjectNumber();
                 if (kidSrcNum >= 0) remap[kidSrcNum] = outNum;
@@ -378,7 +408,7 @@ public sealed partial class PdfFileEditor
             if (key is "Pg" or "P" or "K") continue;
             var v = src.Get(key);
             if (v is PdfName or PdfString or PdfInteger or PdfReal or PdfBoolean)
-                clone.Set(key, v!);
+                clone.Set(key, v);
         }
         var children = new PdfArray();
         foreach (var c in StructKids(src, reader))
@@ -425,7 +455,7 @@ public sealed partial class PdfFileEditor
                 // valid in the original document. After concatenation, shift them
                 // by the total page count of preceding inputs so the bookmark
                 // still points to the intended page.
-                ShiftDestinationPages(cloned, offset, reader);
+                ShiftDestinationPages(cloned, offset);
 
                 var itemObjNum = writer.AllocateObjectNumber();
                 items.Add((itemObjNum, cloned));
@@ -469,7 +499,7 @@ public sealed partial class PdfFileEditor
     /// element is a PdfInteger (0-based page index). Indirect refs to pages
     /// are left alone — they were already remapped by RemapObject.
     /// </summary>
-    private static void ShiftDestinationPages(PdfDictionary item, int offset, PdfReader reader)
+    private static void ShiftDestinationPages(PdfDictionary item, int offset)
     {
         if (offset == 0) return;
 
@@ -502,10 +532,6 @@ public sealed partial class PdfFileEditor
     private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result,
         List<int>? sourceObjNums = null)
         => CollectPages(node, reader, result, null, sourceObjNums, -1);
-
-    private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result,
-        Dictionary<string, PdfObject>? inherited)
-        => CollectPages(node, reader, result, inherited, null, -1);
 
     private static void CollectPages(PdfDictionary node, PdfReader reader, List<PdfDictionary> result,
         Dictionary<string, PdfObject>? inherited, List<int>? sourceObjNums, int selfObjNum)
@@ -557,8 +583,8 @@ public sealed partial class PdfFileEditor
     {
         if (inherited is null) return page;
         var missing = new List<string>();
-        foreach (var key in InheritablePageKeys)
-            if (!page.ContainsKey(key) && inherited.ContainsKey(key)) missing.Add(key);
+        foreach (var key in InheritablePageKeys.Where(key => !page.ContainsKey(key) && inherited.ContainsKey(key)))
+            missing.Add(key);
         if (missing.Count == 0) return page;
 
         var copy = new PdfDictionary();

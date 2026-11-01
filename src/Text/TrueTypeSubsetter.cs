@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 /// for a specific set of character codes. Produces a valid TrueType file
 /// with renumbered glyph IDs.
 /// </summary>
-internal sealed class TrueTypeSubsetter
+internal sealed partial class TrueTypeSubsetter
 {
     private readonly byte[] _data;
     private readonly TrueTypeParser _parser;
@@ -74,8 +74,8 @@ internal sealed class TrueTypeSubsetter
                 neededGlyphs.Add(gid);
         }
         if (_symbolicCodes is not null)
-            foreach (var gid in _symbolicCodes.Values)
-                if (gid > 0 && gid < _numGlyphs) neededGlyphs.Add(gid);
+            foreach (var gid in _symbolicCodes.Values.Where(gid => gid > 0 && gid < _numGlyphs))
+                neededGlyphs.Add(gid);
 
         // 2. Resolve composite glyph dependencies
         var locaOffsets = ParseLoca();
@@ -112,7 +112,7 @@ internal sealed class TrueTypeSubsetter
 
         // Build new cmap (identity mapping for subset — not needed for PDF Type 2 CID fonts,
         // but included for font validity)
-        var newCmap = BuildCmap(neededGlyphs, glyphMap);
+        var newCmap = BuildCmap(glyphMap);
 
         // Copy remaining required tables
         var tables = new Dictionary<string, byte[]>();
@@ -127,7 +127,8 @@ internal sealed class TrueTypeSubsetter
         // Copy optional tables that don't reference glyph IDs. Hinting tables
         // (cvt/fpgm/prep, ~7 KB per MS face) are dropped: neither the FOSS
         // renderer nor the common PDF rasterizers execute TrueType hinting, and
-        // an embedded subset shipping them bloats every converted document.
+        // an embedded subset shipping them bloats every converted document. The
+        // glyphs and maxp drop their hints with them (see TrueTypeSubsetterHints).
         foreach (var tag in new[] { "OS/2" })
         {
             if (_tables.TryGetValue(tag, out var t))
@@ -212,9 +213,8 @@ internal sealed class TrueTypeSubsetter
     public byte[] SubsetSparse(IEnumerable<int> glyphIds, bool keepCmap)
     {
         var needed = new SortedSet<int> { 0 };
-        foreach (var gid in glyphIds)
-            if (gid > 0 && gid < _numGlyphs)
-                needed.Add(gid);
+        foreach (var gid in glyphIds.Where(gid => gid > 0 && gid < _numGlyphs))
+            needed.Add(gid);
 
         var locaOffsets = ParseLoca();
         if (locaOffsets is null || !_tables.TryGetValue("glyf", out var glyfTable))
@@ -235,7 +235,10 @@ internal sealed class TrueTypeSubsetter
             var start = glyfTable.offset + locaOffsets[gid];
             var len = locaOffsets[gid + 1] - locaOffsets[gid];
             if (len <= 0 || start + len > _data.Length) continue;
-            glyfMs.Write(_data, start, len);
+            var glyph = new byte[len];
+            Array.Copy(_data, start, glyph, 0, len);
+            glyph = WithoutInstructions(glyph);
+            glyfMs.Write(glyph, 0, glyph.Length);
             if ((glyfMs.Position & 1) == 1) glyfMs.WriteByte(0); // 2-byte align
         }
         for (var gid = keptGlyphCount; gid < newLoca.Length; gid++)
@@ -258,7 +261,8 @@ internal sealed class TrueTypeSubsetter
         };
         // NOTE: no cmap — a CID-keyed font is addressed via CIDs (+ CIDToGIDMap),
         // never through the program's cmap, and a CJK face's cmap alone runs to
-        // ~100 KB. No hinting either (nothing in the pipeline executes it).
+        // ~100 KB. No hinting either (nothing in the pipeline executes it): the glyphs
+        // lose their instructions with the hint tables (see TrueTypeSubsetterHints).
         // hmtx/maxp/hhea are rebuilt at the truncated glyph count with one long
         // entry per glyph (advance + the ORIGINAL lsb — see OriginalLsb).
         var hmtx = new byte[keptGlyphCount * 4];
@@ -418,6 +422,7 @@ internal sealed class TrueTypeSubsetter
                 var numContours = (short)((glyphData[0] << 8) | glyphData[1]);
                 if (numContours < 0)
                     RewriteCompositeGlyphIds(glyphData, glyphMap);
+                glyphData = WithoutInstructions(glyphData);
 
                 glyfMs.Write(glyphData);
 
@@ -504,6 +509,7 @@ internal sealed class TrueTypeSubsetter
         if (!_tables.TryGetValue("maxp", out var t)) return [];
         var result = CopyBytes(t.offset, t.length);
         WriteUInt16(result, 4, (ushort)numGlyphs);
+        ClearHintLimits(result);
         return result;
     }
 
@@ -526,7 +532,7 @@ internal sealed class TrueTypeSubsetter
         return result;
     }
 
-    private byte[] BuildCmap(SortedSet<int> glyphs, Dictionary<int, int> glyphMap)
+    private byte[] BuildCmap(Dictionary<int, int> glyphMap)
     {
         // Build a minimal cmap with a format 4 subtable
         // Map original char codes to new glyph IDs
@@ -554,7 +560,9 @@ internal sealed class TrueTypeSubsetter
                    mappings[i + 1].charCode == end + 1 &&
                    mappings[i + 1].newGid == startGid + (end - start) + 1)
             {
+#pragma warning disable S127 // a run of consecutive mappings merges into one range - the scan steps over the merged entries
                 end = mappings[++i].charCode;
+#pragma warning restore S127
             }
 
             var delta = (startGid - start) & 0xFFFF;
@@ -630,7 +638,6 @@ internal sealed class TrueTypeSubsetter
 
         // Calculate total size
         var headerSize = 12 + numTables * 16;
-        var dataOffset = headerSize;
 
         // Pad each table to 4-byte boundary
         var paddedSizes = new Dictionary<string, int>();

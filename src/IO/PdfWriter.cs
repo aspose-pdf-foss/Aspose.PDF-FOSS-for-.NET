@@ -53,10 +53,6 @@ internal sealed partial class PdfWriter
     /// </summary>
     public bool UseXRefStream { get; set; }
 
-    /// <summary>Re-deflate plain FlateDecode pass-through streams at the strongest
-    /// level, keeping the smaller of old/new bytes. Enabled for PDF/A saves.</summary>
-    public bool RecompressFlateStreams { get; set; }
-
     /// <summary>
     /// When true, packs eligible small non-stream objects into compressed object streams (PDF 1.6+).
     /// Implies UseXRefStream = true (object streams require type-2 xref entries).
@@ -262,7 +258,10 @@ internal sealed partial class PdfWriter
                 WriteStream(s);
                 break;
             case PdfIndirectRef r:
-                WriteRaw($"{r.ObjectNumber} {r.Generation} R");
+                // A whole rewrite writes every object as generation 0 into a fresh
+                // cross-reference table, so a reference names generation 0 as well,
+                // whatever generation its target had in the file it was read from.
+                WriteRaw($"{r.ObjectNumber} 0 R");
                 break;
         }
         }
@@ -281,7 +280,7 @@ internal sealed partial class PdfWriter
         if (ShouldEncrypt && !_encryptor!.EmbeddedFilesOnly)
         {
             // Encrypt the string value and always write as hex (encrypted bytes may contain parens)
-            var encrypted = _encryptor!.EncryptString(str.Value, _currentObjectNumber, 0);
+            var encrypted = _encryptor.EncryptString(str.Value, _currentObjectNumber, 0);
             WriteRaw("<");
             WriteRaw(Compat.ToHexString(encrypted));
             WriteRaw(">");
@@ -296,42 +295,56 @@ internal sealed partial class PdfWriter
         }
         else
         {
-            WriteRaw("(");
-            foreach (var b in str.Value)
-            {
-                switch (b)
-                {
-                    case (byte)'(' or (byte)')' or (byte)'\\':
-                        _output.WriteByte((byte)'\\');
-                        _output.WriteByte(b);
-                        break;
-                    case (byte)'\r':
-                        _output.Write("\\r"u8);
-                        break;
-                    case (byte)'\n':
-                        _output.Write("\\n"u8);
-                        break;
-                    default:
-                        _output.WriteByte(b);
-                        break;
-                }
-            }
-            WriteRaw(")");
+            WriteLiteralString(_output, str.Value);
         }
     }
 
-    private void WriteName(PdfName name)
+    /// <summary>A literal string as every writer of the library serialises it: ( ) and \
+    /// escaped, and CR and LF written as \r and \n - a reader turns a raw end-of-line inside a
+    /// string into a single line feed, so a UTF-16 0x0D byte would come back as 0x0A.</summary>
+    internal static void WriteLiteralString(Stream output, byte[] value)
     {
-        WriteRaw("/");
-        foreach (var c in name.Value)
+        output.WriteByte((byte)'(');
+        foreach (var b in value)
+        {
+            switch (b)
+            {
+                case (byte)'(' or (byte)')' or (byte)'\\':
+                    output.WriteByte((byte)'\\');
+                    output.WriteByte(b);
+                    break;
+                case (byte)'\r':
+                    output.Write("\\r"u8);
+                    break;
+                case (byte)'\n':
+                    output.Write("\\n"u8);
+                    break;
+                default:
+                    output.WriteByte(b);
+                    break;
+            }
+        }
+        output.WriteByte((byte)')');
+    }
+
+    private void WriteName(PdfName name) => WriteNameToken(_output, name.Value);
+
+    /// <summary>A name as every writer of the library serialises it: '#', white space,
+    /// delimiters and characters outside printable ASCII written as #XX, so a font name with a
+    /// space stays one name.</summary>
+    internal static void WriteNameToken(Stream output, string name)
+    {
+        output.WriteByte((byte)'/');
+        foreach (var c in name)
         {
             if (c is '#' || c <= ' ' || c > '~' || IsDelimiter((byte)c))
             {
-                WriteRaw($"#{(int)c:X2}");
+                var escape = Encoding.ASCII.GetBytes($"#{(int)c:X2}");
+                output.Write(escape, 0, escape.Length);
             }
             else
             {
-                _output.WriteByte((byte)c);
+                output.WriteByte((byte)c);
             }
         }
     }
@@ -419,9 +432,14 @@ internal sealed partial class PdfWriter
                 WriteRaw(" "); // indirect ref begins with a digit, so a separator is required
                 WriteObject(new PdfIndirectRef(valDictNum, 0));
             }
-            else if (key == AnnotsKey && val is PdfArray annots)
+            else if (val is PdfArray objects && (key == AnnotsKey || key == DescendantFontsKey))
             {
-                WriteArray(annots, promoteDicts: true);
+                WriteArray(objects, promoteDicts: true);
+            }
+            else if (val is PdfDictionary indirectByRule && (key == FontDescriptorKey || key == InReplyToKey || key == PopupKey))
+            {
+                WriteRaw(" ");
+                WriteObject(new PdfIndirectRef(PromoteDict(indirectByRule), 0));
             }
             else
             {
@@ -501,7 +519,6 @@ internal sealed partial class PdfWriter
             objNum = PromoteDict(dict);
             return objNum;
         }
-        objNum = 0;
         return null;
     }
 
@@ -516,15 +533,28 @@ internal sealed partial class PdfWriter
         return objNum;
     }
 
+    /// <summary>Names the indirect object a dictionary is written as: held as a value elsewhere, it is then
+    /// written as a reference to that object instead of a copy of it.</summary>
+    internal void WrittenAs(PdfDictionary dict, int objNum) => _promotedDicts[dict] = objNum;
+
     /// <summary>The page key whose array items are always written as indirect objects.</summary>
     private const string AnnotsKey = "Annots";
+
+    /// <summary>The font keys whose values are indirect objects by the format's own rule (PDF 32000-1 tables 111,
+    /// 117 and 121): a font built in memory holds its descendant font and its descriptor as nested dictionaries.</summary>
+    private const string DescendantFontsKey = "DescendantFonts";
+    private const string FontDescriptorKey = "FontDescriptor";
+
+    /// <summary>The annotation keys whose values are indirect references by the format's rule (PDF 32000-1 table 170):
+    /// a reply names the annotation it answers, a markup annotation its popup, held in memory as dictionaries.</summary>
+    private const string InReplyToKey = "IRT";
+    private const string PopupKey = "Popup";
 
     private void WriteStream(PdfStream stream)
     {
         // Check if the stream already has a filter that shouldn't be re-compressed
         // (JPEG, JPEG2000, JBIG2, or already FlateDecode-compressed)
-        var existingFilter = GetExistingFilter(stream.Dict);
-        var isPassThrough = existingFilter is not null;
+        var isPassThrough = HasFilter(stream.Dict);
 
         byte[] data;
         var dict = CloneDictionary(stream.Dict);
@@ -538,26 +568,9 @@ internal sealed partial class PdfWriter
         }
         else if (isPassThrough)
         {
-            // Pass through: keep the raw data and original filter as-is
+            // Pass through: keep the raw data and original filter as-is (the dict already
+            // carries the filter from CloneDictionary).
             data = stream.RawData;
-            // dict already has the correct Filter from CloneDictionary
-
-            // PDF/A saves re-compress plain Flate streams at the strongest level
-            // (the conversion save does this; without
-            // it, outputs carried over from weakly-deflated producers come out
-            // needlessly oversized). Streams with DecodeParms (predictors) are
-            // left untouched — recompressing would need the parms re-applied.
-            if (RecompressFlateStreams && existingFilter == "FlateDecode"
-                && dict.Get("DecodeParms") is null && dict.Get("DP") is null)
-            {
-                try
-                {
-                    var raw = Filters.FlateDecodeFilter.Decode(stream.RawData, null);
-                    var recompressed = Compress(raw);
-                    if (recompressed.Length < data.Length) data = recompressed;
-                }
-                catch { /* keep the original bytes on any decode failure */ }
-            }
         }
         else
         {
@@ -574,7 +587,7 @@ internal sealed partial class PdfWriter
         // Encrypt after compression but before writing (embedded files alone when only they are)
         if (ShouldEncrypt && (!_encryptor!.EmbeddedFilesOnly || dict.GetName("Type") == "EmbeddedFile"))
         {
-            data = _encryptor!.EncryptStream(data, _currentObjectNumber, 0);
+            data = _encryptor.EncryptStream(data, _currentObjectNumber, 0);
         }
 
         dict.Set("Length", new PdfInteger(data.Length));
@@ -585,16 +598,15 @@ internal sealed partial class PdfWriter
         WriteRaw("\nendstream");
     }
 
-    private static string? GetExistingFilter(PdfDictionary dict)
+    private static bool HasFilter(PdfDictionary dict) => dict.Get("Filter") switch
     {
-        var f = dict.Get("Filter");
-        return f switch
-        {
-            PdfName n => n.Value,
-            PdfArray a when a.Count > 0 && a[0] is PdfName n2 => n2.Value,
-            _ => null,
-        };
-    }
+        PdfName => true,
+        PdfArray a => a.Count > 0 && a[0] is PdfName,
+        // A filter stated in an object of its own: what it names is not read here, but the
+        // data is encoded under it, and compressing that again would leave it undecodable.
+        PdfIndirectRef => true,
+        _ => false,
+    };
 
     /// <summary>
     /// Write the cross-reference table and trailer, then %%EOF.
@@ -627,9 +639,9 @@ internal sealed partial class PdfWriter
 
         // Find the range of object numbers
         var maxObjNum = 0;
-        foreach (var num in _offsets.Keys)
+        foreach (var num in _offsets.Keys.Where(num => num > maxObjNum))
         {
-            if (num > maxObjNum) maxObjNum = num;
+            maxObjNum = num;
         }
 
         WriteRaw("xref\n");
@@ -883,7 +895,9 @@ internal sealed partial class PdfWriter
     /// </summary>
     private void WriteBytes(byte[] bytes) => _output.Write(bytes);
 
-    private static byte[] Compress(byte[] data) => Filters.ManagedDeflater.DeflateZlib(data, Filters.DeflateLevel.Best);
+    // Default, not Best: on fonts, images and content streams Best takes 2.2 times as long
+    // for 0.4 percent smaller output, and every saved stream pays it.
+    private static byte[] Compress(byte[] data) => Filters.ManagedDeflater.DeflateZlib(data, Filters.DeflateLevel.Default);
 
     private static PdfDictionary CloneDictionary(PdfDictionary source)
     {

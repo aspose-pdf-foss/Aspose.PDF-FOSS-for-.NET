@@ -134,9 +134,9 @@ internal static partial class HtmlToPdfConverter
         double pageWidth, double pageHeight, double marginLeft, double marginRight,
         double marginTop, double marginBottom)
     {
-        if (!Regex.IsMatch(html, @"class\s*=\s*[""']details_rule_frame", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, @"class\s*=\s*[""']details_group_frame", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, @"class\s*=\s*[""']rule_header", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(html, @"class\s*=\s*[""']details_rule_frame", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, @"class\s*=\s*[""']details_group_frame", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, @"class\s*=\s*[""']rule_header", RegexOptions.IgnoreCase))
             return null;
         var vr = new ValidationReportState();
         vr.pageWidth = pageWidth;
@@ -149,12 +149,12 @@ internal static partial class HtmlToPdfConverter
         vr.faceIt = (Text.SystemFontResolver.Resolve("SegoeUI-Italic")
             ?? Text.SystemFontResolver.Resolve("Segoe UI Italic"))!;
         vr.faceSemi = (Text.SystemFontResolver.Resolve("SegoeUI-Semibold")
-            ?? Text.SystemFontResolver.Resolve("Segoe UI Semibold") ?? vr.faceReg)!;
+            ?? Text.SystemFontResolver.Resolve("Segoe UI Semibold") ?? vr.faceReg);
         if (vr.faceReg is null || vr.faceIt is null || vr.faceSemi is null) return null;
 
         vr.contentH = vr.pageHeight - vr.marginTop - vr.marginBottom;
         if (vr.contentH <= VrBarHeightPt) return null;
-        vr.bodyM = Regex.Match(html, @"<body\b[^>]*>([\s\S]*)</body", RegexOptions.IgnoreCase);
+        vr.bodyM = SafeRegex.Match(html, @"<body\b[^>]*>([\s\S]*)</body", RegexOptions.IgnoreCase);
         vr.src = vr.bodyM.Success ? vr.bodyM.Groups[1].Value : html;
         vr.groups = VrParseGroups(vr.src);
         if (vr.groups.Count < 2) return null;
@@ -225,7 +225,7 @@ internal static partial class HtmlToPdfConverter
         var i = s.IndexOf('>', open);
         if (i < 0) return "";
         var depth = 1;
-        foreach (Match m in Regex.Matches(s[(i + 1)..], @"</?div\b", RegexOptions.IgnoreCase))
+        foreach (Match m in SafeRegex.Matches(s[(i + 1)..], @"</?div\b", RegexOptions.IgnoreCase))
         {
             depth += m.Value[1] == '/' ? -1 : 1;
             if (depth == 0) return s.Substring(i + 1, m.Index);
@@ -234,7 +234,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     private static string VrFlat(string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, "<[^>]+>", " ")), @"\s+", " ").Trim();
+        => SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(frag, "<[^>]+>", " ")), @"\s+", " ").Trim();
 
     private static string VrOpenTag(string cls)
         => @"<div\b[^>]*class\s*=\s*[""'][^""']*\b" + Regex.Escape(cls) + @"\b[^""']*[""'][^>]*>";
@@ -242,7 +242,7 @@ internal static partial class HtmlToPdfConverter
     private static List<string> VrTexts(string s, string cls)
     {
         var outp = new List<string>();
-        foreach (Match m in Regex.Matches(s, VrOpenTag(cls), RegexOptions.IgnoreCase))
+        foreach (Match m in SafeRegex.Matches(s, VrOpenTag(cls), RegexOptions.IgnoreCase))
         {
             var t = VrFlat(VrDivAt(s, m.Index));
             if (t.Length > 0) outp.Add(t);
@@ -253,11 +253,11 @@ internal static partial class HtmlToPdfConverter
     private static List<(string Label, string Value)> VrColumns(string s)
     {
         var outp = new List<(string, string)>();
-        foreach (Match m in Regex.Matches(s, VrOpenTag("width-25"), RegexOptions.IgnoreCase))
+        foreach (Match m in SafeRegex.Matches(s, VrOpenTag("width-25"), RegexOptions.IgnoreCase))
         {
             var inner = VrDivAt(s, m.Index);
-            var sp = Regex.Match(inner, "<span[^>]*>([^<]*)</span", RegexOptions.IgnoreCase);
-            var lb = Regex.Match(inner, "<label[^>]*>([^<]*)</label", RegexOptions.IgnoreCase);
+            var sp = SafeRegex.Match(inner, "<span[^>]*>([^<]*)</span", RegexOptions.IgnoreCase);
+            var lb = SafeRegex.Match(inner, "<label[^>]*>([^<]*)</label", RegexOptions.IgnoreCase);
             outp.Add((VrFlat(sp.Groups[1].Value), VrFlat(lb.Groups[1].Value)));
         }
         return outp;
@@ -276,13 +276,13 @@ internal static partial class HtmlToPdfConverter
     private static List<(string Label, string Value)> VrEnvelopeRows(string s)
     {
         var outp = new List<(string, string)>();
-        var t = Regex.Match(s, @"<table\b[^>]*tbl-envelope[^>]*>([\s\S]*?)</table",
+        var t = SafeRegex.Match(s, @"<table\b[^>]*tbl-envelope[^>]*>([\s\S]*?)</table",
             RegexOptions.IgnoreCase);
         if (!t.Success) return outp;
-        foreach (Match r in Regex.Matches(t.Groups[1].Value, @"<tr\b[^>]*>([\s\S]*?)</tr",
+        foreach (Match r in SafeRegex.Matches(t.Groups[1].Value, @"<tr\b[^>]*>([\s\S]*?)</tr",
                      RegexOptions.IgnoreCase))
         {
-            var tds = Regex.Matches(r.Groups[1].Value, @"<td\b[^>]*>([\s\S]*?)</td",
+            var tds = SafeRegex.Matches(r.Groups[1].Value, @"<td\b[^>]*>([\s\S]*?)</td",
                 RegexOptions.IgnoreCase);
             if (tds.Count >= 2)
                 outp.Add((VrFlat(tds[0].Groups[1].Value), VrFlat(tds[1].Groups[1].Value)));
@@ -293,18 +293,18 @@ internal static partial class HtmlToPdfConverter
     private static List<(string Label, string Path)> VrFileRows(string s)
     {
         var outp = new List<(string, string)>();
-        var f = Regex.Match(s, VrOpenTag("admin_frame"), RegexOptions.IgnoreCase);
+        var f = SafeRegex.Match(s, VrOpenTag("admin_frame"), RegexOptions.IgnoreCase);
         if (!f.Success) return outp;
         var frame = VrDivAt(s, f.Index);
-        foreach (Match r in Regex.Matches(frame, @"<tr\b[^>]*>([\s\S]*?)</tr",
+        foreach (Match r in SafeRegex.Matches(frame, @"<tr\b[^>]*>([\s\S]*?)</tr",
                      RegexOptions.IgnoreCase))
         {
-            var tds = Regex.Matches(r.Groups[1].Value, @"<td\b[^>]*>([\s\S]*?)</td",
+            var tds = SafeRegex.Matches(r.Groups[1].Value, @"<td\b[^>]*>([\s\S]*?)</td",
                 RegexOptions.IgnoreCase);
             if (tds.Count < 2) continue;
             // the link's own href quotes markup, so the cell text is the
             // innermost bold run rather than everything outside the tags
-            var b = Regex.Match(tds[1].Groups[1].Value, "<b><b>([^<]*)</b>",
+            var b = SafeRegex.Match(tds[1].Groups[1].Value, "<b><b>([^<]*)</b>",
                 RegexOptions.IgnoreCase);
             outp.Add((VrFlat(tds[0].Groups[1].Value),
                 b.Success ? VrFlat(b.Groups[1].Value) : VrFlat(tds[1].Groups[1].Value)));
@@ -316,7 +316,7 @@ internal static partial class HtmlToPdfConverter
     /// its region-status class.</summary>
     private static Color VrBubbleColor(string tag)
     {
-        var st = Regex.Match(tag, @"background(?:-color)?\s*:\s*#([0-9a-f]{6})",
+        var st = SafeRegex.Match(tag, @"background(?:-color)?\s*:\s*#([0-9a-f]{6})",
             RegexOptions.IgnoreCase);
         if (st.Success)
             return Color.FromRgbBytes(System.Convert.ToInt32(st.Groups[1].Value[..2], 16),
@@ -338,22 +338,22 @@ internal static partial class HtmlToPdfConverter
     private static List<VrGroup> VrParseGroups(string html)
     {
         var outp = new List<VrGroup>();
-        var list = Regex.Match(html, @"<div\b[^>]*id\s*=\s*[""']detail_list[""'][^>]*>",
+        var list = SafeRegex.Match(html, @"<div\b[^>]*id\s*=\s*[""']detail_list[""'][^>]*>",
             RegexOptions.IgnoreCase);
         if (!list.Success) return outp;
         var s = VrDivAt(html, list.Index);
-        foreach (Match m in Regex.Matches(s, VrOpenTag("details_group_frame"),
+        foreach (Match m in SafeRegex.Matches(s, VrOpenTag("details_group_frame"),
                      RegexOptions.IgnoreCase))
         {
-            if (Regex.IsMatch(m.Value, @"display\s*:\s*none", RegexOptions.IgnoreCase)) continue;
+            if (SafeRegex.IsMatch(m.Value, @"display\s*:\s*none", RegexOptions.IgnoreCase)) continue;
             var inner = VrDivAt(s, m.Index);
             var g = new VrGroup();
-            var name = Regex.Match(inner, VrOpenTag("details_group_name"),
+            var name = SafeRegex.Match(inner, VrOpenTag("details_group_name"),
                 RegexOptions.IgnoreCase);
             if (name.Success) g.Name = VrFlat(VrDivAt(inner, name.Index));
-            var bub = Regex.Match(inner, VrOpenTag("bubble"), RegexOptions.IgnoreCase);
+            var bub = SafeRegex.Match(inner, VrOpenTag("bubble"), RegexOptions.IgnoreCase);
             if (bub.Success) g.Bubble = VrBubbleColor(bub.Value);
-            foreach (Match rm in Regex.Matches(inner, VrOpenTag("details_rule_frame"),
+            foreach (Match rm in SafeRegex.Matches(inner, VrOpenTag("details_rule_frame"),
                          RegexOptions.IgnoreCase))
                 g.Rules.Add(VrParseRule(VrDivAt(inner, rm.Index), rm.Value));
             outp.Add(g);
@@ -364,22 +364,22 @@ internal static partial class HtmlToPdfConverter
     private static VrRule VrParseRule(string inner, string openTag)
     {
         var r = new VrRule();
-        var bub = Regex.Match(inner, VrOpenTag("bubble"), RegexOptions.IgnoreCase);
+        var bub = SafeRegex.Match(inner, VrOpenTag("bubble"), RegexOptions.IgnoreCase);
         r.Bubble = VrBubbleColor(bub.Success ? bub.Value : openTag);
-        var head = Regex.Match(inner, VrOpenTag("rule_header"), RegexOptions.IgnoreCase);
+        var head = SafeRegex.Match(inner, VrOpenTag("rule_header"), RegexOptions.IgnoreCase);
         if (head.Success) r.Title = VrFlat(VrDivAt(inner, head.Index));
-        var help = Regex.Match(inner, VrOpenTag("corrective_action"), RegexOptions.IgnoreCase);
+        var help = SafeRegex.Match(inner, VrOpenTag("corrective_action"), RegexOptions.IgnoreCase);
         if (help.Success) r.Comment = VrFlat(VrDivAt(inner, help.Index));
-        var det = Regex.Match(inner, VrOpenTag("error_details"), RegexOptions.IgnoreCase);
+        var det = SafeRegex.Match(inner, VrOpenTag("error_details"), RegexOptions.IgnoreCase);
         if (!det.Success) return r;
         var ed = VrDivAt(inner, det.Index);
-        var link = Regex.Match(ed, @"<a\b[^>]*>([^<]*)</a>", RegexOptions.IgnoreCase);
+        var link = SafeRegex.Match(ed, @"<a\b[^>]*>([^<]*)</a>", RegexOptions.IgnoreCase);
         if (link.Success) r.Path = VrFlat(link.Groups[1].Value);
-        foreach (Match sl in Regex.Matches(ed, VrOpenTag("single-line"), RegexOptions.IgnoreCase))
+        foreach (Match sl in SafeRegex.Matches(ed, VrOpenTag("single-line"), RegexOptions.IgnoreCase))
         {
             var body = VrDivAt(ed, sl.Index);
             var cut = body.IndexOf('<');
-            var xml = Regex.Match(body, VrOpenTag("error-xml"), RegexOptions.IgnoreCase);
+            var xml = SafeRegex.Match(body, VrOpenTag("error-xml"), RegexOptions.IgnoreCase);
             r.Findings.Add(new VrFinding
             {
                 Text = VrFlat(cut < 0 ? body : body[..cut]),

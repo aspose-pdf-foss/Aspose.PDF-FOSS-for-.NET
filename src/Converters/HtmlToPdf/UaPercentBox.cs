@@ -1,4 +1,5 @@
-﻿using System.Text.RegularExpressions;
+﻿using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
 
@@ -13,13 +14,13 @@ internal static partial class HtmlToPdfConverter
         if (!pb.style.UaBoxes || pb.contentWidthPt <= 0 || tok.Attributes is null
             || !tok.Attributes.TryGetValue("style", out var style) || string.IsNullOrEmpty(style))
             return;
-        if (!Regex.IsMatch(style, @"display\s*:\s*inline-block", RegexOptions.IgnoreCase)) return;
+        if (!SafeRegex.IsMatch(style, @"display\s*:\s*inline-block", RegexOptions.IgnoreCase)) return;
         var pct = StylePct(style, "width");
         if (pct <= 0 || pct >= 100) return;
         var avail = pb.contentWidthPt - UaBodyMarginPt - pb.style.LeftIndent - pb.style.RightInsetPt;
         if (avail <= 0) return;
         pb.style.RightInsetPt += avail * (1 - pct / 100.0);
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_SEAT") == "1")
-            Console.WriteLine(FormattableString.Invariant($"[pctbox] pct={pct} avail={avail:0.##} ri={pb.style.RightInsetPt:0.##}"));
+            Console.WriteLine(Compat.Format(CultureInfo.InvariantCulture, $"[pctbox] pct={pct} avail={avail:0.##} ri={pb.style.RightInsetPt:0.##}"));
     }
 }

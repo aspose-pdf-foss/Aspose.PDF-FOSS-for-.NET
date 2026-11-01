@@ -17,8 +17,8 @@ private sealed class TableDrawState
     public string fontName = null!;
     public double[] colWidths = null!;
     public Content.ContentStreamBuilder builder = null!;
-    // The MEDIA frame's height (see Page.LayoutFrameHeight): a /Rotate page's
-    // table seats against the media edges and paints upright in them.
+    // The layout frame's height (see Page.LayoutFrameHeight): a /Rotate page's
+    // table lays out in the page as shown.
     public double pageHeight;
     // Table origin in PDF coordinates (bottom-left origin)
     public double marginLeft;
@@ -39,13 +39,11 @@ private sealed class TableDrawState
     public double padLeft;
     public double padRight;
     public double padTop;
-    public double padBottom;
     // Draw cell background
     public Color? bgColor;
     // Draw cell text content
     public Aspose.Pdf.Text.TextState? textState;
     public double fontSize;
     public double textX;
-    public double textY;
 }
 }

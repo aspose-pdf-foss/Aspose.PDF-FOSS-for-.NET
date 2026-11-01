@@ -8,9 +8,10 @@ internal static partial class XfaRenderer
 {
     private static void PaintContainerFill(Ctx ctx, XmlElement e, double x, double y, double w, double h)
     {
+        var radius = CornerRadius(FirstChild(e, "border"));
         var fill = FillColor(e);
         if (fill is not null)
-            ctx.Items.Add(new Item { Kind = "fill", X = x, Y = ctx.PageH - (y + h), W = w, H = h, Color = fill });
+            ctx.Items.Add(new Item { Kind = "fill", X = x, Y = ctx.PageH - (y + h), W = w, H = h, Color = fill, Radius = radius });
         // A container border strokes its VISIBLE edges individually (XFA edge order
         // top, right, bottom, left; a single <edge> applies to all four sides).
         // Painting a full box off the first edge alone both drew hidden sides
@@ -28,14 +29,14 @@ internal static partial class XfaRenderer
             if (edges.Count == 1)
             {
                 if (EdgeVis(edges[0]))
-                    ctx.Items.Add(new Item { Kind = "box", X = x, Y = ctx.PageH - (y + h), W = w, H = h });
+                    ctx.Items.Add(new Item { Kind = "box", X = x, Y = ctx.PageH - (y + h), W = w, H = h, Radius = radius, Color = EdgeColor(border) });
             }
             else if (edges.Count > 1)
             {
                 var vis = new bool[4];
                 for (var i = 0; i < 4; i++) vis[i] = i < edges.Count && EdgeVis(edges[i]);
                 if (vis[0] && vis[1] && vis[2] && vis[3])
-                    ctx.Items.Add(new Item { Kind = "box", X = x, Y = ctx.PageH - (y + h), W = w, H = h });
+                    ctx.Items.Add(new Item { Kind = "box", X = x, Y = ctx.PageH - (y + h), W = w, H = h, Radius = radius, Color = EdgeColor(border) });
                 else
                 {
                     const double th = 0.66;
@@ -51,14 +52,15 @@ internal static partial class XfaRenderer
 
     private static void PaintDraw(Ctx ctx, XmlElement e, double x, double y, double w, double h)
     {
+        var drawBorder = FirstChild(e, "border");
+        var radius = CornerRadius(drawBorder);
         var fill = FillColor(e);
         if (fill is not null)
-            ctx.Items.Add(new Item { Kind = "fill", X = x, Y = ctx.PageH - (y + h), W = w, H = h, Color = fill });
+            ctx.Items.Add(new Item { Kind = "fill", X = x, Y = ctx.PageH - (y + h), W = w, H = h, Color = fill, Radius = radius });
         // A draw-level border with a visible edge strokes the draw's box (info sections).
-        var drawBorder = FirstChild(e, "border");
         if (drawBorder is not null && drawBorder.GetAttribute("presence") is not ("hidden" or "invisible")
             && FirstChild(drawBorder, "edge") is { } de && de.GetAttribute("presence") is not ("hidden" or "invisible"))
-            ctx.Items.Add(new Item { Kind = "box", X = x, Y = ctx.PageH - (y + h), W = w, H = h });
+            ctx.Items.Add(new Item { Kind = "box", X = x, Y = ctx.PageH - (y + h), W = w, H = h, Radius = radius, Color = EdgeColor(drawBorder) });
         // Vector-shape draw (<value><rectangle>): a filled bar and/or stroked box.
         var shape = FirstChild(e, "value") is { } dv
             ? dv.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "rectangle")
@@ -94,9 +96,9 @@ internal static partial class XfaRenderer
                     if (parts.Length == 3)
                         lc = new[]
                         {
-                            int.TryParse(parts[0], out var lr) ? lr / 255.0 : 0,
-                            int.TryParse(parts[1], out var lg) ? lg / 255.0 : 0,
-                            int.TryParse(parts[2], out var lb) ? lb / 255.0 : 0,
+                            int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out var lr) ? lr / 255.0 : 0,
+                            int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var lg) ? lg / 255.0 : 0,
+                            int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var lb) ? lb / 255.0 : 0,
                         };
                 }
                 // A line with BOTH extents is a DIAGONAL: slope "/" rises from the
@@ -112,7 +114,9 @@ internal static partial class XfaRenderer
             return;
         }
         // Image draw: resolve the href against the document's embedded XFA image table.
-        if (Ui(e) == "imageEdit")
+        // A static picture draw may declare no ui at all: its value's <image> says what it is.
+        var holdsImage = FirstChild(e, "value") is { } iv && iv.ChildNodes.OfType<XmlElement>().Any(c => c.LocalName == "image");
+        if (Ui(e) == "imageEdit" || holdsImage)
         {
             var data = ImageDataOf(ctx, e);
             if (data is not null)
@@ -123,14 +127,17 @@ internal static partial class XfaRenderer
         var exBody = FirstChild(e, "value") is { } val
             ? Descendants(val, "exData").FirstOrDefault()
             : null;
+        // A draw of a fixed height places its text in it by its paragraph's spacing as well as its vertical
+        // alignment; one that grows is as tall as its text.
+        bool fixedHeight = LenN(e.GetAttribute("h")) is not null;
         if (exBody is not null && exBody.SelectNodes(".//*[local-name()='p']")!.Count > 0)
         {
-            AddRichText(ctx, e, x, y, w, h, exBody);
+            AddRichText(ctx, e, x, y, w, h, exBody, spaced: fixedHeight);
             return;
         }
         var text = InnerText(e, "value");
         if (!string.IsNullOrWhiteSpace(text))
-            AddText(ctx, e, x, y, w, h, text.Trim());
+            AddText(ctx, e, x, y, w, text.Trim(), boxH: fixedHeight ? h : 0);
     }
 
     /// <summary>The image payload of a draw/field: the &lt;value&gt;&lt;image&gt;'s href
@@ -153,7 +160,7 @@ internal static partial class XfaRenderer
         if (href.Length > 0 && ctx.Images.TryGetValue(href, out var d)) return d;
         if (img is not null && !string.IsNullOrWhiteSpace(img.InnerText))
         {
-            try { return Convert.FromBase64String(img.InnerText.Trim()); } catch { }
+            try { return Convert.FromBase64String(img.InnerText.Trim()); } catch { /* malformed base64 - no image */ }
         }
         return null;
     }
@@ -167,24 +174,39 @@ internal static partial class XfaRenderer
     private static string ResolveEmbedText(Ctx ctx, string id)
     {
         if (!ctx.IdElements.TryGetValue(id, out var el)) return " ";
-        var script = Descendants(el, "script").FirstOrDefault()?.InnerText ?? "";
-        if (script.Contains("xfa.layout.pageCount(", StringComparison.Ordinal))
-            return PageCountSentinel;
-        if (script.Contains("xfa.layout.page(", StringComparison.Ordinal))
-            return ctx.PageNum.ToString(CultureInfo.InvariantCulture);
+        // A floating field carries an empty calculate script before its layout-ready
+        // script, so the page function is looked for in every script it has.
+        var script = string.Join("\n", Descendants(el, "script").Select(s => s.InnerText));
+        if (LayoutPageText(ctx, script) is { } pageText) return pageText;
         // "this.rawValue = a.b.c.rawValue;" — resolve the referenced field's data value
         // by its last path segment against the datasets tree.
-        var m = System.Text.RegularExpressions.Regex.Match(
+        var m = SafeRegex.Match(
             script, @"this\.rawValue\s*=\s*([A-Za-z0-9_.\[\]]+)\.rawValue\s*;");
         if (m.Success && ctx.DataRoot is not null)
         {
-            var last = m.Groups[1].Value.Split('.').Last();
+            var last = m.Groups[1].Value.Split('.')[^1];
             var node = ctx.DataRoot.SelectNodes(".//*")!.OfType<XmlElement>()
                 .FirstOrDefault(d => d.LocalName == last && !d.ChildNodes.OfType<XmlElement>().Any());
             if (node is not null && !string.IsNullOrWhiteSpace(node.InnerText)) return node.InnerText.Trim();
         }
-        var val = InnerText(el, "value");
-        return string.IsNullOrWhiteSpace(val) ? " " : val.Trim();
+        // An embedded field shows what the field itself would: its bound data value, else its default.
+        var val = el.LocalName == "field" ? FieldValueText(ctx, el) : InnerText(el, "value");
+        return string.IsNullOrWhiteSpace(val) ? " " : ApplyPicture(el, val!.Trim());
+    }
+
+    /// <summary>The text a layout page function in a floating field's script yields on the current page:
+    /// page() is the one-based page number, sheet() and absPage() the zero-based one, each plus the constant the
+    /// script adds; a count function is the page-count sentinel. Null when the script calls none.</summary>
+    private static string? LayoutPageText(Ctx ctx, string script)
+    {
+        var m = SafeRegex.Match(
+            script, @"xfa\.layout\.(page|absPage|sheet|pageCount|absPageCount|sheetCount)\s*\([^)]*\)\s*(?:\+\s*(\d+))?");
+        if (!m.Success) return null;
+        var fn = m.Groups[1].Value;
+        if (fn.EndsWith("Count", StringComparison.Ordinal)) return PageCountSentinel;
+        var added = m.Groups[2].Success ? int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) : 0;
+        var number = (fn == "page" ? ctx.PageNum : ctx.PageNum - 1) + added;
+        return number.ToString(CultureInfo.InvariantCulture);
     }
 
     /// <summary>Apply the field's picture clause to a default value. Handles the
@@ -196,7 +218,7 @@ internal static partial class XfaRenderer
     private static string ApplyPicture(XmlElement e, string val)
     {
         var picture = FirstChild(e, "format") is { } f ? InnerText(f, "picture") : "";
-        if (picture.Length == 0) return val;
+        if (picture.Length == 0) return Ui(e) == "numericEdit" ? CanonicalNumber(val) : val;
 
         // Split top-level alternatives on '|' (quotes and braces protect it).
         var alternatives = SplitPictureAlternatives(picture);
@@ -225,7 +247,8 @@ internal static partial class XfaRenderer
         int intDigits = 0, decDigits = 0;
         var grouped = false;
         var afterPoint = false;
-        for (var i = 0; i < numericMask.Length; i++)
+        var i = 0;
+        while (i < numericMask.Length)
         {
             var c = numericMask[i];
             if (c == '\'')
@@ -248,12 +271,22 @@ internal static partial class XfaRenderer
                 if (n < 0) (coreSeen ? suffix : prefix).Append(c);
             }
             else if (c == '%') (coreSeen ? suffix : prefix).Append('%');
+            i++;
         }
         if (!coreSeen) return val;
         var fmt = (grouped ? "#,##0" : "0") + (decDigits > 0 ? "." + new string('0', decDigits) : "");
         return prefix.ToString() + Math.Abs(n).ToString(fmt, CultureInfo.InvariantCulture)
             .Insert(0, n < 0 && !numericMask.Contains('(') ? "-" : "") + suffix;
     }
+
+    /// <summary>A numeric field with no picture shows its value as a plain number: the trailing zeros a
+    /// saved float carries ("3.00000000") are dropped. Text that is no number is left as it is.</summary>
+    private const string PlainNumberFormat = "0.############################";
+
+    private static string CanonicalNumber(string val) =>
+        decimal.TryParse(val.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var n)
+            ? n.ToString(PlainNumberFormat, CultureInfo.InvariantCulture)
+            : val;
 
     private static List<string> SplitPictureAlternatives(string picture)
     {

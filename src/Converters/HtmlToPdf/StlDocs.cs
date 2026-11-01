@@ -12,18 +12,19 @@ internal static partial class HtmlToPdfConverter
     /// without it the page container and svg objects flow as stacked blocks and the
     /// text lands pages down (such a round-trip renders a blank page 1).</summary>
     internal static bool IsStlPositionedHtml(string html) =>
-        Regex.IsMatch(html, @"<div id=""page_\d+""")
+        SafeRegex.IsMatch(html, @"<div id=""page_\d+""")
         // Line divs are "<prefix>01" positioned in em; the bare name is stl_01 and a
         // CssClassNamesPrefix save emits e.g. "p1-… p1-…-01" (base class + suffixed).
-        && Regex.IsMatch(html, @"<div class=""[^""]*01"" style=""left:-?[\d.]+em");
+        && SafeRegex.IsMatch(html, @"<div class=""[^""]*01"" style=""left:-?[\d.]+em");
 
     /// <summary>True when the stl_ document's pages carry a RASTER page background
     /// (the PNG-page-background writer: a full-page &lt;img&gt; inside the "03"
     /// background wrapper div) as opposed to the SVG-text dialect's &lt;object&gt;
-    /// vector background. Content images (img_NN.png at their own sizes) don't count.</summary>
+    /// vector background. Content images (img_NN.png at their own sizes) don't count. The image is sized by
+    /// its width alone; files saved before that also gave it a height, and both are read.</summary>
     internal static bool HasStlRasterBackground(string html) =>
-        Regex.IsMatch(html,
-            @"<div class=""[^""]*03""><img [^>]*style=""width:100%;height:100%;""");
+        SafeRegex.IsMatch(html,
+            @"<div class=""[^""]*03""><img [^>]*style=""width:100%;(?:height:100%;)?""");
 
     /// <summary>Map stl_ class → font-size in em (1 em = 12 pt in the stl_ scheme),
     /// harvested from inline <c>&lt;style&gt;</c> blocks and linked stylesheets
@@ -35,10 +36,10 @@ internal static partial class HtmlToPdfConverter
     private static string GatherStlCss(string html, HtmlLoadOptions? options)
     {
         var css = new StringBuilder();
-        foreach (Match m in Regex.Matches(html, @"<style[^>]*>(?<c>.*?)</style>",
+        foreach (Match m in SafeRegex.Matches(html, @"<style[^>]*>(?<c>.*?)</style>",
             RegexOptions.Singleline | RegexOptions.IgnoreCase))
             css.Append(m.Groups["c"].Value).Append('\n');
-        foreach (Match m in Regex.Matches(html, @"<link(?=[^>]*rel=""stylesheet"")[^>]*href=""(?<h>[^""]+)""",
+        foreach (Match m in SafeRegex.Matches(html, @"<link(?=[^>]*rel=""stylesheet"")[^>]*href=""(?<h>[^""]+)""",
             RegexOptions.IgnoreCase))
         {
             var basePath = options?.BasePath;
@@ -64,14 +65,14 @@ internal static partial class HtmlToPdfConverter
     {
         var css = new StringBuilder(GatherStlCss(html, options));
         var map = new Dictionary<string, double>(StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(css.ToString(), @"\.(?<cls>[\w-]+)\s*\{(?<body>[^}]*)\}",
-            RegexOptions.Singleline))
+        foreach (var groups in SafeRegex.Matches(css.ToString(), @"\.(?<cls>[\w-]+)\s*\{(?<body>[^}]*)\}",
+            RegexOptions.Singleline).Select(m => m.Groups))
         {
-            var fm = Regex.Match(m.Groups["body"].Value, @"font-size:\s*(?<v>[\d.]+)em");
+            var fm = SafeRegex.Match(groups["body"].Value, @"font-size:\s*(?<v>[\d.]+)em");
             if (fm.Success && double.TryParse(fm.Groups["v"].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var v))
-                map[m.Groups["cls"].Value] = v;
+                map[groups["cls"].Value] = v;
         }
         return map;
     }
@@ -101,17 +102,17 @@ internal static partial class HtmlToPdfConverter
     private static Dictionary<string, StlClassProps> ParseStlClassProps(string css)
     {
         var map = new Dictionary<string, StlClassProps>(StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(css, @"\.(?<cls>[-\w]+)\s*\{(?<body>[^}]*)\}",
-                     RegexOptions.Singleline))
+        foreach (var groups in SafeRegex.Matches(css, @"\.(?<cls>[-\w]+)\s*\{(?<body>[^}]*)\}",
+                     RegexOptions.Singleline).Select(m => m.Groups))
         {
-            var name = m.Groups["cls"].Value;
-            var body = m.Groups["body"].Value;
+            var name = groups["cls"].Value;
+            var body = groups["body"].Value;
             if (!map.TryGetValue(name, out var p)) map[name] = p = new StlClassProps();
 
             static double? Em(string body, string prop)
             {
                 // Property-name anchored: a bare "height" must not match "line-height".
-                var em = Regex.Match(body, @"(?<![-\w])" + prop + @":\s*(-?[\d.]+)em");
+                var em = SafeRegex.Match(body, @"(?<![-\w])" + prop + @":\s*(-?[\d.]+)em");
                 return em.Success && double.TryParse(em.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
@@ -123,18 +124,18 @@ internal static partial class HtmlToPdfConverter
             p.HeightEm ??= Em(body, "height");
             if (p.Color is null)
             {
-                var cm = Regex.Match(body, @"color:\s*(#[0-9a-fA-F]{6})");
+                var cm = SafeRegex.Match(body, @"color:\s*(#[0-9a-fA-F]{6})");
                 if (cm.Success) p.Color = cm.Groups[1].Value;
             }
             if (p.Family is null)
             {
-                var fm = Regex.Match(body, @"font-family:\s*(?<v>[^;}]+)");
+                var fm = SafeRegex.Match(body, @"font-family:\s*(?<v>[^;}]+)");
                 if (fm.Success)
                 {
                     // First family of the stack, unquoted; a subset tag ("ABCDEF+Name",
                     // the DefaultFontName shape) resolves to the bare name.
                     var fam = fm.Groups["v"].Value.Split(',')[0].Trim().Trim('"', '\'').Trim();
-                    fam = Regex.Replace(fam, @"^[A-Z]{6}\+", "");
+                    fam = SafeRegex.Replace(fam, @"^[A-Z]{6}\+", "");
                     if (fam.Length > 0) p.Family = fam;
                 }
             }
@@ -144,11 +145,13 @@ internal static partial class HtmlToPdfConverter
 
     private sealed class StlRun
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double LeftPt, TopPt, FontSizePt, LetterSpacingPt, WordSpacingPt;
         public string Family = "Times New Roman";
         public string Color = "#000000";
         public string Text = "";       // drawn text (trailing sentinel space kept out)
         public double WidthPt;         // measured, spacing included (sentinel included)
+#pragma warning restore S3218
         public double Baseline => TopPt + FontSizePt;
     }
 
@@ -177,13 +180,12 @@ internal static partial class HtmlToPdfConverter
         if (htmlFaces is null) return null;
         if (htmlFaces.TryGetValue(family, out var f)) return f;
         var squished = family.Replace(" ", "");
+#pragma warning disable S3267 // a first-match search over a value type - FirstOrDefault cannot tell no match from a default item
         foreach (var kv in htmlFaces)
+#pragma warning restore S3267
             if (kv.Key.Replace(" ", "").Equals(squished, StringComparison.OrdinalIgnoreCase))
                 return kv.Value;
-        foreach (var kv in htmlFaces)
-            if (kv.Key.StartsWith(family + " ", StringComparison.OrdinalIgnoreCase))
-                return kv.Value;
-        return null;
+        return htmlFaces.Where(kv => kv.Key.StartsWith(family + " ", StringComparison.OrdinalIgnoreCase)).Select(kv => kv.Value).FirstOrDefault();
     }
 
     /// <summary>The declared face for <paramref name="family"/> whose program covers
@@ -196,19 +198,16 @@ internal static partial class HtmlToPdfConverter
         if (StlFaceForFamily(htmlFaces, family) is not { Parser: not null } f)
             return null;
         if (ParserCovers(f.Parser, text)) return f;
-        if (f.Alternates is { } alts)
-            foreach (var a in alts)
-                if (a.Parser is not null && ParserCovers(a.Parser, text)) return a;
-        return null;
+        return f.Alternates?.FirstOrDefault(a => a.Parser is not null && ParserCovers(a.Parser, text));
     }
 
     private static Dictionary<string, StlFontFace> ParseStlFontFaces(string css, HtmlLoadOptions? options)
     {
         var map = new Dictionary<string, StlFontFace>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in Regex.Matches(css, @"@font-face\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline))
+        foreach (Match m in SafeRegex.Matches(css, @"@font-face\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline))
         {
             var body = m.Groups["body"].Value;
-            var fam = Regex.Match(body, @"font-family:\s*""?(?<f>[^"";}]+)");
+            var fam = SafeRegex.Match(body, @"font-family:\s*""?(?<f>[^"";}]+)");
             if (!fam.Success) continue;
             var famName = fam.Groups["f"].Value.Trim();
             if (famName.Length == 0 || map.ContainsKey(famName)) continue;
@@ -216,14 +215,14 @@ internal static partial class HtmlToPdfConverter
             // A face can list several sources ("bulletproof" @font-face: EOT first
             // for old IE, then WOFF/TTF) — walk them all and keep the first program
             // that actually parses, unwrapping WOFF and EOT containers on the way.
-            foreach (Match src in Regex.Matches(body, @"url\(\s*[""']?(?<u>[^)""']+?)[""']?\s*\)"))
+            foreach (Match src in SafeRegex.Matches(body, @"url\(\s*[""']?(?<u>[^)""']+?)[""']?\s*\)"))
             {
                 byte[]? bytes = null;
                 var url = src.Groups["u"].Value.Trim();
                 try
                 {
-                    var dm = Regex.Match(url, @"^data:[^,]*;base64,(?<b>.+)$", RegexOptions.Singleline);
-                    if (dm.Success) bytes = System.Convert.FromBase64String(dm.Groups["b"].Value);
+                    var dm = SafeRegex.Match(url, @"^data:[^,]*;base64,(?<b>.+)$", RegexOptions.Singleline);
+                    if (dm.Success) bytes = Base64Payload(dm.Groups["b"].Value);
                     else if (options?.BasePath is { Length: > 0 } bp)
                     {
                         var p = System.IO.Path.Combine(bp, url.Replace('/', System.IO.Path.DirectorySeparatorChar));
@@ -310,8 +309,8 @@ internal static partial class HtmlToPdfConverter
         w += run.LetterSpacingPt * text.Length;
         if (run.WordSpacingPt != 0)
         {
-            foreach (var ch in text)
-                if (ch == ' ') w += run.WordSpacingPt;
+            foreach (var ch in text.Where(ch => ch == ' '))
+                w += run.WordSpacingPt;
             // IE-model CJK: adjacent full-em characters take word-spacing too.
             for (var ci = 1; ci < text.Length; ci++)
                 if (StlIdeograph(text[ci - 1]) && StlIdeograph(text[ci]))
@@ -326,18 +325,16 @@ internal static partial class HtmlToPdfConverter
         sp.stlCss = GatherStlCss(html, options);
         sp.classProps = ParseStlClassProps(sp.stlCss);
         sp.emCompensationGrid = false;
+        var sawNonZeroLs = false;
+        var allOnGrid = true;
+        foreach (var cp in sp.classProps.Values)
         {
-            var sawNonZeroLs = false;
-            var allOnGrid = true;
-            foreach (var cp in sp.classProps.Values)
-            {
-                if (cp.LetterSpacingEm is not { } le || le == 0) continue;
-                sawNonZeroLs = true;
-                var cents = le * 100.0;
-                if (Math.Abs(cents - Math.Round(cents)) > 1e-6) { allOnGrid = false; break; }
-            }
-            sp.emCompensationGrid = sawNonZeroLs && allOnGrid;
+            if (cp.LetterSpacingEm is not { } le || le == 0) continue;
+            sawNonZeroLs = true;
+            var cents = le * 100.0;
+            if (Math.Abs(cents - Math.Round(cents)) > 1e-6) { allOnGrid = false; break; }
         }
+        sp.emCompensationGrid = sawNonZeroLs && allOnGrid;
         sp.htmlFaces = ParseStlFontFaces(sp.stlCss, options);
         sp.stlContentPad = 6.0;
 
@@ -352,7 +349,7 @@ internal static partial class HtmlToPdfConverter
         sp.mb = sp.marginsExplicit ? sp.pageMargin!.Bottom : 72.0;
         sp.band = Math.Max(1.0, sp.pageH - sp.mt - sp.mb);
 
-        sp.pageDivs = Regex.Matches(html, @"<div id=""page_\d+""[^>]*>");
+        sp.pageDivs = SafeRegex.Matches(html, @"<div id=""page_\d+""[^>]*>");
 
         sp.pagesRuns = new List<List<StlRun>>();
         sp.pagesImage = new List<(byte[] bytes, double wPt, double hPt)?>();
@@ -387,10 +384,8 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Wrap one source line (a paragraph in the reflow) to the content width with
     /// real font metrics and emit each wrapped line: black plain text, blue underlined
     /// runs (with a link annotation) where a pdf-link overlay covered the characters.</summary>
-    private static void EmitReflowedLine(Document doc,
-        string text, List<string?> urls, List<(Page page, Aspose.Pdf.Rectangle rect, string url)> pendingLinks,
-        double fontSize, double pitch, double marginLeft, double contentW,
-        double pageW, double pageH, double bottomMargin, double firstBaseline,
+    private static void EmitReflowedLine(string text, List<string?> urls, List<(Page page, Aspose.Pdf.Rectangle rect, string url)> pendingLinks,
+        double fontSize, double pitch, double marginLeft, double contentW, double pageH, double bottomMargin,
         Core.PdfDictionary docFontDict, PositionedSpansState pos)
     {
         // No bidi transformation: the PdfToHtml span texts already carry RTL content
@@ -404,16 +399,19 @@ internal static partial class HtmlToPdfConverter
             int lastFit = -1, lastSpace = -1;
             double w = 0;
             int i = lineStart;
-            for (; i < text.Length; i++)
+            while (i < text.Length)
             {
                 (var adv, i) = MeasureSerifChar(text, i, fontSize);
                 w += adv;
                 if (w > contentW + 0.01) break;
                 lastFit = i;
                 if (text[i] == ' ') lastSpace = i;
+                i++;
             }
             if (i >= text.Length) { wrapped.Add((lineStart, text.Length - lineStart)); break; }
-            int breakAt = lastSpace > lineStart ? lastSpace : (lastFit >= lineStart ? lastFit + 1 : lineStart + 1);
+            int breakAt;
+            if (lastSpace > lineStart) breakAt = lastSpace;
+            else breakAt = lastFit >= lineStart ? lastFit + 1 : lineStart + 1;
             wrapped.Add((lineStart, breakAt - lineStart));
             lineStart = breakAt;
             while (lineStart < text.Length && text[lineStart] == ' ') lineStart++;
@@ -424,7 +422,7 @@ internal static partial class HtmlToPdfConverter
             if (pos.baselineY > pageH - bottomMargin) { StartPositionedPage(pos); }
             var lineText = text.Substring(ws, wl).TrimEnd();
             if (lineText.Length > 0)
-                EmitStyledRuns(doc, pos.page!, marginLeft, pageH - pos.baselineY, lineText,
+                EmitStyledRuns(pos.page!, marginLeft, pageH - pos.baselineY, lineText,
                     ws < urls.Count ? urls.GetRange(ws, Math.Min(lineText.Length, urls.Count - ws)) : new List<string?>(),
                     fontSize, pendingLinks, docFontDict);
             pos.baselineY += pitch;
@@ -435,8 +433,7 @@ internal static partial class HtmlToPdfConverter
     /// rules: greedy breaks at plain spaces except before a leader run, per-space
     /// word-spacing pen advances, sup runs at their smaller size and raise (such a
     /// line takes extra lead), and units longer than the budget kept whole.</summary>
-    private static void EmitStlParagraph(Document doc,
-        StlPara para, List<(Page page, Aspose.Pdf.Rectangle rect, string url)> pendingLinks,
+    private static void EmitStlParagraph(StlPara para, List<(Page page, Aspose.Pdf.Rectangle rect, string url)> pendingLinks,
         double fontSize, double supFontSize, double supRise, double supLineExtra,
         double pitch, double marginLeft, double contentW,
         double pageH, double bottomMargin, Core.PdfDictionary docFontDict, PositionedSpansState pos)
@@ -486,7 +483,7 @@ internal static partial class HtmlToPdfConverter
             if (pos.baselineY > pageH - bottomMargin) { StartPositionedPage(pos); }
             var lineText = text.Substring(ws, wl).TrimEnd();
             if (lineText.Length > 0)
-                EmitStyledRuns(doc, pos.page!, marginLeft, pageH - pos.baselineY, lineText,
+                EmitStyledRuns(pos.page!, marginLeft, pageH - pos.baselineY, lineText,
                     new List<string?>(new ArraySegment<string?>(para.Urls, ws, lineText.Length)),
                     fontSize, pendingLinks, docFontDict,
                     new ArraySegment<double>(para.Extra, ws, lineText.Length),

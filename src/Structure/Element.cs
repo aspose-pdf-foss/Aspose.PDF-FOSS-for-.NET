@@ -83,7 +83,7 @@ public class Element
     private void SetString(string key, string? value)
     {
         if (string.IsNullOrEmpty(value)) _dict.Remove(key);
-        else _dict.Set(key, new PdfString(Encoding.UTF8.GetBytes(value)));
+        else _dict.Set(key, Aspose.Pdf.Forms.Field.EncodePdfTextString(value));
     }
 
     private List<Element> LoadChildren()

@@ -95,7 +95,9 @@ public partial class Field
             string? value = null;
             if (root.ValueKind == System.Text.Json.JsonValueKind.Array)
             {
+#pragma warning disable S3267 // the test has a side effect (an assignment or increment) - a LINQ predicate would hide it
                 foreach (var element in root.EnumerateArray())
+#pragma warning restore S3267
                     if ((value = TryFindValueByPath(element, string.Empty, fieldFullNameInJSON)) is not null)
                         break;
             }

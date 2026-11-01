@@ -15,7 +15,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     private Field? FindFieldByStrippedIndices(string fullName)
     {
         static string StripIdx(string s) =>
-            System.Text.RegularExpressions.Regex.Replace(s, @"\[\d+\]", "");
+            SafeRegex.Replace(s, @"\[\d+\]", "");
 
         Field? unique = null;
         foreach (var field in _fields)
@@ -51,30 +51,23 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         var mapping = GetXfaPathMapping();
         if (mapping.TryGetValue(fullName, out var acroFieldName))
         {
-            foreach (var field in _fields)
-            {
-                if (string.Equals(field.FullName, acroFieldName, StringComparison.Ordinal))
-                    return field;
-            }
+            var field = _fields.FirstOrDefault(field => string.Equals(field.FullName, acroFieldName, StringComparison.Ordinal));
+            if (field is not null)
+                return field;
         }
 
         // 3. Group node prefix match: if the requested path is a non-terminal
         // group (subform), return the first child field whose XFA path starts with it.
         var groupPrefix = fullName + ".";
-        foreach (var kvp in mapping)
+        foreach (var kvp in mapping.Where(kvp => kvp.Key.StartsWith(groupPrefix, StringComparison.Ordinal)))
         {
-            if (kvp.Key.StartsWith(groupPrefix, StringComparison.Ordinal))
-            {
-                foreach (var field in _fields)
-                {
-                    if (string.Equals(field.FullName, kvp.Value, StringComparison.Ordinal))
-                        return field;
-                }
-            }
+            var field = _fields.FirstOrDefault(field => string.Equals(field.FullName, kvp.Value, StringComparison.Ordinal));
+            if (field is not null)
+                return field;
         }
 
         // 4. Strip [N] indices and try matching as dotted AcroForm name
-        var stripped = System.Text.RegularExpressions.Regex.Replace(fullName, @"\[\d+\]", "");
+        var stripped = SafeRegex.Replace(fullName, @"\[\d+\]", "");
         foreach (var field in _fields)
         {
             if (string.Equals(field.FullName, stripped, StringComparison.Ordinal))

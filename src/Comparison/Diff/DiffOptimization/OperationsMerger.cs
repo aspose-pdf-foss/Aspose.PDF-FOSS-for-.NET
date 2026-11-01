@@ -1,4 +1,6 @@
 ﻿using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 
 namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
 {
@@ -49,7 +51,7 @@ namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
         private void MergeAdjacentRuns(List<DiffOperation> diffs)
         {
             int pointer = 0, countDelete = 0, countInsert = 0;
-            string textDelete = string.Empty, textInsert = string.Empty;
+            StringBuilder deleted = new(), inserted = new();
 
             while (pointer < diffs.Count)
             {
@@ -57,17 +59,19 @@ namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
                 {
                     case Operation.Insert:
                         countInsert++;
-                        textInsert += diffs[pointer].Text;
+                        inserted.Append(diffs[pointer].Text);
                         pointer++;
                         break;
                     case Operation.Delete:
                         countDelete++;
-                        textDelete += diffs[pointer].Text;
+                        deleted.Append(diffs[pointer].Text);
                         pointer++;
                         break;
                     default: // Equal — flush the accumulated run
                         if (countDelete + countInsert > 1)
                         {
+                            var textDelete = deleted.ToString();
+                            var textInsert = inserted.ToString();
                             FactorCommonAffixes(diffs, countDelete, countInsert, ref pointer, ref textDelete, ref textInsert);
 
                             var removeAt = pointer - countDelete - countInsert;
@@ -81,9 +85,11 @@ namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
                         }
                         else if (pointer != 0 && diffs[pointer - 1].Operation == Operation.Equal)
                         {
-                            // Merge two adjacent equalities.
-                            diffs[pointer - 1].Text += diffs[pointer].Text;
-                            diffs.RemoveAt(pointer);
+                            // Merge the equalities that follow into the one before them.
+                            var end = pointer;
+                            while (end < diffs.Count && diffs[end].Operation == Operation.Equal) end++;
+                            diffs[pointer - 1].Text = string.Concat(diffs.Skip(pointer - 1).Take(end - pointer + 1).Select(d => d.Text));
+                            diffs.RemoveRange(pointer, end - pointer);
                         }
                         else
                         {
@@ -91,8 +97,8 @@ namespace Aspose.Pdf.Comparison.Diff.DiffOptimization
                         }
                         countDelete = 0;
                         countInsert = 0;
-                        textDelete = string.Empty;
-                        textInsert = string.Empty;
+                        deleted.Clear();
+                        inserted.Clear();
                         break;
                 }
             }

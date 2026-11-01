@@ -22,7 +22,7 @@ private sealed class InvoiceCardState
     public double h2Base;
     // h2: 'Contract #: ' label + value, description right-aligned on
     // its own line
-    public System.Text.RegularExpressions.MatchCollection spans = null!;
+    public SafeMatchCollection spans = null!;
     public string lbl1 = null!;
     public string val1 = null!;
     public string lbl2 = null!;

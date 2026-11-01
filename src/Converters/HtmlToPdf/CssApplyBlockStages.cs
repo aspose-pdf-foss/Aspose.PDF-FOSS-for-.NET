@@ -33,9 +33,13 @@ internal static partial class HtmlToPdfConverter
         // runs, but a bare <div> or text node adds nothing, so a heading before one
         // would sit too close. Use the browser's real per-element margins (0.67em on
         // h1 rising to 2.33em on h6, 1em on p), symmetric top and bottom.
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
         if (uaScale != 1.0)
+#pragma warning restore S1244
         {
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             if (s.FontSize != uaParentSize) s.FontSize *= uaScale;
+#pragma warning restore S1244
             s.MarginTop *= uaScale;
             s.MarginBottom *= uaScale;
         }

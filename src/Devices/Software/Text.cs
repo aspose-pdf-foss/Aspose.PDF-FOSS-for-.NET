@@ -87,8 +87,24 @@ public sealed partial class SoftwarePageRenderer
         // A mixed-width CMap (a UTF-8 one declares 1- to 4-byte ranges) cannot be
         // walked at a constant step and keeps the simple routing, as does a
         // CMap-less 1-byte Type0 with a TrueType descendant.
-        DrawTextRuns(dt);
+        dt.ctx.TextStroke = StrokesText(dt.state.RenderingMode) ? dt.state : null;
+        dt.ctx.TextFills = !StrokesTextOnly(dt.state.RenderingMode);
+        try
+        {
+            DrawTextRuns(dt);
+        }
+        finally
+        {
+            dt.ctx.TextStroke = null;
+            dt.ctx.TextFills = true;
+        }
     }
+
+    /// <summary>Text rendering modes that stroke the glyph outlines (PDF 32000 §9.3.6).</summary>
+    private static bool StrokesText(int mode) => mode is 1 or 2 or 5 or 6;
+
+    /// <summary>Text rendering modes that stroke the glyph outlines without filling them.</summary>
+    private static bool StrokesTextOnly(int mode) => mode is 1 or 5;
 
     /// <summary>
     /// Build (and cache) a 256-entry byte→GID map for a simple font whose PDF /Encoding
@@ -164,7 +180,24 @@ public sealed partial class SoftwarePageRenderer
             || !fontDicts.TryGetValue(fontName, out var fdict))
             return null;
 
-        if (reader.Resolve(fdict.Get("Encoding")) is null)
+        // A TrueType program whose only character table is the symbol one is addressed by
+        // its codes (PDF 32000 §9.6.6.4): a name read as a character would index that table
+        // by a code it was never keyed by - in a subset numbered from 1, "zero" at code 17
+        // found the glyph of code 48. A code the table carries takes the table's glyph; the
+        // name fills only the codes it lacks. That holds for a font flagged symbolic. A font
+        // flagged nonsymbolic over such a table is read by NAME: the encoding's name for the
+        // code (its /Differences over the base encoding, the standard names when it has no
+        // /Encoding at all) finds the glyph of that name in the program's post table, and
+        // only a program without names falls back to the name's character in the table; the
+        // table's entry at the code itself comes last. A table whose order disagrees with
+        // the names otherwise drew the wrong letters for a font whose encoding renames its
+        // codes, and for one that leaves them to the standard names.
+        var trueType = parser as Text.GlyphOutlineParser;
+        var symbolTable = trueType is { HasSymbolTableOnly: true } ? parser.CMap : null;
+        var symbolicOnly = symbolTable is not null && IsSymbolicOnly(fdict, reader);
+        var byName = symbolTable is not null && !symbolicOnly;
+        var noEncoding = reader.Resolve(fdict.Get("Encoding")) is null;
+        if (noEncoding && !byName)
             return parser switch
             {
                 Text.Type1GlyphSource t1 => t1.EncodingByteToGid,
@@ -181,10 +214,10 @@ public sealed partial class SoftwarePageRenderer
         // table that subsetters routinely strip or leave stale.
         var hasDifferences = reader.ResolveDict(fdict.Get("Encoding")) is { } encDict
             && encDict.Get("Differences") is PdfArray;
-        if (!hasDifferences && parser is not (Text.Type1GlyphSource or Text.CffGlyphSource))
+        if (!hasDifferences && !byName && parser is not (Text.Type1GlyphSource or Text.CffGlyphSource))
             return null;
-
         var names = ResolveEncoding(fdict, reader);
+        if (noEncoding) ApplyBaseEncoding(names, StandardEncodingName);
         var built = new int[256];
         var any = false;
         for (var code = 0; code < 256; code++)
@@ -197,18 +230,78 @@ public sealed partial class SoftwarePageRenderer
                 // keep a stale cmap (an Arabic page drew digit chains where its spaces
                 // belong). -1 = explicit blank: consumers skip both the cmap fallback
                 // (gid != 0) and the paint (gid < 1); the advance still comes from /Widths.
-                built[code] = -1;
+                built[code] = BlankGlyph;
                 any = true;
                 continue;
             }
-            var gid = parser.GidForName(n);
-            if (gid > 0)
+            var tableGid = symbolTable is null ? 0 : SymbolTableGid(symbolTable, code, symbolicOnly);
+            var gid = tableGid > 0 && !byName ? tableGid : NamedCodeGid(parser, trueType, symbolTable, byName, n, tableGid);
+            if (gid != 0)
             {
                 built[code] = gid;
                 any = true;
             }
         }
         return any ? built : null;
+    }
+
+    /// <summary>The map entry of a code that shows nothing and still advances.</summary>
+    private const int BlankGlyph = -1;
+
+    private const string StandardEncodingName = "StandardEncoding";
+
+    /// <summary>The glyph a code's NAME finds: through the post table of a nonsymbolic font read
+    /// by name, else through the name's character; the table's entry at the code last. A name
+    /// a post table with names lacks is not read as a glyph index: a uniXXXX reaches the table
+    /// through its character and shows nothing when the table lacks it, a gNN takes the table's
+    /// entry at the code, as a symbolic font would; other names still go by their character.</summary>
+    private static int NamedCodeGid(IGlyphOutlineSource parser, Text.GlyphOutlineParser? trueType,
+        Dictionary<int, int>? symbolTable, bool byName, string name, int tableGid)
+    {
+        if (byName && trueType!.HasPostNames)
+        {
+            var named = trueType.GidForPostName(name);
+            if (named > 0) return named;
+            if (UniNameCharacter(name) is { } ch)
+                return symbolTable!.TryGetValue(Text.GlyphOutlineParser.SymbolCodeBase + ch, out var byChar) && byChar > 0
+                    ? byChar
+                    : BlankGlyph;
+            if (Text.GlyphOutlineParser.TryParseGlyphIndexName(name, out _)) return tableGid;
+        }
+        var gid = parser.GidForName(name);
+        return gid == 0 ? tableGid : gid;
+    }
+
+    private const string UniNamePrefix = "uni";
+    private const int UniNameHexDigits = 4;
+
+    /// <summary>The character a <c>uniXXXX</c> glyph name stands for, or null for any other name.</summary>
+    private static int? UniNameCharacter(string name)
+    {
+        if (name.Length != UniNamePrefix.Length + UniNameHexDigits || !name.StartsWith(UniNamePrefix, StringComparison.Ordinal))
+            return null;
+        return int.TryParse(name.Substring(UniNamePrefix.Length), System.Globalization.NumberStyles.AllowHexSpecifier,
+            System.Globalization.CultureInfo.InvariantCulture, out var ch) ? ch : null;
+    }
+
+    private const int SymbolicFontFlag = 1 << 2;
+    private const int NonsymbolicFontFlag = 1 << 5;
+
+    /// <summary>True when the font's descriptor flags it symbolic and not also nonsymbolic.</summary>
+    private static bool IsSymbolicOnly(PdfDictionary fontDict, IO.PdfReader reader)
+    {
+        var flags = reader.ResolveDict(fontDict.Get("FontDescriptor"))?.GetInt("Flags") ?? 0;
+        return (flags & SymbolicFontFlag) != 0 && (flags & NonsymbolicFontFlag) == 0;
+    }
+
+    /// <summary>The glyph a symbol table gives a code, or 0 when it is not the table's to give.
+    /// An entry at U+F000 + code is the code's by the table's own convention. An entry at the
+    /// bare code is the code's only in a font flagged symbolic alone: a font flagged both ways
+    /// keys such a table by character, and its names are read through it as before.</summary>
+    private static int SymbolTableGid(Dictionary<int, int> symbolTable, int code, bool symbolicOnly)
+    {
+        if (symbolTable.TryGetValue(Text.GlyphOutlineParser.SymbolCodeBase + code, out var gid) && gid > 0) return gid;
+        return symbolicOnly && symbolTable.TryGetValue(code, out gid) && gid > 0 ? gid : 0;
     }
 
     /// <summary>
@@ -328,11 +421,15 @@ public sealed partial class SoftwarePageRenderer
 
             if (src is not null)
             {
-                var outline = src.GetOutline(gid);
+                // The pen of a column is the glyph's vertical origin, the top middle of its
+                // cell, and the face keeps its own forms for a column's brackets.
+                var em = effectiveSize * ctx.Scale / 1000.0;
+                var outline = src.GetOutline(vert ? CjkFallbackFont.VerticalGlyph(src, gid) : gid);
                 if (outline is not null)
                 {
                     BlitGlyph(ctx, outline, src.UnitsPerEm, effectiveSize, hScale,
-                        px, vert ? penY : py, r, g, b, a);
+                        vert ? px - CjkFallbackFont.FullWidthOriginX * em * hScale : px,
+                        vert ? penY + cidInfo.VertOriginY * em : py, r, g, b, a);
                 }
             }
 
@@ -385,6 +482,8 @@ public sealed partial class SoftwarePageRenderer
         // Type 3 font may have its own /Resources; if absent, use page resources.
         var fontResources = ctx.Reader.ResolveDict(fontDict.Get("Resources"));
         var glyphExtGStates = ResolveExtGStates(fontResources, ctx.Reader);
+        // A char proc's Do names an XObject of the font's own /Resources before the page's.
+        var fontXObjects = FontXObjects(ctx, fontResources);
         // Fall back to outer ExtGStates so glyphs that reference /GS0 via the page
         // continue to find them. (Type 3 glyphs rarely use ExtGStates but inline
         // image masks are common — those don't need an ExtGState anyway.)
@@ -425,14 +524,20 @@ public sealed partial class SoftwarePageRenderer
                     // own font/extgstate dicts for unresolved names).
                     // The glyph paints inside whatever clips the text, in the text's
                     // colour - a char proc does not start from a blank state.
-                    RenderContent(cpBytes, ctx, glyphExtGStates, glyphCtm,
-                        initialClipMask: state.ClipMask, inheritState: state);
+                    var pageXObjects = ctx.AllXObjects;
+                    ctx.AllXObjects = fontXObjects ?? pageXObjects;
+                    try
+                    {
+                        RenderContent(cpBytes, ctx, glyphExtGStates, glyphCtm,
+                            initialClipMask: state.ClipMask, inheritState: state);
+                    }
+                    finally { ctx.AllXObjects = pageXObjects; }
                 }
             }
 
-            // Walk Tm by the glyph width × Tfs × Th so the NEXT glyph in this run is
-            // placed correctly - and remember how far, because this walk is only ours.
-            var dx = advanceTextSpace * state.FontSize * hScale;
+            // Walk Tm by the glyph's advance so the NEXT glyph in this run is placed
+            // correctly - and remember how far, because this walk is only ours.
+            var dx = Type3Advance(advanceTextSpace, b, state);
             state.AdvanceTextPosition(dx, 0);
             walked += dx;
         }
@@ -445,6 +550,26 @@ public sealed partial class SoftwarePageRenderer
         // needs the shared matrix to position the next glyph rather than a local pen.
         if (walked != 0) state.AdvanceTextPosition(-walked, 0);
     }
+
+    /// <summary>Shared by both renderers: how far a Type 3 glyph moves the text position, in
+    /// unscaled text space - its width (already through the FontMatrix) times Tfs, plus Tc, plus
+    /// Tw for the single-byte code 32, all times Th (PDF 32000 §9.4.4), as for any other font.
+    /// The width alone packed a spaced caption's glyphs together.</summary>
+    /// <summary>The XObjects a Type 3 font's char procs can name: the font's own /Resources /XObject over the
+    /// page's; null when the font brings none, so the page's stand alone.</summary>
+    private static Dictionary<string, PdfStream>? FontXObjects(RenderContext ctx, PdfDictionary? fontResources)
+    {
+        if (fontResources is null || ctx.Reader.ResolveDict(fontResources.Get("XObject")) is null) return null;
+        var merged = ctx.AllXObjects is { } page ? new Dictionary<string, PdfStream>(page) : new Dictionary<string, PdfStream>();
+        foreach (var (name, stream) in ResolveAllXObjects(fontResources, ctx.Reader)) merged[name] = stream;
+        return merged;
+    }
+
+    internal static double Type3Advance(double widthTextSpace, byte code, GraphicsState state)
+        => (widthTextSpace * state.FontSize + state.CharSpacing + (code == SpaceCode ? state.WordSpacing : 0))
+           * state.HorizontalScaling / PercentScale;
+
+    private const double PercentScale = 100.0;
 
     /// <summary>
     /// Extract a font's /FontMatrix. PDF 32000 §9.6.5: default is
@@ -541,7 +666,10 @@ public sealed partial class SoftwarePageRenderer
         if (baseFont is { Length: > 7 } && baseFont[6] == '+') baseFont = baseFont.Substring(7);
 
         IGlyphOutlineSource? parser = null;
-        var ttf = Text.SystemFontResolver.Resolve(string.IsNullOrEmpty(baseFont) ? "Arial" : baseFont!)
+        // No host carries the standard dingbats face: the built-in one stands in, as in the
+        // GDI+ rasteriser.
+        var ttf = baseFont == DingbatsFaceName ? Text.FontRepository.DjVuDingbatsProgram : null;
+        ttf ??= Text.SystemFontResolver.Resolve(string.IsNullOrEmpty(baseFont) ? "Arial" : baseFont)
                   ?? Text.SystemFontResolver.Resolve("Arial");
         if (ttf is { Length: > 0 })
         {
@@ -556,7 +684,8 @@ public sealed partial class SoftwarePageRenderer
         IGlyphOutlineSource? parser, FontMetrics? fontMetrics, int[]? encGidMap,
         double px, double py, double effectiveSize, double hScale,
         double charSpacingPx, double wordSpacingPx,
-        byte r, byte g, byte b, byte a, bool substituted = false, bool[]? undefinedCodes = null)
+        byte r, byte g, byte b, byte a, bool substituted = false, bool[]? undefinedCodes = null,
+        bool embeddedProgram = true)
     {
         // When rawBytes is 1:1 with text (typical for simple TT fonts), each char position
         // also corresponds to a single byte. Subset TT fonts embedded in PDFs commonly
@@ -569,8 +698,12 @@ public sealed partial class SoftwarePageRenderer
         // lookup picks the right glyph. Unicode is the fallback for cases like /Differences-
         // encoded fonts where byte 0x80 maps to a non-ASCII Unicode char (0x0105 etc.).
         // A SUBSTITUTED host face knows nothing of the original program's byte-keyed
-        // cmap, so its glyphs are only addressable by Unicode.
+        // cmap, so its glyphs are only addressable by Unicode. A host face standing in for a
+        // font that embeds no program (see HasEmbeddedProgram) shows the character the
+        // font's encoding names, and only a code that names none (a symbol face addressed
+        // by its codes) is looked up by its byte.
         bool useBytesFallback = !substituted && rawBytes is not null && rawBytes.Length == text.Length;
+        bool bytesFirst = useBytesFallback && embeddedProgram;
         for (var i = 0; i < text.Length; i++)
         {
             var ch = text[i];
@@ -578,8 +711,8 @@ public sealed partial class SoftwarePageRenderer
             if (parser is not null)
             {
                 // An explicit /Encoding /Differences is authoritative for a simple font
-                // (PDF 32000 §9.6.6.1) and overrides the embedded program's own byte cmap;
-                // without this a code like 0x39 ("t" via Differences) wrongly draws the
+                // (PDF 32000 §9.6.6.1) and overrides the embedded program's own byte cmap; without
+                // this a code like 0x39 ("t" via Differences) wrongly draws the
                 // embedded "nine" glyph. encGidMap is non-null only when
                 // /Differences exists; a code with no resolvable name yields 0 → fall back.
                 if (encGidMap is not null && rawBytes is not null && i < rawBytes.Length)
@@ -587,8 +720,9 @@ public sealed partial class SoftwarePageRenderer
 
                 if (gid == 0)
                 {
-                    if (useBytesFallback && parser.CMap.TryGetValue(rawBytes![i], out gid) && gid > 0) { /* byte hit */ }
+                    if (bytesFirst && parser.CMap.TryGetValue(rawBytes![i], out gid) && gid > 0) { /* byte hit */ }
                     else if (parser.CMap.TryGetValue(ch, out gid) && gid > 0) { /* unicode hit */ }
+                    else if (useBytesFallback && parser.CMap.TryGetValue(rawBytes![i], out gid) && gid > 0) { /* code hit in a host face */ }
                     else gid = 0;
                 }
             }
@@ -635,10 +769,13 @@ public sealed partial class SoftwarePageRenderer
                     charWidth = hmtxAdvance * 1000 / parser.UnitsPerEm;
             }
             px += charWidth / 1000.0 * effectiveSize * ctx.Scale * hScale + charSpacingPx;
-            if (ch == ' ') px += wordSpacingPx;
+            // Word spacing belongs to the code 32, not to another code that shows a space.
+            if (rawBytes is not null && rawBytes.Length == text.Length ? rawBytes[i] == SpaceCode : ch == ' ') px += wordSpacingPx;
         }
         return px;
     }
+
+    private const byte SpaceCode = 0x20;
 
     private static CidFontInfo? GetCidFontInfo(RenderContext ctx, string? fontName)
         => GetCidFontInfo(ctx.FontDicts, ctx.Reader, ctx.CidFontInfos, fontName);

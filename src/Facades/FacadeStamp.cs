@@ -149,9 +149,8 @@ public sealed class Stamp
     /// font / size still come from the bound FormattedText.</summary>
     public void BindTextState(TextState textState) => _textState = textState;
 
-    /// <summary>Set the explicit pixel size at which the image stamp is
-    /// rendered. Stored only — the FOSS emitter scales by inferring the
-    /// source image's native dimensions.</summary>
+    /// <summary>Set the size, in points, an image stamp is drawn at (and the pixel size a raw
+    /// RGB image is read with); without it the image is drawn at its pixel size.</summary>
     public void SetImageSize(float width, float height)
     {
         _imageWidth = width;

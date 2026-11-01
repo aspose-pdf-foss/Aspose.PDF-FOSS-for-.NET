@@ -16,6 +16,8 @@ private sealed class MetricParseState
     // table box beside the pixel-fixed columns (measured:
     // the 50% halves of a 1000px table land 372.75 wide each).
     public bool attrCollapse;
+    /// <summary>The grid stands in a right-to-left document: its cell lines draw in the paragraph's bidi order.</summary>
+    public bool rtlParagraph;
     public int boldDepth;
     public Color borderColor = null!;
     /// <summary>The legacy grid's outer frame: a thick border attribute's width in pt (0 = the cell stroke), and its dashed/dotted style from the tag's border-style.</summary>
@@ -137,6 +139,9 @@ private sealed class MetricParseState
     /// <summary>UA block cells (see HtmlDocProfile.uaBlockCells): the paragraph segments carry
     /// their own inline typography, per-line bold and size, and right floats.</summary>
     public bool uaBlockCells;
+    /// <summary>How much of a UA block cell's raw text already stands in a band of its own (the
+    /// text before its first block): kept in the buffer for the column solve, banded once.</summary>
+    public int bandedTextLen;
     /// <summary>UA form cells (see HtmlDocProfile.uaFormCells): text inputs and absolutely
     /// positioned divs are the cell's replaced and out-of-flow boxes.</summary>
     public bool uaFormCells;
@@ -180,7 +185,6 @@ private sealed class MetricParseState
     public double tableStyleHPt;
     public int whiteDepth;
     public bool widthClassTable;
-    public double wtBwBottom;
     public double wtBw;
     public double wtPMarginB;
     public int inlineWrapDepth;      // open inline wrappers (span/font/b/i/u/a) inside the current cell

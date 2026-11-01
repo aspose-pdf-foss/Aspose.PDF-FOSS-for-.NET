@@ -14,9 +14,9 @@ private sealed class XmpParseState
 {
     // Simple regex-based XMP parser for common properties
     // Handles <ns:Property>value</ns:Property> patterns (including empty values)
-    public System.Text.RegularExpressions.MatchCollection matches = null!;
+    public SafeMatchCollection matches = null!;
     // Also handle <rdf:li> lists inside properties (e.g., dc:creator)
-    public System.Text.RegularExpressions.MatchCollection listMatches = null!;
+    public SafeMatchCollection listMatches = null!;
     // Structured (named-value) properties: a property element wrapping a
     // nested <rdf:Description> of child fields, e.g.
     //   <custprops:Property1><rdf:Description>

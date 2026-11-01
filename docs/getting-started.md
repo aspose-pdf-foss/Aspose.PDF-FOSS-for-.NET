@@ -16,11 +16,11 @@ Printing runs on Windows, where `System.Drawing.Printing` can reach the print sp
 Install the [`Aspose.PDF.FOSS`](https://www.nuget.org/packages/Aspose.PDF.FOSS/) package from NuGet:
 
 ```bash
-dotnet add package Aspose.PDF.FOSS --version 26.10.0
+dotnet add package Aspose.PDF.FOSS --version 26.11.0
 ```
 
 ```xml
-<PackageReference Include="Aspose.PDF.FOSS" Version="26.10.0" />
+<PackageReference Include="Aspose.PDF.FOSS" Version="26.11.0" />
 ```
 
 Or build from source:
@@ -44,7 +44,7 @@ Reference the built project directly:
 ```bash
 dotnet new console -n PdfDemo
 cd PdfDemo
-dotnet add package Aspose.PDF.FOSS --version 26.10.0
+dotnet add package Aspose.PDF.FOSS --version 26.11.0
 # (or add the project reference shown above to PdfDemo.csproj)
 ```
 

@@ -56,7 +56,7 @@ internal static partial class HtmlToPdfConverter
         if (prop is "min-width" && kv.Key.Contains(':')) return true;
         // a ZERO border (`border: 0`, `border: 0px`, `* { border: 0px }`) draws nothing - inert
         if (prop.StartsWith("border", StringComparison.Ordinal)
-            && Regex.IsMatch(kv.Value[prop].Trim(), @"^0(?:px|pt|em|in|cm|mm)?(?:\s+\S+)*$", RegexOptions.IgnoreCase)) return true;
+            && SafeRegex.IsMatch(kv.Value[prop].Trim(), @"^0(?:px|pt|em|in|cm|mm)?(?:\s+\S+)*$", RegexOptions.IgnoreCase)) return true;
         // `position: relative` with no offset in the rule moves nothing
         if (prop == "position" && kv.Value[prop].Trim().Equals("relative", StringComparison.OrdinalIgnoreCase)
             && !kv.Value.ContainsKey("top") && !kv.Value.ContainsKey("left")

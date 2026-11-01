@@ -12,8 +12,13 @@ internal static partial class HtmlToPdfConverter
         {
             var line = new BrLine
             {
-                Kind = bv.liDepth > 0 ? BrKind.Li : bv.h1Depth > 0 ? BrKind.H1
-                    : bv.h3Depth > 0 ? BrKind.H3 : BrKind.Flow,
+                Kind = (bv.liDepth, bv.h1Depth, bv.h3Depth) switch
+                {
+                    (> 0, _, _) => BrKind.Li,
+                    (_, > 0, _) => BrKind.H1,
+                    (_, _, > 0) => BrKind.H3,
+                    _ => BrKind.Flow,
+                },
             };
             line.Runs.AddRange(bv.cur);
             bv.lines.Add(line);
@@ -51,17 +56,17 @@ internal static partial class HtmlToPdfConverter
 
     private static double Y(BenefitReviewState bv, double yTd) => bv.pageHeight - yTd;
 
-    private static double FsOf(BenefitReviewState bv, BrKind k) => k switch
+    private static double FsOf(BrKind k) => k switch
     {
         BrKind.H1 => BrH1Fs, BrKind.H3 => BrH3Fs, _ => BrBodyFs,
     };
 
-    private static double TopSeat(BenefitReviewState bv, BrKind k) => k switch
+    private static double TopSeat(BrKind k) => k switch
     {
         BrKind.H1 => BrTopSeatH1, BrKind.H3 => BrTopSeatH3, _ => BrTopSeat12,
     };
 
-    private static double Pitch(BenefitReviewState bv, BrKind prev, BrKind curK)
+    private static double Pitch(BrKind prev, BrKind curK)
     {
         if (curK == BrKind.H1) return BrToH1Pt;
         if (prev == BrKind.H1) return BrH1OutPt;
@@ -72,7 +77,7 @@ internal static partial class HtmlToPdfConverter
         return BrLinePt;
     }
 
-    private static double Measure(BenefitReviewState bv, BrRun r, double fs) => MeasureFaceText(
+    private static double Measure(BrRun r, double fs) => MeasureFaceText(
         r.Bold ? "Times New Roman-Bold" : "Times New Roman", r.Text, fs);
 
     private static void EmitLineAt(BenefitReviewState bv, BrLine line, double baseTd, double x)
@@ -80,8 +85,8 @@ internal static partial class HtmlToPdfConverter
         var pen = x;
         foreach (var r in line.Runs)
         {
-            var fs = FsOf(bv, line.Kind);
-            var w = Measure(bv, r, fs);
+            var fs = FsOf(line.Kind);
+            var w = Measure(r, fs);
             var res = r.Bold || line.Kind is BrKind.H1 or BrKind.H3 ? "F6" : "F5";
             var rg = r.Link ? "0 0 1 rg" : "0 0 0 rg";
             bv.sb.AppendLine($"BT {rg} /{res} {fs.ToString("F2", bv.inv)} Tf "
@@ -94,11 +99,11 @@ internal static partial class HtmlToPdfConverter
     }
 
     // greedy wrap of a line's runs into sublines that fit the content box
-    private static List<BrLine> WrapLine(BenefitReviewState bv, BrLine line)
+    private static List<BrLine> WrapLine(BrLine line)
     {
         var x0 = line.Kind == BrKind.Li ? BrLiTextX : BrTextX;
         var avail = BrTextRight - x0;
-        var fs = FsOf(bv, line.Kind);
+        var fs = FsOf(line.Kind);
         var outLines = new List<BrLine>();
         var curL = new BrLine { Kind = line.Kind };
         var used = 0.0;

@@ -150,12 +150,12 @@ public static class PageCollectionExtensions
     public static void DeleteBatesNumbering(this PageCollection pages)
     {
         if (pages is null) throw new ArgumentNullException(nameof(pages));
-        foreach (var page in pages)
+        foreach (var artifacts in pages.Select(page => page.Artifacts))
         {
-            for (var i = page.Artifacts.Count; i >= 1; i--)
+            for (var i = artifacts.Count; i >= 1; i--)
             {
-                if (page.Artifacts[i].Subtype == Artifact.ArtifactSubtype.BatesN)
-                    page.Artifacts.Delete(i);
+                if (artifacts[i].Subtype == Artifact.ArtifactSubtype.BatesN)
+                    artifacts.Delete(i);
             }
         }
     }
@@ -177,14 +177,14 @@ public static class PageCollectionExtensions
         var settings = HeaderFooterSettings.FindIn(pages);
         if (settings is null) return;
 
-        foreach (var page in pages)
+        foreach (var artifacts in pages.Select(page => page.Artifacts))
         {
             // The enumerator snapshots, so Delete inside the loop is safe.
-            foreach (var artifact in page.Artifacts)
+            foreach (var artifact in artifacts)
             {
                 if (artifact.Type == Artifact.ArtifactType.Pagination &&
                     artifact.Subtype is Artifact.ArtifactSubtype.Header or Artifact.ArtifactSubtype.Footer)
-                    page.Artifacts.Delete(artifact);
+                    artifacts.Delete(artifact);
             }
         }
 
@@ -298,11 +298,9 @@ public static class PageCollectionExtensions
             fonts = new PdfDictionary();
             resources.Set("Font", fonts);
         }
-        foreach (var key in fonts.Keys)
-        {
-            if (ReferenceEquals(page.Reader.Resolve(fonts.Get(key)), fontDict))
-                return key;
-        }
+        var key = fonts.Keys.FirstOrDefault(key => ReferenceEquals(page.Reader.Resolve(fonts.Get(key)), fontDict));
+        if (key is not null)
+            return key;
         var name = "F1";
         var counter = 1;
         while (fonts.ContainsKey(name)) name = $"F{++counter}";

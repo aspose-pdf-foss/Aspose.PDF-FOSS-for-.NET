@@ -11,6 +11,7 @@ namespace Aspose.Pdf.Facades;
 // The printing half of <see cref="PdfViewer"/>: a job draws each page of the bound document
 // onto an installed printer through the same renderer <see cref="PdfViewer.DecodePage"/> uses,
 // honouring the paper, margins, orientation and scale the settings ask for.
+#pragma warning disable S3881 // public API: the published IDisposable shape
 /// <remarks>
 /// A page reaches the printer as drawing commands, as the reference sends it. It is printed as a
 /// rendered image instead when <see cref="PdfViewer.PrintAsImage"/> asks for one - at
@@ -22,6 +23,7 @@ namespace Aspose.Pdf.Facades;
 /// over.
 /// </remarks>
 public partial class PdfViewer
+#pragma warning restore S3881
 {
     private object _printStatus;
 
@@ -68,7 +70,7 @@ public partial class PdfViewer
     public void PrintDocumentWithSettings(PageSettings pageSettings, PrinterSettings printerSettings)
     {
         EnsureBound();
-        if (TryPrintToPdfFile(_document, printerSettings)) return;
+        if (TryPrintToPdfFile(_document, pageSettings, printerSettings)) return;
         Print(new[] { _document }, pageSettings, printerSettings);
     }
 
@@ -196,7 +198,7 @@ public partial class PdfViewer
     [SupportedOSPlatform("windows")]
     private void PrintUnbound(Document document, PageSettings pageSettings, PrinterSettings printerSettings)
     {
-        if (TryPrintToPdfFile(document, printerSettings)) return;
+        if (TryPrintToPdfFile(document, pageSettings, printerSettings)) return;
         Print(new[] { document }, pageSettings, printerSettings);
     }
 
@@ -229,28 +231,33 @@ public partial class PdfViewer
     }
 
     /// <summary>
-    /// A print-TO-FILE job with a .pdf target needs no spooler: the document a spooler
-    /// would hand to "Microsoft Print to PDF" is reproduced directly — each requested
-    /// copy of the page range lands in the target file as its own pages (2 copies of a
-    /// 1-page document print as a 2-page PDF).
+    /// A print-TO-FILE job with a .pdf target needs no spooler: the job prints itself into the
+    /// file as a PDF printer would - every sheet of every copy of the range, laid out on the job's
+    /// paper with its margins, orientation and fit, fields and annotations drawn in, grey when
+    /// asked, the page and print events raised (see <see cref="PdfPrintJob.RunToPdfFile"/>). It
+    /// used to copy the pages as they were, whatever the job asked for.
     /// </summary>
     /// <returns>True when the job was satisfied this way and no printer is needed.</returns>
-    private static bool TryPrintToPdfFile(Document document, PrinterSettings printerSettings)
+    [SupportedOSPlatform("windows")]
+    private bool TryPrintToPdfFile(Document document, PageSettings pageSettings, PrinterSettings printerSettings)
     {
         if (printerSettings is not { PrintToFile: true } settings
             || string.IsNullOrEmpty(settings.PrintFileName)
             || !settings.PrintFileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
             return false;
 
-        using var outDoc = new Document();
-        var from = settings.FromPage > 0 ? settings.FromPage : 1;
-        var to = settings.ToPage >= from && settings.ToPage > 0 && settings.ToPage <= document.Pages.Count
-            ? settings.ToPage : document.Pages.Count;
-        var copies = Math.Max(1, settings.Copies);
-        for (var c = 0; c < copies; c++)
-            for (var p = from; p <= to; p++)
-                outDoc.Pages.Add(document.Pages[p]);
-        outDoc.Save(settings.PrintFileName);
+        _printStatus = null;
+        CopiesPrinted = 0;
+        try
+        {
+            new PdfPrintJob(BuildPrintOptions(), new[] { document }, pageSettings, settings).RunToPdfFile(settings.PrintFileName);
+            CopiesPrinted = Math.Max(1, settings.Copies);
+        }
+        catch (Exception e)
+        {
+            _printStatus = e;
+            throw;
+        }
         return true;
     }
 

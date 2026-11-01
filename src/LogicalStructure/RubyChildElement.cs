@@ -7,6 +7,6 @@ namespace Aspose.Pdf.LogicalStructure;
 /// appear only inside a <see cref="RubyElement"/>.</summary>
 public abstract class RubyChildElement : StructureElement
 {
-    internal RubyChildElement(string structureType) : base(structureType) { }
-    internal RubyChildElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
+    private protected RubyChildElement(string structureType) : base(structureType) { }
+    private protected RubyChildElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
 }

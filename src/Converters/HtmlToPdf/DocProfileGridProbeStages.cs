@@ -16,8 +16,8 @@ internal static partial class HtmlToPdfConverter
         // (…unless its cells cannot wrap: a nowrap grid keeps its content and the sheet grows
         // to it - probed: a `width:670px; table-layout:fixed; white-space:nowrap` table pages 871.25)
         if (profile.uaStdSerif && !profile.deadExternalCss
-            && Regex.Match(b.TableHtml ?? "", @"<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } natTag
-            && !Regex.IsMatch(natTag.Value, @"white-space\s*:\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase)
+            && SafeRegex.Match(b.TableHtml ?? "", @"<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } natTag
+            && !SafeRegex.IsMatch(natTag.Value, @"white-space\s*:\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase)
             && DeclaredTableWidthPt(natTag.Value) is var natDeclared && natDeclared > 0 && natW > natDeclared)
             natW = natDeclared;
         // MEASURED (the no-doctype evaluation form, quirks table font reset + ink sheet): a UA grid
@@ -30,7 +30,7 @@ internal static partial class HtmlToPdfConverter
         if (profile.uaStdSerif && !profile.deadExternalCss && _quirksRowStrut && natW > availContentW
             // (a natural width the probe already floored at min-content - a nowrap grid's - stands)
             && !probedTable.HtmlPctMinNatural && !profile.uaNoWrapCellRule
-            && Regex.Match(b.TableHtml ?? "", @"<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } attrTag
+            && SafeRegex.Match(b.TableHtml ?? "", @"<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } attrTag
             && DeclaredTableWidthPt(attrTag.Value) <= 0 && AttributeColumnsOnly(b.TableHtml ?? ""))
             natW = Math.Max(availContentW, MetricTableMinContentPt(cv, options, b.TableHtml ?? "", availContentW));
         // MEASURED (the change-control print page, min-content sheet): an auto grid whose MIN-content

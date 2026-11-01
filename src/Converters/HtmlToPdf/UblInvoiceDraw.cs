@@ -9,8 +9,8 @@ internal static partial class HtmlToPdfConverter
     // tags drop without a stand-in space (the sheet's spans butt together:
     // DK-8900), and NBSP survives the collapse (the
     // nbsp-spaced runs at their two-space width)
-    private static string Flat(UblInvoiceState ub, string frag) => Regex.Replace(DecodeEntities(
-        Regex.Replace(frag, @"<[^>]+>", "")), @"[ \t\r\n]+", " ").Trim();
+    private static string UblFlat(string frag) => SafeRegex.Replace(DecodeEntities(
+        SafeRegex.Replace(frag, @"<[^>]+>", "")), @"[ \t\r\n]+", " ").Trim();
 
     private static void Emit(UblInvoiceState ub, string res, double fs, double x, double yTd, string text)
         => EmitPositionedRun(ub.page, res, fs, x, ub.pageHeight - yTd, text);

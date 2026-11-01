@@ -30,7 +30,6 @@ internal sealed class RoleMap
             standardType = v;
             return standardType;
         }
-        standardType = string.Empty;
         return null;
     }
 

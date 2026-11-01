@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Devices;
 public sealed partial class SvgDevice
 {
     /// <summary>The graphics-state operators: the q/Q stack, the CTM, ExtGState and the stroke's width, caps, joins and dash.</summary>
-    private bool RenderSvgStateOperator(SvgRenderState sv, ISet<string> usedBlendModes, string op)
+    private static bool RenderSvgStateOperator(SvgRenderState sv, ISet<string> usedBlendModes, string op)
     {
         switch (op)
         {
@@ -37,24 +37,21 @@ public sealed partial class SvgDevice
 
             // --- ExtGState ---
             case "gs":
-                if (sv.operands.Count >= 1 && sv.operands[0] is PdfName gsName)
+                if (sv.operands.Count >= 1 && sv.operands[0] is PdfName gsName && sv.extGStates.TryGetValue(gsName.Value, out var gsDict))
                 {
-                    if (sv.extGStates.TryGetValue(gsName.Value, out var gsDict))
+                    var caObj = gsDict.Get("ca");
+                    if (caObj is PdfReal caR) sv.gs.FillAlpha = caR.Value;
+                    else if (caObj is PdfInteger caI) sv.gs.FillAlpha = caI.Value;
+
+                    var scaObj = gsDict.Get("CA");
+                    if (scaObj is PdfReal scaR) sv.gs.StrokeAlpha = scaR.Value;
+                    else if (scaObj is PdfInteger scaI) sv.gs.StrokeAlpha = scaI.Value;
+
+                    var bmObj = gsDict.GetName("BM");
+                    if (bmObj is not null)
                     {
-                        var caObj = gsDict.Get("ca");
-                        if (caObj is PdfReal caR) sv.gs.FillAlpha = caR.Value;
-                        else if (caObj is PdfInteger caI) sv.gs.FillAlpha = caI.Value;
-
-                        var scaObj = gsDict.Get("CA");
-                        if (scaObj is PdfReal scaR) sv.gs.StrokeAlpha = scaR.Value;
-                        else if (scaObj is PdfInteger scaI) sv.gs.StrokeAlpha = scaI.Value;
-
-                        var bmObj = gsDict.GetName("BM");
-                        if (bmObj is not null)
-                        {
-                            sv.gs.BlendMode = bmObj;
-                            if (bmObj != "Normal") usedBlendModes.Add(bmObj);
-                        }
+                        sv.gs.BlendMode = bmObj;
+                        if (bmObj != "Normal") usedBlendModes.Add(bmObj);
                     }
                 }
                 break;
@@ -93,7 +90,7 @@ public sealed partial class SvgDevice
     }
 
     /// <summary>The text operators: the font and its spacing, the text object and its matrix, and the strings shown.</summary>
-    private bool RenderSvgTextOperator(SvgRenderState sv, StringBuilder sb, PdfReader reader, List<LinkRect>? links, string op)
+    private static bool RenderSvgTextOperator(SvgRenderState sv, StringBuilder sb, PdfReader reader, List<LinkRect>? links, string op)
     {
         switch (op)
         {
@@ -115,7 +112,7 @@ public sealed partial class SvgDevice
             // --- Fill color (RGB) ---
             case "rg":
                 if (sv.operands.Count >= 3)
-                { sv.gs.FillR = Num(sv.operands[0]); sv.gs.FillG = Num(sv.operands[1]); sv.gs.FillB = Num(sv.operands[2]); }
+                { sv.gs.FillR = Num(sv.operands[0]); sv.gs.FillG = Num(sv.operands[1]); sv.gs.FillB = Num(sv.operands[2]); sv.gs.FillPaint = null; }
                 break;
 
             // --- Stroke color (RGB) ---
@@ -130,6 +127,7 @@ public sealed partial class SvgDevice
                 {
                     var gray = Num(sv.operands[0]);
                     sv.gs.FillR = gray; sv.gs.FillG = gray; sv.gs.FillB = gray;
+                    sv.gs.FillPaint = null;
                 }
                 break;
 
@@ -147,6 +145,7 @@ public sealed partial class SvgDevice
                 if (sv.operands.Count >= 4)
                 {
                     (sv.gs.FillR, sv.gs.FillG, sv.gs.FillB) = CmykToRgb(Num(sv.operands[0]), Num(sv.operands[1]), Num(sv.operands[2]), Num(sv.operands[3]));
+                    sv.gs.FillPaint = null;
                 }
                 break;
 
@@ -168,11 +167,25 @@ public sealed partial class SvgDevice
                 if (sv.operands.Count >= 1 && sv.operands[0] is PdfName csn)
                 {
                     var resolved = ResolveNamedColorSpace(csn.Value, resources, reader);
-                    if (op == "cs") sv.gs.FillCs = resolved; else sv.gs.StrokeCs = resolved;
+                    if (op == "cs")
+                    {
+                        sv.gs.FillCs = resolved;
+                        sv.gs.FillIsPattern = IsPatternSpace(csn.Value, resources, reader);
+                        sv.gs.FillPaint = null;
+                    }
+                    else sv.gs.StrokeCs = resolved;
                 }
                 break;
             case "sc":
             case "scn":
+                if (sv.gs.FillIsPattern && sv.operands.Count >= 1 && sv.operands[sv.operands.Count - 1] is PdfName patternName)
+                {
+                    // A shading pattern paints the fill with its gradient; any other pattern leaves the
+                    // colour as it was, as before.
+                    sv.gs.FillPaint = ShadingPatternPaint(patternName.Value, resources, reader, sv.gs);
+                    break;
+                }
+                sv.gs.FillPaint = null;
                 (sv.gs.FillR, sv.gs.FillG, sv.gs.FillB) =
                     sv.gs.FillCs is { TintTransform: not null } fcs && TintToRgb(fcs, sv.operands) is { } fillTint
                         ? fillTint
@@ -198,7 +211,7 @@ public sealed partial class SvgDevice
             case "m": case "l": case "c": case "v": case "y": case "h": case "re":
                 if (RenderSvgPathBuildOperator(sv, op)) return true;
                 break;
-            case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n":
+            case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n": case "W": case "W*":
                 if (RenderSvgPaintOperator(sv, sb, op)) return true;
                 break;
             // --- XObject invocation (Form recursion) ---

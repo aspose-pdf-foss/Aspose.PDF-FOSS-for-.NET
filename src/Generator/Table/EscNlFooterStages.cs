@@ -17,7 +17,7 @@ public partial class Table
         var rowLines = 1;
         for (var c = 0; c < r.Count; c++)
         {
-            var lines2 = Wrap(ef, r[c].lines, r[c].bold, ef.colBox[c] - 2 * EscNlCellPadding);
+            var lines2 = Wrap(r[c].lines, r[c].bold, ef.colBox[c] - 2 * EscNlCellPadding);
             wrapped.Add(lines2);
             rowLines = Math.Max(rowLines, lines2.Count);
         }
@@ -33,7 +33,7 @@ public partial class Table
             {
                 var ln = wrapped[c][li];
                 var x = bold
-                    ? contentX + Math.Max(0, (contentW - Measure(ef, ln, bold)) / 2)
+                    ? contentX + Math.Max(0, (contentW - Measure(ln, bold)) / 2)
                     : contentX;
                 EmitRun(ef, ln, bold, x, rowTop - vOff - li * ef.rootBox - ef.baseDrop);
             }
@@ -56,9 +56,9 @@ public partial class Table
                 var (cellLines, bold) = r[c];
                 foreach (var ln in cellLines)
                 {
-                    ef.maxBox[c] = Math.Max(ef.maxBox[c], Measure(ef, ln, bold) + 2 * EscNlCellPadding);
+                    ef.maxBox[c] = Math.Max(ef.maxBox[c], Measure(ln, bold) + 2 * EscNlCellPadding);
                     foreach (var w in ln.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                        ef.minBox[c] = Math.Max(ef.minBox[c], Measure(ef, w, bold) + 2 * EscNlCellPadding);
+                        ef.minBox[c] = Math.Max(ef.minBox[c], Measure(w, bold) + 2 * EscNlCellPadding);
                 }
             }
         ef.avail = ef.bandW - (ef.nCols + 1) * EscNlCellSpacing;
@@ -78,21 +78,21 @@ public partial class Table
     /// <summary>Splits the pre- and post-table text at the center boundary (the fostered text glued to the centred part) and parses the table rows, bare th cells before the first tr forming their own row. False when the table has no rows.</summary>
     private static bool ParseEscNlFlowAndRows(EscNlFooterState ef)
     {
-        ef.centerOpen = Regex.Match(ef.preMk, @"<center\b[^>]*>", RegexOptions.IgnoreCase);
+        ef.centerOpen = SafeRegex.Match(ef.preMk, @"<center\b[^>]*>", RegexOptions.IgnoreCase);
         ef.preOutside = TextOf(ef.centerOpen.Success ? ef.preMk[..ef.centerOpen.Index] : ef.preMk);
         ef.preCenter = ef.centerOpen.Success ? TextOf(ef.preMk[ef.centerOpen.Index..]) : "";
-        ef.fostered = TextOf(EscNlCellRegex.Replace(ef.tblMk, ""));
+        ef.fostered = TextOf(SafeRegex.Replace(EscNlCellRegex, ef.tblMk, ""));
         ef.tableCentred = ef.centerOpen.Success;
         ef.preCentreRun = ef.preCenter + ef.fostered;
-        ef.centerClose = Regex.Match(ef.postMk, @"</center\s*>", RegexOptions.IgnoreCase);
+        ef.centerClose = SafeRegex.Match(ef.postMk, @"</center\s*>", RegexOptions.IgnoreCase);
         ef.postCenter = TextOf(ef.centerClose.Success ? ef.postMk[..ef.centerClose.Index] : "");
         ef.postOutside = TextOf(ef.centerClose.Success ? ef.postMk[ef.centerClose.Index..] : ef.postMk);
 
         ef.rows = new List<List<(List<string> lines, bool bold)>>();
-        ef.firstTr = EscNlRowRegex.Match(ef.tblMk);
+        ef.firstTr = SafeRegex.Match(EscNlRowRegex, ef.tblMk);
         ef.headSpan = ef.firstTr.Success ? ef.tblMk[..ef.firstTr.Index] : ef.tblMk;
-        if (EscNlCellRegex.IsMatch(ef.headSpan)) AddRow(ef, ef.headSpan);
-        foreach (Match rm in EscNlRowRegex.Matches(ef.tblMk)) AddRow(ef, rm.Groups["r"].Value);
+        if (SafeRegex.IsMatch(EscNlCellRegex, ef.headSpan)) AddRow(ef, ef.headSpan);
+        foreach (Match rm in SafeRegex.Matches(EscNlRowRegex, ef.tblMk)) AddRow(ef, rm.Groups["r"].Value);
         if (ef.rows.Count == 0) return false;
         return true;
     }
@@ -100,9 +100,9 @@ public partial class Table
     /// <summary>Strips the doctype and style, locates the table's markup span and the serif line box; false when the markup holds no table or the band is too narrow.</summary>
     private static bool LocateEscNlTable(EscNlFooterState ef)
     {
-        ef.src = EscNlStyleRegex.Replace(EscNlDoctypeRegex.Replace(ef.html, ""), "");
-        ef.tblOpen = Regex.Match(ef.src, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
-        ef.tblClose = Regex.Match(ef.src, @"</table\s*>", RegexOptions.IgnoreCase);
+        ef.src = SafeRegex.Replace(EscNlStyleRegex, SafeRegex.Replace(EscNlDoctypeRegex, ef.html, ""), "");
+        ef.tblOpen = SafeRegex.Match(ef.src, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        ef.tblClose = SafeRegex.Match(ef.src, @"</table\s*>", RegexOptions.IgnoreCase);
         if (!ef.tblOpen.Success || !ef.tblClose.Success || ef.tblClose.Index < ef.tblOpen.Index) return false;
         ef.preMk = ef.src[..ef.tblOpen.Index];
         ef.tblMk = ef.src[ef.tblOpen.Index..(ef.tblClose.Index + ef.tblClose.Length)];

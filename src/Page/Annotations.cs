@@ -41,9 +41,10 @@ public sealed partial class Page
 
     /// <summary>
     /// Emit a Link annotation for every fragment whose hyperlink was set via the absorber/edit
-    /// path. The fragment rectangle is in the page's displayed (rotation-applied) coordinate
-    /// frame, so it is mapped back to unrotated page space for the annotation /Rect. Called
-    /// during save before the content stream is flushed.
+    /// path. The fragment rectangle is in the frame its page was read in - turned when the page
+    /// was viewed turned - so it is mapped back to unrotated page space, then through the redraws
+    /// of the content since (turns, resizes), for the annotation /Rect. Called during save before
+    /// the content stream is flushed.
     /// </summary>
     internal void FlushHyperlinkAnnotations()
     {
@@ -52,7 +53,8 @@ public sealed partial class Page
         {
             var hyperlink = frag.HyperlinkValue;
             if (hyperlink is null || frag.Rectangle is null) continue;
-            var rect = MapDisplayedRectToUnrotated(frag.Rectangle, RotateDegrees, MediaBox);
+            var rect = frag.PositionFrame?.Unrotate?.Transform(frag.Rectangle) ?? frag.Rectangle;
+            if (TransformsSince(frag.PositionFrame) is { } since) rect = since.Transform(rect);
             EmitHyperlinkAnnotation(rect, hyperlink);
         }
         _hyperlinkFragments.Clear();
@@ -101,16 +103,20 @@ public sealed partial class Page
     }
 
     /// <summary>Transform every annotation's /Rect (renormalised), /QuadPoints and appearance
-    /// /Matrix by the page-rotation affine so the annotations move and orient with the content.</summary>
-    private void TransformAnnotationGeometry(double a, double b, double c, double d, double e, double f)
+    /// /Matrix by the page-rotation affine so the annotations move and orient with the content;
+    /// with <paramref name="only"/>, just the /Annots entries it accepts.</summary>
+    private void TransformAnnotationGeometry(double a, double b, double c, double d, double e, double f,
+        Func<PdfObject, bool>? only = null)
     {
         var annots = _reader.Resolve(_dict.Get("Annots")) as PdfArray;
         if (annots is null) return;
+        // An appearance stream several annotations share takes the turn once.
+        var turnedAppearances = new Dictionary<PdfStream, PdfStream>(ReferenceEqualityComparer.Instance);
 
         foreach (var annotRef in annots)
         {
             var annotDict = _reader.ResolveDict(annotRef);
-            if (annotDict is null) continue;
+            if (annotDict is null || (only is not null && !only(annotRef))) continue;
 
             var rectArr = _reader.Resolve(annotDict.Get("Rect")) as PdfArray;
             if (rectArr is { Count: >= 4 })
@@ -138,7 +144,7 @@ public sealed partial class Page
             // Pre-rotate the normal appearance stream(s) by the linear part of the affine so the
             // annotation's drawn content turns with the page (the viewer fits the appearance BBox
             // into the new /Rect, so only the rotation — not the translation — belongs here).
-            RotateAppearanceMatrices(annotDict, a, b, c, d);
+            RotateAppearanceMatrices(annotDict, a, b, c, d, turnedAppearances);
         }
     }
 }

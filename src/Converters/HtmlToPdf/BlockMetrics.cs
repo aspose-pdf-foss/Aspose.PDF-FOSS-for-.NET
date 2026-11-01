@@ -14,9 +14,6 @@ internal static partial class HtmlToPdfConverter
         public double blockFontSize;
         /// <summary>The line box the block's text is laid out on.</summary>
         public double lineHeight;
-        public double charW;
-        /// <summary>Left edge the block's lines start from.</summary>
-        public double lineX;
         /// <summary>The block's text, wrapped to the width available to it.</summary>
         public string[] lines = System.Array.Empty<string>();
         /// <summary>Character offset of the current line's start within the block text.</summary>

@@ -202,8 +202,8 @@ public class PdfToMarkdownConverterTests
         var md = converter.SaveAsMarkdown(doc);
 
         Assert.Contains("Normal text", md);
-        Assert.DoesNotContain("**Normal text**", md);
-        Assert.DoesNotContain("*Normal text*", md);
+        Assert.DoesNotContain("**Normal text**", md, StringComparison.Ordinal);
+        Assert.DoesNotContain("*Normal text*", md, StringComparison.Ordinal);
     }
 
     // ── Horizontal rule detection tests ──

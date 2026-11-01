@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Facades;
 public sealed partial class PdfFileMend
 {
     /// <summary>Writes the text object: fill colour, font and size, the first line at the seat, then every further line via TL and T* with its leading, each shown through the encoded operand.</summary>
-    private void EmitMendText(MendTextState tx)
+    private static void EmitMendText(MendTextState tx)
     {
         tx.fg = tx.ft.ForegroundColor;
         tx.sb.AppendFormat(CultureInfo.InvariantCulture,
@@ -46,7 +46,7 @@ public sealed partial class PdfFileMend
     }
 
     /// <summary>The background-colour bar behind each line, drawn before the glyphs, one per line stepping down by the leading.</summary>
-    private void EmitMendBackgroundBars(MendTextState tx)
+    private static void EmitMendBackgroundBars(MendTextState tx)
     {
         // The background-colour bar behind each line (drawn before the glyphs so it
         // renders underneath). This makes PdfFileMend honour FormattedText.BackgroundColor.
@@ -70,7 +70,7 @@ public sealed partial class PdfFileMend
     }
 
     /// <summary>Seats the text and its bar: the probed geometry for a standard face, the legacy inset and bar for a named face, clamped to the page.</summary>
-    private void PlaceMendTextBar(MendTextState tx)
+    private static void PlaceMendTextBar(MendTextState tx)
     {
         if (!tx.namedFace)
         {
@@ -107,12 +107,12 @@ public sealed partial class PdfFileMend
     }
 
     /// <summary>Resolves the size, leading and Standard-14 ascender and descender, and the page's display box and rotation matrix.</summary>
-    private void ResolveMendTextMetrics(MendTextState tx)
+    private static void ResolveMendTextMetrics(MendTextState tx)
     {
         tx.size = tx.ft.FontSize;
         tx.defaultLeading = tx.size + 2;
 
-        tx.metricsFont = string.IsNullOrEmpty(tx.ft.FontName) ? "Helvetica" : tx.ft.FontName!;
+        tx.metricsFont = string.IsNullOrEmpty(tx.ft.FontName) ? "Helvetica" : tx.ft.FontName;
         tx.std14 = Standard14Fonts.IsStandard14(tx.metricsFont);
         tx.ascender = (tx.std14 ? Standard14Fonts.GetAscent(tx.metricsFont) : 718) / 1000.0;
         tx.descender = (tx.std14 ? -Standard14Fonts.GetDescent(tx.metricsFont) : 207) / 1000.0;
@@ -141,8 +141,7 @@ public sealed partial class PdfFileMend
         tx.needsUnicode = false;
         foreach (var probeLine in tx.ft.Lines)
         {
-            foreach (var ch in probeLine.Text)
-                if (ch > 255) { tx.needsUnicode = true; break; }
+            if (probeLine.Text.Any(ch => ch > 255)) { tx.needsUnicode = true; }
             if (tx.needsUnicode) break;
         }
         tx.unicodeTtf = null;

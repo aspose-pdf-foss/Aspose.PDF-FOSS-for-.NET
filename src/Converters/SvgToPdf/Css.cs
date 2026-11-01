@@ -19,6 +19,7 @@ internal static partial class SvgToPdfConverter
         ["stroke-linecap"] = "butt",
         ["stroke-linejoin"] = "miter",
         ["stroke-dasharray"] = "none",
+        ["stroke-dashoffset"] = "0",
         ["fill-rule"] = "nonzero",
         ["fill-opacity"] = "1",
         ["stroke-opacity"] = "1",
@@ -62,7 +63,7 @@ internal static partial class SvgToPdfConverter
     private static string ResolveImports(string css, Ctx ctx)
     {
         if (css.IndexOf("@import", StringComparison.OrdinalIgnoreCase) < 0) return css;
-        return Regex.Replace(css,
+        return SafeRegex.Replace(css,
             @"@import\s+(?:url\(\s*[""']?(?<u>[^""')]+)[""']?\s*\)|[""'](?<u>[^""']+)[""'])\s*;?",
             m => FetchCss(m.Groups["u"].Value, ctx) ?? "", RegexOptions.IgnoreCase);
     }
@@ -95,15 +96,15 @@ internal static partial class SvgToPdfConverter
     /// WOFF payload the TrueType parser cannot read is skipped.</summary>
     private static void CollectFontFaces(string css, Ctx ctx)
     {
-        foreach (Match m in Regex.Matches(css, @"@font-face\s*\{(?<b>[^{}]*)\}",
+        foreach (Match m in SafeRegex.Matches(css, @"@font-face\s*\{(?<b>[^{}]*)\}",
                      RegexOptions.IgnoreCase | RegexOptions.Singleline))
         {
             var body = m.Groups["b"].Value;
-            var famM = Regex.Match(body, @"font-family\s*:\s*(?<f>[^;]+)", RegexOptions.IgnoreCase);
+            var famM = SafeRegex.Match(body, @"font-family\s*:\s*(?<f>[^;]+)", RegexOptions.IgnoreCase);
             if (!famM.Success) continue;
             var family = famM.Groups["f"].Value.Trim().Trim('"', '\'').Trim();
             if (family.Length == 0 || ctx.DeclaredFaces.ContainsKey(family)) continue;
-            foreach (Match u in Regex.Matches(body, @"url\(\s*[""']?(?<u>[^""')]+)[""']?\s*\)",
+            foreach (Match u in SafeRegex.Matches(body, @"url\(\s*[""']?(?<u>[^""')]+)[""']?\s*\)",
                          RegexOptions.IgnoreCase))
             {
                 var bytes = LoadFontProgram(u.Groups["u"].Value, ctx);
@@ -142,19 +143,21 @@ internal static partial class SvgToPdfConverter
         }
         catch { return null; }
         if (bytes is null || bytes.Length < 12) return null;
+#pragma warning disable S1848 // constructed only to validate the font program - it throws on a bad one
         try { new Text.GlyphOutlineParser(bytes); } catch { return null; }
+#pragma warning restore S1848
         return bytes;
     }
 
     private static void ParseCss(string css, Ctx ctx)
     {
-        css = Regex.Replace(css, @"/\*.*?\*/", "", RegexOptions.Singleline);
+        css = SafeRegex.Replace(css, @"/\*.*?\*/", "", RegexOptions.Singleline);
         CollectFontFaces(css, ctx);
         var order = ctx.Css.Count;
-        foreach (Match rule in Regex.Matches(css, @"([^{}]+)\{([^}]*)\}"))
+        foreach (var groups in SafeRegex.Matches(css, @"([^{}]+)\{([^}]*)\}").Select(rule => rule.Groups))
         {
             var props = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var decl in rule.Groups[2].Value.Split(';'))
+            foreach (var decl in groups[2].Value.Split(';'))
             {
                 var idx = decl.IndexOf(':');
                 if (idx <= 0) continue;
@@ -163,11 +166,13 @@ internal static partial class SvgToPdfConverter
                 if (name.Length > 0 && value.Length > 0) props[name] = value;
             }
             if (props.Count == 0) continue;
-            foreach (var sel in rule.Groups[1].Value.Split(','))
+            foreach (var sel in groups[1].Value.Split(','))
             {
                 var s = sel.Trim();
                 if (s.Length == 0) continue;
-                var spec = s.StartsWith('#') ? 100 : s.Contains('.') ? 10 : 1;
+                int spec = 1;
+                if (s.StartsWith('#')) spec = 100;
+                else if (s.Contains('.')) spec = 10;
                 ctx.Css.Add((s, spec, order++, props));
             }
         }
@@ -189,8 +194,7 @@ internal static partial class SvgToPdfConverter
         {
             var classes = el.GetAttribute("class").Split(' ', StringSplitOptions.RemoveEmptyEntries);
             // handle multi-class selectors a.b.c
-            foreach (var cls in classPart.Split('.'))
-                if (Array.IndexOf(classes, cls) < 0) return false;
+            if (classPart.Split('.').Any(cls => Array.IndexOf(classes, cls) < 0)) return false;
         }
         return true;
     }
@@ -202,7 +206,7 @@ internal static partial class SvgToPdfConverter
     private static readonly string[] PresentationAttrs =
     {
         "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
-        "stroke-dasharray", "fill-rule", "fill-opacity", "stroke-opacity", "opacity",
+        "stroke-dasharray", "stroke-dashoffset", "fill-rule", "fill-opacity", "stroke-opacity", "opacity",
         "font-family", "font-size", "font-weight", "font-style", "text-anchor",
         "text-decoration", "color", "visibility", "display", "clip-path", "mask",
     };
@@ -266,7 +270,31 @@ internal static partial class SvgToPdfConverter
         if (style.TryGetValue("stroke", out var st) && st == "currentColor")
             style["stroke"] = style.GetValueOrDefault("color", "black");
 
+        // A font size in em, ex or % is relative to the inherited one, which is already absolute, so
+        // what the children inherit is absolute too.
+        if (style.TryGetValue("font-size", out var fontSize) && RelativeFontSize(fontSize, parent) is { } absolute)
+            style["font-size"] = absolute.ToString("0.####", CultureInfo.InvariantCulture);
+
         return style;
+    }
+
+    // The x-height a relative ex size is taken at: half the em.
+    private const double ExPerEm = 0.5;
+
+    /// <summary>A font size given in em, ex or % resolved against the parent's, in user units; null
+    /// for any other value.</summary>
+    private static double? RelativeFontSize(string value, Dictionary<string, string> parent)
+    {
+        var m = SafeRegex.Match(value.Trim(), @"^([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?)\s*(em|ex|%)$");
+        if (!m.Success) return null;
+        var num = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+        var inherited = ParseLength(Prop(parent, "font-size"));
+        return m.Groups[2].Value switch
+        {
+            "em" => num * inherited,
+            "ex" => num * ExPerEm * inherited,
+            _ => num / 100.0 * inherited,
+        };
     }
 
     private static string Prop(Dictionary<string, string> style, string name) =>

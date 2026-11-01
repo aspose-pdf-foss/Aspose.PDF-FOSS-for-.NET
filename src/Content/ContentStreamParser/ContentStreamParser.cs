@@ -158,6 +158,15 @@ internal sealed partial class ContentStreamParser
     /// </summary>
     private readonly HashSet<string> _patternColorSpaces = new();
 
+    /// <summary>The base of an uncoloured pattern space, or of an Indexed space, is registered under the
+    /// space's name with this suffix: the components an scn gives before the pattern name, or the colour an
+    /// index looks up, are read in that space.</summary>
+    private const string BaseSpaceSuffix = "\0base";
+
+    /// <summary>Named /Indexed spaces: the lookup table, the components of one entry and the base space its
+    /// entries are read in (a device-space name, or the registered name of a tint space).</summary>
+    private readonly Dictionary<string, (byte[] lookup, int components, string baseSpace)> _indexedColorSpaces = new();
+
     /// <summary>
     /// Names of page-resource colour spaces that resolve to a bare <c>/Pattern</c>
     /// or <c>[/Pattern]</c> (a coloured pattern). A <c>scn</c> naming one of these is
@@ -194,6 +203,7 @@ internal sealed partial class ContentStreamParser
         _patterns = patterns;
         _tintColorSpaces.Clear();
         _patternColorSpaces.Clear();
+        _indexedColorSpaces.Clear();
         _barePatternColorSpaces.Clear();
         _labEncColorSpaces.Clear();
         _labColorSpaces.Clear();
@@ -351,59 +361,98 @@ internal sealed partial class ContentStreamParser
     /// <summary>The named colour spaces of the resources sorted into the tint, pattern, bare-pattern and Lab tables the operators consult.</summary>
     private void RegisterColorSpaces(PdfDictionary? colorSpaces)
     {
-        if (colorSpaces is not null)
+        if (colorSpaces is null) return;
+        foreach (var name in colorSpaces.Keys) RegisterColorSpace(name, _reader.Resolve(colorSpaces.Get(name)));
+    }
+
+    /// <summary>One named colour space sorted into its table; the base of a pattern or Indexed space is registered
+    /// after it under <see cref="BaseSpaceSuffix"/>.</summary>
+    private void RegisterColorSpace(string name, PdfObject? resolved)
+    {
+        // An UNCOLOURED pattern space — [/Pattern baseColourSpace] — is
+        // always pinned: the numeric scn operands supply the colour the
+        // renderer paints the tiling cell mask with, and FOSS renders these.
+        if (resolved is PdfArray parr && parr.Count >= 2 && (parr[0] as PdfName)?.Value == "Pattern")
         {
-            foreach (var name in colorSpaces.Keys)
-            {
-                var resolved = _reader.Resolve(colorSpaces.Get(name));
-                // An UNCOLOURED pattern space — [/Pattern baseColourSpace] — is
-                // always pinned: the numeric scn operands supply the colour the
-                // renderer paints the tiling cell mask with, and FOSS renders these.
-                if (resolved is PdfArray parr && parr.Count >= 2 && (parr[0] as PdfName)?.Value == "Pattern")
-                { _patternColorSpaces.Add(name); continue; }
-                // A bare /Pattern name or [/Pattern] (a coloured pattern that carries
-                // its own colour operators) is recorded separately. A `scn` naming it
-                // is only routed to the renderer when the referenced pattern is a
-                // shading pattern (PatternType 2), which FOSS rasterises; coloured
-                // tiling cells (PatternType 1) stay on the legacy solid-fill path so
-                // they keep their last solid colour instead of rendering blank.
-                if ((resolved is PdfName pn && pn.Value == "Pattern")
-                    || (resolved is PdfArray bp && bp.Count >= 1 && (bp[0] as PdfName)?.Value == "Pattern"))
-                { _barePatternColorSpaces.Add(name); continue; }
-                if (resolved is not PdfArray arr) continue;
-                // A named [/ICCBased <stream>] space whose profile is a scanner-class
-                // (Lab-encoded) profile: producers like pdfDocs write RAW Lab-ish scn
-                // operands against it (e.g. "100 -1 -1 scn"); record it so scn can
-                // clamp + decode instead of misreading the components as display RGB.
-                if (arr.Count >= 2 && (arr[0] as PdfName)?.Value == "ICCBased"
-                    && IsLabEncodedIcc(arr[1]))
-                { _labEncColorSpaces.Add(name); continue; }
-                if (arr.Count >= 1 && (arr[0] as PdfName)?.Value == "Lab")
-                { _labColorSpaces.Add(name); continue; }
-                if (arr.Count < 4) continue;
-                var familyName = (arr[0] as PdfName)?.Value;
-                if (familyName != "Separation" && familyName != "DeviceN") continue;
-                var altSpace = ResolveAltSpaceName(arr[2]);
-                var tint = altSpace is null ? null : Functions.PdfFunction.Parse(arr[3], _reader);
-                // A scanner-class ICC alternate carries no marker for how the tint
-                // output is ENCODED — some producers emit Lab-encoded channels
-                // (L/100, (a|b+128)/255), others plain display RGB against the same
-                // profile class. The no-ink end disambiguates: tint(0) must be paper
-                // white, which is (1, ~0.5, ~0.5) in the Lab encoding but (1, 1, 1)
-                // in display RGB. Only keep the LabEnc decode when the function
-                // actually lands near the Lab-encoded white.
-                if (altSpace == "LabEnc" && tint is not null)
-                {
-                    var zero = tint.Evaluate(new double[] { 0 });
-                    bool labWhite = zero is { Length: >= 3 }
-                        && Math.Abs(zero[1] - 0.5) < 0.25 && Math.Abs(zero[2] - 0.5) < 0.25;
-                    if (!labWhite) altSpace = "DeviceRGB";
-                }
-                if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_CSDEBUG") == "1")
-                    Console.Error.WriteLine($"[cs] {name} family={familyName} alt={altSpace ?? "NULL"} tint={(tint is null ? "NULL" : tint.GetType().Name)}");
-                if (altSpace is null || tint is null) continue;
-                _tintColorSpaces[name] = (tint, altSpace);
-            }
+            _patternColorSpaces.Add(name);
+            RegisterColorSpace(name + BaseSpaceSuffix, _reader.Resolve(parr[1]));
+            return;
         }
+        // A bare /Pattern name or [/Pattern] (a coloured pattern that carries
+        // its own colour operators) is recorded separately. A `scn` naming it
+        // is only routed to the renderer when the referenced pattern is a
+        // shading pattern (PatternType 2), which FOSS rasterises; coloured
+        // tiling cells (PatternType 1) stay on the legacy solid-fill path so
+        // they keep their last solid colour instead of rendering blank.
+        if ((resolved is PdfName pn && pn.Value == "Pattern")
+            || (resolved is PdfArray bp && bp.Count >= 1 && (bp[0] as PdfName)?.Value == "Pattern"))
+        { _barePatternColorSpaces.Add(name); return; }
+        if (resolved is not PdfArray arr) return;
+        // A named [/ICCBased <stream>] space whose profile is a scanner-class
+        // (Lab-encoded) profile: producers like pdfDocs write RAW Lab-ish scn
+        // operands against it (e.g. "100 -1 -1 scn"); record it so scn can
+        // clamp + decode instead of misreading the components as display RGB.
+        if (arr.Count >= 2 && (arr[0] as PdfName)?.Value == "ICCBased"
+            && IsLabEncodedIcc(arr[1]))
+        { _labEncColorSpaces.Add(name); return; }
+        if (arr.Count >= 1 && (arr[0] as PdfName)?.Value == "Lab")
+        { _labColorSpaces.Add(name); return; }
+        if (arr.Count < 4) return;
+        var familyName = (arr[0] as PdfName)?.Value;
+        if (familyName is "Indexed" or "I")
+        {
+            RegisterIndexedSpace(name, arr);
+            return;
+        }
+        if (familyName != "Separation" && familyName != "DeviceN") return;
+        var altSpace = ResolveAltSpaceName(arr[2]);
+        var tint = altSpace is null ? null : Functions.PdfFunction.Parse(arr[3], _reader);
+        // A scanner-class ICC alternate carries no marker for how the tint
+        // output is ENCODED — some producers emit Lab-encoded channels
+        // (L/100, (a|b+128)/255), others plain display RGB against the same
+        // profile class. The no-ink end disambiguates: tint(0) must be paper
+        // white, which is (1, ~0.5, ~0.5) in the Lab encoding but (1, 1, 1)
+        // in display RGB. Only keep the LabEnc decode when the function
+        // actually lands near the Lab-encoded white.
+        if (altSpace == "LabEnc" && tint is not null)
+        {
+            var zero = tint.Evaluate(new double[] { 0 });
+            bool labWhite = zero is { Length: >= 3 }
+                && Math.Abs(zero[1] - 0.5) < 0.25 && Math.Abs(zero[2] - 0.5) < 0.25;
+            if (!labWhite) altSpace = "DeviceRGB";
+        }
+        if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_CSDEBUG") == "1")
+            Console.Error.WriteLine($"[cs] {name} family={familyName} alt={altSpace ?? "NULL"} tint={(tint is null ? "NULL" : tint.GetType().Name)}");
+        if (altSpace is null || tint is null) return;
+        _tintColorSpaces[name] = (tint, altSpace);
+    }
+
+    /// <summary>An /Indexed space: its lookup table and the base space the entries are read in - a device
+    /// space by name, or a Separation / DeviceN base registered as a tint space of its own.</summary>
+    private void RegisterIndexedSpace(string name, PdfArray arr)
+    {
+        var lookup = _reader.Resolve(arr[3]) switch
+        {
+            PdfString table => table.Value,
+            PdfStream stream => _reader.DecodeStream(stream),
+            _ => null,
+        };
+        if (lookup is null) return;
+        string? baseSpace;
+        int components;
+        if (_reader.Resolve(arr[1]) is PdfArray baseArr && baseArr.Count > 1
+            && (baseArr[0] as PdfName)?.Value is "Separation" or "DeviceN")
+        {
+            baseSpace = name + BaseSpaceSuffix;
+            RegisterColorSpace(baseSpace, baseArr);
+            components = _reader.Resolve(baseArr[1]) is PdfArray colorants ? colorants.Count : 1;
+        }
+        else
+        {
+            baseSpace = ResolveAltSpaceName(arr[1]);
+            components = baseSpace switch { null => 0, "DeviceGray" => 1, "DeviceCMYK" => 4, _ => 3 };
+        }
+        if (baseSpace is null || components == 0) return;
+        _indexedColorSpaces[name] = (lookup, components, baseSpace);
     }
 }

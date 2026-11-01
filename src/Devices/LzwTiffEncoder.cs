@@ -18,7 +18,7 @@ internal static class LzwTiffEncoder
     public static byte[] Encode(byte[] input)
     {
         var writer = new MsbBitWriter();
-        var trie = new Dictionary<int, int>(capacity: 4096);
+        var trie = new StringTable();
 
         var codeSize = 9;
         var nextCode = FirstFreeCode;
@@ -39,7 +39,7 @@ internal static class LzwTiffEncoder
             // Key: (prefixCode << 8) | nextByte — fits in int since prefixCode <= 4095.
             var key = (currentCode << 8) | c;
 
-            if (trie.TryGetValue(key, out var found))
+            if (trie.TryGet(key, out var found))
             {
                 currentCode = found;
                 continue;
@@ -52,7 +52,7 @@ internal static class LzwTiffEncoder
             // grow their tables identically.
             if (nextCode < MaxCode)
             {
-                trie[key] = nextCode;
+                trie.Add(key, nextCode);
                 nextCode++;
                 // Bump condition. The decoder uses (nextCode+1 >= 2^codeSize)
                 // with earlyChange=1 — that +1 compensates for the Clear
@@ -83,6 +83,46 @@ internal static class LzwTiffEncoder
         writer.WriteBits(currentCode, codeSize);
         writer.WriteBits(EoiCode, codeSize);
         return writer.ToArray();
+    }
+
+    /// <summary>The strings seen so far, by (prefix code, next byte): an open-addressed table
+    /// with a generation stamp per slot, so clearing it costs a new stamp and nothing else.
+    /// The dictionary this replaces was most of what encoding a strip cost.</summary>
+    private sealed class StringTable
+    {
+        private const int SizeBits = 14;                 // four slots per code: short probes
+        private const int Size = 1 << SizeBits;
+        private const uint GoldenRatio = 2654435769;     // Fibonacci hashing
+        private readonly int[] _keys = new int[Size];
+        private readonly int[] _codes = new int[Size];
+        private readonly int[] _generations = new int[Size];
+        private int _generation = 1;
+
+        public void Clear() => _generation++;
+
+        public bool TryGet(int key, out int code)
+        {
+            var slot = Find(key);
+            code = _codes[slot];
+            return _generations[slot] == _generation;
+        }
+
+        public void Add(int key, int code)
+        {
+            var slot = Find(key);
+            _keys[slot] = key;
+            _codes[slot] = code;
+            _generations[slot] = _generation;
+        }
+
+        // The slot holding the key, or the free slot it goes into.
+        private int Find(int key)
+        {
+            var slot = (int)(((uint)key * GoldenRatio) >> (32 - SizeBits));
+            while (_generations[slot] == _generation && _keys[slot] != key)
+                slot = (slot + 1) & (Size - 1);
+            return slot;
+        }
     }
 
     private sealed class MsbBitWriter

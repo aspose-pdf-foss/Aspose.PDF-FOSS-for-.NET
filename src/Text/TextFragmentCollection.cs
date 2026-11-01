@@ -19,7 +19,9 @@ public sealed class TextFragmentCollection : System.Collections.Generic.IEnumera
         get
         {
             if (index < 1 || index > _list.Count)
+#pragma warning disable S112 // public API: the exception type callers catch
                 throw new IndexOutOfRangeException($"Index {index} out of range [1, {_list.Count}].");
+#pragma warning restore S112
             return _list[index - 1];
         }
     }
@@ -28,8 +30,12 @@ public sealed class TextFragmentCollection : System.Collections.Generic.IEnumera
     /// just-added range into reading order.</summary>
     internal System.Collections.Generic.List<TextFragment> Inner => _list;
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => false;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>Adds a fragment to the end of the collection; throws when <c>fragment</c> is <c>null</c>.</summary>

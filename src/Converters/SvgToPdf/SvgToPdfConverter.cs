@@ -73,8 +73,8 @@ internal static partial class SvgToPdfConverter
         // xlink: prefix on <use>/<image> hrefs; an undeclared prefix is a hard XML parse
         // error that would drop the whole file to the blank last-resort page. Declare the
         // standard namespace on every <svg> root that uses the prefix without declaring it.
-        if (Regex.IsMatch(svgText, @"\bxlink:") && svgText.IndexOf("xmlns:xlink", StringComparison.Ordinal) < 0)
-            svgText = Regex.Replace(svgText, @"<svg\b",
+        if (SafeRegex.IsMatch(svgText, @"\bxlink:") && svgText.IndexOf("xmlns:xlink", StringComparison.Ordinal) < 0)
+            svgText = SafeRegex.Replace(svgText, @"<svg\b",
                 "<svg xmlns:xlink=\"http://www.w3.org/1999/xlink\"", RegexOptions.IgnoreCase);
 
         // Raphael/HTML-inline SVGs quote url() references with the SAME quote
@@ -82,8 +82,8 @@ internal static partial class SvgToPdfConverter
         // HTML parser, fatal to XML. Unquote the inner reference in place.
         if (svgText.Contains("url(", StringComparison.OrdinalIgnoreCase))
         {
-            svgText = Regex.Replace(svgText, @"='url\('([^')]*)'\)'", "='url($1)'");
-            svgText = Regex.Replace(svgText, @"=""url\(""([^"")]*)""\)""", "=\"url($1)\"");
+            svgText = SafeRegex.Replace(svgText, @"='url\('([^')]*)'\)'", "='url($1)'");
+            svgText = SafeRegex.Replace(svgText, @"=""url\(""([^"")]*)""\)""", "=\"url($1)\"");
         }
 
         // First attempt: standard XML parse with DTD disabled
@@ -98,7 +98,7 @@ internal static partial class SvgToPdfConverter
             xml.Load(reader);
             return xml;
         }
-        catch (XmlException) { }
+        catch (XmlException) { /* not well-formed this way - the next, more lenient attempt follows */ }
 
         // Second attempt: strip unrecognized entities (Adobe Illustrator SVGs reference
         // custom entities like &ns_extend; in the <svg> xmlns attrs, defined only in an
@@ -110,7 +110,8 @@ internal static partial class SvgToPdfConverter
         // unknown entity with a placeholder URI (not empty) so the prefixed xmlns stays a valid,
         // non-empty declaration and the prefix remains declared for the body — dropping the decl
         // (or emptying it) would make every use of that prefix an "undeclared prefix" parse error.
-        var cleaned = Regex.Replace(svgText, @"&(?!amp;|lt;|gt;|quot;|apos;|#)\w+;", "urn:svg-entity");
+        svgText = DeclareMissingPrefixes(svgText);
+        var cleaned = SafeRegex.Replace(svgText, @"&(?!amp;|lt;|gt;|quot;|apos;|#)\w+;", "urn:svg-entity");
         var ignoreDtd = new XmlReaderSettings { DtdProcessing = DtdProcessing.Ignore, XmlResolver = null };
         try
         {
@@ -118,19 +119,19 @@ internal static partial class SvgToPdfConverter
             xml.Load(reader);
             return xml;
         }
-        catch (XmlException) { }
+        catch (XmlException) { /* not well-formed this way - the next, more lenient attempt follows */ }
 
         // Third attempt: strip self-closing HTML tags (link, meta, br, hr, img, input)
-        cleaned = Regex.Replace(cleaned, @"<(link|meta|br|hr|img|input)\b[^>]*/?>", "", RegexOptions.IgnoreCase);
+        cleaned = SafeRegex.Replace(cleaned, @"<(link|meta|br|hr|img|input)\b[^>]*/?>", "", RegexOptions.IgnoreCase);
         // Remove mismatched close tags
-        cleaned = Regex.Replace(cleaned, @"</(?:link|meta|br|hr|img|input)\s*>", "", RegexOptions.IgnoreCase);
+        cleaned = SafeRegex.Replace(cleaned, @"</(?:link|meta|br|hr|img|input)\s*>", "", RegexOptions.IgnoreCase);
         try
         {
             using var reader = XmlReader.Create(new StringReader(cleaned), ignoreDtd);
             xml.Load(reader);
             return xml;
         }
-        catch (XmlException) { }
+        catch (XmlException) { /* not well-formed this way - the next, more lenient attempt follows */ }
 
         // Fourth attempt: wrap in root and extract SVG element
         try
@@ -145,12 +146,33 @@ internal static partial class SvgToPdfConverter
                 return xml;
             }
         }
-        catch (XmlException) { }
+        catch (XmlException) { /* not well-formed this way - the next, more lenient attempt follows */ }
 
         // Last resort: create minimal SVG
         xml.LoadXml("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"612\" height=\"792\"></svg>");
         return xml;
     }
+
+    /// <summary>An editor's metadata (<c>&lt;rdf:RDF&gt;</c>, <c>&lt;dc:title&gt;</c>) often survives a
+    /// clean-up that removed its namespace declarations; one undeclared prefix fails the whole
+    /// parse. Every prefix an element or attribute name uses without a declaration is declared
+    /// on the root, under a placeholder namespace nothing draws from.</summary>
+    private static string DeclareMissingPrefixes(string svgText)
+    {
+        var declarations = new StringBuilder();
+        var seen = new HashSet<string>(StringComparer.Ordinal) { "xml", "xmlns" };
+        foreach (Match m in SafeRegex.Matches(svgText, @"(?:</?|\s)([A-Za-z_][\w.-]*):[A-Za-z_][\w.-]*(?=[\s/>=])"))
+        {
+            var prefix = m.Groups[1].Value;
+            if (!seen.Add(prefix) || svgText.Contains("xmlns:" + prefix, StringComparison.Ordinal)) continue;
+            declarations.Append(" xmlns:").Append(prefix).Append("=\"").Append(PlaceholderNamespace).Append(prefix).Append('"');
+        }
+        if (declarations.Length == 0) return svgText;
+        var root = SafeRegex.Match(svgText, @"<svg\b", RegexOptions.IgnoreCase);
+        return root.Success ? svgText.Insert(root.Index + root.Length, declarations.ToString()) : svgText;
+    }
+
+    private const string PlaceholderNamespace = "urn:svg-prefix:";
 
     // ── Conversion context ──────────────────────────────────────────
 
@@ -192,6 +214,10 @@ internal static partial class SvgToPdfConverter
         sv.svgRoot = sv.xml.DocumentElement;
         if (sv.svgRoot is null)
             throw new InvalidOperationException("SVG document has no root element");
+        // A file wrapped in a foreign element (an svg pasted inside a <code> tag) is the svg it
+        // holds: that element carries the size and viewBox, not the wrapper.
+        if (sv.svgRoot.LocalName != "svg" && sv.svgRoot.GetElementsByTagName("svg").OfType<XmlElement>().FirstOrDefault() is { } inner)
+            sv.svgRoot = inner;
 
         sv.width = sv.imageMode
             ? ParseLength(sv.svgRoot.GetAttribute("width"))
@@ -241,7 +267,9 @@ internal static partial class SvgToPdfConverter
         // (e.g. a 2291x1666 window shown on an 1100x800 page) is drawn unscaled/off-page.
         ApplySvgViewBoxTransform(sv);
 
-        sv.rootStyle = new Dictionary<string, string>(InitialStyle, StringComparer.Ordinal);
+        // The root element's own class, presentation attributes and style are what its children
+        // inherit - a sheet that sets fill:none and the base font size on the <svg> itself.
+        sv.rootStyle = ResolveStyle(sv.svgRoot, InitialStyle, sv.ctx);
         RenderChildren(sv.svgRoot, sv.ctx, sv.rootStyle, sv.ctm);
 
         sv.sb.Append("Q\n");
@@ -292,7 +320,7 @@ internal static partial class SvgToPdfConverter
             var offStr = el.GetAttribute("offset");
             double off = 0;
             if (!string.IsNullOrEmpty(offStr))
-                off = offStr.EndsWith("%")
+                off = offStr.EndsWith('%')
                     ? ParseLength(offStr[..^1]) / 100.0
                     : ParseLength(offStr);
             var colorStr = el.GetAttribute("stop-color");
@@ -300,9 +328,9 @@ internal static partial class SvgToPdfConverter
             var styleAttr = el.GetAttribute("style");
             if (!string.IsNullOrEmpty(styleAttr))
             {
-                var m = Regex.Match(styleAttr, @"stop-color\s*:\s*([^;]+)");
+                var m = SafeRegex.Match(styleAttr, @"stop-color\s*:\s*([^;]+)");
                 if (m.Success) colorStr = m.Groups[1].Value.Trim();
-                var mo = Regex.Match(styleAttr, @"stop-opacity\s*:\s*([^;]+)");
+                var mo = SafeRegex.Match(styleAttr, @"stop-opacity\s*:\s*([^;]+)");
                 if (mo.Success) opStr = mo.Groups[1].Value.Trim();
             }
             if (string.IsNullOrEmpty(colorStr)) colorStr = "black";
@@ -361,7 +389,7 @@ internal static partial class SvgToPdfConverter
         {
             var v = GradAttr(grad, ctx, attr);
             if (string.IsNullOrEmpty(v)) return dflt;
-            if (v.EndsWith("%")) return ParseLength(v[..^1]) / 100.0 * (isBbox ? 1.0 : refBase);
+            if (v.EndsWith('%')) return ParseLength(v[..^1]) / 100.0 * (isBbox ? 1.0 : refBase);
             return ParseLength(v);
         }
 
@@ -484,7 +512,7 @@ internal static partial class SvgToPdfConverter
             }
         }
 
-        var rgbMatch = Regex.Match(color, @"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)");
+        var rgbMatch = SafeRegex.Match(color, @"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)");
         if (rgbMatch.Success)
             return (int.Parse(rgbMatch.Groups[1].Value) / 255.0,
                     int.Parse(rgbMatch.Groups[2].Value) / 255.0,

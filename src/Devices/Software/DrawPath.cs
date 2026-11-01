@@ -15,7 +15,7 @@ public sealed partial class SoftwarePageRenderer
     {
         var dp = new DrawPathState();
         dp.ctx = ctx;
-        dp.segments = segments;
+        dp.segments = PenGeometry.ClosedForStroke(op, segments);
         dp.op = op;
         dp.state = state;
         if (dp.segments.Count == 0) return;
@@ -39,11 +39,13 @@ public sealed partial class SoftwarePageRenderer
 
         if (dp.doFill)
         {
+            dp.ctx.CurrentBlendMode = PaintBlend(dp.ctx, dp.state.BlendMode, dp.state.OverprintFill, dp.state.FillColorSpace);
             FillPathInterior(dp);
         }
 
         if (dp.doStroke)
         {
+            dp.ctx.CurrentBlendMode = PaintBlend(dp.ctx, dp.state.BlendMode, dp.state.OverprintStroke, dp.state.StrokeColorSpace);
             StrokePath(dp);
         }
     }

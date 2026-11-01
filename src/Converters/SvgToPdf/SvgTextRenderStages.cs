@@ -11,7 +11,7 @@ namespace Aspose.Pdf.Converters;
 internal static partial class SvgToPdfConverter
 {
 // The stages of the SVG text render: one run's emit and the tspan walk.
-    private static void EmitSvgTextRun(SvgTextRenderState sx, string text, XmlElement source, Dictionary<string, string> runStyle)
+    private static void EmitSvgTextRun(SvgTextRenderState sx, string text, Dictionary<string, string> runStyle)
     {
         if (text.Length == 0) return;
         // U+A880 is the exporter's PUA stand-in for a space-like glyph slot
@@ -27,8 +27,11 @@ internal static partial class SvgToPdfConverter
         if (sx.uniTtf is null && NeedsUnicodeSvg(text)) sx.uniTtf = ResolveSvgUnicodeTtf(text);
         sx.display = text;
         if (sx.uniTtf is not null)
-            sx.display = IsPureRtlSvg(text) ? ToVisualRtlSvg(text)
-                : Text.BidiReorderer.ContainsRtl(text) ? VisualizeMixedRtlSvg(text) : text;
+        {
+            if (IsPureRtlSvg(text)) sx.display = ToVisualRtlSvg(text);
+            else if (Text.BidiReorderer.ContainsRtl(text)) sx.display = VisualizeMixedRtlSvg(text);
+            else sx.display = text;
+        }
 
         sx.baseFont = MapFont(runStyle);
         sx.fontDict = GetOrCreate(sx.ctx.Surface.Resources, "Font");
@@ -38,7 +41,7 @@ internal static partial class SvgToPdfConverter
         sx.width = sx.uniTtf is null
             ? MeasureText(text, sx.baseFont, sx.fontSize)
             : Text.Type0FontEmbedder.MeasureText(sx.fontDict, sx.uniTtf, sx.embedName, sx.display, sx.fontSize,
-                stripSpacesInBaseFont: true, resNameHint: NextCompositeResName(sx.fontDict));
+                stripSpacesInBaseFont: true, resNameHint: NextCompositeResName(sx.fontDict, sx.uniTtf));
         sx.anchor = Prop(runStyle, "text-anchor");
         sx.x = sx.curX;
         if (sx.anchor == "middle") sx.x -= sx.width / 2;
@@ -59,7 +62,7 @@ internal static partial class SvgToPdfConverter
             if (child.NodeType is XmlNodeType.Text or XmlNodeType.CDATA)
             {
                 var text = CollapseWs(child.Value ?? "");
-                EmitSvgTextRun(sx, text, (XmlElement)node, nodeStyle);
+                EmitSvgTextRun(sx, text, nodeStyle);
             }
             else if (child is XmlElement tspan && child.LocalName is "tspan" or "textPath" or "a")
             {
@@ -97,7 +100,7 @@ internal static partial class SvgToPdfConverter
         if (sx.uniTtf is not null)
         {
             var (rn, hex) = Text.Type0FontEmbedder.Embed(sx.fontDict, sx.uniTtf, sx.embedName, sx.display,
-                stripSpacesInBaseFont: true, resNameHint: NextCompositeResName(sx.fontDict));
+                stripSpacesInBaseFont: true, resNameHint: NextCompositeResName(sx.fontDict, sx.uniTtf));
             useFontRes = rn;
             glyphOp = $"<{Compat.ToHexString(hex)}>";
         }

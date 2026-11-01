@@ -72,7 +72,7 @@ public sealed partial class PageCollection
         }
 
         // Add to AcroForm /Fields
-        im.fieldsArr.Add(im.annotObj!);
+        im.fieldsArr.Add(im.annotObj);
         if (im.srcParentNum is int ownedParentNum && im.annotObj is PdfIndirectRef fieldRef)
             im.owners[(im.sourceReader, ownedParentNum)] = (fieldRef, im.annotDict, im.fieldsArr.Count - 1, false);
         return true;

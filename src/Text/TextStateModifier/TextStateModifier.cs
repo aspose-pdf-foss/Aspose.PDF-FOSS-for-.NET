@@ -18,7 +18,7 @@ internal sealed partial class TextStateModifier
     {
         var s = Compat.Latin1.GetString(content, 0, System.Math.Min(showStart, content.Length));
         System.Text.RegularExpressions.Match? last = null;
-        foreach (System.Text.RegularExpressions.Match m in SimpleTm.Matches(s))
+        foreach (System.Text.RegularExpressions.Match m in SafeRegex.Matches(SimpleTm, s))
             last = m;
         if (last is null) return null;
         return (double.Parse(last.Groups[1].Value, CultureInfo.InvariantCulture),
@@ -32,7 +32,7 @@ internal sealed partial class TextStateModifier
     /// Tf operators, or the leftovers keep the original font alive. Null when no window
     /// matches; spans already naming <paramref name="alreadyReplacedRes"/> are dropped, so
     /// re-running over a converted region changes nothing.</summary>
-    private List<(int start, int end)>? FindSpannedTfSpans(byte[] streamBytes, string text,
+    private static List<(int start, int end)>? FindSpannedTfSpans(byte[] streamBytes, string text,
         PdfDictionary pageDict, PdfReader reader, string? alreadyReplacedRes)
     {
         if (string.IsNullOrEmpty(text)) return null;
@@ -92,7 +92,7 @@ internal sealed partial class TextStateModifier
     /// Tf name operand governing it, that name, and the text it decodes to. Composite
     /// (Type0) runs decode through their ToUnicode like the simple ones but cannot be
     /// restyled by a Tf repoint, so they are reported with no name span.</summary>
-    private List<(int nameStart, int nameEnd, string? res, string decoded)> CollectShowOps(
+    private static List<(int nameStart, int nameEnd, string? res, string decoded)> CollectShowOps(
         byte[] streamBytes, PdfDictionary pageDict, PdfReader reader)
     {
         var result = new List<(int, int, string?, string)>();

@@ -95,7 +95,9 @@ internal static class UaProblems
 
     // Clause 7.21 — fonts.
     public static readonly UaProblemKind FontNotEmbedded =
+#pragma warning disable S1313 // a PDF/A or PDF/UA clause number, not an IP address
         new(Fonts, "7.21.4.1", "7.21.4.1", PdfAProblemSeverity.Error, true);
     public static readonly UaProblemKind CidSetIncomplete =
         new(Fonts, "7.21.4.2", "7.21.4.2", PdfAProblemSeverity.Error, true);
+#pragma warning restore S1313
 }

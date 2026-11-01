@@ -20,7 +20,9 @@ public class GraphicElement
     public virtual Point Position
     {
         get => new Point(Rectangle.LLX, Rectangle.LLY);
-        set { }
+#pragma warning disable S3237 // the base element's anchor is read-only; derived elements move on assignment
+        set { /* the base element's anchor is read-only - derived elements move on assignment */ }
+#pragma warning restore S3237
     }
 
     /// <summary>The collection this element was absorbed into (the absorber's
@@ -253,7 +255,7 @@ public sealed class SubPath : GraphicElement
         {
             sb.Append($"{F(stroke.R)} {F(stroke.G)} {F(stroke.B)} RG\n");
             sb.Append($"{F(_style.LineWidth)} w\n");
-            sb.Append($"{_style.LineJoin} j\n");
+            sb.Append($"{_style.LineJoin.ToString(System.Globalization.CultureInfo.InvariantCulture)} j\n");
         }
         foreach (var op in _construction)
         {
@@ -274,7 +276,7 @@ public sealed class SubPath : GraphicElement
         {
             paint.Append($"stroke=\"{Hex(sc.R, sc.G, sc.B)}\" ");
             paint.Append($"stroke-width=\"{F(_style.LineWidth * CtmScale())}\" ");
-            paint.Append($"stroke-linejoin=\"{(_style.LineJoin == 1 ? "round" : _style.LineJoin == 2 ? "bevel" : "miter")}\" ");
+            paint.Append($"stroke-linejoin=\"{(_style.LineJoin switch { 1 => "round", 2 => "bevel", _ => "miter" })}\" ");
         }
         else
         {

@@ -83,17 +83,19 @@ internal partial class HtmlToPdfConverter
                     pen = lx; lineOpen = false; lineFs = 0; lineHasCb = false;
                     continue;
                 }
-                var res = RunRes(mg, run);
+                var res = RunRes(run);
                 var fsz = run.Fs;
                 var clean = FilterWinAnsi(run.Text);
                 if (clean.Trim().Length == 0) { lineOpen = true; lineFs = Math.Max(lineFs, fsz); continue; }
-                var w = MeasureFaceText(RunFace(mg, run), clean, fsz);
+                var w = MeasureFaceText(RunFace(run), clean, fsz);
                 var tx = run.Center ? mg.cx + (cw - w) / 2 : pen;
-                var col = run.White ? "1 1 1" : run.Teal ? "0 0.502 0.502" : "0 0 0";
+                string col = "0 0 0";
+                if (run.White) col = "1 1 1";
+                else if (run.Teal) col = "0 0.502 0.502";
                 var by = ly - MsoLineOf(fsz) + MsoLineOf(fsz) * 0.18;
                 mg.tsb.Append(Compat.Format(mg.invc,
                     $"BT /{res} {fsz:F2} Tf {col} rg {tx:F2} {by + 1.5:F2} Td ({EscapePdfText(clean)}) Tj ET\n"));
-                pen = tx + w + MeasureFaceText(RunFace(mg, run), " ", fsz);
+                pen = tx + w + MeasureFaceText(RunFace(run), " ", fsz);
                 lineOpen = true;
                 lineFs = Math.Max(lineFs, fsz);
             }
@@ -164,7 +166,6 @@ internal partial class HtmlToPdfConverter
             // roster rows: checkbox + label pairs on the measured two-column
             // rhythm inside the host box
             var ly0 = mg.y;
-            var pen0 = mg.x0 + MsoRosterCol1Pt;
             var ci0 = 0;
             foreach (var mc in r.Cells)
             {
@@ -187,9 +188,9 @@ internal partial class HtmlToPdfConverter
                     if (run.Text.Length == 0 || run.Input is not null) continue;
                     var clean0 = FilterWinAnsi(run.Text);
                     if (clean0.Trim().Length == 0) continue;
-                    var w0 = MeasureFaceText(RunFace(mg, run), clean0, run.Fs);
+                    var w0 = MeasureFaceText(RunFace(run), clean0, run.Fs);
                     mg.tsb.Append(Compat.Format(mg.invc,
-                        $"BT /{RunRes(mg, run)} {run.Fs:F2} Tf 0 0 0 rg {penN:F2} {ly0 - MsoCheckLinePt + 4.6:F2} Td ({EscapePdfText(clean0)}) Tj ET\n"));
+                        $"BT /{RunRes(run)} {run.Fs:F2} Tf 0 0 0 rg {penN:F2} {ly0 - MsoCheckLinePt + 4.6:F2} Td ({EscapePdfText(clean0)}) Tj ET\n"));
                     penN += w0;
                 }
             }

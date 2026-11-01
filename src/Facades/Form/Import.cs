@@ -14,7 +14,6 @@ public sealed partial class Form
     public void ImportXml(Stream inputXmlStream, bool IgnoreFormTemplateChanges)
     {
         var xmlStream = inputXmlStream;
-        var ignoreFormTemplateChanges = IgnoreFormTemplateChanges;
         if (_doc is null) throw new InvalidOperationException("No document bound.");
 
         var xml = new XmlDocument();
@@ -40,8 +39,8 @@ public sealed partial class Form
             if (hasBom || hasDeclaredEncoding)
                 xml.Load(new MemoryStream(bytes));
             else if (IsValidUtf8(bytes))
-                // Bare XML that decodes cleanly as UTF-8 is UTF-8 (the XML default);
-                // only byte sequences that can't be UTF-8 take the legacy codepage read.
+                // Bare XML that decodes cleanly as UTF-8 is UTF-8 (the XML default); only
+                // byte sequences that can't be UTF-8 take the legacy codepage read.
                 xml.LoadXml(new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes));
             else
                 xml.LoadXml(Aspose.Pdf.Text.Cp1252.GetString(bytes));
@@ -71,6 +70,12 @@ public sealed partial class Form
         ImportXmlAcroForm(xml.DocumentElement!);
         _importResult = TrackResults(names);
     }
+
+    /// <summary>
+    /// Import form field values from an XML stream (parameterless overload — same as
+    /// <see cref="ImportXml(Stream, bool)"/> with <c>ignoreFormTemplateChanges=false</c>).
+    /// </summary>
+    public void ImportXml(Stream inputXmlStream) => ImportXml(inputXmlStream, IgnoreFormTemplateChanges: false);
 
     private static bool IsValidUtf8(byte[] bytes)
     {
@@ -198,8 +203,8 @@ public sealed partial class Form
     {
         if (_doc is null) return Array.Empty<FormImportResult>();
         var form = _doc.Form;
-        // For XFA forms, AcroForm FindByName won't match XFA dotted paths;
-        // resolve names against the set of XFA field paths instead.
+        // For XFA forms, AcroForm FindByName won't match XFA dotted paths; resolve
+        // names against the set of XFA field paths instead.
         // For XFA forms, AcroForm FindByName won't match XFA dotted paths. Resolve
         // names against the XFA field paths, index-insensitively: a flat leaf name
         // (from a flat-FDF /T(Employee[0])) matches the full path form1[0]…Employee[0],
@@ -322,12 +327,12 @@ public sealed partial class Form
             // the value's spaces are kept but the layout newlines dropped,
             // so "\n            Product\n        " imports as "            Product        ".
             var valueNode = node.SelectSingleNode("value");
-            var fieldValue = (valueNode?.InnerText ?? node.InnerText).Replace("\r", "").Replace("\n", "");
+            var fieldValue = WithoutLayoutNewlines(valueNode?.InnerText ?? node.InnerText);
 
             var field = form.FindFieldOrNull(fieldName);
             if (field is not null)
             {
-                editor.SetField(fieldName, fieldValue);
+                if (TakesImportedValue(field, fieldValue)) editor.SetField(fieldName, fieldValue);
             }
             else
             {
@@ -337,6 +342,36 @@ public sealed partial class Form
         }
     }
 
+    /// <summary>The value without the newlines that only lay the XML out: those before the
+    /// first and after the last non-blank character. A line break inside the value is the
+    /// value's own, as in a multi-line address, and stays.</summary>
+    private static string WithoutLayoutNewlines(string raw)
+    {
+        var first = 0;
+        while (first < raw.Length && char.IsWhiteSpace(raw[first])) first++;
+        if (first == raw.Length) return raw.Replace("\r", "").Replace("\n", "");
+        var last = raw.Length - 1;
+        while (char.IsWhiteSpace(raw[last])) last--;
+        return raw.Substring(0, first).Replace("\r", "").Replace("\n", "")
+            + raw.Substring(first, last - first + 1)
+            + raw.Substring(last + 1).Replace("\r", "").Replace("\n", "");
+    }
+
+    /// <summary>False for a combo box the user cannot type into when the value is none of its options:
+    /// a viewer offers no way to enter such a value, so an import leaves the field as it was.
+    /// Clearing the field, and a combo box that lists no options at all, are let through.</summary>
+    private static bool TakesImportedValue(Field field, string value)
+    {
+        if (field is not ComboBoxField { Editable: false } combo || value.Length == 0) return true;
+        var listsOptions = false;
+        foreach (var option in combo.Options)
+        {
+            if (option.Value == value || option.Name == value) return true;
+            listsOptions = true;
+        }
+        return !listsOptions;
+    }
+
     private static void ImportXmlNode(XmlNode node, string prefix, FormEditor editor, Forms.Form form)
     {
         var name = string.IsNullOrEmpty(prefix) ? node.LocalName : prefix + "." + node.LocalName;
@@ -344,7 +379,7 @@ public sealed partial class Form
         if (node.HasChildNodes && node.FirstChild!.NodeType == XmlNodeType.Text)
         {
             var field = form.FindFieldOrNull(name);
-            if (field is not null)
+            if (field is not null && TakesImportedValue(field, node.InnerText))
                 editor.SetField(name, node.InnerText);
             return;
         }
@@ -366,18 +401,16 @@ public sealed partial class Form
         for (; i < s.Length; i++)
         {
             char c = s[i];
+#pragma warning disable S127 // string-literal lexer - a backslash escape consumes the character after it
             if (c == '\\' && i + 1 < s.Length) { sb.Append(s[++i]); continue; }
-            if (c == '(') { if (depth > 0) sb.Append(c); depth++; continue; }
+#pragma warning restore S127
+            if (c == '(') { if (depth > 0) { sb.Append(c); } depth++; continue; }
+#pragma warning disable S127 // string-literal lexer - the closing parenthesis is consumed with the literal
             if (c == ')') { depth--; if (depth == 0) { i++; break; } sb.Append(c); continue; }
+#pragma warning restore S127
             if (depth > 0) sb.Append(c);
         }
         afterClose = i;
         return (sb.ToString(), afterClose);
     }
-
-    /// <summary>
-    /// Import form field values from an XML stream (parameterless overload — same as
-    /// <see cref="ImportXml(Stream, bool)"/> with <c>ignoreFormTemplateChanges=false</c>).
-    /// </summary>
-    public void ImportXml(Stream inputXmlStream) => ImportXml(inputXmlStream, IgnoreFormTemplateChanges: false);
 }

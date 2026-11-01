@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Devices;
 public sealed partial class SvgDevice
 {
     /// <summary>The path construction operators: moves, lines, curves, closes and rectangles into the pending path data.</summary>
-    private bool RenderSvgPathBuildOperator(SvgRenderState sv, string op)
+    private static bool RenderSvgPathBuildOperator(SvgRenderState sv, string op)
     {
         switch (op)
         {
@@ -90,65 +90,46 @@ public sealed partial class SvgDevice
     {
         switch (op)
         {
-            // --- Path painting ---
-            case "S": // stroke
-                if (sv.pathData.Length > 0)
-                {
-                    EmitPath(sb, sv.gs, sv.pathData.ToString().Trim(), stroke: true, fill: false, evenOdd: false);
-                    sv.pathData.Clear();
-                }
-                break;
-            case "s": // close and stroke
-                sv.pathData.Append("Z ");
-                goto case "S";
-            case "f" or "F": // fill (nonzero)
-                if (sv.pathData.Length > 0)
-                {
-                    EmitPath(sb, sv.gs, sv.pathData.ToString().Trim(), stroke: false, fill: true, evenOdd: false);
-                    sv.pathData.Clear();
-                }
-                break;
-            case "f*": // fill (even-odd)
-                if (sv.pathData.Length > 0)
-                {
-                    EmitPath(sb, sv.gs, sv.pathData.ToString().Trim(), stroke: false, fill: true, evenOdd: true);
-                    sv.pathData.Clear();
-                }
-                break;
-            case "B": // fill and stroke (nonzero)
-                if (sv.pathData.Length > 0)
-                {
-                    EmitPath(sb, sv.gs, sv.pathData.ToString().Trim(), stroke: true, fill: true, evenOdd: false);
-                    sv.pathData.Clear();
-                }
-                break;
-            case "B*": // fill and stroke (even-odd)
-                if (sv.pathData.Length > 0)
-                {
-                    EmitPath(sb, sv.gs, sv.pathData.ToString().Trim(), stroke: true, fill: true, evenOdd: true);
-                    sv.pathData.Clear();
-                }
-                break;
-            case "b": // close, fill and stroke (nonzero)
-                sv.pathData.Append("Z ");
-                if (sv.pathData.Length > 0)
-                {
-                    EmitPath(sb, sv.gs, sv.pathData.ToString().Trim(), stroke: true, fill: true, evenOdd: false);
-                    sv.pathData.Clear();
-                }
-                break;
-            case "b*": // close, fill and stroke (even-odd)
-                sv.pathData.Append("Z ");
-                if (sv.pathData.Length > 0)
-                {
-                    EmitPath(sb, sv.gs, sv.pathData.ToString().Trim(), stroke: true, fill: true, evenOdd: true);
-                    sv.pathData.Clear();
-                }
-                break;
-            case "n": // end path (no fill, no stroke)
-                sv.pathData.Clear();
-                break;
+            // --- Clipping: takes effect once the path is painted or ended (PDF 32000-1 §8.5.4) ---
+            case "W":
+                sv.clipPending = true; sv.clipEvenOdd = false;
+                return false;
+            case "W*":
+                sv.clipPending = true; sv.clipEvenOdd = true;
+                return false;
         }
+
+        if (op is "s" or "b" or "b*") sv.pathData.Append("Z "); // the closing variants
+        var d = sv.pathData.ToString().Trim();
+        if (d.Length > 0)
+        {
+            switch (op)
+            {
+                // --- Path painting ---
+                case "S" or "s": // stroke; close and stroke
+                    EmitPath(sb, sv.gs, d, stroke: true, fill: false, evenOdd: false);
+                    break;
+                case "f" or "F": // fill (nonzero)
+                    EmitPath(sb, sv.gs, d, stroke: false, fill: true, evenOdd: false);
+                    break;
+                case "f*": // fill (even-odd)
+                    EmitPath(sb, sv.gs, d, stroke: false, fill: true, evenOdd: true);
+                    break;
+                case "B" or "b": // fill and stroke (nonzero); close, fill and stroke
+                    EmitPath(sb, sv.gs, d, stroke: true, fill: true, evenOdd: false);
+                    break;
+                case "B*" or "b*": // fill and stroke (even-odd); close, fill and stroke
+                    EmitPath(sb, sv.gs, d, stroke: true, fill: true, evenOdd: true);
+                    break;
+                // "n": end path (no fill, no stroke)
+            }
+            // The clip is the painted path, so content outside it - a text layer parked in a
+            // strip, say - stays unseen as on the page.
+            if (sv.clipPending)
+                sv.gs.ClipId = AddClipPath(d, sv.clipEvenOdd, sv.gs.ClipId);
+        }
+        sv.clipPending = false;
+        sv.pathData.Clear();
         return false;
     }
 }

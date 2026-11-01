@@ -40,9 +40,9 @@ internal static partial class HtmlToPdfConverter
             || !sp.css.TryGetValue(".spread", out var spreadRule)
             || !(spreadRule.TryGetValue("overflow", out var ovV)
                  && ovV.Contains("hidden", System.StringComparison.OrdinalIgnoreCase))
-            || !Regex.IsMatch(sp.html, "class\\s*=\\s*[\"'][^\"']*spread", RegexOptions.IgnoreCase))
+            || !SafeRegex.IsMatch(sp.html, "class\\s*=\\s*[\"'][^\"']*spread", RegexOptions.IgnoreCase))
             return null;
-        sp.spreads = Regex.Matches(sp.html,
+        sp.spreads = SafeRegex.Matches(sp.html,
             "<div\\b[^>]*class\\s*=\\s*[\"'][^\"']*\\bspread\\b[^\"']*[\"'][^>]*>(?<body>[\\s\\S]*?)</div>\\s*</div>",
             RegexOptions.IgnoreCase);
         if (sp.spreads.Count == 0) return null;
@@ -71,7 +71,6 @@ internal static partial class HtmlToPdfConverter
         sp.h1Asc = sp.h1Fs * sp.arialM.asc;
         sp.h1MarginY = sp.h1Fs * 0.67;
         sp.bodyDrop = MetricBaselineDrop(sp.bodyFs, sp.bodyPitch, serifM);
-        sp.bodyDesc = sp.bodyPitch - sp.bodyDrop;
         sp.natAsc = sp.natFs * 0.837;
         sp.capDrop = MetricBaselineDrop(sp.capFs, sp.capPitch, serifM);
         // the italic caption opens this far below the figure (measured 592.3
@@ -86,7 +85,9 @@ internal static partial class HtmlToPdfConverter
         sp.doc = new Document();
         sp.invc = System.Globalization.CultureInfo.InvariantCulture;
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (Match spread in sp.spreads)
+#pragma warning restore S3267
         {
             if (!RenderSpread(sp, spread)) break;
         }

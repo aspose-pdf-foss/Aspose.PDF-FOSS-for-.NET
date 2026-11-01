@@ -56,7 +56,8 @@ public sealed partial class PdfToHtmlConverter
 
         ReadFontMetrics(fr, reader, friendlyFamilies);
 
-        FinishFontRecord(fr, key, reader, family, weight, style, result);
+        FinishFontRecord(fr, key, reader, family, weight, style, result,
+            programServed: !friendlyFamilies && string.IsNullOrEmpty(defaultFontName));
         return true;
     }
 }

@@ -27,17 +27,17 @@ internal static partial class HtmlToPdfConverter
                 color = scr.Color;
             }
             var st = DtpAttr("<span " + rt.attrs + ">", "style") ?? "";
-            var fs = Regex.Match(st, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+            var fs = SafeRegex.Match(st, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
             if (fs.Success) size = DtpNum(fs.Groups[1].Value);
             // `font: 7pt "Times New Roman"` shorthand
-            var fsh = Regex.Match(st, @"font\s*:\s*([\d.]+)\s*pt\s+[""']?([^;""']+)",
+            var fsh = SafeRegex.Match(st, @"font\s*:\s*([\d.]+)\s*pt\s+[""']?([^;""']+)",
                 RegexOptions.IgnoreCase);
             if (fsh.Success)
             {
                 size = DtpNum(fsh.Groups[1].Value);
                 face = fsh.Groups[2].Value.Trim();
             }
-            var ff = Regex.Match(st, @"font-family\s*:\s*[""']?([^;,""']+)", RegexOptions.IgnoreCase);
+            var ff = SafeRegex.Match(st, @"font-family\s*:\s*[""']?([^;,""']+)", RegexOptions.IgnoreCase);
             if (ff.Success) face = ff.Groups[1].Value.Trim();
             rt.spanStack.Push((size, face is null ? null : DtpNormalizeFace(face), color));
         }
@@ -49,7 +49,7 @@ internal static partial class HtmlToPdfConverter
         FlushDtpLine(rt);
         if (!rt.close)
         {
-            var alM = Regex.Match(rt.attrs, @"align\s*=\s*[""']?(left|center|right)",
+            var alM = SafeRegex.Match(rt.attrs, @"align\s*=\s*[""']?(left|center|right)",
                 RegexOptions.IgnoreCase);
             rt.alignStack.Push(alM.Success
                 ? alM.Groups[1].Value.ToLowerInvariant() : rt.alignStack.Peek());
@@ -80,7 +80,7 @@ internal static partial class HtmlToPdfConverter
     private static void AppendDtpText(DtpRichTextState rt)
     {
         var raw = EdgarHtmlRenderer.DecodeEntities(rt.inner[rt.idx..rt.textEnd]);
-        raw = Regex.Replace(raw, @"[ \t\r\n\f]+", " ");
+        raw = SafeRegex.Replace(raw, @"[ \t\r\n\f]+", " ");
         if (raw.Length > 0 && raw != " " || raw == " " && rt.cur is not null && rt.cur.Runs.Count > 0)
         {
             var line = CurDtpLine(rt);

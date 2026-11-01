@@ -37,16 +37,16 @@ internal static partial class HtmlToPdfConverter
         rl.html = html;
         rl.pageWidth = pageWidth;
         rl.pageHeight = pageHeight;
-        if (!Regex.IsMatch(rl.html, @"<div\b[^>]*class\s*=\s*[""']?WordSection1", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(rl.html, @"dir\s*=\s*[""']?RTL", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(rl.html, @"<div\b[^>]*class\s*=\s*[""']?WordSection1", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(rl.html, @"dir\s*=\s*[""']?RTL", RegexOptions.IgnoreCase))
             return null;
         rl.face = "Times New Roman";
         if (WinMetricsFor(rl.face) is null) return null;
-        rl.bodyM = Regex.Match(rl.html, @"<body\b[^>]*>([\s\S]*)</body\s*>", RegexOptions.IgnoreCase);
+        rl.bodyM = SafeRegex.Match(rl.html, @"<body\b[^>]*>([\s\S]*)</body\s*>", RegexOptions.IgnoreCase);
         if (!rl.bodyM.Success) return null;
         rl.body = rl.bodyM.Groups[1].Value;
 
-        rl.tblM = Regex.Match(rl.body, @"<table\b[^>]*>([\s\S]*?)</table\s*>", RegexOptions.IgnoreCase);
+        rl.tblM = SafeRegex.Match(rl.body, @"<table\b[^>]*>([\s\S]*?)</table\s*>", RegexOptions.IgnoreCase);
         rl.before = rl.tblM.Success ? rl.body[..rl.tblM.Index] : rl.body;
         rl.after = rl.tblM.Success ? rl.body[(rl.tblM.Index + rl.tblM.Length)..] : "";
 
@@ -57,21 +57,21 @@ internal static partial class HtmlToPdfConverter
         rl.top = ColMarginTop + UaBodyMarginPt;
         rl.bottom = rl.pageHeight - ColMarginTop;
 
-        rl.y0 = FlowRtlParas(rl, ReadRtlParas(rl, rl.before), rl.top, rl.boxRight, trailingCounts: true);
+        rl.y0 = FlowRtlParas(rl, ReadRtlParas(rl.before), rl.top, rl.boxRight, trailingCounts: true);
         if (rl.tblM.Success)
         {
             // The block margin the paragraph before it left does not collapse
             // into the table: its cells open one margin lower, and the table's
             // own height stops at its deepest REAL line.
             var cellTop = rl.y0 + RtlBlockMarginPt;
-            var cells = Regex.Matches(rl.tblM.Groups[1].Value, @"<td\b([^>]*)>([\s\S]*?)</td\s*>",
+            var cells = SafeRegex.Matches(rl.tblM.Groups[1].Value, @"<td\b([^>]*)>([\s\S]*?)</td\s*>",
                 RegexOptions.IgnoreCase);
             var deepest = rl.y0;
             var ci = 0;
-            foreach (Match cm in cells)
+            foreach (var groups in cells.Select(cm => cm.Groups))
             {
                 var cw = 0.0;
-                var wm = Regex.Match(cm.Groups[1].Value, @"width\s*:\s*([\d.]+)\s*pt",
+                var wm = SafeRegex.Match(groups[1].Value, @"width\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase);
                 if (wm.Success) double.TryParse(wm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -79,11 +79,11 @@ internal static partial class HtmlToPdfConverter
                 if (cw <= 0) cw = 207.4;
                 // RTL: the first cell is the RIGHTMOST
                 var cellRight = rl.boxRight - ci * cw - RtlCellPadPt;
-                var end = FlowRtlParas(rl, ReadRtlParas(rl, cm.Groups[2].Value), cellTop, cellRight, trailingCounts: false);
+                var end = FlowRtlParas(rl, ReadRtlParas(groups[2].Value), cellTop, cellRight, trailingCounts: false);
                 deepest = Math.Max(deepest, end);
                 ci++;
             }
-            FlowRtlParas(rl, ReadRtlParas(rl, rl.after), deepest, rl.boxRight, trailingCounts: true);
+            FlowRtlParas(rl, ReadRtlParas(rl.after), deepest, rl.boxRight, trailingCounts: true);
         }
         return rl.doc;
     }

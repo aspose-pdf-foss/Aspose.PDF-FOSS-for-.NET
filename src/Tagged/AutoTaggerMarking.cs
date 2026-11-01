@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Aspose.Pdf.Core;
 using LS = Aspose.Pdf.LogicalStructure;
@@ -105,14 +106,15 @@ internal static partial class AutoTagger
     }
 
     /// <summary>Each text show's place in reading order among the shows of its target (null: on no line) - the marker keeps
-    /// a sequence to text read one piece after another. By row (see <see cref="ReadAt"/>); within a row the lines in the
+    /// a sequence to text read one piece after another. By row (see <see cref="RowOf"/>); within a row the lines in the
     /// order they are drawn, and along a line from its start (a label drawn after the text beside it).</summary>
     private static Func<int, int?> ReadingRanks(PageWork pw, List<ContentOp> ops, int[] targets)
     {
         var ranks = new Dictionary<int, int>();
         var placed = Enumerable.Range(0, ops.Count).Where(i => ops[i].Kind == ContentOpKind.TextShow)
-            .Select(i => (Op: i, Row: ReadAt(pw, ops[i]), Line: LineOf(pw.Lines, ops[i])))
-            .Where(x => x.Row is not null && x.Line is not null).ToList();
+            .Select(i => (Op: i, Line: LineOf(pw.Lines, ops[i])))
+            .Where(x => x.Line is not null)
+            .Select(x => (x.Op, Row: RowOf(pw, x.Line!), x.Line)).ToList();
         foreach (var group in placed.GroupBy(x => targets[x.Op]))
         {
             // Where each line's text of the target is first drawn.
@@ -122,18 +124,18 @@ internal static partial class AutoTagger
             // Along a line, the shows on one baseline from its start; shows of one line on baselines apart (a heading's
             // lines the page reads as one) as they are drawn.
             // A mark set smaller, raised or lowered off the text beside it (the 1 of a ½ built of glyphs), is on its baseline -
-            // and on the baseline that text is on (an index lowered under a line a raised note number opens).
+            // and on the baseline that text is on (an index lowered under a line a raised note number opens); so is a word
+            // in the text's own size raised over the line that closes up to the text before or after it (260ter).
             bool OneBaseline(ContentOp a, ContentOp b)
             {
                 var (small, large) = a.Size < b.Size ? (a, b) : (b, a);
                 var off = Math.Abs(a.Y - b.Y);
                 return off <= SameBaselineEms * large.Size
-                       || (small.Size < MarkSizeShare * large.Size && off <= MarkOffsetEms * large.Size);
+                       || (off <= MarkOffsetEms * large.Size && (small.Size < MarkSizeShare * large.Size || Touching(a, b)));
             }
-            var baseline = new Dictionary<int, int>();
-            foreach (var x in group.OrderBy(x => x.Op))
-                baseline[x.Op] = group.Where(o => o.Op <= x.Op && ReferenceEquals(o.Line, x.Line) && OneBaseline(ops[o.Op], ops[x.Op]))
-                    .Min(o => o.Op == x.Op ? x.Op : baseline[o.Op]);
+            static bool Touching(ContentOp a, ContentOp b)
+                => Math.Abs(Math.Max(a.X0, a.X1) - b.X0) <= TouchTolerance || Math.Abs(Math.Max(b.X0, b.X1) - a.X0) <= TouchTolerance;
+            var baseline = BaselineGroups(group.Select(x => (x.Op, x.Line!)), (a, b) => OneBaseline(ops[a], ops[b]));
             var rank = 0;
             foreach (var x in group.OrderBy(x => x.Row).ThenBy(x => drawn[x.Line!]).ThenBy(x => baseline[x.Op]).ThenBy(x => ops[x.Op].X0).ThenBy(x => x.Op))
                 ranks[x.Op] = rank++;
@@ -141,6 +143,33 @@ internal static partial class AutoTagger
         return i => ranks.TryGetValue(i, out var r) ? r : null;
     }
 
+
+    /// <summary>The baseline each show of a line is on, named by the first show drawn on it: shows on one baseline with
+    /// each other (<paramref name="oneBaseline"/>) are on one, whichever of them is drawn first - a word raised over the
+    /// line drawn before the number it closes up to (a law's suffix drawn ahead of its 260) is on that number's baseline,
+    /// and so on the line's.</summary>
+    private static Dictionary<int, int> BaselineGroups(IEnumerable<(int Op, Line Line)> shows, Func<int, int, bool> oneBaseline)
+    {
+        var root = new Dictionary<int, int>();
+        int Find(int op)
+        {
+            while (root[op] != op) op = root[op] = root[root[op]];
+            return op;
+        }
+        foreach (var line in shows.GroupBy(x => x.Line, x => x.Op, ReferenceEqualityComparer.Instance))
+        {
+            var on = line.OrderBy(op => op).ToList();
+            foreach (var op in on) root[op] = op;
+            for (var i = 1; i < on.Count; i++)
+                for (var j = 0; j < i; j++)
+                {
+                    if (!oneBaseline(on[j], on[i])) continue;
+                    var (a, b) = (Find(on[j]), Find(on[i]));
+                    if (a != b) root[Math.Max(a, b)] = Math.Min(a, b);
+                }
+        }
+        return root.Keys.ToList().ToDictionary(op => op, Find);
+    }
 
     // Shows whose baselines stand within this share of their size of each other are on one baseline.
     private const double SameBaselineEms = 0.2;
@@ -151,12 +180,11 @@ internal static partial class AutoTagger
     // Lines next to each other in reading order sharing this share of the smaller one's size in height stand in one row.
     private const double RowShare = 0.25;
 
-    /// <summary>Which row a text show is read in: the place of its line among the page's lines (in reading order), lines
-    /// set level with the one before them (a mark raised over a line's end, a heading set midway beside two) in its row;
-    /// null for any other operation, or text on no line. Within a row the text reads in the order it is drawn.</summary>
-    private static int? ReadAt(PageWork pw, ContentOp op)
+    /// <summary>Which row a line is read in: its place among the page's lines (in reading order), lines set level
+    /// with the one before them (a mark raised over a line's end, a heading set midway beside two) in its row. Within
+    /// a row the text reads in the order it is drawn.</summary>
+    private static int RowOf(PageWork pw, Line line)
     {
-        if (op.Kind != ContentOpKind.TextShow || LineOf(pw.Lines, op) is not { } line) return null;
         var row = pw.Lines.IndexOf(line);
         static bool Level(Line a, Line b)
             => Math.Min(a.Y + a.Size, b.Y + b.Size) - Math.Max(a.Y, b.Y) >= RowShare * Math.Min(a.Size, b.Size);
@@ -201,7 +229,19 @@ internal static partial class AutoTagger
                 continue;
             }
             // A drawing's paths, and the text standing inside its box, are the figure's.
-            var drawing = op.Drawing >= 0 ? op.Drawing : op.Kind == ContentOpKind.TextShow ? DrawingAt(pw, op.X0, op.Y) : -1;
+            int drawing = -1;
+            // (the line a show over a drawing stands on, read once: the check below and the show's line further on)
+            Line? shownLine = null;
+            var lineRead = false;
+            if (op.Drawing >= 0) drawing = op.Drawing;
+            // (text standing over a drawing on a line of the page's text - a paragraph's line running across a mark laid
+            // behind it - is that line's: the drawing's labels are the lines it took out of the page's text)
+            else if (op.Kind == ContentOpKind.TextShow && DrawingAt(pw, op.X0, op.Y) is >= 0 and var at)
+            {
+                shownLine = LineOf(pw.Lines, op);
+                lineRead = true;
+                if (!OnTextLine(shownLine, op)) drawing = at;
+            }
             if (drawing >= 0)
             {
                 var rep = pw.Drawings[drawing].Rep;
@@ -239,7 +279,7 @@ internal static partial class AutoTagger
             if (op.Kind != ContentOpKind.TextShow) continue;
             // Text drawn too small to be seen is no line's: it stays out of the tree (see MinVisibleTextHeight).
             if (op.Size < MinVisibleTextHeight) continue;
-            var line = LineOf(pw.Lines, op);
+            var line = lineRead ? shownLine : LineOf(pw.Lines, op);
             if (line is { Running: not 0 }) { targets[i] = line.Running; continue; }
             if (line is null || !blocks.TryGetValue(line.BlockId, out var b)) continue;
             targets[i] = b.Kind switch
@@ -297,7 +337,7 @@ internal static partial class AutoTagger
         {
             var op = pw.Ops[i];
             if (op.Kind == ContentOpKind.BeginMark) { open.Push(i); continue; }
-            if (op.Kind == ContentOpKind.EndMark) { if (open.Count > 0) open.Pop(); continue; }
+            if (op.Kind == ContentOpKind.EndMark) { if (open.Count > 0) { open.Pop(); } continue; }
             if (op.Kind == ContentOpKind.TextShow && targets[i] >= 0 && !open.Any(m => pw.Ops[m].MarkTag == "Artifact")
                 && LineOf(pw.Lines, op) is { } line)
                 shared.Add(line);
@@ -307,7 +347,7 @@ internal static partial class AutoTagger
         {
             var op = pw.Ops[i];
             if (op.Kind == ContentOpKind.BeginMark) { open.Push(i); continue; }
-            if (op.Kind == ContentOpKind.EndMark) { if (open.Count > 0) open.Pop(); continue; }
+            if (op.Kind == ContentOpKind.EndMark) { if (open.Count > 0) { open.Pop(); } continue; }
             if (targets[i] < 0) continue;
             // An entry blank a line took, and a symbol a block took, are content whatever their size.
             var blank = (op.Kind == ContentOpKind.PathPaint && op.Drawing < 0) || (op.Kind == ContentOpKind.Form && op.AsFigure);
@@ -317,6 +357,9 @@ internal static partial class AutoTagger
                 if (pw.Ops[m].MarkTag == "Artifact" && pw.Ops[m].Stream == op.Stream) pw.Ops[m].MarkDropped = true;
         }
     }
+
+    // Baselines this many points apart or less are one (what two readings of one baseline round apart by).
+    private const double SameBaseline = 0.01;
 
     /// <summary>The line a text show belongs to: the one whose baseline is nearest to the
     /// show's, within a fraction of the text size.</summary>
@@ -328,11 +371,16 @@ internal static partial class AutoTagger
         Line? best = null;
         var bestD = double.MaxValue;
         var cx = (op.X0 + Math.Max(op.X0, op.X1)) / 2;
+        // (its exact baseline as two readings of it give it - the line's from its text, the show's from its drawing -
+        // apart by their rounding: a mark shown alone whose pen stops short of its glyph under a negative character
+        // spacing, a colon before a word, stands beside the line's text on it; any other show - spaces a line's end
+        // is padded with, a leader's dots, a form's line number - takes the line from its exact baseline only)
+        var slack = LoneMark(op.Text) ? SameBaseline : 0;
         foreach (var l in lines)
         {
             var d = Math.Abs(l.Baseline - op.Y);
             var inside = l.Frags.Count == 0 || (cx >= l.MinX - 2 && cx <= l.Frags[^1].R + 2);
-            if (!inside) d += tolerance;
+            if (!inside) d = d <= slack ? tolerance : double.MaxValue;
             if (d > tolerance || d >= bestD) continue;
             bestD = d;
             best = l;
@@ -340,6 +388,28 @@ internal static partial class AutoTagger
         // A mark raised over its line (a note call, a revision mark) is shown off the line's
         // baseline: the line holding the fragment the show drew takes it.
         return best ?? lines.FirstOrDefault(l => l.Frags.Any(f => Math.Abs(f.Base - op.Y) <= FragmentMatch && Math.Abs(f.X - op.X0) <= FragmentMatch));
+    }
+
+    /// <summary>Whether a show draws one punctuation mark or symbol alone (a colon, a stop), spaces, the direction marks
+    /// a right-to-left line carries and codes its font maps to no character around it aside.</summary>
+    private static bool LoneMark(string text)
+    {
+        var marks = 0;
+        foreach (var c in text)
+        {
+            if (char.IsWhiteSpace(c) || char.IsControl(c) || char.GetUnicodeCategory(c) == UnicodeCategory.Format) continue;
+            if (!char.IsPunctuation(c) && !char.IsSymbol(c)) return false;
+            marks++;
+        }
+        return marks == 1;
+    }
+
+    /// <summary>Whether a text show stands inside <paramref name="line"/> (its line, <see cref="LineOf"/>), a line of the
+    /// page's text that a block holds.</summary>
+    private static bool OnTextLine(Line? line, ContentOp op)
+    {
+        var cx = (op.X0 + Math.Max(op.X0, op.X1)) / 2;
+        return line is { Running: 0, Frags.Count: > 0 } && line.BlockId >= 0 && cx >= line.MinX && cx <= line.Frags[^1].R;
     }
 
     // A show drew a fragment standing within this many points of its start and baseline.
@@ -612,7 +682,9 @@ internal static partial class AutoTagger
         var refs = StructureWiring.NumberAndLink(document, root, structRootDict);
 
         // Keys of a previous tree no longer mean anything.
+#pragma warning disable S3267 // Select would read the member once, before calls in the body that can change it
         foreach (var pw in run.Pages)
+#pragma warning restore S3267
         {
             pw.Page.Dict.Remove("StructParents");
             if (document.Reader.Resolve(pw.Page.Dict.Get("Annots")) is PdfArray annots)

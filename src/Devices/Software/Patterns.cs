@@ -39,77 +39,6 @@ public sealed partial class SoftwarePageRenderer
     }
 
     /// <summary>
-    /// Rasterise one tiling-pattern cell to a device-sized tile and stamp it across the
-    /// masked region. Used when a fine pattern covers an area too large to execute the
-    /// cell per-tile. Handles only axis-aligned, non-flipped pattern matrices (the common
-    /// case); returns false to fall back to the per-tile path otherwise.
-    /// </summary>
-    private static bool TryStampTiledPattern(RenderContext ctx, byte[] mask, byte[] patternContent,
-        RenderContext patternContext, Dictionary<string, PdfDictionary>? patExtG,
-        double[] m, double xStep, double yStep)
-    {
-        if (Math.Abs(m[1]) > 1e-9 || Math.Abs(m[2]) > 1e-9) return false; // not axis-aligned
-        if (m[0] <= 0 || m[3] <= 0) return false;                         // flipped — let per-tile handle
-        double s = m[0] * ctx.Scale;                                      // device px per pattern unit
-        int tw = (int)Math.Round(s * xStep), th = (int)Math.Round(s * yStep);
-        if (tw < 1 || th < 1 || (long)tw * th > 4_000_000) return false;
-
-        // Render one cell into a tile buffer: the cell content carries its own cm, so an
-        // identity CTM plus a tile context whose scale/box map pattern (0,0)…(xStep,yStep)
-        // onto [0,tw]×[0,th] places the cell on the tile.
-        var tileBuf = new byte[tw * th * 4];
-        var tileCtx = new RenderContext(tileBuf, tw, th, s, new Rectangle(0, 0, xStep, yStep), ctx.Reader)
-        {
-            AllXObjects = patternContext.AllXObjects,
-            FontDicts = patternContext.FontDicts,
-            ConvertFontsToUnicodeTtf = patternContext.ConvertFontsToUnicodeTtf,
-            Patterns = patternContext.Patterns,
-            Shadings = patternContext.Shadings,
-        };
-        try { RenderContent(patternContent, tileCtx, patExtG, new double[] { 1, 0, 0, 1, 0, 0 }); }
-        catch { return false; }
-
-        // Device anchor of pattern point (0,0); the tile's top-left pixel maps to pattern
-        // (0, yStep), i.e. device (devX0, devY0 − th). Tiles repeat every tw/th device px.
-        double devX0 = (m[4] - ctx.MediaBox.LLX) * ctx.Scale;
-        double devY0 = ctx.PixelH - (m[5] - ctx.MediaBox.LLY) * ctx.Scale;
-        int offX = (int)Math.Round(devX0), offY = (int)Math.Round(devY0) - th;
-
-        // Masked-region bbox so the stamp loop only touches painted pixels.
-        int w = ctx.PixelW, h = ctx.PixelH;
-        int xmin = w, xmax = -1, ymin = h, ymax = -1;
-        for (var y = 0; y < h; y++)
-        {
-            var rowOff = y * w;
-            for (var x = 0; x < w; x++)
-                if (mask[rowOff + x] != 0)
-                {
-                    if (x < xmin) xmin = x;
-                    if (x > xmax) xmax = x;
-                    if (y < ymin) ymin = y;
-                    if (y > ymax) ymax = y;
-                }
-        }
-        if (xmax < xmin) return true; // nothing to paint, but the fill was "handled"
-
-        for (var y = ymin; y <= ymax; y++)
-        {
-            int row = (((y - offY) % th) + th) % th;
-            var maskRow = y * w;
-            for (var x = xmin; x <= xmax; x++)
-            {
-                if (mask[maskRow + x] == 0) continue;
-                int col = (((x - offX) % tw) + tw) % tw;
-                int t = (row * tw + col) * 4;
-                byte a = tileBuf[t + 3];
-                if (a == 0) continue;
-                SetPixel(ctx, x, y, tileBuf[t], tileBuf[t + 1], tileBuf[t + 2], a);
-            }
-        }
-        return true;
-    }
-
-    /// <summary>
     /// Fill a path with a PatternType-2 shading pattern (PDF 32000 §8.7.3.2). The
     /// pattern's /Matrix maps shading space → user space; we left-multiply it into
     /// the active CTM so DrawAxialShading / DrawRadialShading sample the shading at
@@ -172,9 +101,8 @@ public sealed partial class SoftwarePageRenderer
     /// range that can possibly intersect it. Guards: caps the range at ±64 so a near-singular
     /// matrix or tiny step can't trigger a runaway loop. Typical real PDFs need a range of 1–3.
     /// </summary>
-    /// <summary>The tile index range a pattern fill must walk, and the uncapped tile count
-    /// the caller uses to decide whether to stamp a rasterised tile instead.</summary>
-    private readonly record struct PatternTileRange(int IMin, int IMax, int JMin, int JMax, long RawCount);
+    /// <summary>The tile index range a pattern fill must walk.</summary>
+    private readonly record struct PatternTileRange(int IMin, int IMax, int JMin, int JMax);
 
     private static PatternTileRange ComputePatternTileRange(EdgeTable edgeTable, RenderContext ctx, double[] m,
         double xStep, double yStep, double[]? cellBBox = null)
@@ -255,11 +183,6 @@ public sealed partial class SoftwarePageRenderer
             jMax = (int)Math.Ceiling(pys_max / yStep) + 1;
         }
 
-        // Unclamped tile count — lets the caller switch to a tile-and-stamp fill when a
-        // fine pattern covers a large area (per-tile execution would be capped below and
-        // leave most of the region unpainted).
-        var rawCount = (long)(iMax - iMin + 1) * (jMax - jMin + 1);
-
         // Guard against runaway. This caps HOW MANY tiles are executed, not WHERE they
         // are: clamping the indices themselves to a fixed window round zero silently
         // inverted the range whenever the filled region lay outside it (a chart bar 600 pt
@@ -269,7 +192,7 @@ public sealed partial class SoftwarePageRenderer
         const int MaxTilesPerAxis = 129;
         if (iMax - iMin + 1 > MaxTilesPerAxis) iMax = iMin + MaxTilesPerAxis - 1;
         if (jMax - jMin + 1 > MaxTilesPerAxis) jMax = jMin + MaxTilesPerAxis - 1;
-        return new PatternTileRange(iMin, iMax, jMin, jMax, rawCount);
+        return new PatternTileRange(iMin, iMax, jMin, jMax);
     }
 
     /// <summary>Read a numeric PdfObject (integer or real) into a double. Zero for other types.</summary>

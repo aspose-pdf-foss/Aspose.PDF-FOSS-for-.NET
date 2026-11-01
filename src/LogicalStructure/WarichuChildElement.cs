@@ -7,6 +7,6 @@ namespace Aspose.Pdf.LogicalStructure;
 /// inside a <see cref="WarichuElement"/>.</summary>
 public abstract class WarichuChildElement : StructureElement
 {
-    internal WarichuChildElement(string structureType) : base(structureType) { }
-    internal WarichuChildElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
+    private protected WarichuChildElement(string structureType) : base(structureType) { }
+    private protected WarichuChildElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
 }

@@ -188,7 +188,7 @@ internal sealed partial class CidFontInfo
             HasFixedSingleByteCMap = cb.singleByteCMap,
             LegacyCodepage = legacyCodepage,
             CjkBaseFont = cb.fontDict.GetName("BaseFont"),
-            IsVertical = cb.encoding is not null && cb.encoding.EndsWith("-V", StringComparison.Ordinal),
+            IsVertical = cb.verticalCMap || (cb.encoding is not null && cb.encoding.EndsWith("-V", StringComparison.Ordinal)),
             VertOriginY = cb.vertOriginY,
             VertAdvance = cb.vertAdvance,
             W2 = cb.w2,
@@ -337,9 +337,10 @@ internal sealed partial class CidFontInfo
         if (end < 0) return false;
         var slice = text.Substring(start, end - start);
         var any = false;
-        for (var i = 0; i < slice.Length; i++)
+        var i = 0;
+        while (i < slice.Length)
         {
-            if (slice[i] != '<') continue;
+            if (slice[i] != '<') { i++; continue; }
             var close = slice.IndexOf('>', i + 1);
             if (close < 0) break;
             var hexCount = 0;
@@ -350,7 +351,7 @@ internal sealed partial class CidFontInfo
             }
             if (hexCount > 2) return false; // a range wider than one byte
             if (hexCount > 0) any = true;
-            i = close;
+            i = close + 1;
         }
         return any;
     }

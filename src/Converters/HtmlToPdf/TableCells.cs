@@ -18,7 +18,7 @@ internal static partial class HtmlToPdfConverter
             .Add((ps.lines.Count, r, CollapseWs(raw[..start]), boxText));
     }
 
-    private static Text.Font? ResolveProbeFont(TableParseState ps, HtmlLoadOptions? options, bool widenProbe, string? fam, bool bold)
+    private static Text.Font? ResolveProbeFont(TableParseState ps, string? fam, bool bold)
     {
         fam ??= ps.cellFamily;
         if (fam is null) return null;
@@ -30,9 +30,11 @@ internal static partial class HtmlToPdfConverter
         try
         {
             r = ps.uaControlGrid && bold ? Text.FontRepository.FindEmbeddableStyledFont(fam, Text.FontStyles.Bold) : null;
+            // (…and a body-face grid in the very program its cells draw a bold line in)
+            if (ps.bodyFaceCells && bold) r ??= BodyFaceBoldFont(fam);
             r ??= Text.FontRepository.TryFindFont(fam, bold ? Text.FontStyles.Bold : Text.FontStyles.Regular, ignoreCase: true);
         }
-        catch { }
+        catch { /* a font that cannot be found or read leaves the fallback in place */ }
         ps.probeFonts[(fam, bold)] = r;
         return r;
     }
@@ -85,8 +87,8 @@ internal static partial class HtmlToPdfConverter
         try
         {
             var mf = ps.measureFont;
-            if ((widenProbe || ps.uaControlGrid) && (bold || fam is not null))
-                mf = ResolveProbeFont(ps, options, widenProbe, fam, bold) ?? ps.measureFont;
+            if ((widenProbe || ps.uaControlGrid || (ps.bodyFaceCells && bold)) && (bold || fam is not null))
+                mf = ResolveProbeFont(ps, fam, bold) ?? ps.measureFont;
             // A system font resolved via FindFont has an empty PDF font dict (no /Widths),
             // so Font.MeasureString would default every glyph to 1 em. Read the real glyph
             // advances from the source TTF (hmtx) instead when available.
@@ -104,7 +106,8 @@ internal static partial class HtmlToPdfConverter
             // the AFM table has no entry for it and would count it small.
             // Probe-only: the legacy render dialects are calibrated on the
             // AFM count and must not move.
-            for (var ci = 0; ci < s.Length; ci++)
+            var ci = 0;
+            while (ci < s.Length)
             {
                 int cp = s[ci];
                 if (char.IsHighSurrogate(s[ci]) && ci + 1 < s.Length && char.IsLowSurrogate(s[ci + 1]))
@@ -112,13 +115,14 @@ internal static partial class HtmlToPdfConverter
                     cp = char.ConvertToUtf32(s[ci], s[ci + 1]);
                     ci++;
                 }
-                total += (widenProbe || fullWidthCjkMin) && IsFullWidthCp(cp) ? 1000
-                    : cp > 0xFFFF ? 500
-                    : Text.Standard14Fonts.GetWidth(baseFont, (char)cp);
+                if ((widenProbe || fullWidthCjkMin) && IsFullWidthCp(cp)) total += 1000;
+                else if (cp > 0xFFFF) total += 500;
+                else total += Text.Standard14Fonts.GetWidth(baseFont, (char)cp);
+                ci++;
             }
             if (total > 0) return total / 1000.0 * size;
         }
-        catch { }
+        catch { /* a face whose widths cannot be read falls back to the average-advance estimate below */ }
         // fallback: average glyph advance — a full em for full-width
         // codepoints (probe-only, see above)
         double est = 0;
@@ -128,7 +132,9 @@ internal static partial class HtmlToPdfConverter
             if (char.IsHighSurrogate(s[ci]) && ci + 1 < s.Length && char.IsLowSurrogate(s[ci + 1]))
             {
                 cp = char.ConvertToUtf32(s[ci], s[ci + 1]);
+#pragma warning disable S127 // a surrogate pair is one code point - the scan steps over its low half
                 ci++;
+#pragma warning restore S127
             }
             est += ((widenProbe || fullWidthCjkMin) && IsFullWidthCp(cp) ? 1.0 : 0.5) * size;
         }
@@ -186,7 +192,9 @@ internal static partial class HtmlToPdfConverter
             // Slashes and non-breaking spaces are NOT opportunities.
             // The declared-percent grid asks for the same dash-aware floors
             // (breakDashes) — its min-content columns break at hyphens too.
+#pragma warning disable S2692 // a match at index 0 is deliberately excluded here
             if ((widenProbe || breakDashes) && (word.IndexOf('-') > 0 || word.IndexOf('–') > 0))
+#pragma warning restore S2692
             {
                 var start = 0;
                 for (var ci = 0; ci < word.Length; ci++)
@@ -233,7 +241,9 @@ internal static partial class HtmlToPdfConverter
     /// (in the heading's size), left pending like any block margin.</summary>
     private static void UaLeaveHeadingMargin(TableParseState ps, string tag, Token? tok, bool top)
     {
-        var fs = ps.curFontPt > 0 ? ps.curFontPt : ps.uaBaseFontPt > 0 ? ps.uaBaseFontPt : DefaultBodyFontPt;
+        double fs = DefaultBodyFontPt;
+        if (ps.curFontPt > 0) fs = ps.curFontPt;
+        else if (ps.uaBaseFontPt > 0) fs = ps.uaBaseFontPt;
         var side = top ? "margin-top" : "margin-bottom";
         double? declared = null;
         if (tok?.Attributes is not null && tok.Attributes.TryGetValue("style", out var hSt) && hSt is not null)
@@ -259,7 +269,7 @@ internal static partial class HtmlToPdfConverter
 
     private static void UaLeaveBlockMargin(TableParseState ps, double em)
     {
-        ps.uaPendingMarginPt = Math.Max(ps.uaPendingMarginPt, em * (ps.curFontPt > 0 ? ps.curFontPt : ps.uaBaseFontPt > 0 ? ps.uaBaseFontPt : DefaultBodyFontPt));
+        ps.uaPendingMarginPt = Math.Max(ps.uaPendingMarginPt, em * ((ps.curFontPt, ps.uaBaseFontPt) switch { (> 0, _) => ps.curFontPt, (_, > 0) => ps.uaBaseFontPt, _ => DefaultBodyFontPt }));
     }
 
     private static void PushLine(TableParseState ps, bool redlineCells, bool dwFormCells, bool widenProbe, bool keepIfBlank = false, bool joinNext = false)
@@ -285,7 +295,7 @@ internal static partial class HtmlToPdfConverter
         // opportunity, so nbsp-joined runs measure as one unbreakable token
         // (.NET's \s matches U+00A0, so the normal collapse would split them).
         var text = widenProbe
-            ? Regex.Replace(ps.line.ToString(), "[^\\S ]+", " ").Trim(' ')
+            ? SafeRegex.Replace(ps.line.ToString(), "[^\\S ]+", " ").Trim(' ')
             : CollapseWs(ps.line.ToString());
         // A cell whose only content is a zero-width space holds a real line box all
         // the same — the browser gives that row a line's height. (The character

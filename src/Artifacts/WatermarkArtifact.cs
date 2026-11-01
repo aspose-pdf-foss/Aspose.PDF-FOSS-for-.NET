@@ -68,7 +68,7 @@ public partial class WatermarkArtifact : Artifact
         wc.fontSize = TextState?.FontSize ?? 12;
 
         wc.charWidth = wc.fontSize * 0.5; // approximate
-        wc.textWidth = wc.renderText!.Length * wc.charWidth;
+        wc.textWidth = wc.renderText.Length * wc.charWidth;
         wc.textHeight = wc.fontSize;
 
         PlaceWatermark(wc);
@@ -206,6 +206,14 @@ public partial class WatermarkArtifact : Artifact
             AddImageWatermark(page);
             return;
         }
+        if (RawImageBytes is not null)
+        {
+            // An image given through SetImage is drawn at the artifact's place and opacity, like
+            // the image of any artifact; a foreground one above the page content's own transform.
+            if (!IsBackground) page.WrapExistingContentInGraphicsState();
+            RenderToPage(page);
+            return;
+        }
         // Register the face the watermark is written with. RegisterFont may return
         // a name other than "F1" when the page's existing resources already use that
         // slot — a page may reserve /F1 for an embedded subset that lacks our
@@ -262,7 +270,7 @@ public partial class WatermarkArtifact : Artifact
         tw.fontSize = TextState?.FontSize ?? 12;
         tw.baseFont = TextState?.FontName ?? TextState?.Font?.FontName ?? "Helvetica";
 
-        tw.lines = tw.renderText!.Replace("\r\n", "\n").Split('\n');
+        tw.lines = tw.renderText.Replace("\r\n", "\n").Split('\n');
         tw.writtenFace = WrittenFace;
         tw.textWidth = 0;
         foreach (var line in tw.lines) tw.textWidth = Math.Max(tw.textWidth, MeasureTextWidth(line, tw.writtenFace, tw.fontSize));
@@ -310,7 +318,12 @@ public partial class WatermarkArtifact : Artifact
         PlaceTextWatermarkLines(tw);
         tw.inner.Append("ET\n");
 
-        tw.formName = tw.page.AddStampForm(System.Text.Encoding.ASCII.GetBytes(tw.inner.ToString()));
+        // A rotated watermark writes its lines at the form's origin and is turned outside the form, so the
+        // form's box is the text's own, a font size around it - the page's box would cut the descenders
+        // under the baseline away.
+        var formBox = tw.rotationCm is null ? null
+            : new Rectangle(-tw.fontSize, -tw.descent - tw.fontSize, tw.textWidth + tw.fontSize, tw.textHeight - tw.descent + tw.fontSize);
+        tw.formName = tw.page.AddStampForm(System.Text.Encoding.ASCII.GetBytes(tw.inner.ToString()), formBox);
         ComposeTextWatermarkForm(tw);
         tw.bboxStr = $"[{tw.bbox.LLX.ToString("0.##", tw.ci)} {tw.bbox.LLY.ToString("0.##", tw.ci)} {tw.bbox.URX.ToString("0.##", tw.ci)} {tw.bbox.URY.ToString("0.##", tw.ci)}]";
         tw.sb.Append($"/Artifact <</Type /{Type} /Subtype /{Subtype} /BBox {tw.bboxStr}>> BDC\n");

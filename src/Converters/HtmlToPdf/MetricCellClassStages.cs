@@ -28,11 +28,11 @@ internal static partial class HtmlToPdfConverter
                 break;
             case "width":
             {
-                var bwm2 = Regex.Match(bVal, @"([\d.]+)\s*px");
+                var bwm2 = SafeRegex.Match(bVal, @"([\d.]+)\s*px");
                 if (bwm2.Success) mc.WidthPx = DtpNum(bwm2.Groups[1].Value) * PxPt;
                 // a class PERCENT width pins its column only when the
                 // table is over-constrained (see the width solve)
-                else if (Regex.Match(bVal, @"([\d.]+)\s*%") is { Success: true } bwPct)
+                else if (SafeRegex.Match(bVal, @"([\d.]+)\s*%") is { Success: true } bwPct)
                     mc.ClassWidthPct = DtpNum(bwPct.Groups[1].Value);
                 break;
             }
@@ -44,7 +44,7 @@ internal static partial class HtmlToPdfConverter
                 break;
             case "height":
             {
-                var bph = Regex.Match(bVal, @"([\d.]+)\s*px");
+                var bph = SafeRegex.Match(bVal, @"([\d.]+)\s*px");
                 if (bph.Success) mc.HeightPt = DtpNum(bph.Groups[1].Value) * PxPt;
                 // (a UA form cell's class height is its CONTENT box, banding the row like an
                 // inline one - measured: 26 px rows pitch 22.5 = 19.5 + the pads + the spacing)
@@ -65,7 +65,7 @@ internal static partial class HtmlToPdfConverter
     /// is its line plus 1.5 a side, not plus 1.5 and the attribute's 0.75 (probed).</summary>
     private static void ApplyCellClassPadding(MetricParseState mps, MetricCell mc, string prop, string bVal)
     {
-        var bp = Regex.Match(bVal, @"([\d.]+)\s*(px|pt|em)");
+        var bp = SafeRegex.Match(bVal, @"([\d.]+)\s*(px|pt|em)");
         if (!bp.Success) return;
         var bpPt = bp.Groups[2].Value.ToLowerInvariant() switch
         {
@@ -87,7 +87,7 @@ internal static partial class HtmlToPdfConverter
     /// and its own colour (a white rule is real, invisible ink).</summary>
     private static void ApplyCellClassBorder(MetricCell mc, string bProp, string bVal)
     {
-        var bbw = Regex.Match(bVal, @"([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
+        var bbw = SafeRegex.Match(bVal, @"([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
         var dashed = bVal.Contains("dashed", StringComparison.OrdinalIgnoreCase);
         if (!bbw.Success
             || !(dashed || bVal.Contains("solid", StringComparison.OrdinalIgnoreCase)))
@@ -95,12 +95,12 @@ internal static partial class HtmlToPdfConverter
         var sidePt = DtpNum(bbw.Groups[1].Value)
             * (bbw.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase) ? PxPt : 1.0);
         // the rule's own colour (a white rule is real, invisible ink)
-        var sideCol = ParseCssColor(Regex.Replace(bVal, @"solid|dashed|[\d.]+\s*(?:px|pt)", "", RegexOptions.IgnoreCase).Trim());
+        var sideCol = ParseCssColor(SafeRegex.Replace(bVal, @"solid|dashed|[\d.]+\s*(?:px|pt)", "", RegexOptions.IgnoreCase).Trim());
         switch (bProp.ToLowerInvariant())
         {
-            case "border-left": mc.BorderLeftW = sidePt; if (sideCol is { } lc) mc.BorderLeftCol = lc; break;
-            case "border-right": mc.BorderRightW = sidePt; if (sideCol is { } rc) mc.BorderRightCol = rc; break;
-            case "border-bottom": mc.BorderBottomW = sidePt; if (sideCol is { } bc) mc.BorderBottomCol = bc; break;
+            case "border-left": mc.BorderLeftW = sidePt; if (sideCol is { } lc) { mc.BorderLeftCol = lc; } break;
+            case "border-right": mc.BorderRightW = sidePt; if (sideCol is { } rc) { mc.BorderRightCol = rc; } break;
+            case "border-bottom": mc.BorderBottomW = sidePt; if (sideCol is { } bc) { mc.BorderBottomCol = bc; } break;
             default:
                 mc.BorderTopW = sidePt;
                 mc.BorderTopDashed = dashed;

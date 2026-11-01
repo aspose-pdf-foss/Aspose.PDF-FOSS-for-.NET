@@ -95,6 +95,18 @@ public sealed partial class GdiPlusPageRenderer
         return map;
     }
 
+    /// <summary>The standard dingbats code behind each code of this run's font - the shared rule in
+    /// <see cref="SoftwarePageRenderer.BuildDingbatCodes"/>, cached per font dict.</summary>
+    private byte[]? DingbatCodes(string? fontName)
+    {
+        if (fontName is null || _scope.Fonts is null || !_scope.Fonts.TryGetValue(fontName, out var fd))
+            return null;
+        if (_dingbatCodes.TryGetValue(fd, out var cached)) return cached;
+        var map = SoftwarePageRenderer.IsDingbatsFace(fd, _reader) ? SoftwarePageRenderer.BuildDingbatCodes(fd, _reader) : null;
+        _dingbatCodes[fd] = map;
+        return map;
+    }
+
     /// <summary>For a StandardEncoding quote code, the character it shows; null for any other code.</summary>
     /// <remarks>A form whose Helvetica apostrophes were 0x27 printed straight quotes where the
     /// reference prints quoteright.</remarks>
@@ -105,6 +117,7 @@ public sealed partial class GdiPlusPageRenderer
         _ => null,
     };
 
+    private const byte SpaceCode = 0x20;
     private const byte StandardQuoteRightCode = 0x27;
     private const byte StandardQuoteLeftCode = 0x60;
 
@@ -142,8 +155,13 @@ public sealed partial class GdiPlusPageRenderer
             text = new string(chars);
         }
         bool useBytes = rawBytes is not null && rawBytes.Length == text.Length;
+        // Only an embedded program's own table is keyed by the codes; a host face standing
+        // in for a named font shows a code through the font's encoding alone (a MacRoman
+        // bullet drew as the yen sign its byte is in the host face's table).
+        var byteKeyedProgram = useBytes && SoftwarePageRenderer.HasEmbeddedProgram(_scope.Fonts, _reader, state.FontName);
         var builtInStandard = useBytes && metrics is { ShowsStandardEncodingQuotes: true };
         var dingbats = useFallback && useBytes && parser == _dingbatsParser;
+        var dingbatCodes = dingbats ? DingbatCodes(state.FontName) : null;
         using var brush = new SolidBrush(fill);
 
         for (int i = 0; i < text.Length; i++)
@@ -153,7 +171,9 @@ public sealed partial class GdiPlusPageRenderer
             // The two quote codes StandardEncoding and WinAnsi disagree on in the ASCII range.
             var standardQuote = builtInStandard ? StandardQuote(rawBytes![i]) : null;
             if (standardQuote is { } quote) ch = quote;
-            if (dingbats) ch = TextAbsorber.DingbatCharacter(rawBytes![i]);
+            // The code of the dingbats face's own encoding: the one the font's encoding names, else the byte.
+            var dingbatCode = !dingbats ? (byte)0 : dingbatCodes is null ? rawBytes![i] : dingbatCodes[rawBytes![i]];
+            if (dingbats) ch = TextAbsorber.DingbatCharacter(dingbatCode);
             if (useFallback && parser is not null)
             {
                 // Host substitute: map the decoded Unicode char straight through its cmap.
@@ -172,15 +192,16 @@ public sealed partial class GdiPlusPageRenderer
 
                 if (gid == 0)
                 {
-                    if (useBytes && standardQuote is null && parser.CMap.TryGetValue(rawBytes![i], out gid) && gid > 0) { }
-                    else if (parser.CMap.TryGetValue(ch, out gid) && gid > 0) { }
+                    if (byteKeyedProgram && standardQuote is null && parser.CMap.TryGetValue(rawBytes![i], out gid) && gid > 0) { /* the lookup in the condition sets gid - nothing more to do */ }
+                    else if (parser.CMap.TryGetValue(ch, out gid) && gid > 0) { /* the lookup in the condition sets gid - nothing more to do */ }
+                    else if (useBytes && standardQuote is null && parser.CMap.TryGetValue(rawBytes![i], out gid) && gid > 0) { /* a code that names no character: a host symbol face addressed by its codes */ }
                     else gid = 0;
                 }
             }
             var blank = undefined is not null && rawBytes is not null && i < rawBytes.Length
                 && rawBytes[i] < undefined.Length && undefined[rawBytes[i]];
             if (parser is not null && gid > 0 && !blank)
-                PaintGlyph(parser, gid, dingbats ? SeatDingbat(parser, gid, rawBytes![i], tm, tfs, th, upm) : tm,
+                PaintGlyph(parser, gid, dingbats ? SeatDingbat(parser, gid, dingbatCode, tm, tfs, th, upm) : tm,
                     ctm, tfs, th, state.Rise, hScale, upm, brush);
 
             int charWidth = 500;
@@ -199,9 +220,13 @@ public sealed partial class GdiPlusPageRenderer
                 && parser is not null && gid > 0)
             {
                 var adv = parser.GetAdvanceWidth(gid);
-                if (adv > 0 && parser.UnitsPerEm > 0) advance = charWidth = adv * 1000 / parser.UnitsPerEm;
+#pragma warning disable S2184 // integer font units: the advance truncates to whole thousandths, as it always has
+                if (adv > 0 && parser.UnitsPerEm > 0) advance = adv * 1000 / parser.UnitsPerEm;
+#pragma warning restore S2184
             }
-            double tx = (advance / 1000.0 * tfs + state.CharSpacing + (ch == ' ' ? state.WordSpacing : 0)) * th;
+            // Word spacing belongs to the code 32, not to another code that shows a space.
+            var wordSpace = useBytes ? rawBytes![i] == SpaceCode : ch == ' ';
+            double tx = (advance / 1000.0 * tfs + state.CharSpacing + (wordSpace ? state.WordSpacing : 0)) * th;
             tm = GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, tx, 0 }, tm);
         }
     }
@@ -300,8 +325,19 @@ public sealed partial class GdiPlusPageRenderer
             }
 
             var upm = src is not null && src.UnitsPerEm > 0 ? src.UnitsPerEm : 1000;
+            var glyphTm = tm;
+            if (cid.IsVertical && src is not null && gid > 0)
+            {
+                // The pen of a column is the glyph's vertical origin, the top middle of its
+                // cell, and the face keeps its own forms for a column's brackets.
+                gid = Text.CjkFallbackFont.VerticalGlyph(src, gid);
+                glyphTm = GraphicsState.MultiplyMatrices(new double[]
+                {
+                    1, 0, 0, 1, -Text.CjkFallbackFont.FullWidthOriginX / 1000.0 * tfs, -cid.VertOriginY / 1000.0 * tfs,
+                }, tm);
+            }
             if (src is not null && gid > 0)
-                PaintGlyph(src, gid, tm, ctm, tfs, th, rise, hScale, upm, brush);
+                PaintGlyph(src, gid, glyphTm, ctm, tfs, th, rise, hScale, upm, brush);
 
             // Nominal full-/half-width advance (must match ContentStreamParser's cursor
             // advance for these CMaps, else glyphs and the next show-string drift apart).
@@ -330,9 +366,12 @@ public sealed partial class GdiPlusPageRenderer
         var curveSource = PrintedPageImage ? parser as CffGlyphSource : null;
         var outline = curveSource is not null ? curveSource.GetCurveOutline(gid) : parser.GetOutline(gid);
         if (outline is null || outline.Contours.Length == 0) return;
-        using var path = _vectorTarget ? BuildPrintedGlyphPath(outline)
-            : curveSource is not null ? BuildCubicGlyphPath(outline)
-            : BuildGlyphPath(outline);
+        using var path = (_vectorTarget, curveSource) switch
+        {
+            (true, _) => BuildPrintedGlyphPath(outline),
+            (_, not null) => BuildCubicGlyphPath(outline),
+            _ => BuildGlyphPath(outline),
+        };
         if (path.PointCount == 0) return;
 
         var s = new double[] { hScale / upm, 0, 0, 1.0 / upm, 0, 0 };
@@ -398,7 +437,9 @@ public sealed partial class GdiPlusPageRenderer
         // sits in the unobserved gap between those witnesses.
         var we = world.Elements;
         var emPx = Math.Sqrt(Math.Abs(we[0] * we[3] - we[1] * we[2])) * upm;
-        if (TextLinear && emPx < TextLinearMaxEmPx)
+        // Glyphs under a fill alpha blend straight too, as a shape fill under one does: gamma-corrected
+        // compositing put 20% red over black at 49% (124 for the 51 the alpha asks).
+        if ((TextLinear && emPx < TextLinearMaxEmPx) || brush.Color.A < byte.MaxValue)
             _g.CompositingQuality = CompositingQuality.AssumeLinear;
         try
         {
@@ -478,6 +519,7 @@ public sealed partial class GdiPlusPageRenderer
     /// </summary>
     private void PaintGlyphOpaque(GraphicsPath path, GdiMatrix world, GdiColor color)
     {
+        if (DeferToPageImage()) return;
         var db = path.GetBounds(world);
         int x0 = Math.Max(0, (int)Math.Floor(db.Left) - 1), y0 = Math.Max(0, (int)Math.Floor(db.Top) - 1);
         int x1 = Math.Min(_bitmap.Width, (int)Math.Ceiling(db.Right) + 2), y1 = Math.Min(_bitmap.Height, (int)Math.Ceiling(db.Bottom) + 2);
@@ -775,8 +817,8 @@ public sealed partial class GdiPlusPageRenderer
                 }
             }
 
-            double dx = advanceTextSpace * state.FontSize * hScale;
-            tm = GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, dx, 0 }, tm);
+            double dx = SoftwarePageRenderer.Type3Advance(advanceTextSpace, b, state);
+            tm =GraphicsState.MultiplyMatrices(new double[] { 1, 0, 0, 1, dx, 0 }, tm);
         }
     }
 
@@ -812,9 +854,12 @@ public sealed partial class GdiPlusPageRenderer
         // render of a font pins its substitute so re-rendering the same Document with a
         // different DefaultFontName reuses the original (rendering one document twice
         // must give identical output). A fresh Document gets a fresh choice.
-        string Pick() => !string.IsNullOrEmpty(DefaultFontName) ? DefaultFontName!
-            : !string.IsNullOrEmpty(baseFont) ? baseFont!
-            : "Arial";
+        string Pick()
+        {
+            if (!string.IsNullOrEmpty(DefaultFontName)) return DefaultFontName;
+            if (!string.IsNullOrEmpty(baseFont)) return baseFont;
+            return "Arial";
+        }
         var name = _reader is not null
             ? _stickyFallback.GetValue(_reader, _ => new()).GetOrAdd(baseFont ?? fontName ?? "", _ => Pick())
             : Pick();

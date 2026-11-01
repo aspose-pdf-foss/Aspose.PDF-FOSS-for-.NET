@@ -80,10 +80,12 @@ public sealed class Matrix3D
             Tx + other.Tx, Ty + other.Ty, Tz + other.Tz);
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Convert a rotation enum value (None/on90/on180/on270/on360)
     /// to radians. Returns 0 when the value is not one of the recognised
     /// quarter-turns.</summary>
     public double GetAngle(Rotation rotation) => rotation switch
+#pragma warning restore S2325
     {
         Rotation.on90 => Math.PI / 2,
         Rotation.on180 => Math.PI,
@@ -95,10 +97,12 @@ public sealed class Matrix3D
     public override bool Equals(object? obj)
     {
         if (obj is not Matrix3D m) return false;
+#pragma warning disable S1244 // value equality of the type - exact by contract, as its hash code
         return A == m.A && B == m.B && C == m.C
             && D == m.D && E == m.E && F == m.F
             && G == m.G && H == m.H && I == m.I
             && Tx == m.Tx && Ty == m.Ty && Tz == m.Tz;
+#pragma warning restore S1244
     }
 
     public override int GetHashCode()

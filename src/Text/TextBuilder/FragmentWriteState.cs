@@ -18,7 +18,28 @@ public sealed partial class TextBuilder
     /// <summary>The text rise for <paramref name="state"/> at base size <paramref name="size"/>: up for a
     /// superscript, down for a subscript, none otherwise.</summary>
     private static double ScriptRise(TextState state, double size)
-        => state.Superscript ? size * SuperscriptRiseEm : state.Subscript ? -size * SubscriptDropEm : 0;
+    {
+        if (state.Superscript) return size * SuperscriptRiseEm;
+        if (state.Subscript) return -size * SubscriptDropEm;
+        return 0;
+    }
+
+    /// <summary>The state a fragment drawn as one run takes its script from: its own when it states one, else
+    /// the script its segments state when every segment with text states the same one - a script set on the
+    /// segment of a one-segment fragment is the whole run's.</summary>
+    private static TextState ScriptStateOf(TextFragment fragment)
+    {
+        var own = fragment.TextState;
+        if (own.Superscript || own.Subscript) return own;
+        TextState? shared = null;
+        foreach (var seg in fragment.Segments)
+        {
+            if (string.IsNullOrEmpty(seg.Text) || seg.TextState is not { } st) continue;
+            if (shared is null) shared = st;
+            else if (st.Superscript != shared.Superscript || st.Subscript != shared.Subscript) return own;
+        }
+        return shared is { } s && (s.Superscript || s.Subscript) ? s : own;
+    }
 
 /// <summary>Per-call working state of the enclosing method. One instance per
 /// invocation; never shared.</summary>
@@ -36,10 +57,15 @@ private sealed class FragmentWriteState
     public float fontSize;
     public double x;
     public double y;
+    // A run appended to a page viewed turned is seated in the view: this carries the view to the page's own space.
+    public Matrix? viewTurn;
     // Compute descent compensation for embedded fonts.
     // The absorber's Position.Y = Td.Y + descent*fs/1000 (descent is negative),
     // so we must write Td.Y = user_y - descent*fs/1000 to round-trip correctly.
     public double descentComp;
+    // The descent (thousandths of the size) of a font shown without a host program - a document
+    // font or a predefined CJK face - whose descriptor the absorber reads back; null otherwise.
+    public double? hostlessDescent;
     public Content.ContentStreamBuilder builder = null!;
     public byte[] runBytes = null!;
     // Underline/strikeout are drawn as thin rectangles at save time. The

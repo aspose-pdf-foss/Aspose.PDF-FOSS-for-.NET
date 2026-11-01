@@ -16,8 +16,11 @@ public partial class FreeTextAnnotation
         ft.bbox.Add(new PdfReal(0)); ft.bbox.Add(new PdfReal(0));
         ft.bbox.Add(new PdfReal(ft.bboxW)); ft.bbox.Add(new PdfReal(ft.bboxH));
         ft.apStream.Dict.Set("BBox", ft.bbox);
-        ft.fonts = new PdfDictionary();
-        ft.fonts.Set(ResName(ft.fontName), ft.fontDict);
+        if (ft.faceTtf is null)
+        {
+            ft.fonts = new PdfDictionary();
+            ft.fonts.Set(ResName(ft.fontName), ft.fontDict);
+        }
         ft.res = new PdfDictionary();
         ft.res.Set("Font", ft.fonts);
         ft.apStream.Dict.Set("Resources", ft.res);
@@ -50,7 +53,7 @@ public partial class FreeTextAnnotation
             for (int i = 0; i < ft.lines.Count; i++)
             {
                 if (i > 0) ft.sb.Append("T*\n");
-                ft.sb.Append('(').Append(EscapePdfString(ft.lines[i])).Append(") Tj\n");
+                ft.sb.Append(FreeTextShow(ft, ft.lines[i])).Append(" Tj\n");
             }
         }
         else
@@ -60,16 +63,27 @@ public partial class FreeTextAnnotation
             double prevX = 0;
             for (int i = 0; i < ft.lines.Count; i++)
             {
-                var lineW = ft.metrics.MeasureString(ft.lines[i], ft.fontSize);
+                var lineW = ft.measure(ft.lines[i]);
                 double lineX = ft.align == Aspose.Pdf.HorizontalAlignment.Right
                     ? ft.w - lineW
                     : (ft.w - lineW) / 2;
                 double dy = i == 0 ? ft.h - ft.fontSize : -ft.leading;
                 ft.sb.Append(FtFmt(ft, lineX - prevX)).Append(' ').Append(FtFmt(ft, dy)).Append(" Td\n");
-                ft.sb.Append('(').Append(EscapePdfString(ft.lines[i])).Append(") Tj\n");
+                ft.sb.Append(FreeTextShow(ft, ft.lines[i])).Append(" Tj\n");
                 prevX = lineX;
             }
         }
+    }
+
+    /// <summary>A line as the string operand of Tj: glyph ids through the embedded face, else a literal.</summary>
+    private static string FreeTextShow(FreeTextAppearanceState ft, string line)
+    {
+        if (ft.faceTtf is null) return "(" + EscapePdfString(line) + ")";
+        var (_, hex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(ft.fonts, ft.faceTtf, ft.faceName,
+            Aspose.Pdf.Text.BidiText.ToVisualOrder(line));
+        var sb = new System.Text.StringBuilder(hex.Length * 2 + 2).Append('<');
+        foreach (var b in hex) sb.Append(b.ToString("X2"));
+        return sb.Append('>').ToString();
     }
 
     /// <summary>Free text appearance: the text block opened, rotated onto the annotation's axis.</summary>

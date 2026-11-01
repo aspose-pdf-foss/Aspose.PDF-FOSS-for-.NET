@@ -18,6 +18,17 @@ internal static partial class HtmlToPdfConverter
         }
         cv.profile.sheetTypographyDoc = ((cv.profile.docChainRules is not null && !cv.profile.docChainCellRulesOnly) || cv.profile.wordExportDoc || (cv.profile.uaGridSheet)) && !cv.uaFlow
             && !cv.printCoverDoc && !cv.profile.chartCardDoc && !cv.profile.floatBothSidesDoc;
+        // A sheet whose body pads its own box lays the page the CSS way: the page margins (90 at the
+        // sides, 72 at the top) plus the body's margin and padding (see BodyBoxInsetsPt).
+        cv.profile.cssBoxBody = cv.profile.sheetTypographyDoc && BodyBoxInsetsPt(cv.css) is not null;
+        _cssPunctuationFallback = cv.profile.cssBoxBody;
+        if (cv.profile.sheetTypographyDoc && !cv.marginsExplicit && !(cv.pageInfo?.WidthAssigned ?? false)
+            && BodyBoxInsetsPt(cv.css) is { } bodyInsets)
+        {
+            cv.marginLeft = 90.0 + bodyInsets.left;
+            cv.marginRight = 90.0 + bodyInsets.right;
+            cv.marginTop = 72.0 + bodyInsets.top;
+        }
         // …and the line-box seating only where the flat flow has no dialect calibration of its
         // own: the metric flow already seats inside CSS boxes, and a sheet that pads every div
         // builds its bands from container padding the box flow does not model.
@@ -30,7 +41,7 @@ internal static partial class HtmlToPdfConverter
         // (the DOCTYPE-less legacy export only: a transitional DTD reads in quirks mode too, but the
         // one green such document - a 14-grid report with an external sheet - was calibrated without
         // these laws and went red under them; both references carry no doctype at all)
-        var ancestorCells = _quirksRowStrut && !Regex.IsMatch(cv.html, @"<!doctype", RegexOptions.IgnoreCase)
+        var ancestorCells = _quirksRowStrut && !SafeRegex.IsMatch(cv.html, @"<!doctype", RegexOptions.IgnoreCase)
             && SheetScopesCellsThroughContainer(cv);
         _quirksChainSheet = cv.profile.sheetTypographyDoc && ancestorCells;
         _ancestorGridSheet = ancestorCells;

@@ -7,18 +7,14 @@ namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
-// IPD claim letter helpers: text flattening, div extraction, measurement, page breaks, runs, lines, fills, wrapping and block open/advance.
-    private static string Flat(IpdClaimLetterState ic, string s) => Regex.Replace(DecodeEntities(
-        Regex.Replace(s, @"<[^>]+>", " ")).Replace(' ', ' '), @"\s+", " ").Trim();
 
     // Balanced scan: from an opening <div ...> at openEnd, find the matching
     // </div> and return the inner segment.
-    private static (string result, int closeEnd) DivInner(IpdClaimLetterState ic, string h, int openEnd)
+    private static (string result, int closeEnd) DivInner(string h, int openEnd)
     {
         int closeEnd = default;
         var depth = 1;
-        var i = openEnd;
-        foreach (Match m in Regex.Matches(h[openEnd..], @"<(/?)div\b[^>]*>",
+        foreach (Match m in SafeRegex.Matches(h[openEnd..], @"<(/?)div\b[^>]*>",
             RegexOptions.IgnoreCase))
         {
             depth += m.Groups[1].Value.Length > 0 ? -1 : 1;
@@ -32,7 +28,7 @@ internal static partial class HtmlToPdfConverter
         return (h[openEnd..], closeEnd);
     }
 
-    private static double MW(IpdClaimLetterState ic, string s, double fs, bool bold = false)
+    private static double IpdMW(string s, double fs, bool bold = false)
         => MeasureFaceText(bold ? "Arial Bold" : "Arial", s, fs);
 
     private static void NewPage(IpdClaimLetterState ic)
@@ -55,14 +51,14 @@ internal static partial class HtmlToPdfConverter
             $"q {rgb} rg {x0:F2} {IpdPageH - yTop - hpt:F2} {wpt:F2} {hpt:F2} re f Q"));
 
     // greedy word wrap at a pixel budget
-    private static List<string> Wrap(IpdClaimLetterState ic, string text, double fs, double budget, bool bold = false)
+    private static List<string> IpdWrap(string text, double fs, double budget, bool bold = false)
     {
         var lines = new List<string>();
         var cur = new StringBuilder();
         foreach (var word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
             var trial = cur.Length == 0 ? word : cur + " " + word;
-            if (cur.Length == 0 || MW(ic, trial, fs, bold) <= budget) { cur.Clear(); cur.Append(trial); }
+            if (cur.Length == 0 || IpdMW(trial, fs, bold) <= budget) { cur.Clear(); cur.Append(trial); }
             else { lines.Add(cur.ToString()); cur.Clear(); cur.Append(word); }
         }
         if (cur.Length > 0) lines.Add(cur.ToString());

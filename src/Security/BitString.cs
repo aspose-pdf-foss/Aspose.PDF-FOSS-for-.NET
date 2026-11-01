@@ -94,7 +94,9 @@ public sealed class BitString : IEquatable<BitString>
         get
         {
             if (index < 0 || index >= _length)
+#pragma warning disable S112 // public API: the exception type callers catch
                 throw new IndexOutOfRangeException($"Index {index} out of range [0, {_length}).");
+#pragma warning restore S112
             var pos = _length - 1 - index; // map to string position (0=leftmost)
             var wi = pos >> 5;
             var bi = 31 - (pos & 31);
@@ -103,7 +105,9 @@ public sealed class BitString : IEquatable<BitString>
         set
         {
             if (index < 0 || index >= _length)
+#pragma warning disable S112 // public API: the exception type callers catch
                 throw new IndexOutOfRangeException($"Index {index} out of range [0, {_length}).");
+#pragma warning restore S112
             var pos = _length - 1 - index;
             var wi = pos >> 5;
             var bi = 31 - (pos & 31);
@@ -222,7 +226,9 @@ public sealed class BitString : IEquatable<BitString>
 
     public override bool Equals(object? obj) => obj is BitString bs && Equals(bs);
 
+#pragma warning disable S2328 // value equality over the bits; a BitString is not mutated while hashed
     public override int GetHashCode()
+#pragma warning restore S2328
     {
         var h = HashCode.Combine(_length);
         foreach (var w in _words) h = HashCode.Combine(h, w);

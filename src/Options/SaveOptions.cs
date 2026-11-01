@@ -27,6 +27,7 @@ namespace Aspose.Pdf
 
         public class ResourceSavingInfo
         {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
             /// <summary>Decoded resource content stream supplied by the saver.</summary>
             public System.IO.Stream ContentStream;
             /// <summary>Whether the caller decided to drop this resource.</summary>
@@ -35,6 +36,7 @@ namespace Aspose.Pdf
             public string SupposedFileName;
             /// <summary>Optional raw bytes (FOSS-only convenience over the stream).</summary>
             public byte[] ContentStreamData;
+#pragma warning restore S1104
             /// <summary>What kind of resource this entry represents.</summary>
             public NodeLevelResourceType ResourceType { get; internal set; }
         }
@@ -45,18 +47,23 @@ namespace Aspose.Pdf
             {
                 TopStyleIfAny = RightStyleIfAny = BottomStyleIfAny = LeftStyleIfAny = commonStyle;
             }
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
             public BorderPartStyle TopStyleIfAny;
             public BorderPartStyle RightStyleIfAny;
             public BorderPartStyle BottomStyleIfAny;
             public BorderPartStyle LeftStyleIfAny;
+#pragma warning restore S1104
         }
 
         public class BorderPartStyle
         {
             public BorderPartStyle() { }
-            public int WidthInPoints { get; set; }
+            /// <summary>The side's width; a side given no width is one point wide.</summary>
+            public int WidthInPoints { get; set; } = 1;
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
             public System.Drawing.Color Color;
             public HtmlBorderLineType LineType;
+#pragma warning restore S1104
         }
 
         public enum HtmlBorderLineType
@@ -81,10 +88,12 @@ namespace Aspose.Pdf
             {
                 TopMarginIfAny = RightMarginIfAny = BottomMarginIfAny = LeftMarginIfAny = commonMargin;
             }
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
             public MarginPartStyle TopMarginIfAny;
             public MarginPartStyle RightMarginIfAny;
             public MarginPartStyle BottomMarginIfAny;
             public MarginPartStyle LeftMarginIfAny;
+#pragma warning restore S1104
         }
 
         /// <summary>One side of a <see cref="MarginInfo"/>: either a fixed
@@ -135,6 +144,7 @@ namespace Aspose.Pdf
             public ResourceLoadingResult(byte[] data) { Data = data; }
             public byte[] Data { get; }
 
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
             /// <summary>Whether the caller asked the loader to drop this resource (public-API-shape field).</summary>
             public bool LoadingCancelled;
 
@@ -146,6 +156,7 @@ namespace Aspose.Pdf
 
             /// <summary>MIME type declared by the resource, if any.</summary>
             public string MIMETypeIfKnown;
+#pragma warning restore S1104
         }
 
         /// <summary>Callback invoked by the HTML loader to resolve an external resource by URI.</summary>
@@ -177,6 +188,7 @@ namespace Aspose.Pdf
         public UnifiedSaveOptions() { }
 
         public bool ExtractOcrSublayerOnly { get; set; }
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
         public bool IsMultiThreading;
         public bool TryMergeAdjacentSameBackgroundImages;
 
@@ -186,6 +198,7 @@ namespace Aspose.Pdf
             public ProgressEventType EventType;
             public int MaxValue;
             public int Value;
+#pragma warning restore S1104
         }
 
         public delegate void ConversionProgressEventHandler(ProgressEventHandlerInfo eventInfo);
@@ -212,18 +225,22 @@ namespace Aspose.Pdf
         /// <summary>Creates SVG save options with default settings (separate SVG files, not a zip archive).</summary>
         public SvgSaveOptions() { }
 
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
         public bool CompressOutputToZipArchive;
         public bool TreatTargetFileNameAsDirectory;
         public bool ScaleToPixels;
         public EmbeddedImagesSavingStrategy CustomStrategyOfEmbeddedImagesSaving;
+#pragma warning restore S1104
         public class SvgImageSavingInfo
         {
             /// <summary>The embedded image's bytes, positioned at the start.</summary>
             public System.IO.Stream ContentStream { get; set; }
             /// <summary>The file name the writer would give this image.</summary>
             public string SupposedFileName { get; set; }
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
             /// <summary>Image format hint for the SVG writer.</summary>
             public SvgExternalImageType ImageType;
+#pragma warning restore S1104
         }
         /// <summary>Callback returning the file name to use for an embedded image during SVG save.</summary>
         public delegate string EmbeddedImagesSavingStrategy(SvgImageSavingInfo imageSavingInfo);

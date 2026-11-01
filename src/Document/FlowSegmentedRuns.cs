@@ -27,7 +27,9 @@ public sealed partial class Document
             public readonly Text.TextState State;
             /// <summary>What the run occupies past its glyphs, and what its rule spans.</summary>
             public readonly double Extra;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
             public readonly double RuleExtra;
+#pragma warning restore S3218
             /// <summary>The run's rise and the factor its horizontal scaling applies.</summary>
             public readonly double Rise;
             public readonly double Scale;
@@ -203,13 +205,15 @@ public sealed partial class Document
                 if ((st.FontData is not null || st.Font?.SourceFontData is not null)
                     && (picture is not null || !HasFaceProgram(st) || !DrawnPlainly(st) || !DrawnPlainly(fragState)))
                     return null;
-                var fs = st.FontSizeTouched && st.FontSize > 0 ? (double)st.FontSize
-                    : fragState.FontSize > 0 ? fragState.FontSize : (double)st.FontSize;
+                double fs;
+                if (st.FontSizeTouched && st.FontSize > 0) fs = (double)st.FontSize;
+                else if (fragState.FontSize > 0) fs = fragState.FontSize;
+                else fs = (double)st.FontSize;
                 if (fs <= 0) fs = 12;
                 var spacing = st.LineSpacing > 0 ? st.LineSpacing : fragState.LineSpacing;
-                var (ascentEm, descentEm) = st is { LineBoxAscentEm: { } a, LineBoxDescentEm: { } d } ? (a, d)
-                    : fragState is { LineBoxAscentEm: { } fa, LineBoxDescentEm: { } fd } ? (fa, fd)
-                    : (GenericAscentEm, GenericDescentEm);
+                var (ascentEm, descentEm) = (GenericAscentEm, GenericDescentEm);
+                if (st is { LineBoxAscentEm: { } a, LineBoxDescentEm: { } d }) (ascentEm, descentEm) = (a, d);
+                else if (fragState is { LineBoxAscentEm: { } fa, LineBoxDescentEm: { } fd }) (ascentEm, descentEm) = (fa, fd);
                 // The run paints with its own stroke and shear when it declares any,
                 // else with the paragraph's.
                 var paintState = st.RenderingMode != 0 || st.ExplicitStrokingColor is not null
@@ -275,7 +279,7 @@ public sealed partial class Document
         /// slot becomes a page.</summary>
         private void PlaceInlinePicture(byte[] data, Rectangle rect)
         {
-            if (_overflowBuffer is null) { _startPage.AddImage(data, rect); return; }
+            if (_overflowBuffer is null) { _startPage.AddLayoutImage(data, rect); return; }
             _pendingImages.Add((_currentSlot, data, rect, false));
         }
 
@@ -323,7 +327,7 @@ public sealed partial class Document
                     run.OwnState.FontData ?? run.OwnState.Font?.SourceFontData)(text);
             var w = MeasureLineWidth(AsWrittenCodes(text, run.BaseFont), run.BaseFont, run.FontSize) + text.Length * run.CharSpacing;
             if (run.WordSpacing != 0)
-                foreach (var c in text) if (c == ' ') w += run.WordSpacing;
+                foreach (var c in text.Where(c => c == ' ')) w += run.WordSpacing;
             return w * run.Scale;
         }
 
@@ -348,27 +352,29 @@ public sealed partial class Document
             var box = 0.0;
             var tallest = -1;
             var onlyTabs = line.TrueForAll(p => runs[p.Run].Tab || runs[p.Run].Picture is not null);
-            foreach (var piece in line)
+            foreach (var pieceRun in line.Select(piece => piece.Run))
             {
-                var run = runs[piece.Run];
+                var run = runs[pieceRun];
                 if (run.Picture is not null || (run.Tab && !onlyTabs)) continue;
                 box = Math.Max(box, run.LineBox);
-                if (tallest < 0 || SeatsOver(run, runs[tallest])) tallest = piece.Run;
+                if (tallest < 0 || SeatsOver(run, runs[tallest])) tallest = pieceRun;
             }
             var tallestPicture = 0.0;
             var textRun = -1;
-            foreach (var piece in line)
+            foreach (var pieceRun in line.Select(piece => piece.Run))
             {
-                var run = runs[piece.Run];
+                var run = runs[pieceRun];
                 if (run.Picture is not null) tallestPicture = Math.Max(tallestPicture, run.PictureHeight);
                 else if (run.Tab && !onlyTabs) continue;
-                else if (textRun < 0 || run.FontSize > runs[textRun].FontSize) textRun = piece.Run;
+                else if (textRun < 0 || run.FontSize > runs[textRun].FontSize) textRun = pieceRun;
             }
             // (the drop of a later line's box under a picture: the text's em descent,
             // the paragraph's when the line holds no text)
-            var drop = firstLine ? 0 : (textRun >= 0 ? runs[textRun] : runs[line[0].Run]) is { } dropRun && dropRun.Picture is null
-                ? dropRun.DescentEm * dropRun.FontSize
-                : runs[line[0].Run].DescentEm * runs[line[0].Run].FontSize;
+            double drop;
+            if (firstLine) drop = 0;
+            else if ((textRun >= 0 ? runs[textRun] : runs[line[0].Run]) is { } dropRun && dropRun.Picture is null)
+                drop = dropRun.DescentEm * dropRun.FontSize;
+            else drop = runs[line[0].Run].DescentEm * runs[line[0].Run].FontSize;
             // A line of pictures alone: the tallest picture, standing on the line's bottom.
             if (tallest < 0) return (tallestPicture + drop, tallestPicture + drop);
             var seat = runs[tallest];
@@ -464,7 +470,7 @@ public sealed partial class Document
                 if (run.Tab || run.Picture is not null) continue;
                 var text = i == line.Count - 1 ? line[i].Text.TrimEnd(' ') : line[i].Text;
                 glyphs += text.Length;
-                foreach (var c in text) if (c == ' ') spaces++;
+                foreach (var c in text.Where(c => c == ' ')) spaces++;
             }
             var slack = CurWidth - indent - RunLineWidth(runs, line);
             var share = (1 - ratio) * (glyphs - 1) + ratio * spaces;
@@ -492,11 +498,9 @@ public sealed partial class Document
             var b = new Content.ContentStreamBuilder();
             b.SaveState();
             var options = fragState.FormattingOptions;
-            var alphaGs = options?.Opacity is { } opacity
-                ? Text.TextParagraph.EnsureAlphaExtGState(_startPage, opacity, strokeToo: true)
-                : options?.FillOpacity is { } fillOpacity
-                ? Text.TextParagraph.EnsureAlphaExtGState(_startPage, fillOpacity, strokeToo: false)
-                : null;
+            string? alphaGs = null;
+            if (options?.Opacity is { } opacity) alphaGs = Text.TextParagraph.EnsureAlphaExtGState(_startPage, opacity, strokeToo: true);
+            else if (options?.FillOpacity is { } fillOpacity) alphaGs = Text.TextParagraph.EnsureAlphaExtGState(_startPage, fillOpacity, strokeToo: false);
             if (alphaGs is not null) b.SetExtGState(alphaGs);
             var ruleAlpha = RuleAlphaStates(options);
             var i = 0;
@@ -584,7 +588,7 @@ public sealed partial class Document
         {
             if (spacing == default) return 0;
             var extra = text.Length * spacing.Tc;
-            foreach (var c in text) if (c == ' ') extra += spacing.Tw;
+            foreach (var c in text.Where(c => c == ' ')) extra += spacing.Tw;
             return extra;
         }
 

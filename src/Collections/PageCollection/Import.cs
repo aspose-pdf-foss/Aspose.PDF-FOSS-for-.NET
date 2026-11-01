@@ -9,9 +9,10 @@ public sealed partial class PageCollection
     /// <summary>The first free object number in the cross-document import space: past the
     /// destination's existing xref and every already-allocated imported object and page
     /// slot. Imported objects and page-destination slots draw from this one space so they
-    /// never collide.</summary>
+    /// never collide. Objects the document made before the import (a form conversion's fields
+    /// and widgets) are not in the xref yet: the space starts above them too.</summary>
     private int ImportObjNumBase() =>
-        _reader.XRefTable.Entries.Keys.DefaultIfEmpty(0).Max()
+        Math.Max(_reader.XRefTable.Entries.Keys.DefaultIfEmpty(0).Max(), OwnerDocument?.HighestNewObjectNumber() ?? 0)
         + _importedObjects.Count + _slotCount + 1;
 
     /// <summary>Record a freshly allocated slot number for the running counters.</summary>
@@ -116,6 +117,7 @@ public sealed partial class PageCollection
             // Cross-document: remap indirect refs from source to new object numbers
             var remap = GetOrCreateCloneCache(sourceReader);
             clone = (PdfDictionary)RemapObject(dict, sourceReader, remap);
+            ImportOptionalContentGroups(sourceReader, remap);
         }
 
         // Ensure inheritable properties are set directly on the clone.
@@ -152,6 +154,7 @@ public sealed partial class PageCollection
         // every prior import/slot. Slots allocated below share this space via _importPageSlots.
         ro.nextObjNum = ImportObjNumBase();
         ro.root = null;
+        ro.destinations = SourceDestinations(sourceReader);
 
         RemapSourceObject(ro, obj, result => ro.root = result);
         int safetyLimit = 1_000_000;
@@ -202,17 +205,15 @@ public sealed partial class PageCollection
         var current = srcAnnot;
         while (current is not null)
         {
-            foreach (var key in keysToInherit)
+            foreach (var key in keysToInherit.Where(key => !target.ContainsKey(key)))
             {
-                if (!target.ContainsKey(key))
+                if (Forms.SignatureField.IsSignatureValue(target, key)) continue;
+                var val = current.Get(key);
+                if (val is not null)
                 {
-                    var val = current.Get(key);
-                    if (val is not null)
-                    {
-                        // Deep-copy the value (resolve indirect refs)
-                        var resolved = reader.Resolve(val) ?? val;
-                        target.Set(key, resolved);
-                    }
+                    // Deep-copy the value (resolve indirect refs)
+                    var resolved = reader.Resolve(val) ?? val;
+                    target.Set(key, resolved);
                 }
             }
             current = reader.ResolveDict(current.Get("Parent"));
@@ -250,7 +251,9 @@ public sealed partial class PageCollection
 
     private static string DeduplicateFieldName(string baseName, HashSet<string> existing)
     {
+#pragma warning disable S1994 // the loop runs on its own exit condition; the counter only numbers the passes
         for (int suffix = 1; ; suffix++)
+#pragma warning restore S1994
         {
             var candidate = baseName + suffix;
             if (!existing.Contains(candidate))

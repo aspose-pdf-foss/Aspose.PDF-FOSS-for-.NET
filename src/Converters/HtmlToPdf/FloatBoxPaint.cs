@@ -14,7 +14,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (y < fb.bandBottom - FbEpsilon) return (0, y);
         var k = 1 + (int)Math.Floor((y - fb.bandBottom) / fb.laterPageStep);
-        return (k, FbPageMarginTop + (y - fb.bandBottom) - (k - 1) * fb.laterPageStep);
+        return (k, fb.marginTop + (y - fb.bandBottom) - (k - 1) * fb.laterPageStep);
     }
 
     private static double FbPageBottom(FbState fb, int page) => page == 0 ? fb.bandBottom : fb.bandBottom + page * fb.laterPageStep;
@@ -119,6 +119,7 @@ internal static partial class HtmlToPdfConverter
         if (box.Img is not null) FbPaintReplaced(fb, box);
         if (box.Grid is { } grid) FbPaintGrid(fb, grid);
         if (box.Ctl is not null) FbPaintControl(fb, box);
+        if (fb.columns) FbPaintColumnExtras(fb, box);
         foreach (var line in box.Lines) FbPaintLineRuns(fb, line);
         foreach (var k in box.Kids) FbPaintTree(fb, k);
     }
@@ -200,7 +201,8 @@ internal static partial class HtmlToPdfConverter
             for (var k = 0; k <= nCols; k++)
             {
                 FbTableCell? leftCell = null, rightCell = null;
-                foreach (var c in row) { if (c.Col + c.Span == k) leftCell = c; if (c.Col == k) rightCell = c; }
+                foreach (var c in row) { if (c.Col + c.Span == k) leftCell = c;
+                if (c.Col == k) rightCell = c; }
                 var drawn = (leftCell is not null && leftCell.Right) || (rightCell is not null && rightCell.Left);
                 if (!drawn) continue;
                 var extra = nextCharged && ((leftCell is not null && leftCell.Bottom) || (rightCell is not null && rightCell.Bottom)) ? b : 0;
@@ -214,7 +216,10 @@ internal static partial class HtmlToPdfConverter
                 if (c.Top && !FbCellAboveHasBottom(g, r, c.Col)) FbStrokeH(fb, x0, x1, g.ChargedTop[r] ? top + b / 2 : top - b / 2, g.Rgb, b);
                 if (c.Bottom)
                 {
-                    var y = g.ChargedBottom[r] ? bottom - b / 2 : nextCharged ? bottom + b / 2 : bottom;
+                    double y;
+                    if (g.ChargedBottom[r]) y = bottom - b / 2;
+                    else if (nextCharged) y = bottom + b / 2;
+                    else y = bottom;
                     FbStrokeH(fb, x0, x1, y, g.Rgb, b);
                 }
             }

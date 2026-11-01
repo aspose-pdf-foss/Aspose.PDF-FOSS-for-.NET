@@ -11,7 +11,7 @@ namespace Aspose.Pdf;
 public sealed partial class Page
 {
     /// <summary>The stages of the image add: the general decode into a stamp.</summary>
-    private void DecodeImageStamp(ImageAddState ia)
+    private static void DecodeImageStamp(ImageAddState ia)
     {
         // Assume raw RGB pixel data — caller must ensure width/height are correct
         var w = (int)ia.rect.Width;

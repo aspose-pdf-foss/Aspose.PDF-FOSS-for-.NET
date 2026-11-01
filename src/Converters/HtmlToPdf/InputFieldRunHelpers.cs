@@ -25,8 +25,9 @@ internal static partial class HtmlToPdfConverter
         // A control line advances by the control's flow cost; carrying
         // body text beside it adds the descent clearance. Text-only
         // (wrap remainder) lines keep the normal line box.
-        var adv = maxAdv > 0 ? maxAdv + (hasText ? InlineMixedExtraPt : 0)
-            : NormalLineHeightPt(ib.blockFontSize > 0 ? ib.blockFontSize : EscapedBodyFontPt);
+        double adv;
+        if (maxAdv > 0) adv = maxAdv + (hasText ? InlineMixedExtraPt : 0);
+        else adv = NormalLineHeightPt(ib.blockFontSize > 0 ? ib.blockFontSize : EscapedBodyFontPt);
         if (ib.flow.y - (maxAbove > InputBoxAboveBaselinePt ? SerifDescentRoomPt : adv) < ib.marginBottom)
         {
             ib.flow.page = ib.doc.Pages.Add(ib.pageWidth, ib.pageHeight);
@@ -63,9 +64,12 @@ internal static partial class HtmlToPdfConverter
             // top clears the content above.
             var midLineTall = ib.curItems.Count > 0 && it.InputMultiline;
             ib.curItems.Add((it, null, ib.pen, 0, ""));
-            ib.curMaxAdv = System.Math.Max(ib.curMaxAdv, midLineTall
-                ? ControlFirstRowAdvancePt
-                : it.InputAdvance > 0 ? it.InputAdvance : ControlFirstRowAdvancePt);
+            ib.curMaxAdv = System.Math.Max(ib.curMaxAdv, (midLineTall, it.InputAdvance) switch
+            {
+                (true, _) => ControlFirstRowAdvancePt,
+                (_, > 0) => it.InputAdvance,
+                _ => ControlFirstRowAdvancePt,
+            });
             if (midLineTall && it.InputHeight > 0)
                 ib.curMaxAbove = System.Math.Max(ib.curMaxAbove, it.InputHeight - TextareaBottomHangPt);
             ib.pen += penW;
@@ -73,9 +77,8 @@ internal static partial class HtmlToPdfConverter
         else if (!string.IsNullOrEmpty(it.Text))
         {
             var fpt = it.FontSize > 0 ? it.FontSize : EscapedBodyFontPt;
-            var res = it.FontRes == "F2" ? "F6" : it.FontRes == "F3" ? "F7" : "F5";
-            var face = res == "F6" ? "Times-Bold"
-                : res == "F7" ? "Times-Italic" : "Times-Roman";
+            var res = it.FontRes switch { "F2" => "F6", "F3" => "F7", _ => "F5" };
+            var face = res switch { "F6" => "Times-Bold", "F7" => "Times-Italic", _ => "Times-Roman" };
             int p = 0;
             while (p < it.Text.Length)
             {

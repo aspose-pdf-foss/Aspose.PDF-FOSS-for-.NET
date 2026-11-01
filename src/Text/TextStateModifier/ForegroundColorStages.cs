@@ -111,7 +111,7 @@ internal sealed partial class TextStateModifier
     }
 
     /// <summary>Seed the rewrite's state: the inputs, the page's fonts, the lexer and the initial CTM and text state.</summary>
-    private void InitForegroundColorState(ForegroundColorState fc, byte[] streamBytes, string text, double? targetY, double? targetX, PdfDictionary pageDict, PdfReader reader, double initCtmA, double initCtmB, double initCtmC, double initCtmD, double initCtmTx, double initCtmTy, bool nearestX)
+    private static void InitForegroundColorState(ForegroundColorState fc, byte[] streamBytes, string text, double? targetY, double? targetX, PdfDictionary pageDict, PdfReader reader, double initCtmA, double initCtmB, double initCtmC, double initCtmD, double initCtmTx, double initCtmTy, bool nearestX)
     {
         fc.text = text;
         fc.targetY = targetY;

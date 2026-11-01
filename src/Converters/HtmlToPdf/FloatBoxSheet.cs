@@ -29,6 +29,7 @@ internal static partial class HtmlToPdfConverter
         public List<string>? Classes;
         public List<(string name, string op, string val)>? Attrs;
         public List<string>? Pseudos;                         // pseudo-classes, lower case, with their argument
+        public bool Universal;                                // a lone `*` kept as a compound of its own (the column claim)
     }
 
     private sealed class FbSheetRule
@@ -61,6 +62,8 @@ internal static partial class HtmlToPdfConverter
         public Dictionary<HtmlNode, Dictionary<string, string>> Generated = new();   // a ::before / ::after node's declarations
         public HashSet<HtmlNode> GeneratedDone = new();
         public HtmlLoadOptions? Options;
+        public Dictionary<string, List<FbSheetRule>>? RulesByKey;    // the rules by their subject's id, class or tag ("" = any element), built on first use
+        public bool KeepsUniversal;                           // `*` is a compound: `a * b` and a bare `*` rule match as written
         public Dictionary<string, (int objNum, string embedName)> FontFileCache = new();
     }
 
@@ -73,9 +76,9 @@ internal static partial class HtmlToPdfConverter
         if (cv.marginsExplicit) return "margins";
         if (options is { HtmlMediaType: HtmlMediaType.Screen }) return "screen media";   // (the law is the PRINT context)
         if (ReadsInQuirksMode(html) && !ReadsInLimitedQuirks(html)) return "quirks";
-        if (Regex.IsMatch(html, @"<(frameset|iframe|svg)\b", RegexOptions.IgnoreCase)) return "frames";
-        if (!Regex.IsMatch(html, @"@font-face\s*\{[^}]*url\(\s*[""']?(?!https?:|data:)[^)]*\.(ttf|woff|otf)", RegexOptions.IgnoreCase)) return "no own faces";
-        if (!Regex.IsMatch(html, @"@media[^{]*\(\s*max-width\s*:", RegexOptions.IgnoreCase)) return "no width features";
+        if (SafeRegex.IsMatch(html, @"<(frameset|iframe|svg)\b", RegexOptions.IgnoreCase)) return "frames";
+        if (!SafeRegex.IsMatch(html, @"@font-face\s*\{[^}]*url\(\s*[""']?(?!https?:|data:)[^)]*\.(ttf|woff|otf)", RegexOptions.IgnoreCase)) return "no own faces";
+        if (!SafeRegex.IsMatch(html, @"@media[^{]*\(\s*max-width\s*:", RegexOptions.IgnoreCase)) return "no width features";
         return null;
     }
 
@@ -98,7 +101,7 @@ internal static partial class HtmlToPdfConverter
             if (term.StartsWith("only ")) term = term[5..].Trim();
             if (term.StartsWith("not ")) { negate = true; term = term[4..].Trim(); }
             var holds = true;
-            foreach (var partRaw in Regex.Split(term, @"\s+and\s+"))
+            foreach (var partRaw in SafeRegex.Split(term, @"\s+and\s+"))
             {
                 var part = partRaw.Trim();
                 if (part.Length == 0) continue;
@@ -116,9 +119,11 @@ internal static partial class HtmlToPdfConverter
         var colon = feature.IndexOf(':');
         var name = (colon < 0 ? feature : feature[..colon]).Trim();
         var value = colon < 0 ? "" : feature[(colon + 1)..].Trim();
-        var num = Regex.Match(value, @"-?\d+(?:\.\d+)?");
+        var num = SafeRegex.Match(value, @"-?\d+(?:\.\d+)?");
         var n = num.Success ? double.Parse(num.Value, System.Globalization.CultureInfo.InvariantCulture) : double.NaN;
-        var prefix = name.StartsWith("min-") ? "min" : name.StartsWith("max-") ? "max" : "";
+        string prefix = "";
+        if (name.StartsWith("min-")) prefix = "min";
+        else if (name.StartsWith("max-")) prefix = "max";
         var bare = prefix.Length > 0 ? name[4..] : name;
         double? measured = bare switch
         {
@@ -143,16 +148,16 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>Read every style block of the document (a linked sheet is inlined with its media
     /// attribute) into the rule list and the face table, in source order.</summary>
-    private static FbSheet FbReadSheet(string html, HtmlLoadOptions? options, double vpW, double vpH)
+    private static FbSheet FbReadSheet(string html, HtmlLoadOptions? options, double vpW, double vpH, bool keepsUniversal = false)
     {
-        var sheet = new FbSheet { Options = options };
+        var sheet = new FbSheet { Options = options, KeepsUniversal = keepsUniversal };
         var order = 0;
-        foreach (Match block in Regex.Matches(html, @"<style\b([^>]*)>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(html, @"<style\b([^>]*)>([\s\S]*?)</style>", RegexOptions.IgnoreCase).Select(block => block.Groups))
         {
-            var mediaAttr = Regex.Match(block.Groups[1].Value, @"\bmedia\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+            var mediaAttr = SafeRegex.Match(groups[1].Value, @"\bmedia\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
             if (mediaAttr.Success && !FbMediaApplies(mediaAttr.Groups[1].Value, vpW, vpH)) continue;
-            var css = Regex.Replace(block.Groups[2].Value, @"/\*[\s\S]*?\*/", "");
-            css = Regex.Replace(css, @"@(import|charset)\b[^;]*;", "", RegexOptions.IgnoreCase);
+            var css = SafeRegex.Replace(groups[2].Value, @"/\*[\s\S]*?\*/", "");
+            css = SafeRegex.Replace(css, @"@(import|charset)\b[^;]*;", "", RegexOptions.IgnoreCase);
             FbReadCssBlock(sheet, css, ref order, vpW, vpH);
         }
         return sheet;
@@ -182,7 +187,7 @@ internal static partial class HtmlToPdfConverter
             {
                 var sel = selRaw.Trim();
                 if (sel.Length == 0) continue;
-                var rule = FbParseSelector(sel);
+                var rule = FbParseSelector(sel, sheet.KeepsUniversal);
                 if (rule is null) continue;
                 rule.Decls = decls;
                 rule.Important = important;
@@ -232,7 +237,7 @@ internal static partial class HtmlToPdfConverter
         var depth = 0; var quote = '\0';
         foreach (var ch in body)
         {
-            if (quote != '\0') { sb.Append(ch); if (ch == quote) quote = '\0'; continue; }
+            if (quote != '\0') { sb.Append(ch); if (ch == quote) { quote = '\0'; } continue; }
             if (ch is '"' or '\'') { quote = ch; sb.Append(ch); continue; }
             if (ch == '(') depth++; else if (ch == ')') depth--;
             if (ch == ';' && depth <= 0) { parts.Add(sb.ToString()); sb.Clear(); continue; }
@@ -243,15 +248,15 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>Parse one selector into its compounds; null when it is not a selector at all.</summary>
-    private static FbSheetRule? FbParseSelector(string sel)
+    private static FbSheetRule? FbParseSelector(string sel, bool keepsUniversal = false)
     {
         var rule = new FbSheetRule { Parts = new List<FbSelPart>() };
         var part = new FbSelPart();
         var i = 0;
-        var pendingComb = '\0';
+        char pendingComb;
         void Close()
         {
-            if (part.Tag is null && part.Id is null && part.Classes is null && part.Attrs is null && part.Pseudos is null) return;
+            if (part.Tag is null && part.Id is null && part.Classes is null && part.Attrs is null && part.Pseudos is null && !part.Universal) return;
             rule.Parts.Add(part);
             part = new FbSelPart();
         }
@@ -271,14 +276,14 @@ internal static partial class HtmlToPdfConverter
                 if (rule.Parts.Count > 0) part.Comb = pendingComb;
                 continue;
             }
-            if (c == '*') { i++; continue; }
+            if (c == '*') { part.Universal = keepsUniversal; i++; continue; }
             if (c == '#') { var j = FbIdentEnd(sel, i + 1); part.Id = sel[(i + 1)..j]; i = j; continue; }
             if (c == '.') { var j = FbIdentEnd(sel, i + 1); (part.Classes ??= new List<string>()).Add(sel[(i + 1)..j]); i = j; continue; }
             if (c == '[')
             {
                 var j = sel.IndexOf(']', i);
                 if (j < 0) return null;
-                var m = Regex.Match(sel[(i + 1)..j], @"^\s*([\w-]+)\s*(?:([~|^$*]?=)\s*[""']?([^""']*?)[""']?)?\s*$");
+                var m = SafeRegex.Match(sel[(i + 1)..j], @"^\s*([\w-]+)\s*(?:([~|^$*]?=)\s*[""']?([^""']*?)[""']?)?\s*$");
                 if (!m.Success) return null;
                 (part.Attrs ??= new List<(string, string, string)>()).Add((m.Groups[1].Value.ToLowerInvariant(), m.Groups[2].Value, m.Groups[3].Value));
                 i = j + 1;
@@ -339,7 +344,7 @@ internal static partial class HtmlToPdfConverter
         if (!decls.TryGetValue("font-family", out var famRaw) || !decls.TryGetValue("src", out var src)) return;
         var family = famRaw.Trim().Trim('"', '\'');
         if (family.Length == 0 || sheet.Faces.ContainsKey(family)) return;
-        foreach (Match u in Regex.Matches(src, @"url\(\s*[""']?([^)""']+?)[""']?\s*\)", RegexOptions.IgnoreCase))
+        foreach (Match u in SafeRegex.Matches(src, @"url\(\s*[""']?([^)""']+?)[""']?\s*\)", RegexOptions.IgnoreCase))
         {
             var url = u.Groups[1].Value.Trim();
             var lower = url.ToLowerInvariant();
@@ -371,7 +376,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (el.Attrs is null || !el.Attrs.TryGetValue("class", out var cls)) return false;
             var have = cls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var c in p.Classes) if (Array.IndexOf(have, c) < 0) return false;
+            if (p.Classes.Any(c => Array.IndexOf(have, c) < 0)) return false;
         }
         if (p.Attrs is not null)
             foreach (var (name, op, val) in p.Attrs)
@@ -390,9 +395,7 @@ internal static partial class HtmlToPdfConverter
                 };
                 if (!ok) return false;
             }
-        if (p.Pseudos is not null)
-            foreach (var ps in p.Pseudos)
-                if (!FbPseudoClassMatches(ps, el)) return false;
+        if (p.Pseudos is not null && p.Pseudos.Any(ps => !FbPseudoClassMatches(ps, el))) return false;
         return true;
     }
 
@@ -435,7 +438,8 @@ internal static partial class HtmlToPdfConverter
     private static int FbTypeIndex(List<HtmlNode> siblings, HtmlNode el)
     {
         var k = 0;
-        foreach (var s in siblings) { if (ReferenceEquals(s, el)) return k; if (s.Tag == el.Tag) k++; }
+        foreach (var s in siblings) { if (ReferenceEquals(s, el)) return k;
+        if (s.Tag == el.Tag) k++; }
         return k;
     }
 
@@ -452,7 +456,7 @@ internal static partial class HtmlToPdfConverter
         arg = arg.Replace(" ", "").ToLowerInvariant();
         if (arg == "odd") return pos % 2 == 1;
         if (arg == "even") return pos % 2 == 0;
-        var m = Regex.Match(arg, @"^(?:(-?\d*)n)?([+-]?\d+)?$");
+        var m = SafeRegex.Match(arg, @"^(?:(-?\d*)n)?([+-]?\d+)?$");
         if (!m.Success) return false;
         var hasN = arg.Contains('n');
         var a = !hasN ? 0 : m.Groups[1].Value switch { "" or "+" => 1, "-" => -1, var s => int.Parse(s, System.Globalization.CultureInfo.InvariantCulture) };
@@ -510,13 +514,52 @@ internal static partial class HtmlToPdfConverter
     private static Dictionary<string, string> FbCascade(FbSheet sheet, HtmlNode el, string? pseudoElement)
     {
         var hits = new List<FbSheetRule>();
-        foreach (var r in sheet.Rules)
-            if (!r.Unsupported && r.PseudoElement == pseudoElement && FbSelectorMatches(r.Parts, r.Parts.Count - 1, el)) hits.Add(r);
+        foreach (var key in FbRuleKeys(el))
+        {
+            if (!FbRulesByKey(sheet).TryGetValue(key, out var rules)) continue;
+            foreach (var r in rules)
+                if (!r.Unsupported && r.PseudoElement == pseudoElement && FbSelectorMatches(r.Parts, r.Parts.Count - 1, el)) hits.Add(r);
+        }
         hits.Sort((a, b) => a.Spec != b.Spec ? a.Spec.CompareTo(b.Spec) : a.Order.CompareTo(b.Order));
         var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in hits) foreach (var kv in r.Decls) FbMergeDecl(merged, kv.Key, kv.Value);
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
         foreach (var r in hits) if (r.Important is not null) foreach (var kv in r.Important) FbMergeDecl(merged, kv.Key, kv.Value);
+#pragma warning restore S3267
         return merged;
+    }
+
+    /// <summary>The sheet's rules filed under what their subject compound asks of an element first -
+    /// its id, else its first class, else its tag, else nothing - so an element is matched against
+    /// the rules that can name it, not against the whole sheet.</summary>
+    private static Dictionary<string, List<FbSheetRule>> FbRulesByKey(FbSheet sheet)
+    {
+        if (sheet.RulesByKey is { } built) return built;
+        var index = new Dictionary<string, List<FbSheetRule>>(StringComparer.Ordinal);
+        foreach (var r in sheet.Rules)
+        {
+            var subject = r.Parts[^1];
+            string key;
+            if (subject.Id is not null) key = "#" + subject.Id;
+            else if (subject.Classes is { Count: > 0 }) key = "." + subject.Classes[0];
+            else key = subject.Tag ?? "";
+            if (!index.TryGetValue(key, out var list)) index[key] = list = new List<FbSheetRule>();
+            list.Add(r);
+        }
+        sheet.RulesByKey = index;
+        return index;
+    }
+
+    /// <summary>The keys an element's rules are filed under: any element, its tag, its id, each of its classes.</summary>
+    private static List<string> FbRuleKeys(HtmlNode el)
+    {
+        var keys = new List<string> { "", el.Tag.ToLowerInvariant() };
+        if (el.Attrs is null) return keys;
+        if (el.Attrs.TryGetValue("id", out var id)) keys.Add("#" + id.Trim());
+        if (el.Attrs.TryGetValue("class", out var cls))
+            foreach (var c in cls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+                if (!keys.Contains("." + c)) keys.Add("." + c);
+        return keys;
     }
 
     /// <summary>Set one declaration on the merged map: a shorthand that wins later resets the
@@ -530,13 +573,13 @@ internal static partial class HtmlToPdfConverter
                 foreach (var side in new[] { "-top", "-right", "-bottom", "-left" }) merged.Remove(name + side);
                 break;
             case "border":
-                foreach (var k in new List<string>(merged.Keys)) if (k.StartsWith("border-", StringComparison.Ordinal) && !k.StartsWith("border-radius", StringComparison.Ordinal) && !k.StartsWith("border-collapse", StringComparison.Ordinal) && !k.StartsWith("border-spacing", StringComparison.Ordinal)) merged.Remove(k);
+                foreach (var k in new List<string>(merged.Keys).Where(k => k.StartsWith("border-", StringComparison.Ordinal) && !k.StartsWith("border-radius", StringComparison.Ordinal) && !k.StartsWith("border-collapse", StringComparison.Ordinal) && !k.StartsWith("border-spacing", StringComparison.Ordinal))) merged.Remove(k);
                 break;
             case "border-top": case "border-right": case "border-bottom": case "border-left":
                 foreach (var part in new[] { "-width", "-style", "-color" }) merged.Remove(name + part);
                 break;
             case "background":
-                foreach (var k in new List<string>(merged.Keys)) if (k.StartsWith("background-", StringComparison.Ordinal)) merged.Remove(k);
+                foreach (var k in new List<string>(merged.Keys).Where(k => k.StartsWith("background-", StringComparison.Ordinal))) merged.Remove(k);
                 break;
             case "font":
                 foreach (var k in new[] { "font-size", "font-family", "font-weight", "font-style", "line-height" }) merged.Remove(k);
@@ -570,15 +613,15 @@ internal static partial class HtmlToPdfConverter
         var v = content.Trim();
         if (v.Length == 0 || v.Equals("none", StringComparison.OrdinalIgnoreCase) || v.Equals("normal", StringComparison.OrdinalIgnoreCase)) return null;
         var sb = new StringBuilder();
-        foreach (Match m in Regex.Matches(v, @"""((?:[^""\\]|\\.)*)""|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)"))
+        foreach (var groups in SafeRegex.Matches(v, @"""((?:[^""\\]|\\.)*)""|'((?:[^'\\]|\\.)*)'|attr\(\s*([\w-]+)\s*\)").Select(m => m.Groups))
         {
-            if (m.Groups[3].Success)
+            if (groups[3].Success)
             {
-                if (el.Attrs is not null && el.Attrs.TryGetValue(m.Groups[3].Value, out var av)) sb.Append(av);
+                if (el.Attrs is not null && el.Attrs.TryGetValue(groups[3].Value, out var av)) sb.Append(av);
                 continue;
             }
-            var s = m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
-            sb.Append(Regex.Replace(s, @"\\([0-9a-fA-F]{1,6})\s?|\\(.)", e =>
+            var s = groups[1].Success ? groups[1].Value : groups[2].Value;
+            sb.Append(SafeRegex.Replace(s, @"\\([0-9a-fA-F]{1,6})\s?|\\(.)", e =>
                 e.Groups[1].Success ? char.ConvertFromUtf32(System.Convert.ToInt32(e.Groups[1].Value, 16)) : e.Groups[2].Value));
         }
         return sb.Length > 0 ? sb.ToString() : null;

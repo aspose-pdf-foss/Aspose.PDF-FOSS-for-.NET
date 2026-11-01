@@ -91,20 +91,20 @@ public sealed partial class Document
         QsParseCss(string html)
     {
         var map = new Dictionary<string, (double, double, bool, bool)>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match sm in Regex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
-            foreach (Match rm in Regex.Matches(sm.Groups[1].Value, @"([^{}]+)\{([^}]*)\}"))
+        foreach (Match sm in SafeRegex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(sm.Groups[1].Value, @"([^{}]+)\{([^}]*)\}").Select(rm => rm.Groups))
             {
-                var body = rm.Groups[2].Value;
+                var body = groups[2].Value;
                 double width = 0, fontPx = 0;
-                if (Regex.Match(body, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase)
+                if (SafeRegex.Match(body, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase)
                         is { Success: true } wm)
                     width = double.Parse(wm.Groups[1].Value, CultureInfo.InvariantCulture);
-                if (Regex.Match(body, @"font-size\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase)
+                if (SafeRegex.Match(body, @"font-size\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase)
                         is { Success: true } fm)
                     fontPx = double.Parse(fm.Groups[1].Value, CultureInfo.InvariantCulture);
-                var centre = Regex.IsMatch(body, @"text-align\s*:\s*center", RegexOptions.IgnoreCase);
-                var underline = Regex.IsMatch(body, @"text-decoration\s*:\s*underline", RegexOptions.IgnoreCase);
-                foreach (var selRaw in rm.Groups[1].Value.Split(','))
+                var centre = SafeRegex.IsMatch(body, @"text-align\s*:\s*center", RegexOptions.IgnoreCase);
+                var underline = SafeRegex.IsMatch(body, @"text-decoration\s*:\s*underline", RegexOptions.IgnoreCase);
+                foreach (var selRaw in groups[1].Value.Split(','))
                 {
                     var sel = selRaw.Trim();
                     // the last simple selector names the rule (`.A .B` styles B)
@@ -135,8 +135,8 @@ public sealed partial class Document
 
         qb.rx = new Regex(
             @"<table[^>]*>[\s\S]*?</table>|<p\b[^>]*>[\s\S]*?</p>|<br\s*/?>|<img\b[^>]*>|<div\b[^>]*>",
-            RegexOptions.IgnoreCase);
-        foreach (Match m in qb.rx.Matches(qb.body))
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        foreach (Match m in SafeRegex.Matches(qb.rx, qb.body))
         {
             ParseQuoteBlockMatch(qb, m);
         }
@@ -148,7 +148,6 @@ public sealed partial class Document
     {
         int w = default;
         int h = default;
-        w = h = 0;
         if (data.Length > 24 && data[0] == 0x89 && data[1] == 0x50)
         {
             w = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];

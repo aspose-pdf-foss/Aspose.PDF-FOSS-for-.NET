@@ -44,7 +44,6 @@ private sealed class TableWidthSolveState
     public bool uaDocGrid;
     public double padSide;
     public double rowPctDeclMax;
-    public int headerRows;
     public bool ptCellWidths;
     public bool uaCellBoxes;
     public bool uaSerifMin;

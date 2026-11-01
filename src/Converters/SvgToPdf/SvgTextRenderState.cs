@@ -17,9 +17,6 @@ private sealed class SvgTextRenderState
     public System.Text.StringBuilder sb = null!;
     public string transform = null!;
     public double[]? tmMatrix;
-    // A pure matrix() transform is applied through the text matrix (Tm) in
-    // EmitRun — emitting it as a cm too would double the translation.
-    public double[] newCtm = null!;
     // Walk the text content: direct text nodes and tspan children, tracking the
     // current text position.
     public double curX;

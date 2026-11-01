@@ -83,17 +83,17 @@ internal static partial class MarkdownToPdfConverter
 
     // ── Block model ──────────────────────────────────────────────────────────────
 
-    private abstract record Blk;
-    // HardLines: source lines an explicit hard break (two trailing spaces) keeps apart;
-    // each wraps independently.
-    private sealed record ParaBlk(List<List<Run>> HardLines) : Blk;
-    private sealed record HeadBlk(int Level, List<Run> Runs) : Blk;
-    private sealed record CodeBlk(List<string> Lines, double Size) : Blk;
-    private sealed record QuoteBlk(List<List<Run>> HardLines) : Blk;
-    private sealed record ListBlk(List<(string Marker, List<Run> Runs)> Items) : Blk;
-    private sealed record TableBlk(List<List<List<Run>>> Rows) : Blk;
-    private sealed record HrBlk : Blk;
-    private sealed record ImgBlk(byte[] Data, double W, double H, bool Center) : Blk;
+    private interface IBlk { }
+    // HardLines: source lines an explicit hard break (two trailing spaces) keeps apart; each
+    // wraps independently.
+    private sealed record ParaBlk(List<List<Run>> HardLines) : IBlk;
+    private sealed record HeadBlk(int Level, List<Run> Runs) : IBlk;
+    private sealed record CodeBlk(List<string> Lines, double Size) : IBlk;
+    private sealed record QuoteBlk(List<List<Run>> HardLines) : IBlk;
+    private sealed record ListBlk(List<(string Marker, List<Run> Runs)> Items) : IBlk;
+    private sealed record TableBlk(List<List<List<Run>>> Rows) : IBlk;
+    private sealed record HrBlk : IBlk;
+    private sealed record ImgBlk(byte[] Data, double W, double H, bool Center) : IBlk;
 
     private static Document ConvertFromText(string mdText, MdLoadOptions? options)
     {
@@ -114,7 +114,7 @@ internal static partial class MarkdownToPdfConverter
 
         // A <style> block in the source never renders as text; when the caller set
         // IsPriorityCssPageRule its @page rule overrides the PageInfo geometry.
-        var styleMatch = Regex.Match(mdText, @"<style[^>]*>(.*?)</style>",
+        var styleMatch = SafeRegex.Match(mdText, @"<style[^>]*>(.*?)</style>",
             RegexOptions.Singleline | RegexOptions.IgnoreCase);
         if (styleMatch.Success)
         {
@@ -135,11 +135,11 @@ internal static partial class MarkdownToPdfConverter
 
     // ── Parsing ──────────────────────────────────────────────────────────────────
 
-    private static List<Blk> ParseBlocks(string[] lines)
+    private static List<IBlk> ParseBlocks(string[] lines)
     {
         var mb = new MarkdownBlocksState();
         mb.lines = lines;
-        mb.blocks = new List<Blk>();
+        mb.blocks = new List<IBlk>();
         mb.i = 0;
         mb.pendingCenter = false;
         while (mb.i < mb.lines.Length)
@@ -154,9 +154,9 @@ internal static partial class MarkdownToPdfConverter
     {
         if (line.StartsWith("#", StringComparison.Ordinal) || line.StartsWith(">", StringComparison.Ordinal)) return true;
         if (line.StartsWith("    ", StringComparison.Ordinal) || line.StartsWith("\t", StringComparison.Ordinal)) return true;
-        if (Regex.IsMatch(line, @"^\s*([-*_])(\s*\1){2,}\s*$")) return true;
-        if (Regex.IsMatch(line, @"^(\s*)[*+\-]\s+")) return true;
-        if (Regex.IsMatch(line, @"^(\s*)\d+[.)]\s+")) return true;
+        if (SafeRegex.IsMatch(line, @"^\s*([-*_])(\s*\1){2,}\s*$")) return true;
+        if (SafeRegex.IsMatch(line, @"^(\s*)[*+\-]\s+")) return true;
+        if (SafeRegex.IsMatch(line, @"^(\s*)\d+[.)]\s+")) return true;
         if (line.TrimStart().StartsWith("```", StringComparison.Ordinal)) return true;
         var t = line.Trim();
         if (t.Length >= 2 && t.StartsWith("`", StringComparison.Ordinal)
@@ -170,7 +170,7 @@ internal static partial class MarkdownToPdfConverter
     private static List<Run> ParseInline(string text)
     {
         var runs = new List<Run>();
-        text = Regex.Replace(text, "<[^>]+>", "");
+        text = SafeRegex.Replace(text, "<[^>]+>", "");
         text = System.Net.WebUtility.HtmlDecode(text).Replace('\u00A0', ' ');
         text = HideBackslashEscapes(text);
 
@@ -181,10 +181,10 @@ internal static partial class MarkdownToPdfConverter
             + @"|(`(?<c>[^`]+)`)"
             + @"|(~~(?<s>.+?)~~)"
             + @"|(!\[(?<ia>[^\]]*)\]\((?<iu>[^)]+)\))"
-            + @"|(\[(?<lt>[^\]]+)\]\((?<lu>[^)]+)\))");
+            + @"|(\[(?<lt>[^\]]+)\]\((?<lu>[^)]+)\))", RegexOptions.None, RegexLimits.Timeout);
 
         var pos = 0;
-        foreach (Match m in pattern.Matches(text))
+        foreach (Match m in SafeRegex.Matches(pattern, text))
         {
             if (m.Index > pos) runs.Add(Plain(text.Substring(pos, m.Index - pos)));
             if (m.Groups["bi"].Success) runs.Add(Styled(m.Groups["bi"].Value, 3));
@@ -213,12 +213,12 @@ internal static partial class MarkdownToPdfConverter
     // character (the punctuation's code point moved up into U+E000..), so an escaped '*'
     // or '_' can never open emphasis, and every run puts the character back on the way out.
     private const int EscapedPunctuationBase = 0xE000;
-    private static readonly Regex BackslashEscape = new(@"\\([!-/:-@\[-`{-~])", RegexOptions.Compiled);
+    private static readonly Regex BackslashEscape = new(@"\\([!-/:-@\[-`{-~])", RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static string HideBackslashEscapes(string text) =>
         text.IndexOf('\\') < 0
             ? text
-            : BackslashEscape.Replace(text, m => ((char)(EscapedPunctuationBase + m.Groups[1].Value[0])).ToString());
+            : SafeRegex.Replace(BackslashEscape, text, m => ((char)(EscapedPunctuationBase + m.Groups[1].Value[0])).ToString());
 
     private static string RestoreBackslashEscapes(string text)
     {
@@ -239,7 +239,7 @@ internal static partial class MarkdownToPdfConverter
     /// <summary>A table divider row: only pipes, colons, dashes and spaces,
     /// with at least one dash (e.g. <c>--- | :--- | ---:</c>).</summary>
     private static bool IsTableDividerLine(string line)
-        => line.Contains('-') && Regex.IsMatch(line, @"^\s*\|?[\s:|\-]+\|?\s*$");
+        => line.Contains('-') && SafeRegex.IsMatch(line, @"^\s*\|?[\s:|\-]+\|?\s*$");
 
     /// <summary>Split a pipe-table row into per-cell inline runs. Outer pipes are
     /// optional; a cell that decodes to whitespace (e.g. <c>&amp;nbsp;</c>) becomes empty.</summary>
@@ -275,7 +275,6 @@ internal static partial class MarkdownToPdfConverter
     {
         int w = default;
         int h = default;
-        w = h = 0;
         if (data.Length < 24 || data[0] != 0x89 || data[1] != (byte)'P') return null;
         w = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
         h = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];
@@ -308,11 +307,11 @@ internal static partial class MarkdownToPdfConverter
     {
         double width = 0, height = 0;
         double? margin = null;
-        var page = Regex.Match(css, @"@page[^{]*\{([^}]*)\}", RegexOptions.IgnoreCase);
+        var page = SafeRegex.Match(css, @"@page[^{]*\{([^}]*)\}", RegexOptions.IgnoreCase);
         if (!page.Success) return null;
         var body = page.Groups[1].Value;
 
-        var size = Regex.Match(body, @"size\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
+        var size = SafeRegex.Match(body, @"size\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
         if (!size.Success) return null;
         var parts = size.Groups[1].Value.Trim()
             .Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
@@ -322,7 +321,7 @@ internal static partial class MarkdownToPdfConverter
         foreach (var part in parts)
         {
             if (part.Equals("landscape", StringComparison.OrdinalIgnoreCase)) landscape = true;
-            else if (part.Equals("portrait", StringComparison.OrdinalIgnoreCase)) { }
+            else if (part.Equals("portrait", StringComparison.OrdinalIgnoreCase)) { /* portrait is the default orientation - nothing to set */ }
             else if (CssPageSizes.TryGetValue(part, out var named)) (w, h) = named;
             else if (TryParseCssLength(part) is { } len)
             {
@@ -335,7 +334,7 @@ internal static partial class MarkdownToPdfConverter
         height = h ?? w.Value;
         if (landscape && height > width) (width, height) = (height, width);
 
-        var m = Regex.Match(body, @"margin\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(body, @"margin\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
         if (m.Success && TryParseCssLength(m.Groups[1].Value.Trim().Split(' ')[0]) is { } mv)
             margin = mv;
         return (width, height, margin);
@@ -344,7 +343,7 @@ internal static partial class MarkdownToPdfConverter
     private static double? TryParseCssLength(string s)
     {
         double points = 0;
-        var m = Regex.Match(s.Trim(), @"^(-?[\d.]+)(pt|px|mm|cm|in)?$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(s.Trim(), @"^(-?[\d.]+)(pt|px|mm|cm|in)?$", RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         if (!double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
             return null;
@@ -394,7 +393,7 @@ internal static partial class MarkdownToPdfConverter
         EnsureFont(page, "CourierNew", Mono);
     }
 
-    private static string EnsureFont(Page page, string baseFontName, string resName)
+    private static void EnsureFont(Page page, string baseFontName, string resName)
     {
         var resources = page.Dict.Get("Resources") as PdfDictionary;
         if (resources is null)
@@ -417,6 +416,5 @@ internal static partial class MarkdownToPdfConverter
             font.Set("Encoding", new PdfName("WinAnsiEncoding"));
             fontDict.Set(resName, font);
         }
-        return resName;
     }
 }

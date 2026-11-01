@@ -7,7 +7,9 @@
 [Flags]
 public enum FontStyles
 {
+#pragma warning disable S2346 // public API: the published zero member
     Regular = 0,
+#pragma warning restore S2346
     Bold = 1,
     Italic = 2,
 }
@@ -18,10 +20,12 @@ public enum FontStyles
 /// </summary>
 public partial class TextState
 {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
     /// <summary>Default tab-stop width in PDF points (56 pt ≈ 0.78 in,
     /// matches Adobe's default tab spacing). Declared as an instance
     /// field so reflection-based callers see a non-static field.</summary>
     public float TabstopDefaultValue = 56f;
+#pragma warning restore S1104
 
     /// <summary>Creates a text state with the default settings: Helvetica at 10 points.</summary>
     public TextState() { }
@@ -30,12 +34,12 @@ public partial class TextState
     public TextState(double fontSize) { FontSize = (float)fontSize; }
 
     /// <summary>Creates a text state that uses the named font family.</summary>
-    public TextState(string fontFamily) { FontName = fontFamily; }
+    public TextState(string fontFamily) => TakeFamily(fontFamily);
 
     /// <summary>Creates a text state that uses the named font family at the given size, in points.</summary>
     public TextState(string fontFamily, double fontSize)
     {
-        FontName = fontFamily;
+        TakeFamily(fontFamily);
         FontSize = (float)fontSize;
     }
 
@@ -47,10 +51,26 @@ public partial class TextState
         // Courier-Oblique) is resolved from FontName + FontStyle at the point the font is
         // applied, so the standard-14 oblique/italic spelling differences are handled in
         // one place instead of being baked into the name here.
-        FontName = fontFamily;
+        TakeFamily(fontFamily);
         IsBold = bold;
         IsItalic = italic;
     }
+
+    /// <summary>A family named in a constructor is the state's face, as an assigned
+    /// <see cref="Font"/> is, when the repository resolves it: the state used to keep the
+    /// default Helvetica object beside the name, and every writer that reads the face (a
+    /// table's cells, a state copied with <see cref="ApplyChangesFrom"/>) drew Helvetica.
+    /// The default face itself stays the untouched default; a name that resolves to no
+    /// face is kept as the name alone.</summary>
+    private void TakeFamily(string fontFamily)
+    {
+        FontName = fontFamily;
+        if (string.IsNullOrEmpty(fontFamily)
+            || string.Equals(FontRepository.FamilyOf(fontFamily), DefaultFamily, StringComparison.OrdinalIgnoreCase)) return;
+        if (FontRepository.TryFindFont(fontFamily, ignoreCase: true) is { } face) Font = face;
+    }
+
+    private const string DefaultFamily = "Helvetica";
 
     /// <summary>Creates a text state with the given text (foreground) colour.</summary>
     public TextState(System.Drawing.Color foregroundColor)
@@ -332,8 +352,8 @@ public partial class TextState
             var text = OwnerSegment?.Text;
             if (page is not null && !string.IsNullOrEmpty(text))
             {
-                ModifySegmentColor(page, text!, value,
-                    OwnerSegment!.Position?.YIndent ?? OwnerSegment.Owner?.PositionOrNull?.YIndent,
+                ModifySegmentColor(page, text, value,
+                    SegmentBaselineY(OwnerSegment!, OwnerSegment!.Owner),
                     OwnerSegment.Position?.XIndent);
                 return;
             }
@@ -347,9 +367,22 @@ public partial class TextState
                     if (string.IsNullOrEmpty(seg.Text)) continue;
                     seg.TextState.SetCapturedForegroundColor(value);
                     ModifySegmentColor(fragPage, seg.Text, value,
-                        (seg.BaselinePosition ?? seg.Position)?.YIndent,
+                        SegmentBaselineY(seg, OwnerFragment),
                         seg.Position?.XIndent);
                 }
+            }
+
+            // The recolour finds the run by the baseline its Tm states, while a segment
+            // seats a full descent below it (a 44 pt face sits 11 pt lower, past the
+            // match tolerance). A segment that carries no baseline of its own takes the
+            // fragment's seat-to-baseline lift, which its font and size share.
+            static double? SegmentBaselineY(TextSegment seg, TextFragment? owner)
+            {
+                if (seg.BaselinePosition is { } baseline) return baseline.YIndent;
+                if (seg.Position is not { } seat) return owner?.PositionOrNull?.YIndent;
+                var lift = owner is { BaselinePosition: { } ownerBaseline, PositionOrNull: { } ownerSeat }
+                    ? ownerBaseline.YIndent - ownerSeat.YIndent : 0;
+                return seat.YIndent + lift;
             }
 
             static void ModifySegmentColor(Page pg, string segText, Color c, double? y, double? x)
@@ -463,15 +496,14 @@ public partial class TextState
         var wanted = FontStyles.Regular;
         if (IsBold) wanted |= FontStyles.Bold;
         if (IsItalic) wanted |= FontStyles.Italic;
-        var styled = FontRepository.TryFindFont(family!, wanted, ignoreCase: true);
+        var styled = FontRepository.TryFindFont(family, wanted, ignoreCase: true);
         // Only a face that carries a program can be embedded and shown; a repository miss
         // (or a resolve back to the same unstyled file) leaves the run as it was.
         if (styled?.SourceFontData is null) return;
         try
         {
-            new TextStateModifier().ModifyFont(page, text!, styled,
-                OwnerSegment?.Position?.YIndent ?? OwnerFragment?.PositionOrNull?.YIndent,
-                segmentScoped: OwnerSegment is not null);
+            new TextStateModifier().ModifyFont(page, text, styled,
+                OwnerSegment?.Position?.YIndent ?? OwnerFragment?.PositionOrNull?.YIndent);
         }
         catch { /* best-effort: leave the content unchanged if the rewrite fails */ }
     }
@@ -494,10 +526,13 @@ public partial class TextState
             }
             // Turning underline off on a fragment whose source underline was captured
             // (ToAttemptGetUnderlineFromSource): register it so the source rectangle is
-            // spliced out of the content stream at save time.
+            // spliced out of the content stream at save time. A text change before this
+            // registered the fragment for a rule under the new text: that redraw is
+            // cancelled, so switching the underline off after the replacement leaves none.
             else if (frag?.CapturedUnderlineSources is { Count: > 0 })
             {
                 frag.SourcePage?.RegisterUnderlineRemoval(frag);
+                frag.SourcePage?.UnregisterUnderlineFragment(frag);
             }
         }
     }
@@ -508,7 +543,9 @@ public partial class TextState
     public bool IsUnderline
     {
         get => _isUnderline;
+#pragma warning disable S4275 // the setter delegates to the registering setter on purpose
         set => Underline = value; // delegate to the registering setter
+#pragma warning restore S4275
     }
 
     /// <summary>Assigns the captured underline state from absorber graphics-state
@@ -622,9 +659,11 @@ public partial class TextState
     }
     private float _lineSpacing;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>String token inserted into the rendered text in place of a
     /// tab character. Returns "\t" — the default tab-character placeholder.</summary>
     public string TabTag => "\t";
+#pragma warning restore S2325
 
     private HorizontalAlignment _horizontalAlignment = HorizontalAlignment.Left;
 
@@ -717,8 +756,8 @@ public partial class TextState
             // caller IsEmbedded=false — the save/layout pipeline re-assigns the font
             // into fresh text states, which would otherwise re-embed it and clobber
             // the caller's choice (font embedded incorrectly became true after save).
-            // Standard-14 fonts are referenced by name and are never embedded/subset;
-            // any other real font (one carrying a program) embeds and subsets by
+            // Standard-14 fonts are referenced by name and are never embedded/subset; any
+            // other real font (one carrying a program) embeds and subsets by
             // default. IsCoreName matches only the genuine Core-14 names, so an
             // aliased TrueType such as "Courier New" still embeds.
             var isCore = Standard14Fonts.IsCoreName(value.BaseFont)
@@ -768,7 +807,7 @@ public partial class TextState
                 && OwnerFragment.AbsorbedRectangle is { } srcRect && srcRect.URX <= media.URX)
             {
                 double newW = 0;
-                try { newW = MeasureString(text!); } catch { }
+                try { newW = MeasureString(text); } catch { /* a face that cannot measure the text leaves the estimate in place */ }
                 if (newW > 0 && fragPos.XIndent + newW > media.URX)
                 {
                     double spaceW;
@@ -781,9 +820,9 @@ public partial class TextState
             FaceReassigned = true;
             try
             {
-                new TextStateModifier().ModifyFont(page, text!, value,
+                new TextStateModifier().ModifyFont(page, text, value,
                     OwnerSegment?.Position?.YIndent ?? OwnerFragment?.PositionOrNull?.YIndent,
-                    segmentScoped: OwnerSegment is not null, relay: relay);
+                    relay: relay);
             }
             catch { /* best-effort: leave content unchanged if the rewrite fails */ }
 

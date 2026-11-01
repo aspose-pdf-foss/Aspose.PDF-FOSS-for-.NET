@@ -22,7 +22,7 @@ namespace Aspose.Pdf.Comparison
         {
             var rgb = Tight(padded, width, height);
             if (Equals(format, GdiImageFormat.Jpeg))
-                return IO.JpegEncoderImpl.Encode(WithAlpha(rgb, width, height), width, height, jpegQuality, (int)resolution.X, (int)resolution.Y);
+                return IO.JpegEncoderImpl.Encode(WithAlpha(rgb, width, height), width, height, jpegQuality, resolution.X, resolution.Y);
             if (Equals(format, GdiImageFormat.Bmp))
                 return BmpDevice.EncodeBmp(WithAlpha(rgb, width, height), width, height);
             if (Equals(format, GdiImageFormat.Gif))

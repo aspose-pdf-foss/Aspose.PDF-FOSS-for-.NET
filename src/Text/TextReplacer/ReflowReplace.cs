@@ -20,7 +20,6 @@ public sealed partial class TextReplacer
     {
         processedXObjects ??= new HashSet<int>();
         var rr = new ReflowReplaceState();
-        rr.countBefore = _replacementCount;
         rr.fonts = TextAbsorber.ResolveFonts(pageDict, reader);
         rr.normalizedSearch = NormalizeForSearch(search);
         rr.lexer = new PdfLexer(streamBytes);
@@ -65,7 +64,7 @@ public sealed partial class TextReplacer
         if (rr.lastWritePos < streamBytes.Length)
             rr.result.Write(streamBytes, rr.lastWritePos, streamBytes.Length - rr.lastWritePos);
 
-        rr.output = rr.result.ToArray();
+        rr.output = ApplyPendingShifts(rr.result.ToArray(), rr.pendingShifts);
         _walkSawText = rr.sawText;
 
         // Always run cross-operator pass when enabled, even after per-op
@@ -74,7 +73,7 @@ public sealed partial class TextReplacer
         // "Page " in one Tj followed by "5 of 10" in another after a Td/Tm).
         // The cross-op routine itself skips single-operator matches so we
         // don't double-process spans the per-op pass already replaced.
-        if (_allowCrossOperator)
+        if (AllowCrossOperator)
         {
             var crossResult = TryCrossOperatorReplace(rr.output, search, replacement, pageDict, reader,
                 initCtmA, initCtmB, initCtmC, initCtmD, initCtmTx, initCtmTy);
@@ -108,7 +107,7 @@ public sealed partial class TextReplacer
         // op is Tm-positioned) so a follower's Tm can be rewritten in place.
         var textOps = CollectTextOps(streamBytes, fonts, reader,
             initCtmA, initCtmB, initCtmC, initCtmD, initCtmTx, initCtmTy);
-        return TryCrossOperatorReplaceCore(streamBytes, search, replacement, pageDict, reader,
+        return TryCrossOperatorReplaceCore(streamBytes, replacement, pageDict, reader,
             normalizedSearch, textOps);
     }
 }

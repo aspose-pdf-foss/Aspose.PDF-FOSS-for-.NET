@@ -22,7 +22,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A declared CSS length on an element's inline style, in points.</summary>
     private static double DeclaredLen(string attrs, string prop, double fallback)
     {
-        var m = Regex.Match(attrs, prop + @"\s*:\s*([\d.]+\s*\w+)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(attrs, prop + @"\s*:\s*([\d.]+\s*\w+)", RegexOptions.IgnoreCase);
         return m.Success && TryParseLength(m.Groups[1].Value.Replace(" ", "")) is { } v && v > 0
             ? v : fallback;
     }

@@ -37,8 +37,11 @@ public sealed partial class PdfPageStamp : Stamp
             // Indents are measured from the TARGET page's box origin (a page whose
             // MediaBox lower-left is not (0,0) still stamps at its visible corner),
             // and the SOURCE page's own box origin maps to the placement point.
+            // A turned source's form already starts at its origin (see ShownFormMatrix).
             var tmb = pg.targetPage.MediaBox;
-            pg.matrix = $"{Fmt(pg.sx)} 0 0 {Fmt(pg.sy)} {Fmt(tmb.LLX + pg.x - pg.mb.LLX * pg.sx)} {Fmt(tmb.LLY + pg.y - pg.mb.LLY * pg.sy)}";
+            var originX = pg.srcRot == 0 ? pg.mb.LLX : 0;
+            var originY = pg.srcRot == 0 ? pg.mb.LLY : 0;
+            pg.matrix = $"{Fmt(pg.sx)} 0 0 {Fmt(pg.sy)} {Fmt(tmb.LLX + pg.x - originX * pg.sx)} {Fmt(tmb.LLY + pg.y - originY * pg.sy)}";
         }
     }
 
@@ -73,6 +76,8 @@ public sealed partial class PdfPageStamp : Stamp
         bbox.Add(new PdfReal(pg.mb.URX + BBoxOutsetPt));
         bbox.Add(new PdfReal(pg.mb.URY + BBoxOutsetPt));
         formDict.Set("BBox", bbox);
+        // A turned source page is drawn as a viewer shows it, not lying on its side.
+        if (ShownFormMatrix(pg.mb, pg.srcRot) is { } shown) formDict.Set("Matrix", shown);
 
         // Import the source page's resources into the TARGET document. The source
         // /Resources dictionary holds indirect references into the source document's

@@ -5,8 +5,8 @@ using System.Text.RegularExpressions;
 namespace Aspose.Pdf.Converters;
 
 // THE QUIRKS INLINE-STYLED DOCUMENT: the float-box formatter's second claim - a sheet with no
-// doctype and no stylesheet, every block styled inline by an editor (`margin: 0pt 0pt 10pt;
-// line-height: 115%; font-size: 12pt` on each paragraph), its pictures remote and unreachable.
+// doctype and no stylesheet, every block styled inline by an editor (`margin: 0pt 0pt 10pt; line-height:
+// 115%; font-size: 12pt` on each paragraph), its pictures remote and unreachable.
 // The reference converter lays it out as the same block flow (probed on synthetic fixtures)
 // with the quirks differences: a paragraph without a margin of its own has the UA 1.12 em; a
 // line holding only replaced boxes has no strut (the block is exactly the box); a sized picture
@@ -39,15 +39,14 @@ internal static partial class HtmlToPdfConverter
     {
         var html = cv.html;
         if (cv.marginsExplicit) return "margins";
-        if (Regex.IsMatch(html, @"<!DOCTYPE\b", RegexOptions.IgnoreCase)) return "doctype";
-        if (Regex.IsMatch(html, @"<(style|link)\b", RegexOptions.IgnoreCase)) return "sheet";
-        if (Regex.IsMatch(html, @"style\s*=\s*[""'][^""']*(float\s*:|position\s*:\s*(absolute|fixed))", RegexOptions.IgnoreCase)) return "float or positioned inline";
-        if (Regex.IsMatch(html, @"<(iframe|svg|object|embed|frameset|form|input|textarea|select|button)\b", RegexOptions.IgnoreCase)) return "controls or frames";
-        var imgs = Regex.Matches(html, @"<img\b[^>]*>", RegexOptions.IgnoreCase);
+        if (SafeRegex.IsMatch(html, @"<!DOCTYPE\b", RegexOptions.IgnoreCase)) return "doctype";
+        if (SafeRegex.IsMatch(html, @"<(style|link)\b", RegexOptions.IgnoreCase)) return "sheet";
+        if (SafeRegex.IsMatch(html, @"style\s*=\s*[""'][^""']*(float\s*:|position\s*:\s*(absolute|fixed))", RegexOptions.IgnoreCase)) return "float or positioned inline";
+        if (SafeRegex.IsMatch(html, @"<(iframe|svg|object|embed|frameset|form|input|textarea|select|button)\b", RegexOptions.IgnoreCase)) return "controls or frames";
+        var imgs = SafeRegex.Matches(html, @"<img\b[^>]*>", RegexOptions.IgnoreCase);
         if (imgs.Count == 0) return "no pictures";
-        foreach (Match m in imgs)
-            if (!Regex.IsMatch(m.Value, @"\bsrc\s*=\s*[""']?https?://", RegexOptions.IgnoreCase)) return "local picture";
-        if (!Regex.IsMatch(html, @"<p\b[^>]*style\s*=\s*[""'][^""']*line-height\s*:", RegexOptions.IgnoreCase)) return "paragraphs not styled inline";
+        if (imgs.Any(m => !SafeRegex.IsMatch(m.Value, @"\bsrc\s*=\s*[""']?https?://", RegexOptions.IgnoreCase))) return "local picture";
+        if (!SafeRegex.IsMatch(html, @"<p\b[^>]*style\s*=\s*[""'][^""']*line-height\s*:", RegexOptions.IgnoreCase)) return "paragraphs not styled inline";
         return null;
     }
 

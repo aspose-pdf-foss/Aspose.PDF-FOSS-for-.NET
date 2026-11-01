@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -64,7 +65,7 @@ internal static partial class HtmlToPdfConverter
                 block.FontRes == "F2" ? "Times New Roman Bold" : "Times New Roman",
                 rb.metrics.lines[^1] + " ", rb.metrics.blockFontSize);
             (var phName, cv.flow.flowIconRef) = RegisterPlaceholderIcon(cv.doc, cv.flow.page, cv.flow.flowIconRef, masked: true);
-            cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+            cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
                 $"q 32 0 0 32 {iconX + 1:0.##} {iconBase + 1:0.##} cm /{phName} Do Q\n")));
             var inD = ParseCssColor("#555555");
             var inL = ParseCssColor("#AAAAAA");
@@ -132,7 +133,7 @@ internal static partial class HtmlToPdfConverter
             var bandH = block.BandPx * 0.75;
             var bandPad = block.BandPadPx * 0.75;
             var bandY = cv.flow.y - bandPad - bandH;
-            var bandRect = FormattableString.Invariant(
+            var bandRect = Compat.Format(CultureInfo.InvariantCulture,
                 $"q {bandC.R / 255.0:0.###} {bandC.G / 255.0:0.###} {bandC.B / 255.0:0.###} rg {cv.marginLeft + block.LeftIndent:0.##} {bandY:0.##} {cv.flow.contentWidth - block.LeftIndent:0.##} {bandH:0.##} re f Q\n");
             cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bandRect));
             cv.flow.y = bandY;
@@ -162,6 +163,7 @@ internal static partial class HtmlToPdfConverter
         {
             cv.flow.y += rb.metrics.lineHeight - rb.metrics.blockFontSize * 0.25 - block.BandPadPt;
             cv.flow.pendingTableDrop = true;
+            cv.flow.pendingTableDropFieldGrid = false;
         }
     }
 
@@ -169,11 +171,11 @@ internal static partial class HtmlToPdfConverter
     private static void WriteBlockLines(ConvertState cv, RenderBlockState rb, Block block)
     {
         rb.textHeight = rb.metrics.lines.Length * rb.metrics.lineHeight;
-        rb.paddingBelow = block.ExplicitHeight > rb.textHeight ? block.ExplicitHeight - rb.textHeight
-            // (a UA-grid block whose declared height is SHORTER than its line overflows it: the flow
-            //  resumes at the declared box's foot - measured on the quotation's `h3 { height: 20px }`)
-            : cv.profile.uaGridSheet && block.ExplicitHeight > 0 && rb.textHeight > 0
-                ? block.ExplicitHeight - rb.textHeight : 0;
+        if (block.ExplicitHeight > rb.textHeight) rb.paddingBelow = block.ExplicitHeight - rb.textHeight;
+        // (a UA-grid block whose declared height is SHORTER than its line overflows it: the flow
+        //  resumes at the declared box's foot - measured on the quotation's `h3 { height: 20px }`)
+        else if (cv.profile.uaGridSheet && block.ExplicitHeight > 0 && rb.textHeight > 0) rb.paddingBelow = block.ExplicitHeight - rb.textHeight;
+        else rb.paddingBelow = 0;
         // In the float flow the declared height is the WHOLE element's box, measured
         // from where it opened - the certificate heading reserves 200 px for its four
         // break-separated lines together, not 200 px after the fourth.
@@ -192,12 +194,6 @@ internal static partial class HtmlToPdfConverter
 
         // Approximate per-char advance for mapping inline <a href> char ranges to
         // link-annotation rects (same crude metric WordWrap uses to break lines).
-        rb.metrics.charW = rb.metrics.blockFontSize * 0.52;
-        rb.metrics.lineX = cv.marginLeft + block.LeftIndent
-            + (rb.uaDeclBox ? block.BorderWidth : 0);
-        // FLOAT FLOW: the block sits in the box its own margin and width declare,
-        // which may overflow the content frame; it is let overflow and clipped.
-        if (rb.metrics.floatBoxWidthPt > 0) rb.metrics.lineX = cv.marginLeft + rb.metrics.floatBoxLeftPt;
         rb.metrics.cumChar = 0;          // char offset of the current line's start within block.Text
         rb.metrics.firstLineOfBlock = true;
         WriteBlockTextLines(block, cv.flow, cv.profile, rb.metrics, cv.doc, cv.docFontDict, cv.sb, cv.anchorTargets,
@@ -224,12 +220,12 @@ internal static partial class HtmlToPdfConverter
         // Scoped to bands, so the calibrated flat-flow greens keep their 0.52-em breaks.
         // The form-document dialect wraps a family-declaring block the same way — its
         // notice divs (`font: bold 8pt Verdana`) break where the REAL face breaks.
-        rb.metrics.bandFace = cv.bandStack.Count > 0 ? BandMeasureFace(block)
-            : cv.profile.formDialectTables && !string.IsNullOrEmpty(block.FontFamily) ? BandMeasureFace(block)
-            // report label/span columns wrap on real advances too — the crude
-            // 0.52-em estimate breaks their narrow boxes a word early
-            : block.MaxWidthPt > 0 && !string.IsNullOrEmpty(block.FontFamily) ? BandMeasureFace(block)
-            : null;
+        if (cv.bandStack.Count > 0) rb.metrics.bandFace = BandMeasureFace(block);
+        else if (cv.profile.formDialectTables && !string.IsNullOrEmpty(block.FontFamily)) rb.metrics.bandFace = BandMeasureFace(block);
+        // report label/span columns wrap on real advances too — the crude
+        // 0.52-em estimate breaks their narrow boxes a word early
+        else if (block.MaxWidthPt > 0 && !string.IsNullOrEmpty(block.FontFamily)) rb.metrics.bandFace = BandMeasureFace(block);
+        else rb.metrics.bandFace = null;
         rb.floatLines = 0;
         // Lines level with the LEFT float are pushed in from the left; lines level
         // with the RIGHT float lose width on the right. The two spans need not
@@ -252,8 +248,15 @@ internal static partial class HtmlToPdfConverter
     {
         if (!cv.profile.inlineRunFaces || string.IsNullOrEmpty(block.FontFamily) || WinMetricsFor(block.FontFamily) is null)
             return rb.metrics.metricMeasureFace;
-        return block.FontRes == "F2" || block.EmBold ? block.FontFamily + " Bold"
-            : block.EmItalic ? block.FontFamily + " Italic" : block.FontFamily;
+        return BlockDrawFace(block);
+    }
+
+    /// <summary>The face a block draws in: its family (callers check it is set), bold or italic as it draws.</summary>
+    private static string BlockDrawFace(Block block)
+    {
+        if (block.FontRes == "F2" || block.EmBold) return block.FontFamily + " Bold";
+        if (block.EmItalic) return block.FontFamily + " Italic";
+        return block.FontFamily!;
     }
 
     /// <summary>Seat the block box, detect the floats it sits beside and wrap its text into lines.</summary>
@@ -278,84 +281,96 @@ internal static partial class HtmlToPdfConverter
     private static void WrapBlockLines(ConvertState cv, RenderBlockState rb, Block block)
     {
         SeatBlockBesideFloats(cv, rb, block);
-        rb.metrics.lines = block.MaxWidthPt > 0
-            ? ReportWordWrap(block.Text, rb.availWidth, rb.metrics.blockFontSize, block.FontRes == "F2")
-            // …a block that names a face the flow draws wraps on that face's advances
-            // (an arial paragraph measured on the serif ran past the content edge).
-            // (…and a UA block with emphasis runs on the faces those runs draw in)
-            // (…and a UA block whose ink is wholly inside one sized run wraps at that run's size:
-            // the state analysis' 10 pt list-item spans fill the 12 pt items' lines)
-            : cv.profile.metricFlow && rb.metrics.metricDrop > 0
-            ? cv.profile.uaStdSerif && !cv.profile.deadExternalCss
+        if (block.MaxWidthPt > 0) rb.metrics.lines = ReportWordWrap(block.Text, rb.availWidth, rb.metrics.blockFontSize, block.FontRes == "F2");
+        // …a block that names a face the flow draws wraps on that face's advances
+        // (an arial paragraph measured on the serif ran past the content edge).
+        // (…and a UA block with emphasis runs on the faces those runs draw in)
+        // (…and a UA block whose ink is wholly inside one sized run wraps at that run's size:
+        // the state analysis' 10 pt list-item spans fill the 12 pt items' lines)
+        else if (cv.profile.metricFlow && rb.metrics.metricDrop > 0)
+        {
+            // (a text-indent gives the first line a width of its own: shorter by a positive indent, wider by a hanging one)
+            var firstLineWidth = cv.profile.uaStdSerif && block.TextIndentPt != 0 ? rb.availWidth - block.TextIndentPt : 0;
+            rb.metrics.lines = cv.profile.uaStdSerif && !cv.profile.deadExternalCss
                 && (block.BoldRuns is { Count: > 0 } || block.ItalicRuns is { Count: > 0 })
-                ? MeasuredWordWrapRuns(block, rb.availWidth, MetricFlowWrapFace(cv, rb, block), WholeBlockSizeRunPt(cv, block) ?? rb.metrics.blockFontSize)
-                : MeasuredWordWrap(block.Text, rb.availWidth, MetricFlowWrapFace(cv, rb, block), WholeBlockSizeRunPt(cv, block) ?? rb.metrics.blockFontSize)
-            : rb.metrics.bandFace is not null
-                ? MeasuredWordWrap(block.Text, rb.availWidth, rb.metrics.bandFace, rb.metrics.blockFontSize)
-                // pt-styled fragment: the flow draws real TrueType faces —
-                // break lines on their real advances (the 0.52-em estimate
-                // over-measures Verdana's short words and wraps a word early).
-                // The redline diff document wraps on its Times advances the
-                // same way — small-caps blocks on their case-scaled advances.
-                : cv.profile.redlineDiffDoc && block.SmallCaps && !string.IsNullOrEmpty(block.FontFamily)
-                ? SmallCapsWordWrap(block.Text, rb.availWidth,
-                    block.FontFamily + (block.FontRes == "F2" || block.EmBold ? " Bold" : ""),
-                    rb.metrics.blockFontSize)
-                // Word mail: a hanging label's first line starts at the margin and is wider by the
-                // indent it hangs; the row wraps on its own face (the nbsp tab measures as spaces).
-                : cv.profile.wordMailDoc && block.TextIndentPt != 0 && !string.IsNullOrEmpty(block.FontFamily)
-                ? RedlineIndentWrap(block.Text, rb.availWidth - block.TextIndentPt, rb.availWidth,
-                    block.FontFamily + (block.FontRes == "F2" || block.EmBold ? " Bold" : ""),
-                    rb.metrics.blockFontSize)
-                // …and an indented paragraph wraps its FIRST line short.
-                : cv.profile.redlineDiffDoc && block.TextIndentPt > 0 && !string.IsNullOrEmpty(block.FontFamily)
-                ? RedlineIndentWrap(block.Text, rb.availWidth - block.TextIndentPt, rb.availWidth,
-                    block.FontFamily + (block.FontRes == "F2" || block.EmBold ? " Bold" : ""),
-                    rb.metrics.blockFontSize)
-                // A Word mail's paragraphs wrap on their own face too (an Arial footnote wrapped a
-                // word early on the 0.52-em estimate, 12 % over its real advances).
-                : (cv.profile.ptStyledFragment || cv.profile.redlineDiffDoc || cv.profile.wordMailDoc) && !string.IsNullOrEmpty(block.FontFamily)
-                ? MeasuredWordWrap(block.Text, rb.availWidth,
-                    block.FontRes == "F2" || block.EmBold
-                        ? block.FontFamily + " Bold"
-                        : block.EmItalic ? block.FontFamily + " Italic" : block.FontFamily,
-                    rb.metrics.blockFontSize)
-                // Dash-overflow wrap: the doc carries a dash-delimited segment
-                // wider than the content box — every line then wraps at the
-                // widened limit on space/after-dash breakpoints with real face
-                // advances (see quirksWrapW above).
-                : cv.quirksWrapW > rb.availWidth
-                ? DashAwareWordWrap(block.Text, cv.quirksWrapW, cv.dashWrapFace, rb.metrics.blockFontSize)
-                // The escaped-attr dialect draws serif — break lines on the real
-                // Times advances, not the 0.52-em estimate (17 % narrow).
-                : cv.profile.escapedAttrDoc
-                    ? MeasuredWordWrap(block.Text, rb.availWidth,
-                        block.FontRes == "F2" ? "Times New Roman Bold" : "Times New Roman",
-                        rb.metrics.blockFontSize)
-                // The pinned-body report wraps on its page face's real advances
-                // too — the estimate over-measures narrow-lettered runs — with
-                // CSS break-word semantics (its sheet's `* { word-break }`): an
-                // over-long token moves to its own line before char-splitting.
-                : cv.profile.bodyPinnedW > 0 && cv.bodyPinnedFace is not null
-                    ? MeasuredWordWrap(block.Text, rb.availWidth,
-                        block.FontRes == "F2" ? cv.bodyPinnedFace + " Bold" : cv.bodyPinnedFace,
-                        rb.metrics.blockFontSize, wordFirst: true)
-                    // The certificate flow draws real TrueType faces — break its lines
-                    // on their real advances. The 0.52-em estimate over-measures Arial
-                    // and broke every body paragraph four lines early, which is what
-                    // cost the page.
-                    // The sheet-typography flow wraps on its resolved face's advances the same way;
-                    // a block carrying size runs on each line's own box.
-                    : cv.profile.sheetTypographyDoc && block.SizeRuns is { Count: > 0 } && !string.IsNullOrEmpty(block.FontFamily)
-                    ? SizeRunLines(cv, rb, block)
-                    : (cv.profile.floatBothSidesDoc || cv.profile.sheetTypographyDoc) && !string.IsNullOrEmpty(block.FontFamily)
-                    ? MeasuredWordWrapPastFloat(block.Text, rb.floatNarrowW, rb.availWidth,
-                        rb.floatLines, FloatFlowMeasureFace(block), rb.metrics.blockFontSize)
-                    : rb.floatLines > 0
-                        ? WordWrapPastFloat(block.Text, rb.floatNarrowW,
-                            rb.availWidth, rb.floatLines, rb.metrics.blockFontSize * 0.52)
-                        : WordWrap(block.Text, rb.availWidth, rb.metrics.blockFontSize * 0.52);
+                ? MeasuredWordWrapRuns(block, rb.availWidth, MetricFlowWrapFace(cv, rb, block), WholeBlockSizeRunPt(cv, block) ?? rb.metrics.blockFontSize, firstLineWidth)
+                : MeasuredWordWrap(block.Text, rb.availWidth, MetricFlowWrapFace(cv, rb, block), WholeBlockSizeRunPt(cv, block) ?? rb.metrics.blockFontSize, firstLineWidth: firstLineWidth);
+        }
+        else if (rb.metrics.bandFace is not null)
+            rb.metrics.lines = MeasuredWordWrap(block.Text, rb.availWidth, rb.metrics.bandFace, rb.metrics.blockFontSize);
+        // pt-styled fragment: the flow draws real TrueType faces —
+        // break lines on their real advances (the 0.52-em estimate
+        // over-measures Verdana's short words and wraps a word early).
+        // The redline diff document wraps on its Times advances the
+        // same way — small-caps blocks on their case-scaled advances.
+        else if (cv.profile.redlineDiffDoc && block.SmallCaps && !string.IsNullOrEmpty(block.FontFamily))
+            rb.metrics.lines = SmallCapsWordWrap(block.Text, rb.availWidth,
+                block.FontFamily + (block.FontRes == "F2" || block.EmBold ? " Bold" : ""),
+                rb.metrics.blockFontSize);
+        // Word mail: a hanging label's first line starts at the margin and is wider by the
+        // indent it hangs; the row wraps on its own face (the nbsp tab measures as spaces).
+        else if (cv.profile.wordMailDoc && block.TextIndentPt != 0 && !string.IsNullOrEmpty(block.FontFamily))
+            rb.metrics.lines = RedlineIndentWrap(block.Text, rb.availWidth - block.TextIndentPt, rb.availWidth,
+                block.FontFamily + (block.FontRes == "F2" || block.EmBold ? " Bold" : ""),
+                rb.metrics.blockFontSize);
+        // …and an indented paragraph wraps its FIRST line short.
+        else if (cv.profile.redlineDiffDoc && block.TextIndentPt > 0 && !string.IsNullOrEmpty(block.FontFamily))
+            rb.metrics.lines = RedlineIndentWrap(block.Text, rb.availWidth - block.TextIndentPt, rb.availWidth,
+                block.FontFamily + (block.FontRes == "F2" || block.EmBold ? " Bold" : ""),
+                rb.metrics.blockFontSize);
+        // A Word mail's paragraphs wrap on their own face too (an Arial footnote wrapped a
+        // word early on the 0.52-em estimate, 12 % over its real advances).
+        else if ((cv.profile.ptStyledFragment || cv.profile.redlineDiffDoc || cv.profile.wordMailDoc) && !string.IsNullOrEmpty(block.FontFamily))
+            rb.metrics.lines = MeasuredWordWrap(block.Text, rb.availWidth,
+                BlockDrawFace(block),
+                rb.metrics.blockFontSize);
+        // Dash-overflow wrap: the doc carries a dash-delimited segment
+        // wider than the content box — every line then wraps at the
+        // widened limit on space/after-dash breakpoints with real face
+        // advances (see quirksWrapW above).
+        else if (cv.quirksWrapW > rb.availWidth)
+            rb.metrics.lines = DashAwareWordWrap(block.Text, cv.quirksWrapW, cv.dashWrapFace, rb.metrics.blockFontSize);
+        // The escaped-attr dialect draws serif — break lines on the real
+        // Times advances, not the 0.52-em estimate (17 % narrow).
+        else if (cv.profile.escapedAttrDoc)
+            rb.metrics.lines = MeasuredWordWrap(block.Text, rb.availWidth,
+                block.FontRes == "F2" ? "Times New Roman Bold" : "Times New Roman",
+                rb.metrics.blockFontSize);
+        // The pinned-body report wraps on its page face's real advances
+        // too — the estimate over-measures narrow-lettered runs — with
+        // CSS break-word semantics (its sheet's `* { word-break }`): an
+        // over-long token moves to its own line before char-splitting.
+        else if (cv.profile.bodyPinnedW > 0 && cv.bodyPinnedFace is not null)
+            rb.metrics.lines = MeasuredWordWrap(block.Text, rb.availWidth,
+                block.FontRes == "F2" ? cv.bodyPinnedFace + " Bold" : cv.bodyPinnedFace,
+                rb.metrics.blockFontSize, wordFirst: true);
+        // The certificate flow draws real TrueType faces — break its lines
+        // on their real advances. The 0.52-em estimate over-measures Arial
+        // and broke every body paragraph four lines early, which is what
+        // cost the page.
+        // The sheet-typography flow wraps on its resolved face's advances the same way; a
+        // block carrying size runs on each line's own box.
+        else if (cv.profile.sheetTypographyDoc && block.SizeRuns is { Count: > 0 } && !string.IsNullOrEmpty(block.FontFamily))
+            rb.metrics.lines = SizeRunLines(cv, rb, block);
+        else if ((cv.profile.floatBothSidesDoc || cv.profile.sheetTypographyDoc) && !string.IsNullOrEmpty(block.FontFamily))
+            rb.metrics.lines = MeasuredWordWrapPastFloat(block.Text, rb.floatNarrowW, rb.availWidth,
+                rb.floatLines, FloatFlowMeasureFace(block), rb.metrics.blockFontSize);
+        else if (rb.floatLines > 0)
+            rb.metrics.lines = WordWrapPastFloat(block.Text, rb.floatNarrowW,
+                rb.availWidth, rb.floatLines, rb.metrics.blockFontSize * 0.52);
+        // Text holding CJK wraps on measured advances, where every ideograph is a break
+        // opportunity a full em wide; the per-character estimate charges it half an em and
+        // breaks only at spaces, which moved a whole CJK run after a Latin word to its own line.
+        else if (HasIdeograph(block.Text))
+            rb.metrics.lines = MeasuredWordWrap(block.Text, rb.availWidth,
+                string.IsNullOrEmpty(block.FontFamily) ? "Arial" : block.FontFamily, rb.metrics.blockFontSize);
+        else rb.metrics.lines = WordWrap(block.Text, rb.availWidth, rb.metrics.blockFontSize * 0.52);
     }
+
+    /// <summary>Whether the sheet zeroes the top margin of the body's first child heading or paragraph
+    /// (`body > h1:first-child { margin-top: 0 }`, the rule markdown exports carry).</summary>
+    private static bool FirstChildMarginZeroed(string html)
+        => SafeRegex.IsMatch(html, @"body\s*>\s*(?:h[1-6]|p)\s*:first-child\s*\{[^}]*margin-top\s*:\s*0", RegexOptions.IgnoreCase);
 
     /// <summary>Resolve the block's available width, font family, float box and float-label indent.</summary>
     private static void ResolveBlockWidth(ConvertState cv, RenderBlockState rb, Block block)
@@ -485,7 +500,14 @@ internal static partial class HtmlToPdfConverter
             // RenderBlockText); at the page top the block's own margin collapses through the
             // body onto the canvas and is spent here (the drop stage skips it there).
             var aboveThis = LineBoxAbove(seatFace, rb.metrics.blockFontSize, rb.metrics.lineHeight);
-            if (cv.flow.y >= cv.pageHeight - cv.marginTop - 1e-3) cv.flow.y -= block.MarginTop;
+            // (a line holding CJK text hangs from the taller of the strut's and the CJK face's ascent sides)
+            var cssBoxBody = cv.profile.cssBoxBody;
+            if (cssBoxBody && HasIdeograph(block.Text))
+                aboveThis = Math.Max(aboveThis, LineBoxAbove(CjkLineFaceName, rb.metrics.blockFontSize, rb.metrics.lineHeight));
+            // (…and a body that pads its own box opens on its first child's own margin, which the
+            //  markdown sheets zero with `body > h1:first-child { margin-top: 0 }`)
+            if (cv.flow.y >= cv.pageHeight - cv.marginTop - 1e-3)
+                cv.flow.y -= cssBoxBody && FirstChildMarginZeroed(cv.html) ? 0 : block.MarginTop;
             cv.flow.y -= aboveThis;
         }
 

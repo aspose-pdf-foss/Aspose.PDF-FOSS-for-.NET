@@ -12,7 +12,9 @@ public sealed partial class TextAbsorber
 private sealed class ShowTextArrayState
 {
     public double tjWidth;
-    public int tjDecodedLen;
+    // The furthest the array's strings have advanced the pen: a trailing kern that pulls the pen
+    // back leaves the ink ending here.
+    public double tjInkWidth;
     // Buffer the TJ text so we can apply per-operator RTL reversal
     // after collecting all sub-strings (mirrors TypeScript applyRtl on TJ).
     public System.Text.StringBuilder tjBuf = null!;
@@ -40,6 +42,10 @@ private sealed class ShowTextArrayState
     // span's per-character X map; invalidated when the code↔char
     // mapping is not 1:1 for some sub-string.
     public List<double> tjRel = null!;
+    /// <summary>Pen positions of the kerns that follow a word's drawn space: the gap they open is no column jump.</summary>
+    public List<double>? wordSpaceKerns;
+    /// <summary>Length of the array's text at its last word-breaking kern: a word starts after it.</summary>
+    public int lastBreakAt;
     public bool tjRelValid;
     // Synthetic-space eligibility (validated over a
     // 1231-run corpus; same rule as the fragment

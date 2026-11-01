@@ -23,7 +23,7 @@ public sealed partial class Document
         {
             if (_overflowBuffer is { Count: > 0 })
             {
-                _overflowPages.Add((ConcatBlocks(_overflowBuffer), _startPage.Width, _startPage.Height));
+                _overflowPages.Add((ConcatBlocks(_overflowBuffer), _startPage.LayoutFrameWidth, _startPage.LayoutFrameHeight));
                 _overflowBuffer = new List<byte[]>();
             }
         }
@@ -40,7 +40,7 @@ public sealed partial class Document
             EnsureRoom(h);
             var x = CurLeft;
             var rect = new Rectangle(x, _curY - h, x + w, _curY);
-            if (_overflowBuffer is null) _startPage.AddImage(data, rect);
+            if (_overflowBuffer is null) _startPage.AddLayoutImage(data, rect);
             else
             {
                 _pendingImages.Add((_currentSlot, data, rect, false));
@@ -67,7 +67,7 @@ public sealed partial class Document
                 QueueDeferredPlaceholder();
                 return;
             }
-            if (_overflowBuffer is null) _startPage.AddImage(data, rect);
+            if (_overflowBuffer is null) _startPage.AddLayoutImage(data, rect);
             else _pendingImages.Add((_currentSlot, data, rect, false));
         }
 
@@ -96,7 +96,7 @@ public sealed partial class Document
             if (_overflowBuffer is null)
             {
                 if (paint.Length > 0) _startPage.AddContentStream(paint);
-                _startPage.AddImage(data, rect, blackWhite);
+                _startPage.AddLayoutImage(data, rect, blackWhite);
                 return;
             }
             // A queued image is not content; the paint (or an empty block) keeps
@@ -207,6 +207,7 @@ public sealed partial class Document
                 doc.Form.Add(checkbox, pg.Number);
             }
             FinaliseInlineRadios(overflowPageRefs, doc);
+            FinaliseInlineControls(overflowPageRefs, doc);
         }
 
         // Bind a flow-placed annotation to its final page: translate the authored
@@ -274,8 +275,8 @@ public sealed partial class Document
                 if (_pendingRenderOps.TryGetValue(ri, out var ops)) { target.AddContentStream(ops); continue; }
                 if (_pendingRenderPictures.TryGetValue(ri, out var picture))
                 {
-                    try { target.AddImage(picture.Data, picture.Rect); }
-                    catch (ArgumentException) { }
+                    try { target.AddLayoutImage(picture.Data, picture.Rect); }
+                    catch (ArgumentException) { /* an image the page cannot take is left out - the layout carries on */ }
                     continue;
                 }
                 var sub = new Text.TextFragment(text)
@@ -296,16 +297,19 @@ public sealed partial class Document
                     var cb = new Content.ContentStreamBuilder();
                     cb.SaveState();
                     cb.Rectangle(clip!.LLX, clip.LLY, clip.Width, clip.Height).Clip();
-                    target.AddContentStream(cb.Build());
+                    AddClipBracket(target, cb.Build(), textState);
                 }
                 // Copy the embedded-font state across so TextBuilder picks the
                 // right embedding path (FontData / TtfData / Font.SourceFontData).
                 sub.TextState.FontSize = (float)fontSize;
-                sub.TextState.FontData = textState.FontData;
                 sub.TextState.Font = textState.Font;
                 // The Standard-14 face is carried by NAME — without it a styled
                 // run (Times-Bold, Courier, …) would fall back to Helvetica.
                 sub.TextState.FontName = textState.FontName;
+                // The program goes last: a core face's assignment clears it, and a
+                // Standard-14 run the flow moved to a covering face keeps that face only
+                // through its program.
+                sub.TextState.FontData = textState.FontData;
                 sub.TextState.ForegroundColor = textState.ForegroundColor;
                 sub.TextState.IsBold = textState.IsBold;
                 sub.TextState.IsItalic = textState.IsItalic;
@@ -316,7 +320,9 @@ public sealed partial class Document
                     ? Text.TextRenderingMode.FillThenStrokeText : textState.RenderingMode;
                 sub.TextState.StrokingColor = textState.StrokingColor;
                 if (textState.FormattingOptions is { SyntheticBoldPen: > 0 } bold) sub.TextState.LineWidth = (float)bold.SyntheticBoldPen;
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
                 else if (textState.LineWidth != 1.0) sub.TextState.LineWidth = textState.LineWidth;
+#pragma warning restore S1244
                 // Underline must survive the deferred hop — TextBuilder draws it
                 // as a rectangle at save time from the fragment state.
                 sub.TextState.Underline = textState.Underline;
@@ -359,9 +365,19 @@ public sealed partial class Document
                 {
                     var ce = new Content.ContentStreamBuilder();
                     ce.RestoreState();
-                    target.AddContentStream(ce.Build());
+                    AddClipBracket(target, ce.Build(), textState);
                 }
             }
+        }
+
+        /// <summary>One half of a deferred run's clip bracket. A tagged run's bracket goes
+        /// inside its marked content, as the immediate writer puts it, so the next run with the
+        /// same tag and MCID joins the same BDC/EMC block; each run of a tagged paragraph
+        /// written through an embedded face used to open a block of its own inside its clip.</summary>
+        private static void AddClipBracket(Page target, byte[] bracket, Text.TextState state)
+        {
+            if (state.MarkedContentTag is { } tag) target.AddMarkedContentStream(bracket, tag, state.MarkedContentMcid);
+            else target.AddContentStream(bracket);
         }
 
         /// <summary>Distribute the accumulated line-break notifications to the
@@ -401,8 +417,8 @@ public sealed partial class Document
         {
             if (_pendingBackFills.Count == 0) return;
             var slots = new List<int>();
-            foreach (var f in _pendingBackFills)
-                if (!slots.Contains(f.Slot)) slots.Add(f.Slot);
+            foreach (var f in _pendingBackFills.Where(f => !slots.Contains(f.Slot)))
+                slots.Add(f.Slot);
             foreach (var slot in slots)
             {
                 var cs = new Content.ContentStreamBuilder();
@@ -428,8 +444,8 @@ public sealed partial class Document
             {
                 var target = SlotPage(slot, overflowPageRefs);
                 if (target is null) continue;
-                try { target.AddImage(data, rect, blackWhite); }
-                catch (ArgumentException) { }
+                try { target.AddLayoutImage(data, rect, blackWhite); }
+                catch (ArgumentException) { /* an image the page cannot take is left out - the layout carries on */ }
             }
         }
 

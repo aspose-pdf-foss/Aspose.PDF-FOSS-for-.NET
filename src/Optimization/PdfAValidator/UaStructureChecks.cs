@@ -120,7 +120,7 @@ internal static partial class PdfAValidator
         var attributes = element.Get("A");
         var placedAsBlock = false;
         var hasBoundingBox = false;
-        foreach (var entry in reader.Resolve(attributes) is PdfArray array ? array : attributes is null ? [] : [attributes])
+        foreach (var entry in OneOrMany(reader, attributes))
         {
             if (reader.ResolveDict(entry) is not { } attribute) continue;
             // The values are resolved: an attribute dictionary may hold its /Placement as
@@ -136,9 +136,7 @@ internal static partial class PdfAValidator
     /// this document.</summary>
     private static Page? FindPage(Document document, PdfDictionary pageDict)
     {
-        foreach (var page in document.Pages)
-            if (ReferenceEquals(page.Dict, pageDict)) return page;
-        return null;
+        return document.Pages.FirstOrDefault(page => ReferenceEquals(page.Dict, pageDict));
     }
 
     /// <summary>Read the structure tree once: the elements, the marked-content ids they
@@ -178,7 +176,7 @@ internal static partial class PdfAValidator
             // the reference that reaches it, and resolving a lone /K reference here would
             // throw that number away.
             var kids = element.Get("K");
-            foreach (var kid in reader.Resolve(kids) is PdfArray array ? array : kids is null ? [] : [kids])
+            foreach (var kid in OneOrMany(reader, kids))
             {
                 switch (kid)
                 {

@@ -59,45 +59,45 @@ public partial class Table
         // segments out of alignment with the template.
         if (border.Side.HasFlag(BorderSide.Box) && IsUniformBox(border) && border.RawTop?.DashArray is { Length: > 0 })
         {
-            var gi = border.RawTop!;
+            var gi = border.RawTop;
             builder.SetLineWidth(gi.LineWidth);
             if (gi.StrokeColor is { } bsc)
                 builder.SetStrokeColor(bsc.R, bsc.G, bsc.B);
             else
                 builder.SetStrokeColor(border.Color);
-            builder.SetDashPattern(Array.ConvertAll(gi.DashArray!, d => (double)d), gi.DashPhase);
+            builder.SetDashPattern(Array.ConvertAll(gi.DashArray, d => (double)d), gi.DashPhase);
             builder.Rectangle(x, y, w, h).Stroke();
             builder.SetDashPattern(Array.Empty<double>(), 0);
             return;
         }
 
         // A side draws when the Side flags name it OR its GraphInfo was
-        // explicitly assigned (the generator enables a side on assignment);
-        // the per-side GraphInfo supplies stroke styling either way.
+        // explicitly assigned (the generator enables a side on assignment); the
+        // per-side GraphInfo supplies stroke styling either way.
         // Every side paints INSIDE the cell box: the stroke's outer edge sits
         // on the box edge (adjacent cells show abutting double bands). Probed
         // 2026-08-23 on a `new BorderInfo(BorderSide.Top)` cell rule: a 1 pt
         // rule centres 0.5 below the row top, a 0.3 pt one 0.15 below.
-        double Inset(bool assigned, bool flagged, GraphInfo? gi) =>
+        double Inset(GraphInfo? gi) =>
             (gi?.LineWidth > 0 ? gi.LineWidth : border.Width) / 2;
         if (border.Side.HasFlag(BorderSide.Bottom) || border.BottomAssigned)
         {
-            var ib = Inset(border.BottomAssigned, border.Side.HasFlag(BorderSide.Bottom), border.RawBottom);
+            var ib = Inset(border.RawBottom);
             DrawSide(builder, border, border.RawBottom, x, y + ib, x + w, y + ib);
         }
         if (border.Side.HasFlag(BorderSide.Top) || border.TopAssigned)
         {
-            var it = Inset(border.TopAssigned, border.Side.HasFlag(BorderSide.Top), border.RawTop);
+            var it = Inset(border.RawTop);
             DrawSide(builder, border, border.RawTop, x, y + h - it, x + w, y + h - it);
         }
         if (border.Side.HasFlag(BorderSide.Left) || border.LeftAssigned)
         {
-            var il = Inset(border.LeftAssigned, border.Side.HasFlag(BorderSide.Left), border.RawLeft);
+            var il = Inset(border.RawLeft);
             DrawSide(builder, border, border.RawLeft, x + il, y, x + il, y + h);
         }
         if (border.Side.HasFlag(BorderSide.Right) || border.RightAssigned)
         {
-            var ir = Inset(border.RightAssigned, border.Side.HasFlag(BorderSide.Right), border.RawRight);
+            var ir = Inset(border.RawRight);
             DrawSide(builder, border, border.RawRight, x + w - ir, y, x + w - ir, y + h);
         }
     }
@@ -170,7 +170,7 @@ public partial class Table
         var shows = builder.TextShows;
         if (shows.Count == 0 || w <= 0) { builder.ResetTextExtent(); return; }
         double fs = 0;
-        foreach (var s in shows) if (s.Size > fs) fs = s.Size;
+        foreach (var size in shows.Select(s => s.Size).Where(size => size > fs)) fs = size;
         if (fs <= 0) { builder.ResetTextExtent(); return; }
         if (mixedSizes)
         {
@@ -212,13 +212,13 @@ public partial class Table
                 // beside a 15 pt one seats 0.5 pt lower), so a baseline is "the same
                 // line" well inside a sub/superscript shift.
                 var seen = false;
-                foreach (var b in baselines) if (Math.Abs(b - s.Y) < 0.3 * fs) { seen = true; break; }
+                if (baselines.Any(b => Math.Abs(b - s.Y) < 0.3 * fs)) { seen = true; }
                 if (!seen) baselines.Add(s.Y);
             }
         }
         if (baselines.Count == 0) { builder.ResetTextExtent(); return; }
         double lastBase = double.PositiveInfinity;
-        foreach (var b in baselines) if (b < lastBase) lastBase = b;
+        foreach (var b in baselines.Where(b => b < lastBase)) lastBase = b;
         foreach (var s in shows)
         {
             if (s.Size >= mainFloor) continue;
@@ -236,7 +236,7 @@ public partial class Table
         // (pitch ≤ box) cell byte-identical and stops a leaded cell clipping its own
         // opening lines away.
         double firstBase = double.NegativeInfinity;
-        foreach (var b in baselines) if (b > firstBase) firstBase = b;
+        foreach (var b in baselines.Where(b => b > firstBase)) firstBase = b;
         var h = Math.Max(baselines.Count * CellClipLineEm * fs,
                          firstBase - lastBase + CellClipLineEm * fs)
             + (hasSup ? SuperscriptClipAboveEm * fs : 0)
@@ -266,7 +266,10 @@ public partial class Table
 
     /// <summary>Stroke width a border side paints with; 0 when the side does not draw.</summary>
     private static double DrawnSideWidth(BorderInfo b, BorderSide flag, bool assigned, GraphInfo? gi)
-        => b.Side.HasFlag(flag) || assigned ? Math.Max(0, gi?.LineWidth > 0 ? gi.LineWidth : b.Width) : 0;
+    {
+        if (b.Side.HasFlag(flag) || assigned) return Math.Max(0, gi?.LineWidth > 0 ? gi.LineWidth : b.Width);
+        return 0;
+    }
 
     /// <summary>Clearance a <see cref="GraphInfo.IsDoubled"/> side claims OUTSIDE the
     /// box its single rule would occupy: the second rule is drawn two line widths clear

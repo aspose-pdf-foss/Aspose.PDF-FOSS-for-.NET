@@ -46,8 +46,9 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         // Size the image to the crop box (clipped to the media box), not the media
         // box: GDI+ presents only the cropped region. Rotation
         // swaps the visible dimensions exactly as it does for the media box.
-        // Live-document render: unsaved Contents edits must be visible to the
-        // stream read below, as a live document is expected to render them.
+        // Live-document render: unsaved Contents edits and paragraphs must be visible to
+        // the stream read below, as a live document is expected to render them.
+        ImageDevice.LayOutPendingParagraphs(page);
         page.FlushPendingContents();
         var crop = EffectiveCropRect(page);
         var rot = ((page.RotateDegrees % 360) + 360) % 360;
@@ -98,7 +99,6 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
 
         px.reader = px.page.Reader;
         px.cachedBefore = px.reader.CachedObjects();
-        px.rawMb = px.page.MediaBox;
         px.crop = EffectiveCropRect(px.page);
 
         px.rot = ((px.page.RotateDegrees % 360) + 360) % 360;
@@ -109,6 +109,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
 
         px.yFit = px.yScale ?? px.pixelH / px.effectiveMb.Height;
         ReconcilePinnedAspect(px);
+        if (PixelCentreOrigin) px.effectiveMb = PixelCentreBox(px.effectiveMb, px.scale);
 
         px.pixels = new byte[px.pixelW * px.pixelH * 4];
 
@@ -321,7 +322,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
         {
             if (ctx.IsContentHidden) return;
             ctx.ClipMask = state.ClipMask;
-            DrawXObject(ctx, name, state, extGStates);
+            DrawXObject(ctx, name, state);
         };
 
         parser.OnPathPainted += (op, state, segments) =>

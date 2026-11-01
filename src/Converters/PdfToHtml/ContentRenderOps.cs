@@ -44,10 +44,7 @@ public sealed partial class PdfToHtmlConverter
                 {
                     switch (op)
                     {
-                        case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*":
-                            ct.zCounter.V++;
-                            break;
-                        case "BI":
+                        case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*" or "BI":
                             ct.zCounter.V++;
                             break;
                         case "Do":
@@ -68,6 +65,7 @@ public sealed partial class PdfToHtmlConverter
                             break;
                     }
                 }
+                if (ct.model is not null) AdvancePaintSequence(ct, op);
                 if (RenderOperator(ct, op)) return true;
                 ct.operands.Clear();
                 break;
@@ -79,6 +77,17 @@ public sealed partial class PdfToHtmlConverter
         return true;
     }
 
+    /// <summary>Paint ordinals of the text-layer model: every show and every painting operator
+    /// takes the next number, and a show that opens a line gives the line that number, so a fill
+    /// can later be told to have come before or after the line.</summary>
+    private static void AdvancePaintSequence(ContentRenderState ct, string op)
+    {
+        var show = op is "Tj" or "TJ" or "'" or "\"";
+        if (!show && op is not ("S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*" or "sh" or "Do" or "BI")) return;
+        ct.paintSeq = ct.model!.Seq++;
+        if (show && !ct.groupActive) ct.groupSeq = ct.paintSeq;
+    }
+
     /// <summary>Dispatches one content operator to its arm; true when the arm finished the token itself and the caller must return at once.</summary>
     private static bool RenderOperator(ContentRenderState ct, string op)
     {
@@ -87,7 +96,7 @@ public sealed partial class PdfToHtmlConverter
             case "q": case "Q": case "gs": case "cm": case "BDC": case "BMC": case "EMC": case "w":
                 if (RenderStateOperator(ct, op) is { } renderStateOperatorResult) return renderStateOperatorResult;
                 break;
-            case "BT": case "ET": case "Tf": case "Tr": case "TL": case "Td": case "TD": case "Tm": case "T*": case "Ts": case "Tc": case "Tw": case "Tj": case "TJ": case "'":
+            case "BT": case "ET": case "Tf": case "Tr": case "TL": case "Td": case "TD": case "Tm": case "T*": case "Ts": case "Tc": case "Tz": case "Tw": case "Tj": case "TJ": case "'":
                 if (RenderTextOperator(ct, op) is { } renderTextOperatorResult) return renderTextOperatorResult;
                 break;
             case "rg": case "RG": case "g": case "G": case "k": case "K": case "cs": case "CS": case "sc": case "scn": case "SC": case "SCN":

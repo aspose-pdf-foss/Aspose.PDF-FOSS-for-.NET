@@ -28,13 +28,16 @@ private sealed class MatchRewriteState
     // Replacement: re-encoded into the source font when its glyphs map
     // (source-metric width, keeps the face); otherwise the font-switch path.
     public double advRepl;
+    // advRepl is a width guessed from standard metrics: the replacement went into
+    // another face whose real advance this rewrite does not know.
+    public bool advReplEstimated;
     public double advPrefix;
     public double advMatchedLast;
     public double oldSuffixTmX;
     public double newSuffixTmX;
-    // Same-line reflow: shift following absolute-Tm runs on this line left by
-    // the width delta so words split across runs stay joined. Td-positioned
-    // followers inherit the shift through the re-anchored suffix Tm.
+    // Same-line reflow: the runs after the match on this line move by the width
+    // delta so words split across runs stay joined (the follower pass after the
+    // rewrite seats both Tm- and Td-positioned runs).
     public double delta;
 }
 }

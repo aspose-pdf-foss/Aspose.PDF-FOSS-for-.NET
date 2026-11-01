@@ -6,11 +6,11 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>Every stylesheet rule is scanned for the layout properties that take the document out of the layout-free UA flow.</summary>
-    private static void ScanStylesheetForLayoutFreedom(ConvertState cv, HtmlLoadOptions? options)
+    private static void ScanStylesheetForLayoutFreedom(ConvertState cv)
     {
         // (a sheet scoped under the body's own class: `<body class="X">` with rules rooted at `.X`)
-        cv.bodyClassSheet = Regex.Match(cv.html, @"<body\b[^>]*\bclass\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase) is { Success: true } bodyClsM
-            && Regex.IsMatch(cv.html, @"\." + Regex.Escape(bodyClsM.Groups[1].Value) + @"\s*[>\s][^{}]*\{", RegexOptions.IgnoreCase);
+        cv.bodyClassSheet = SafeRegex.Match(cv.html, @"<body\b[^>]*\bclass\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase) is { Success: true } bodyClsM
+            && SafeRegex.IsMatch(cv.html, @"\." + Regex.Escape(bodyClsM.Groups[1].Value) + @"\s*[>\s][^{}]*\{", RegexOptions.IgnoreCase);
         foreach (var kv in cv.css)
         {
             // @page / @media at-rules do not drive this converter's layout (the
@@ -31,18 +31,16 @@ internal static partial class HtmlToPdfConverter
             // drive the FLOW, so they must not disqualify it: a rule whose last
             // simple selector is a table part, or whose CLASS the document uses
             // only on table tags (a `.collapseBorderTable` skin), rides along.
-            if (TableScopedSelector(cv.html, cv, cv.bodyAllTables, cv.edgeToEdgePre, kv.Key, kv.Value)) continue;
+            if (TableScopedSelector(cv.html, cv, cv.bodyAllTables, cv.edgeToEdgePre, kv.Key)) continue;
             // Authored-margin documents: a bare STRUCTURAL table-part rule
             // (table/td/th/tr) still feeds the table renderer, not the flow —
             // the margin guard inside TableScopedSelector protects the legacy
             // class-skin dialects, not these parts.
-            {
-                var lfParts = kv.Key.Trim().Split((char[]?)null,
-                    StringSplitOptions.RemoveEmptyEntries);
-                if (lfParts.Length > 0
-                    && lfParts[^1].Split('.')[0].ToLowerInvariant()
-                        is "table" or "td" or "th" or "tr") continue;
-            }
+            var lfParts = kv.Key.Trim().Split((char[]?)null,
+                StringSplitOptions.RemoveEmptyEntries);
+            if (lfParts.Length > 0
+                && lfParts[^1].Split('.')[0].ToLowerInvariant()
+                    is "table" or "td" or "th" or "tr") continue;
             // An IMG-scoped class — every use of the class in the document sits
             // on an <img> tag — sizes the IMAGE, not the flow: the pure UA
             // flow is kept for the licensing letter whose only
@@ -74,35 +72,35 @@ internal static partial class HtmlToPdfConverter
             // one line box to the container BOX and leaves the rhythm alone. So none of them makes
             // the sheet layout-declaring, and treating them as such cost the whole UA structure.
             if (kv.Value.TryGetValue("width", out var fwCont)
-                && Regex.IsMatch(fwCont.Trim(), @"^[0-9.]+%$")
+                && SafeRegex.IsMatch(fwCont.Trim(), @"^[0-9.]+%$")
                 && kv.Value.Keys.All(pk => pk is "width" or "float" or "position"
                     or "overflow" or "color" or "background-color" or "background"
                     or "display" or "height" or "min-height"
                     || pk.StartsWith("margin", StringComparison.Ordinal)
                     || pk.StartsWith("padding", StringComparison.Ordinal)))
                 continue;
-            ScanRuleProperties(cv, kv, options);
+            ScanRuleProperties(cv, kv);
             if (!cv.cssLayoutFree && Environment.GetEnvironmentVariable("ASPOSE_TRACE_PROFILE") != "1") break;
         }
     }
 
     /// <summary>The metric-flow line sum and box grid, the print-grid metric face, the UA MSHTML and edge-to-edge flags.</summary>
-    private static void ResolveMetricFlowAndUaMshtml(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResolveMetricFlowAndUaMshtml(ConvertState cv)
     {
         if (!cv.profile.metricFlow && cv.marginsExplicit && !cv.css.ContainsKey("body")
-            && Regex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(?:""([^""]*)""|'([^']*)')",
+            && SafeRegex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(?:""([^""]*)""|'([^']*)')",
                 RegexOptions.IgnoreCase) is { Success: true } ibBodyStyle)
         {
             var ibDecl = ibBodyStyle.Groups[1].Success
                 ? ibBodyStyle.Groups[1].Value : ibBodyStyle.Groups[2].Value;
             var ibBox = ParseInlineMarginBox(ibDecl, DefaultBodyFontPt);
             string? ibFam = null;
-            var ibFamM = Regex.Match(ibDecl, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            var ibFamM = SafeRegex.Match(ibDecl, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
             if (ibFamM.Success) ibFam = FirstFontFamily(ibFamM.Groups[1].Value);
             if (ibFam is null
-                && Regex.Match(cv.html, @"<html\b[^>]*style\s*=\s*(?:""([^""]*)""|'([^']*)')",
+                && SafeRegex.Match(cv.html, @"<html\b[^>]*style\s*=\s*(?:""([^""]*)""|'([^']*)')",
                     RegexOptions.IgnoreCase) is { Success: true } ibHtmlStyle
-                && Regex.Match(ibHtmlStyle.Groups[1].Success
+                && SafeRegex.Match(ibHtmlStyle.Groups[1].Success
                         ? ibHtmlStyle.Groups[1].Value : ibHtmlStyle.Groups[2].Value,
                     @"font-family\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase) is { Success: true } ibHtmlFam)
@@ -113,13 +111,14 @@ internal static partial class HtmlToPdfConverter
                 cv.profile.metricFlow = true;
                 cv.profile.bodyBoxGridDoc = true;
                 cv.profile.metricFace = ibFam;
-                cv.marginLeft += ibBox.left;
-                cv.marginRight += ibBox.right;
-                cv.bodyMarT = ibBox.top;
+                // (the side insets stand in the page margins already - the body box; the top is spent
+                // on the first page only, so it moves from the page margin to the flow's seat)
+                if (AuthoredBodyBox(cv)) cv.marginTop -= cv.bodyBox.Top - ModelledBodyInsetPt(cv, cv.perSide && !cv.pageMargin!.TopTouched);
+                cv.bodyMarT = AuthoredBodyBox(cv) ? cv.bodyBox.Top : ibBox.top;
                 cv.profile.metricLineSum = HheaLineSumFor(ibFam) ?? 0;
                 // These sheets separate blocks with INVALID `</br>` tags — a
                 // browser treats each as a line break.
-                cv.html = Regex.Replace(cv.html, @"</br\s*>", "<br>", RegexOptions.IgnoreCase);
+                cv.html = SafeRegex.Replace(cv.html, @"</br\s*>", "<br>", RegexOptions.IgnoreCase);
             }
         }
 
@@ -133,50 +132,52 @@ internal static partial class HtmlToPdfConverter
         }
 
         cv.uaMshtml = cv.css.Count == 0 && !cv.profile.metricFlow
-            && Regex.IsMatch(cv.html,
+            && SafeRegex.IsMatch(cv.html,
                 @"<meta\b[^>]*\bname\s*=\s*[""']?generator\b[""']?[^>]*\bcontent\s*=\s*[""']?MSHTML",
                 RegexOptions.IgnoreCase)
             && WinMetricsFor("Times New Roman") is not null;
 
-        cv.edgeToEdgePre = (cv.pageMargin?.IsTouched ?? false) && cv.pageMargin!.HtmlPerSideDefaults
+        cv.edgeToEdgePre = (cv.pageMargin?.IsTouched ?? false) && cv.pageMargin.HtmlPerSideDefaults
             && cv.pageMargin.LeftTouched && cv.pageMargin.RightTouched
             && !cv.pageMargin.TopTouched && !cv.pageMargin.BottomTouched
             && cv.pageMargin.Left < 1e-9 && cv.pageMargin.Right < 1e-9;
         cv.bodyAllTables = false;
-        {
-            var bodyM = Regex.Match(cv.html, @"<body\b[^>]*>([\s\S]*?)</body", RegexOptions.IgnoreCase);
-            var bodyHtml = bodyM.Success ? bodyM.Groups[1].Value : cv.html;
-            var sansT = Regex.Replace(bodyHtml, @"<table\b[\s\S]*?</table\s*>", "",
-                RegexOptions.IgnoreCase);
-            cv.bodyAllTables = Regex.IsMatch(bodyHtml, @"<table\b", RegexOptions.IgnoreCase)
-                && CollapseWs(DecodeEntities(Regex.Replace(sansT, "<[^>]+>", " ")))
-                    .Trim().Length == 0;
-        }
+        var bodyM = SafeRegex.Match(cv.html, @"<body\b[^>]*>([\s\S]*?)</body", RegexOptions.IgnoreCase);
+        var bodyHtml = bodyM.Success ? bodyM.Groups[1].Value : cv.html;
+        var sansT = SafeRegex.Replace(bodyHtml, @"<table\b[\s\S]*?</table\s*>", "",
+            RegexOptions.IgnoreCase);
+        cv.bodyAllTables = SafeRegex.IsMatch(bodyHtml, @"<table\b", RegexOptions.IgnoreCase)
+            && CollapseWs(DecodeEntities(SafeRegex.Replace(sansT, "<[^>]+>", " ")))
+                .Trim().Length == 0;
         cv.cssLayoutFree = true;
     }
 
     /// <summary>The pinned body width and face, inline-block column rules, and the metric-flow body face and top margin.</summary>
-    private static void ResolveBodyWidthAndMetricFace(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResolveBodyWidthAndMetricFace(ConvertState cv)
     {
         if (!cv.marginsExplicit)
-            foreach (Match styleBlock in Regex.Matches(cv.html, @"<style\b([^>]*)>([\s\S]*?)</style\s*>",
-                         RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(cv.html, @"<style\b([^>]*)>([\s\S]*?)</style\s*>",
+                         RegexOptions.IgnoreCase).Select(styleBlock => styleBlock.Groups))
             {
-                var mediaM = Regex.Match(styleBlock.Groups[1].Value, @"\bmedia\s*=\s*[""']?([^""'>]*)",
+                var mediaM = SafeRegex.Match(groups[1].Value, @"\bmedia\s*=\s*[""']?([^""'>]*)",
                     RegexOptions.IgnoreCase);
-                if (mediaM.Success && !Regex.IsMatch(mediaM.Groups[1].Value, @"\b(all|print)\b",
+                if (mediaM.Success && !SafeRegex.IsMatch(mediaM.Groups[1].Value, @"\b(all|print)\b",
                         RegexOptions.IgnoreCase))
                     continue;
-                foreach (Match br in Regex.Matches(styleBlock.Groups[2].Value,
+                // (a body rule inside a screen-only @media group never reaches paper: a sheet's
+                // `@media screen and (min-width: …) { body { width } }` pins nothing)
+                foreach (Match br in SafeRegex.Matches(FlattenMediaBlocks(groups[2].Value),
                              @"(?<![\w.#-])body\s*\{([^{}]*)\}", RegexOptions.IgnoreCase))
                 {
-                    var bw = Regex.Match(br.Groups[1].Value,
-                        @"(?<![\w-])width\s*:\s*([\d.]+\s*(?:px|pt|in|cm|mm))", RegexOptions.IgnoreCase);
-                    if (bw.Success && TryParseLength(bw.Groups[1].Value.Replace(" ", "")) is { } bwPt
-                        && bwPt > cv.profile.bodyPinnedW)
+                    if (PinnedBodyWidthPt(br.Groups[1].Value) is { } bwPt && bwPt > cv.profile.bodyPinnedW)
                         cv.profile.bodyPinnedW = bwPt;
                 }
             }
+        // …and the width the body tag's own style states over a sheet's body rule: the cascade reads the two as
+        // one rule (see MergeBodyTagStyle), so the tag's width pins the body as the sheet's would.
+        if (!cv.marginsExplicit && cv.css.ContainsKey("body") && BodyTagStyleAttr(cv.html) is { } tagStyle
+            && PinnedBodyWidthPt(tagStyle) is { } tagPt && tagPt > cv.profile.bodyPinnedW)
+            cv.profile.bodyPinnedW = tagPt;
         if (cv.profile.bodyPinnedW > 0 && cv.css.TryGetValue("body", out var bpBody)
             && bpBody.TryGetValue("font-family", out var bpFam))
             foreach (var fam in bpFam.Split(','))
@@ -216,9 +217,10 @@ internal static partial class HtmlToPdfConverter
             {
                 cv.profile.metricFlow = true;
                 cv.profile.metricFace = mfFam;
-                cv.marginLeft += mfBox.left;
-                cv.marginRight += mfBox.right;
-                cv.bodyMarT = mfBox.top;
+                // The side insets stand in the page margins already (the body box above); the top is
+                // spent on the first page only, so it moves from the page margin to the flow's seat.
+                if (AuthoredBodyBox(cv)) cv.marginTop -= cv.bodyBox.Top - ModelledBodyInsetPt(cv, cv.perSide && !cv.pageMargin!.TopTouched);
+                cv.bodyMarT = AuthoredBodyBox(cv) ? cv.bodyBox.Top : mfBox.top;
             }
         }
 
@@ -234,17 +236,29 @@ internal static partial class HtmlToPdfConverter
         cv.profile.metricLineSum = 0;
     }
 
+    /// <summary>The UA body margin a page margin already carries: the calibrated defaults bake it in, an explicit
+    /// page margin does not (its untouched per-side defaults do).</summary>
+    private static double ModelledBodyInsetPt(ConvertState cv, bool untouchedSide)
+        => !cv.marginsExplicit || untouchedSide ? UaBodyMarginPt : 0.0;
+
     /// <summary>The body's CSS margin, zero-margin flag, left margin, CSS face and size, and the element-grid face.</summary>
-    private static void ResolveBodyMargin(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResolveBodyMargin(ConvertState cv)
     {
         cv.profile.bodyZeroMargin = false;
+        // The body's own box, resolved once for every flow: its margin (the UA 8 px where the author
+        // states none) plus its padding inset the content inside the page margins on each side. The
+        // calibrated defaults already carry the UA margin (96 = 90 + 6 at the left, 89 = 72 + 6 + the
+        // first-line drop at the top), explicit page margins carry none; an authored box replaces
+        // that inset (probed: body { margin: 30px } opens at 112.5 = 90 + 22.5, body { padding: 30px }
+        // at 118.5 = 90 + 6 + 22.5, and under 72 pt page margins body { margin: 0 } at 72, 30px at 94.5).
+        cv.bodyBox = ResolveBodyBox(cv);
         cv.bodyMargin = null;
         if (cv.css.TryGetValue("body", out var bodyDecls))
             bodyDecls.TryGetValue("margin", out cv.bodyMargin);
         if (cv.bodyMargin is null
-            && Regex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])([^'""]*)\1",
+            && SafeRegex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])([^'""]*)\1",
                 RegexOptions.IgnoreCase) is { Success: true } bodyTagStyle
-            && Regex.Match(bodyTagStyle.Groups[2].Value, @"(?<![-\w])margin\s*:\s*([^;]+)",
+            && SafeRegex.Match(bodyTagStyle.Groups[2].Value, @"(?<![-\w])margin\s*:\s*([^;]+)",
                 RegexOptions.IgnoreCase) is { Success: true } bodyTagMargin)
             cv.bodyMargin = bodyTagMargin.Groups[1].Value;
         // …and a universal reset (`* { margin: 0 }`) zeroes the body margin with
@@ -253,7 +267,9 @@ internal static partial class HtmlToPdfConverter
             starDecls.TryGetValue("margin", out cv.bodyMargin);
         if (!cv.marginsExplicit && cv.bodyMargin is not null
             // "0", "0px", or an all-zero shorthand list ("0 0 0 0").
-            && Regex.IsMatch(cv.bodyMargin.Trim(), @"^0(px)?(\s+0(px)?){0,3}$"))
+            && SafeRegex.IsMatch(cv.bodyMargin.Trim(), @"^0(px)?(\s+0(px)?){0,3}$")
+            // (a zero-margin body that PADS itself is not the bare-page-margin model: its padding is the inset)
+            && cv.bodyBox.Padding.All(p => p <= 0))
         {
             cv.profile.bodyZeroMargin = true;
             cv.marginLeft = 90.0;
@@ -265,12 +281,18 @@ internal static partial class HtmlToPdfConverter
         // the invoice's body box fills 90..813.75 while its spacer line still seats at 78).
         // Quirks documents only: a strict-doctype mail keeps its content at 96 with the same attribute.
         else if (!cv.marginsExplicit && cv.bodyMargin is null && ReadsInQuirksMode(cv.html)
-            && Regex.IsMatch(cv.html, @"<body\b[^>]*\b(leftmargin|marginwidth)\s*=\s*[""']?0\b", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(cv.html, @"<body\b[^>]*\b(leftmargin|marginwidth)\s*=\s*[""']?0\b", RegexOptions.IgnoreCase))
         {
             cv.profile.bodyZeroMargin = true;
             cv.profile.bodySideOnlyZero = true;
             cv.marginLeft = 90.0;
             cv.marginRight = 90.0;
+        }
+        if (AuthoredBodyBox(cv))
+        {
+            cv.marginLeft += cv.bodyBox.Left - ModelledBodyInsetPt(cv, cv.perSide && !cv.pageMargin!.LeftTouched);
+            cv.marginRight += cv.bodyBox.Right - ModelledBodyInsetPt(cv, cv.perSide && !cv.pageMargin!.RightTouched);
+            cv.marginTop += cv.bodyBox.Top - ModelledBodyInsetPt(cv, cv.perSide && !cv.pageMargin!.TopTouched);
         }
 
         // A body that declares no margin keeps the UA default one (8 px = 6 pt), so the
@@ -318,13 +340,19 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A default-page document with @font-face styling or an EDGAR filing renders through its own renderer; that document, or null to continue the general flow.</summary>
     private static Document? RenderStyledOrEdgarDocument(ConvertState cv, HtmlLoadOptions? options)
     {
+        // The sheet's data: URI faces, decoded once: the styled dialect reads them, and so does the
+        // general flow's face resolution when the dialect declines the body.
+        cv.profile.dataFaces = cv.html.IndexOf("@font-face", StringComparison.OrdinalIgnoreCase) >= 0
+            && ParseDataFontFaces(cv.html) is { Count: > 0 } faces ? faces : null;
         if (!(cv.pageMargin?.IsTouched ?? false)
+#pragma warning disable S1244 // the untouched default page size (595 x 842, assigned as literals) - exact on purpose
             && (cv.pageInfo is null || (cv.pageInfo.Width == 595 && cv.pageInfo.Height == 842))
-            && cv.html.IndexOf("@font-face", StringComparison.OrdinalIgnoreCase) >= 0
-            && TryParseStyledDataFontDoc(cv.html) is { } styledBody
+#pragma warning restore S1244
+            && cv.profile.dataFaces is { } dataFaces
+            && TryParseStyledDataFontDoc(cv.html, dataFaces) is { } styledBody
             && RenderStyledDataFontDoc(styledBody) is { } styledDoc)
         {
-            var styledTitle = Regex.Match(cv.html, @"<title[^>]*>(.*?)</title>",
+            var styledTitle = SafeRegex.Match(cv.html, @"<title[^>]*>(.*?)</title>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             if (styledTitle.Success)
                 styledDoc.Info.Title = DecodeEntities(styledTitle.Groups[1].Value).Trim();
@@ -336,11 +364,13 @@ internal static partial class HtmlToPdfConverter
         // TOC anchors render through the dedicated line-box-density flow engine.
         // Default page setup only — explicit PageInfo/margins keep the legacy flow.
         if (!(cv.pageMargin?.IsTouched ?? false)
+#pragma warning disable S1244 // the untouched default page size (595 x 842, assigned as literals) - exact on purpose
             && (cv.pageInfo is null || (cv.pageInfo.Width == 595 && cv.pageInfo.Height == 842))
+#pragma warning restore S1244
             && EdgarHtmlRenderer.IsEdgarFilingDoc(cv.html)
             && EdgarHtmlRenderer.TryConvert(cv.html, options) is { } edgarDoc)
         {
-            var edgarTitle = Regex.Match(cv.html, @"<title[^>]*>(.*?)</title>",
+            var edgarTitle = SafeRegex.Match(cv.html, @"<title[^>]*>(.*?)</title>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             if (edgarTitle.Success)
                 edgarDoc.Info.Title = DecodeEntities(edgarTitle.Groups[1].Value).Trim();
@@ -370,12 +400,12 @@ internal static partial class HtmlToPdfConverter
         // and the names in THAT sheet do not paginate the host (MEASURED: the filtered export whose
         // nested message declares the same `div.WordSection1 { page: WordSection1 }` pages 3 with
         // no break at it, while the host-declared one breaks).
-        var bodyAt = Regex.Match(html, @"<body\b", RegexOptions.IgnoreCase);
+        var bodyAt = SafeRegex.Match(html, @"<body\b", RegexOptions.IgnoreCase);
         var ownSheets = bodyAt.Success ? html[..bodyAt.Index] : html;
-        foreach (Match block in Regex.Matches(ownSheets, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
+        foreach (Match block in SafeRegex.Matches(ownSheets, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
             foreach (var (selector, body) in InnermostRules(block.Groups[1].Value))
             {
-                var page = Regex.Match(body,
+                var page = SafeRegex.Match(body,
                     @"(?<![-\w])page\s*:\s*([A-Za-z_][\w-]*)\s*(?:;|$)", RegexOptions.IgnoreCase);
                 if (!page.Success || page.Groups[1].Value.Equals("auto", StringComparison.OrdinalIgnoreCase)) continue;
                 foreach (var sel in selector.Split(','))
@@ -435,12 +465,12 @@ internal static partial class HtmlToPdfConverter
     private static readonly char[] Braces = { '{', '}' };
 
     /// <summary>The Word-filtered, custom-font-face, pt-styled fragment, Mozilla e-mail, form and redline dialects are recognised from the markup.</summary>
-    private static void DetectDocumentDialects(ConvertState cv, HtmlLoadOptions? options)
+    private static void DetectDocumentDialects(ConvertState cv)
     {
-        cv.profile.msoFilteredDoc = Regex.IsMatch(cv.html,
+        cv.profile.msoFilteredDoc = SafeRegex.IsMatch(cv.html,
                 @"<meta\s+name=[""']?Generator[""']?\s+content=[""']?Microsoft Word [^>]*\(filtered[^)>]*\)",
                 RegexOptions.IgnoreCase)
-            && !Regex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase);
+            && !SafeRegex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase);
         // …and whether that filtered page carries the over-wide box its GROWN sheet is grown
         // for. The arm's 721.75 pt sheet and its 1.00 em paragraph margin were both measured on
         // grown pages; a plain filtered page keeps A4 and the ordinary UA 1.12 em.
@@ -449,26 +479,26 @@ internal static partial class HtmlToPdfConverter
         // labels at margin-left - 18, the sheet's h1 24 / MsoNormal 12 Arial, 16 pt list lines
         // pitched 18.75 by their face), laid on the UA page box (h1 baseline 100.2 = 78 + 0.925 x 24,
         // the 12 pt paragraph wraps at 505).
-        cv.profile.wordExportDoc = Regex.IsMatch(cv.html,
+        cv.profile.wordExportDoc = SafeRegex.IsMatch(cv.html,
                 @"<meta\s+name=[""']?Generator[""']?\s+content=[""']?Microsoft Word\b", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"class=[""']?Section1\b", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"class=[""']?Section1\b", RegexOptions.IgnoreCase)
             && cv.html.IndexOf("mso-list:", StringComparison.OrdinalIgnoreCase) >= 0
-            && Regex.IsMatch(cv.html, @"class=[""']?MsoNormal\b", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(cv.html, @"class=[""']?MsoNormal\b", RegexOptions.IgnoreCase);
         cv.profile.wordMailDoc = cv.profile.wordExportDoc
             || cv.html.IndexOf("WordSection1", StringComparison.Ordinal) >= 0
             && cv.html.IndexOf("mso-tab-count", StringComparison.OrdinalIgnoreCase) >= 0
-            && Regex.IsMatch(cv.html, @"class=[""']?MsoNormal\b", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"class=[""']?MsoNormal\b", RegexOptions.IgnoreCase)
             // (…and a Word export that names itself: the Generator meta, a WordSection1 and MsoNormal
             //  paragraphs are the family, a tab stop or a list only witnesses of it - the mail with
             //  the 1289 pt grid carries neither and is laid out on the Word rules all the same)
             || cv.html.IndexOf("WordSection1", StringComparison.Ordinal) >= 0
-            && Regex.IsMatch(cv.html, @"<meta\s+name=[""']?Generator[""']?\s+content=[""']?Microsoft Word\b", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"class=[""']?MsoNormal\b", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(cv.html, @"<meta\s+name=[""']?Generator[""']?\s+content=[""']?Microsoft Word\b", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"class=[""']?MsoNormal\b", RegexOptions.IgnoreCase);
         cv.profile.namedPageRules = ReadNamedPageRules(cv.html);
         cv.customFontFaceDoc = !cv.cssRealFamily
-            && Regex.IsMatch(cv.html, @"@font-face", RegexOptions.IgnoreCase)
-            && !Regex.IsMatch(cv.html, @"<!doctype", RegexOptions.IgnoreCase)
-            && !Regex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(cv.html, @"@font-face", RegexOptions.IgnoreCase)
+            && !SafeRegex.IsMatch(cv.html, @"<!doctype", RegexOptions.IgnoreCase)
+            && !SafeRegex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase);
         // …and NOTHING from those sheets applies — no floats, no class boxes,
         // no typography (the whole report draws in the UA face at
         // the UA sizes). Every downstream consumer sees an empty rule map.
@@ -485,13 +515,13 @@ internal static partial class HtmlToPdfConverter
         // such columns at min-content (a phone column wrapping one character
         // per line).
         cv.profile.ptStyledFragment = cv.css.Count == 0 && !cv.marginsExplicit
-            && !Regex.IsMatch(cv.html, @"<!doctype|<body\b", RegexOptions.IgnoreCase)
+            && !SafeRegex.IsMatch(cv.html, @"<!doctype|<body\b", RegexOptions.IgnoreCase)
             // …and not the browser-saved (moz) email — that family keeps its
             // own calibrated dialect (see mozEmailDoc below).
             && !cv.html.Contains("-moz-", StringComparison.OrdinalIgnoreCase)
-            && Regex.IsMatch(cv.html, @"<table\b[^>]*border-collapse\s*:\s*collapse",
+            && SafeRegex.IsMatch(cv.html, @"<table\b[^>]*border-collapse\s*:\s*collapse",
                 RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"<td\b[^>]*style\s*=\s*[""'][^""']*width\s*:\s*[\d.]+\s*pt",
+            && SafeRegex.IsMatch(cv.html, @"<td\b[^>]*style\s*=\s*[""'][^""']*width\s*:\s*[\d.]+\s*pt",
                 RegexOptions.IgnoreCase);
         // A document with NO sheet whose GRID CELLS author their own
         // typography is not riding the UA defaults: its sheet grows to page
@@ -501,7 +531,7 @@ internal static partial class HtmlToPdfConverter
         // 650 pt page, not the calibrated margin + box + margin sheet).
         cv.profile.cellAuthoredTypography = cv.css.Count == 0
             && CellStylesAuthorTypography(cv.html);
-        cv.mozEmailDoc = Regex.IsMatch(cv.html, @"\A\s*(?:<!--.*?-->\s*)*<div dir=[""']ltr[""']", RegexOptions.IgnoreCase | RegexOptions.Singleline) && cv.html.Contains("-moz-", StringComparison.OrdinalIgnoreCase);
+        cv.mozEmailDoc = SafeRegex.IsMatch(cv.html, @"\A\s*(?:<!--.*?-->\s*)*<div dir=[""']ltr[""']", RegexOptions.IgnoreCase | RegexOptions.Singleline) && cv.html.Contains("-moz-", StringComparison.OrdinalIgnoreCase);
         // A DataWorks dispatch form (the DWControls workflow page): a form-table
         // of label cells and live controls rendered as a GRID with
         // the controls drawn at their declared pixel boxes.
@@ -517,10 +547,10 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>The absolute-span ledger, the layout-free flow's markup checks and the fieldset document's body percent and chrome.</summary>
-    private static void ResolveLayoutFreeAndFieldsetFlow(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResolveLayoutFreeAndFieldsetFlow(ConvertState cv)
     {
         cv.absSpanLedger = false;
-        if (!cv.cssLayoutFree && !Regex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase))
+        if (!cv.cssLayoutFree && !SafeRegex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase))
         {
             var ledgerAbs = false;
             var ledgerOk = true;
@@ -531,11 +561,10 @@ internal static partial class HtmlToPdfConverter
                     && lgPos.Contains("absolute", StringComparison.OrdinalIgnoreCase)
                     && kv.Value.ContainsKey("left"))
                     ledgerAbs = true;
-                foreach (var prop in kv.Value.Keys)
-                    if (prop is not ("display" or "text-align" or "font-weight" or "font-size"
+                if (kv.Value.Keys.Any(prop => prop is not ("display" or "text-align" or "font-weight" or "font-size"
                         or "margin-left" or "width" or "position" or "left" or "text-decoration"
-                        or "border-width" or "color" or "background-color" or "background"))
-                    { ledgerOk = false; break; }
+                        or "border-width" or "color" or "background-color" or "background")))
+                { ledgerOk = false; }
                 if (!ledgerOk) break;
             }
             cv.absSpanLedger = ledgerAbs && ledgerOk;
@@ -544,15 +573,15 @@ internal static partial class HtmlToPdfConverter
         cv.fsBodyPct = 0.0;
         cv.fsBodyChromePt = 0.0;
         if (!cv.profile.metricFlow
-            && Regex.IsMatch(cv.html, @"<fieldset\b", RegexOptions.IgnoreCase)
-            && Regex.IsMatch(cv.html, @"<legend\b", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"<fieldset\b", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"<legend\b", RegexOptions.IgnoreCase)
             && cv.css.TryGetValue("body", out var fsBodyRule)
             && fsBodyRule.TryGetValue("width", out var fsBodyW)
             && fsBodyW.Trim().EndsWith("%", StringComparison.Ordinal)
             && fsBodyRule.ContainsKey("padding"))
         {
             cv.fieldsetDoc = true;
-            cv.fsBodyPct = double.Parse(Regex.Match(fsBodyW, @"[\d.]+").Value,
+            cv.fsBodyPct = double.Parse(SafeRegex.Match(fsBodyW, @"[\d.]+").Value,
                 System.Globalization.CultureInfo.InvariantCulture) / 100.0;
             var fsPadPt = fsBodyRule.TryGetValue("padding", out var fsPadV)
                 && TryParseLength(fsPadV.Trim()) is { } fsPadParsed ? fsPadParsed : 37.5;
@@ -565,10 +594,10 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The dead-sheet class: an absolute http(s) stylesheet link, the sp-matrix report's absent relative sheet,
     /// a remote-@import-only style, or a MediaWiki export - see the clauses.</summary>
     private static bool IsDeadExternalCssDoc(ConvertState cv)
-        => Regex.IsMatch(cv.html,
+        => SafeRegex.IsMatch(cv.html,
             @"<link\b[^>]*rel\s*=\s*[""']?stylesheet[^>]*href\s*=\s*[""']?https?://",
             RegexOptions.IgnoreCase)
-            || Regex.IsMatch(cv.html,
+            || SafeRegex.IsMatch(cv.html,
                 @"<link\b[^>]*href\s*=\s*[""']?https?://[^>]*rel\s*=\s*[""']?stylesheet",
                 RegexOptions.IgnoreCase)
             // The sectioned .pdf-page report with the sp-matrix diagram: its
@@ -584,7 +613,7 @@ internal static partial class HtmlToPdfConverter
             // unreachable at conversion time as a dead <link> and the document lays
             // out in pure UA defaults (the report corpus's
             // `@import "http://…/style.css"` idiom).
-            || Regex.IsMatch(cv.html,
+            || SafeRegex.IsMatch(cv.html,
                 @"<style\b[^>]*>\s*@import\s+[""']?https?://",
                 RegexOptions.IgnoreCase)
             // A MediaWiki export's load.php links are RELATIVE under the page's
@@ -594,26 +623,26 @@ internal static partial class HtmlToPdfConverter
             || cv.wikiExportDoc;
 
     /// <summary>A dead external stylesheet, a tag-free document, the edge-to-edge flag, the table-free markup and a real font family in the rules.</summary>
-    private static void DetectDeadCssAndRealFamily(ConvertState cv, HtmlLoadOptions? options)
+    private static void DetectDeadCssAndRealFamily(ConvertState cv)
     {
         cv.profile.deadExternalCss = IsDeadExternalCssDoc(cv);
         cv.edgeToEdgeDoc = cv.edgeToEdgePre;
-        cv.htmlSansTables = Regex.IsMatch(cv.html, @"<font\b|font-family", RegexOptions.IgnoreCase)
-            ? Regex.Replace(cv.html, @"<table\b[\s\S]*?</table\s*>", "", RegexOptions.IgnoreCase)
+        cv.htmlSansTables = SafeRegex.IsMatch(cv.html, @"<font\b|font-family", RegexOptions.IgnoreCase)
+            ? SafeRegex.Replace(cv.html, @"<table\b[\s\S]*?</table\s*>", "", RegexOptions.IgnoreCase)
             : cv.html;
         cv.cssRealFamily = false;
         foreach (var kv in cv.css)
             if (!kv.Key.TrimStart().StartsWith('@') && SelectorUsed(cv.html, kv.Key)
-                && !TableScopedSelector(cv.html, cv, cv.bodyAllTables, cv.edgeToEdgePre, kv.Key, kv.Value)
+                && !TableScopedSelector(cv.html, cv, cv.bodyAllTables, cv.edgeToEdgePre, kv.Key)
                 // A CLASS-scoped family rule (`p.subheader2 { font-family:
                 // Calibri }`) rides its classed blocks like a tag rule rides its
                 // element (the block-rule applier styles them) — the rest of the
                 // document keeps UA structure, so it does not disqualify.
-                && !Regex.IsMatch(kv.Key.Trim(), @"^[a-zA-Z]*[1-6]?\.[\w-]+$")
+                && !SafeRegex.IsMatch(kv.Key.Trim(), @"^[a-zA-Z]*[1-6]?\.[\w-]+$")
                 // …and an ID-scoped one rides its element the same way (`#divGeral { font-family:
-                // Verdana; font-size: 14px }` styles the wrapper's blocks and its grid's cells;
-                // probed: the title VerdanaBold 10.5 at the UA top, the cells Verdana 10.5).
-                && !Regex.IsMatch(kv.Key.Trim(), @"^[a-zA-Z]*#[\w-]+$")
+                // Verdana; font-size: 14px }` styles the wrapper's blocks and its grid's cells; probed:
+                // the title VerdanaBold 10.5 at the UA top, the cells Verdana 10.5).
+                && !SafeRegex.IsMatch(kv.Key.Trim(), @"^[a-zA-Z]*#[\w-]+$")
                 && !IsRunScopedFamilySelector(kv.Key)
                 && kv.Value.TryGetValue("font-family", out var ffDecl)
                 && FirstFontFamily(ffDecl) is { } ffName
@@ -629,14 +658,16 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>Every property of one stylesheet rule is checked for the layout declarations that end the layout-free flow.</summary>
-    private static void ScanRuleProperties(ConvertState cv, KeyValuePair<string, Dictionary<string, string>> kv, HtmlLoadOptions? options)
+    private static void ScanRuleProperties(ConvertState cv, KeyValuePair<string, Dictionary<string, string>> kv)
     {
         // a keyframe step (`0% { opacity: 0 }`, `from`, `to`) animates nothing on paper: the
         // whole rule is skipped, whatever it declares (a per-RULE fact, so it is decided once
         // here, not once per property)
-        if (Regex.IsMatch(kv.Key.Trim(), @"^(?:\d+(?:\.\d+)?%|from|to)(?:\s*,\s*(?:\d+(?:\.\d+)?%|from|to))*$",
+        if (SafeRegex.IsMatch(kv.Key.Trim(), @"^(?:\d+(?:\.\d+)?%|from|to)(?:\s*,\s*(?:\d+(?:\.\d+)?%|from|to))*$",
                 RegexOptions.IgnoreCase)) return;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var prop in kv.Value.Keys)
+#pragma warning restore S3267
         {
             if (!ScanRulePropertyForLayout(cv, kv, prop)) break;
         }
@@ -644,7 +675,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>The markup without its script and style bodies, computed once per document.</summary>
     private static string MarkupSansScripts(ConvertState cv)
-        => cv.htmlSansScripts ??= Regex.Replace(cv.html, @"<(script|style)\b[\s\S]*?</\1\s*>", "", RegexOptions.IgnoreCase);
+        => cv.htmlSansScripts ??= SafeRegex.Replace(cv.html, @"<(script|style)\b[\s\S]*?</\1\s*>", "", RegexOptions.IgnoreCase);
 
     /// <summary>Whether every CLASS the selector names sits on a VISIBLE element with text: a class the
     /// markup never carries, one carried only by `display: none` elements (a saved page's search
@@ -653,17 +684,17 @@ internal static partial class HtmlToPdfConverter
     /// builds keeps its calibrated flow.</summary>
     private static bool SelectorNamesMarkup(string html, string selector)
     {
-        foreach (Match m in Regex.Matches(selector, @"\.([A-Za-z_][\w-]*)"))
+        foreach (Match m in SafeRegex.Matches(selector, @"\.([A-Za-z_][\w-]*)"))
         {
             var name = Regex.Escape(m.Groups[1].Value);
             var visible = false;
-            foreach (Match el in Regex.Matches(html,
+            foreach (Match el in SafeRegex.Matches(html,
                 @"<(\w+)\b[^>]*\bclass\s*=\s*[""'][^""']*(?<![\w-])" + name + @"(?![\w-])[^>]*>", RegexOptions.IgnoreCase))
             {
-                if (Regex.IsMatch(el.Value, @"display\s*:\s*none", RegexOptions.IgnoreCase)) continue;
+                if (SafeRegex.IsMatch(el.Value, @"display\s*:\s*none", RegexOptions.IgnoreCase)) continue;
                 var close = html.IndexOf("</" + el.Groups[1].Value, el.Index + el.Length, StringComparison.OrdinalIgnoreCase);
                 var inner = close < 0 ? "" : html.Substring(el.Index + el.Length, close - el.Index - el.Length);
-                if (Regex.Replace(inner, "<[^>]*>", "").Trim().Length > 0) { visible = true; break; }
+                if (SafeRegex.Replace(inner, "<[^>]*>", "").Trim().Length > 0) { visible = true; break; }
             }
             if (!visible) return false;
         }
@@ -674,10 +705,10 @@ internal static partial class HtmlToPdfConverter
     /// directly with a table - a grid host.</summary>
     private static bool IsGridHostSelector(string html, string selector)
     {
-        var m = Regex.Match(selector.Trim(), @"^[a-zA-Z]*#([\w-]+)$");
+        var m = SafeRegex.Match(selector.Trim(), @"^[a-zA-Z]*#([\w-]+)$");
         if (!m.Success) return false;
         var name = Regex.Escape(m.Groups[1].Value);
-        return Regex.IsMatch(html,
+        return SafeRegex.IsMatch(html,
             @"<div\b[^>]*\bid\s*=\s*[""']?" + name + @"(?:\s|[""'>])[^>]*>\s*<table\b",
             RegexOptions.IgnoreCase);
     }
@@ -732,8 +763,8 @@ internal static partial class HtmlToPdfConverter
             // walks whole quoted style attributes so a family value QUOTED
             // with the other quote kind still parses (a value capture that
             // stopped at the quote read `font-family:"Angsana New"` as "no
-            // family here" and let the differently-faced document through);
-            // a family that fails to parse disqualifies like any other
+            // family here" and let the differently-faced document through); a
+            // family that fails to parse disqualifies like any other
             // face, and so does TABLE-element styling that leaked through
             // the non-greedy nested-table strip — the allowance covers only
             // flow typography (the p/span soup), never grid cells.
@@ -745,11 +776,11 @@ internal static partial class HtmlToPdfConverter
                 // corpora the allowance was measured on carry no <img>).
                 // Sheet rules stay out of the test — only style attributes
                 // mark the span-typed statement idiom.
-                && !(Regex.IsMatch(cv.html, @"<img\b", RegexOptions.IgnoreCase)
-                     && Regex.Matches(cv.htmlSansTables,
+                && !(SafeRegex.IsMatch(cv.html, @"<img\b", RegexOptions.IgnoreCase)
+                     && SafeRegex.Matches(cv.htmlSansTables,
                              @"\bstyle\s*=\s*(?:""(?<s>[^""]*)""|'(?<s>[^']*)')",
                              RegexOptions.IgnoreCase)
-                         .Cast<Match>().Any(sm => Regex.IsMatch(sm.Groups["s"].Value,
+                         .Cast<Match>().Any(sm => SafeRegex.IsMatch(sm.Groups["s"].Value,
                              @"font-family\s*:", RegexOptions.IgnoreCase)
                              // (the body tag's own attribute is the flow's typography, not a statement span)
                              && !(cv.uaBodyFaceFromAttr && IsBodyTagStyleAttr(cv.htmlSansTables, sm.Index)))));
@@ -759,7 +790,7 @@ internal static partial class HtmlToPdfConverter
     private static bool IsBodyTagStyleAttr(string markup, int attrIndex)
     {
         var lt = markup.LastIndexOf('<', attrIndex);
-        return lt >= 0 && Regex.IsMatch(markup.Substring(lt, Math.Min(6, markup.Length - lt)), @"^<body\b", RegexOptions.IgnoreCase);
+        return lt >= 0 && SafeRegex.IsMatch(markup.Substring(lt, Math.Min(6, markup.Length - lt)), @"^<body\b", RegexOptions.IgnoreCase);
     }
 
     /// <summary>The markup reads as a plain page: any fragment or document without a declared font flow, no styled table header and no Excel export classes, with the UA serif installed.</summary>
@@ -780,9 +811,9 @@ internal static partial class HtmlToPdfConverter
         // an unresolved RELATIVE stylesheet is a packaging gap (the sheet was
         // present when the page was authored — see the dead-CSS rule above),
         // so such a table document keeps the legacy calibrated flow.
-        (!Regex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase)
+        (!SafeRegex.IsMatch(cv.html, @"<table\b", RegexOptions.IgnoreCase)
             || cv.profile.deadExternalCss
-            || !Regex.Matches(cv.html,
+            || !SafeRegex.Matches(cv.html,
                     @"<link\b[^>]*rel\s*=\s*[""']?stylesheet[^>]*href\s*=\s*[""']?([^""'\s>]+)",
                     RegexOptions.IgnoreCase)
                 .Cast<Match>().Any(lm =>
@@ -806,7 +837,7 @@ internal static partial class HtmlToPdfConverter
                         try
                         {
                             if (!System.IO.File.Exists(System.IO.Path.Combine(
-                                    options!.BasePath!, relHref.TrimStart('/', '\\'))))
+                                    options.BasePath, relHref.TrimStart('/', '\\'))))
                                 return false;
                         }
                         catch { /* malformed href: treat as unresolved-present */ }
@@ -831,14 +862,14 @@ internal static partial class HtmlToPdfConverter
             // A document whose stylesheet is DEAD renders pure UA whatever
             // Excel-class residue rides its markup (the report corpus's
             // xl24-classed paragraphs under a dead @import).
-            || !(Regex.IsMatch(cv.html, @"class\s*=\s*[""']?xl\d+", RegexOptions.IgnoreCase)
-             && (Regex.IsMatch(cv.html, @"\.xl\d+\s*[,{]", RegexOptions.IgnoreCase)
-                 || !Regex.IsMatch(cv.html, @"<font\b", RegexOptions.IgnoreCase))))
+            || !(SafeRegex.IsMatch(cv.html, @"class\s*=\s*[""']?xl\d+", RegexOptions.IgnoreCase)
+             && (SafeRegex.IsMatch(cv.html, @"\.xl\d+\s*[,{]", RegexOptions.IgnoreCase)
+                 || !SafeRegex.IsMatch(cv.html, @"<font\b", RegexOptions.IgnoreCase))))
         && WinMetricsFor("Times New Roman") is not null;
     }
 
     /// <summary>The UA body face: a body or div rule naming an installed face at the UA base size, unless a real family is declared outside the body.</summary>
-    private static void ResolveUaBodyFace(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResolveUaBodyFace(ConvertState cv)
     {
         var realFamilyOutsideBody = RealFamilyDeclaredOutsideBody(cv, out var bodyClassFace, out var bodyClassRule);
         const double uaBasePt = 12.0;   // the UA 16px root, in pt
@@ -853,6 +884,18 @@ internal static partial class HtmlToPdfConverter
                 || (TryParseLength(uaBodyFsV) is { } uaBodyFsPt
                     && Math.Abs(uaBodyFsPt - uaBasePt) < 0.01)))
             cv.uaBodyFace = uaBodyName;
+        // …or the body's FONT shorthand, at the size it states (the XML tree view's `BODY { font: x-small
+        // 'Verdana' }`: the reference draws every run Verdana 7.5 under it and keeps the UA structure).
+        if (cv.uaBodyFace is null && !realFamilyOutsideBody
+            && cv.css.TryGetValue("body", out var uaShorthandRule)
+            && uaShorthandRule.TryGetValue("font", out var uaShorthand)
+            && FontShorthandParts(uaShorthand) is { } uaShorthandParts
+            && !uaShorthandParts.Family.Contains(',') && WinMetricsFor(uaShorthandParts.Family) is not null)
+        {
+            cv.uaBodyFace = uaShorthandParts.Family;
+            cv.uaBodyFontPt = uaShorthandParts.SizePt;
+            cv.uaBodyFaceFromAttr = true;
+        }
         // A sheet whose only inherited face is the UNIVERSAL rule states the flow's face
         // there: `* { font-family: Arial }` is the document's face exactly as a body rule
         // would be (measured on the invoice and the narrative sheet, whose runs the reference
@@ -874,11 +917,11 @@ internal static partial class HtmlToPdfConverter
         // `style="font-size:11pt; font-family:arial"` on the tag - every body run and every
         // em heading resolves off the 11 pt, never the .75 em).
         if (cv.uaBodyFace is null && !realFamilyOutsideBody
-            && Regex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase)
+            && SafeRegex.Match(cv.html, @"<body\b[^>]*style\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase)
                 is { Success: true } uaBodyAttr
-            && Regex.Match(uaBodyAttr.Groups[2].Value, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
+            && SafeRegex.Match(uaBodyAttr.Groups[2].Value, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
                 is { Success: true } uaAttrFam
-            && Regex.Match(uaBodyAttr.Groups[2].Value, @"font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
+            && SafeRegex.Match(uaBodyAttr.Groups[2].Value, @"font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
                 is { Success: true } uaAttrFs
             && FirstFontFamily(uaAttrFam.Groups[1].Value) is { } uaAttrName && !uaAttrName.Contains(',')
             && WinMetricsFor(uaAttrName) is not null
@@ -925,7 +968,7 @@ internal static partial class HtmlToPdfConverter
     /// typography, which is the level a `body` rule states - not a scoped family.</summary>
     private static bool IsRootFamilySelector(string selector)
     {
-        var s = Regex.Replace(selector.Trim(), @"\s+", " ");
+        var s = SafeRegex.Replace(selector.Trim(), @"\s+", " ");
         return s == "*" || s.Equals("body *", StringComparison.OrdinalIgnoreCase)
             || s.Equals("body*", StringComparison.OrdinalIgnoreCase)
             || s.Equals("html *", StringComparison.OrdinalIgnoreCase);
@@ -934,8 +977,6 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The root rule that names the document's inherited face, if the sheet has one.</summary>
     private static Dictionary<string, string>? RootFamilyRule(Dictionary<string, Dictionary<string, string>> css)
     {
-        foreach (var kv in css)
-            if (IsRootFamilySelector(kv.Key) && kv.Value.ContainsKey("font-family")) return kv.Value;
-        return null;
+        return css.Where(kv => IsRootFamilySelector(kv.Key) && kv.Value.ContainsKey("font-family")).Select(kv => kv.Value).FirstOrDefault();
     }
 }

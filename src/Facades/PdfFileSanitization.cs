@@ -117,8 +117,8 @@ public sealed class PdfFileSanitization : IDisposable
         var idEntry = FindTrailerId(data);
 
         var maxNum = 0;
-        foreach (var num in offsets.Keys)
-            if (num > maxNum) maxNum = num;
+        foreach (var num in offsets.Keys.Where(num => num > maxNum))
+            maxNum = num;
 
         var sb = new StringBuilder();
         sb.Append("\r\nxref\r\n");
@@ -260,7 +260,7 @@ public sealed class PdfFileSanitization : IDisposable
             var start = (int)kv.Value.offset;
             var end = Math.Min(data.Length, start + 2048);
             var slice = Encoding.ASCII.GetString(data, start, end - start);
-            if (System.Text.RegularExpressions.Regex.IsMatch(slice, @"/Type\s*/Catalog\b"))
+            if (SafeRegex.IsMatch(slice, @"/Type\s*/Catalog\b"))
                 return $"{kv.Key} {kv.Value.gen} R";
         }
         return null;
@@ -271,7 +271,7 @@ public sealed class PdfFileSanitization : IDisposable
     private static string? FindTrailerReference(byte[] data, string key)
     {
         var text = Encoding.ASCII.GetString(data);
-        var matches = System.Text.RegularExpressions.Regex.Matches(text, $@"/{key}\s+(\d+)\s+(\d+)\s+R\b");
+        var matches = SafeRegex.Matches(text, $@"/{key}\s+(\d+)\s+(\d+)\s+R\b");
         if (matches.Count == 0) return null;
         var m = matches[^1];
         return $"{m.Groups[1].Value} {m.Groups[2].Value} R";
@@ -281,7 +281,7 @@ public sealed class PdfFileSanitization : IDisposable
     private static string? FindTrailerId(byte[] data)
     {
         var text = Encoding.ASCII.GetString(data);
-        var matches = System.Text.RegularExpressions.Regex.Matches(text, @"/ID\s*(\[\s*<[0-9A-Fa-f]*>\s*<[0-9A-Fa-f]*>\s*\])");
+        var matches = SafeRegex.Matches(text, @"/ID\s*(\[\s*<[0-9A-Fa-f]*>\s*<[0-9A-Fa-f]*>\s*\])");
         return matches.Count == 0 ? null : matches[^1].Groups[1].Value;
     }
 

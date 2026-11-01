@@ -39,60 +39,60 @@ public sealed partial class Document
         if (SkipNotdefDictEnd(nd, c)) return true;
 
         // Regular token (number or operator).
+        var tokEnd = nd.pos;
+        while (tokEnd < nd.text.Length && !char.IsWhiteSpace(nd.text[tokEnd])
+               && nd.text[tokEnd] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
+            tokEnd++;
+        // A stray delimiter byte (an unbalanced ')' or a lone '>') yields an
+        // empty token with tokEnd == pos — skip the byte or the scan never advances.
+        if (tokEnd == nd.pos) { nd.pos++; return true; }
+        var isNumber = Compat.IsAsciiDigit(c) || c is '+' or '-' or '.';
+        if (isNumber) { BeginOperand(nd, nd.pos); nd.pos = tokEnd; return true; }
+        // Only four operators matter here, read in place: a stream is mostly other tokens.
+        if (TokenIs(nd, tokEnd, "BI")) { nd.inlineImage = true; return false; } // inline image: bail out, keep original bytes
+        if (TokenIs(nd, tokEnd, "Tf")) nd.currentFont = nd.lastName;
+        else if ((TokenIs(nd, tokEnd, "Tj") || TokenIs(nd, tokEnd, "TJ")) && nd.strings.Count > 0 && nd.currentFont is not null
+            && EncodingFor(nd, nd.currentFont) is { } names)
         {
-            var end = nd.pos;
-            while (end < nd.text.Length && !char.IsWhiteSpace(nd.text[end])
-                   && nd.text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
-                end++;
-            // A stray delimiter byte (an unbalanced ')' or a lone '>') yields an
-            // empty token with end == pos — skip the byte or the scan never advances.
-            if (end == nd.pos) { nd.pos++; return true; }
-            var token = nd.text[nd.pos..end];
-            var isNumber = Compat.IsAsciiDigit(token[0]) || token[0] is '+' or '-' or '.';
-            if (isNumber) { BeginOperand(nd, nd.pos); nd.pos = end; return true; }
-
-            switch (token)
-            {
-                case "BI":
-                    { nd.inlineImage = true; return false; } // inline image: bail out, keep original bytes
-                case "Tf":
-                    nd.currentFont = nd.lastName;
-                    break;
-                case "Tj" or "TJ" when nd.strings.Count > 0 && nd.currentFont is not null
-                    && EncodingFor(nd, nd.currentFont) is { } names:
+            var sawCode = false;
+            var allNotdef = true;
+            foreach (var s in nd.strings)
+                foreach (var b in s)
                 {
-                    var sawCode = false;
-                    var allNotdef = true;
-                    foreach (var s in nd.strings)
-                        foreach (var b in s)
-                        {
-                            sawCode = true;
-                            if (b >= 0x20 || names[b] is not (null or ".notdef"))
-                            { allNotdef = false; break; }
-                        }
-                    if (sawCode && allNotdef)
-                    {
-                        nd.options.ConversionLog.Add(new PdfAViolation
-                        {
-                            Rule = "NotdefGlyph",
-                            Description = $"Page {nd.pageNumber} text show operator references only the .notdef glyph"
-                                + (nd.strip ? " — operator removed." : "."),
-                            PageNumber = nd.pageNumber,
-                        });
-                        if (nd.strip && nd.operandStart >= 0)
-                            nd.deletions.Add((nd.operandStart, end));
-                    }
-                    break;
+                    sawCode = true;
+                    if (b >= 0x20 || names[b] is not (null or ".notdef"))
+                    { allNotdef = false; break; }
                 }
+            if (sawCode && allNotdef)
+            {
+                nd.options.ConversionLog.Add(new PdfAViolation
+                {
+                    Rule = "NotdefGlyph",
+                    Description = $"Page {nd.pageNumber} text show operator references only the .notdef glyph"
+                        + (nd.strip ? " — operator removed." : "."),
+                    PageNumber = nd.pageNumber,
+                });
+                if (nd.strip && nd.operandStart >= 0)
+                    nd.deletions.Add((nd.operandStart, tokEnd, null));
             }
-            EndOperator(nd);
-            nd.pos = end;
         }
+        // A composite font reported for showing its .notdef glyph: the log already names it,
+        // and a show of nothing else gives way to the advance it made.
+        else if (_notdefCidFonts is not null && nd.strip && nd.operandStart >= 0 && nd.currentFont is not null
+            && (TokenIs(nd, tokEnd, "Tj") || TokenIs(nd, tokEnd, "TJ"))
+            && NotdefCidAdvance(nd, nd.currentFont) is { } advance)
+            nd.deletions.Add((nd.operandStart, tokEnd, advance));
+        EndOperator(nd);
+        nd.pos = tokEnd;
         return true;
     }
 
+    /// <summary>Whether the token ending at <paramref name="tokEnd"/> is the operator <paramref name="op"/>.</summary>
+    private static bool TokenIs(NotdefRewriteState nd, int tokEnd, string op)
+        => tokEnd - nd.pos == op.Length && string.CompareOrdinal(nd.text, nd.pos, op, 0, op.Length) == 0;
+
     /// <summary>A '>>' dictionary end or a '&lt;' token: dictionary opens and ends are bookkept as operands, a hex string is consumed whole as a string operand. True when the token was consumed.</summary>
-    private bool SkipNotdefDictEnd(NotdefRewriteState nd, char c)
+    private static bool SkipNotdefDictEnd(NotdefRewriteState nd, char c)
     {
         if (c == '>' && nd.pos + 1 < nd.text.Length && nd.text[nd.pos + 1] == '>')
         { BeginOperand(nd, nd.pos); nd.pos += 2; return true; }
@@ -110,7 +110,7 @@ public sealed partial class Document
     }
 
     /// <summary>A literal string operand: consumed with its escapes and balanced parentheses and gathered for the show that follows. True when the token was consumed.</summary>
-    private bool SkipNotdefLiteralString(NotdefRewriteState nd, char c)
+    private static bool SkipNotdefLiteralString(NotdefRewriteState nd, char c)
     {
         if (c == '(') // literal string, with escapes and balanced parens
         {

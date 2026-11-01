@@ -82,8 +82,7 @@ public class OutlineItem
     internal static PdfString EncodePdfText(string value)
     {
         bool isAscii = true;
-        foreach (var c in value)
-            if (c > 0x7F) { isAscii = false; break; }
+        if (value.Any(c => c > 0x7F)) { isAscii = false; }
 
         if (isAscii)
             return new PdfString(Compat.Latin1.GetBytes(value));
@@ -115,9 +114,13 @@ public class OutlineItem
         set
         {
             if (value is null)
+            {
                 _dict.Remove("A");
-            else
-                _dict.Set("A", value.Dict);
+                return;
+            }
+            // An item goes where its /Dest says before it runs its action, so the action replaces it.
+            _dict.Remove("Dest");
+            _dict.Set("A", value.Dict);
         }
     }
 
@@ -159,7 +162,10 @@ public class OutlineItem
                     _dict.Set("A", action.Dict);
                     return;
                 case ExplicitDestination dest:
-                    _dict.Set("Dest", dest.ToPdfArrayPublic());
+                    _dict.Set("Dest", dest.ToLocalPdfArray());
+                    return;
+                case NamedDestination named:
+                    _dict.Set("Dest", named.ToNameString());
                     return;
             }
         }
@@ -172,7 +178,9 @@ public class OutlineItem
         {
             var children = Children;
             if (index < 1 || index > children.Count)
+#pragma warning disable S112 // public API: the exception type callers catch
                 throw new IndexOutOfRangeException($"Index {index} is out of range. Valid range: 1 to {children.Count}.");
+#pragma warning restore S112
             return children[index - 1];
         }
     }
@@ -359,7 +367,6 @@ public class OutlineItem
     /// <summary>Removes the first child outline item.</summary>
     public void Delete()
     {
-        var children = Children;
         if (_children is not null && _children.Count > 0)
         {
             _children.RemoveAt(0);
@@ -370,6 +377,7 @@ public class OutlineItem
     /// <summary>Appends a child outline item.</summary>
     public void Add(OutlineItem child)
     {
+        PrepareToPlace(child);
         _ = Children; // ensure lazy init
         _children!.Add(child);
         child._ownerItem = this;
@@ -379,6 +387,7 @@ public class OutlineItem
     /// <summary>Inserts a child outline item at a 1-based position.</summary>
     public void Insert(int index, OutlineItem child)
     {
+        PrepareToPlace(child);
         _ = Children; // ensure lazy init
         if (index < 1) index = 1;
         if (index > _children!.Count + 1) index = _children.Count + 1;
@@ -396,22 +405,34 @@ public class OutlineItem
             _children = [];
 
             if (_reader is null) return _children;
-            var first = _reader.ResolveDict(_dict.Get("First"));
-            var current = first;
-            var visited = new HashSet<int>();
-
-            while (current is not null)
+            // A file's chain may loop back to a sibling or to an item above this one: each item is read once,
+            // so the tree stays a tree for every walker.
+            var seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+            for (var node = this; node is not null; node = node._ownerItem)
+                seen.Add(node._dict);
+            var current = _reader.ResolveDict(_dict.Get("First"));
+            while (current is not null && seen.Add(current))
             {
                 _children.Add(new OutlineItemCollection(current, _reader) { _ownerItem = this });
-
-                var nextRef = current.Get("Next");
-                if (nextRef is PdfIndirectRef iref && !visited.Add(iref.ObjectNumber))
-                    break;
-
-                current = _reader.ResolveDict(nextRef);
+                current = _reader.ResolveDict(current.Get("Next"));
             }
 
             return _children;
         }
+    }
+
+    /// <summary>Refuse an item that would sit under itself or under one of its own items, and take an item this
+    /// item already holds out of its old place, so it is listed once. An item held elsewhere stays there too: callers
+    /// copy bookmarks from a collection they are enumerating.</summary>
+    private void PrepareToPlace(OutlineItem child)
+    {
+        if (child is null) throw new ArgumentNullException(nameof(child));
+        for (var node = this; node is not null; node = node._ownerItem)
+        {
+            if (ReferenceEquals(node, child))
+                throw new ArgumentException("An outline item cannot be placed under itself or under one of its own items.", nameof(child));
+        }
+        _ = Children; // ensure lazy init
+        _children!.RemoveAll(c => ReferenceEquals(c, child));
     }
 }

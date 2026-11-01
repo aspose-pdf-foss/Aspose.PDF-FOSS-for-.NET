@@ -10,7 +10,7 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>Quote schedule: a table block - its columns solved and its rows drawn.</summary>
-    private void RenderQuoteTable(QuoteScheduleState qs, QsBlock b)
+    private static void RenderQuoteTable(QuoteScheduleState qs, QsBlock b)
     {
         var qt = new QuoteTableState();
         qt.qs = qs;

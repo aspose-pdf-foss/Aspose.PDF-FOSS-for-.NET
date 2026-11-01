@@ -19,8 +19,9 @@ public sealed partial class PdfToHtmlConverter
         var dir = System.IO.Path.GetDirectoryName(pathTemplate) ?? "";
         var stem = System.IO.Path.GetFileNameWithoutExtension(pathTemplate);
         var ext = System.IO.Path.GetExtension(pathTemplate);
-        var w = (int)page.Width * 96 / 72;
-        var h = (int)page.Height * 96 / 72;
+        var (_, width, height) = VisiblePageBox(page);
+        var w = (int)width * 96 / 72;
+        var h = (int)height * 96 / 72;
         var device = new Aspose.Pdf.Devices.PngDevice(w, h, new Aspose.Pdf.Devices.Resolution(96));
         using var ms = new System.IO.MemoryStream();
         device.Process(page, ms);
@@ -62,7 +63,7 @@ public sealed partial class PdfToHtmlConverter
         StyleRegistry styleReg, List<SidecarFile> sidecars, HtmlSaveOptions? options = null,
         string? cssUrl = null)
     {
-        var css = new StringBuilder(BuildBaseCss(doc, pageList, namer, styleReg));
+        var css = new StringBuilder(BuildBaseCss(doc, pageList, namer, styleReg, options));
         var fontMode = options?.FontSavingMode ?? HtmlSaveOptions.FontSavingModes.AlwaysSaveAsWOFF;
         foreach (var font in EmitFontSidecars(doc, pageList, sidecars, fontMode, options))
             css.Append(FontFaceCss(font, fontUrlPrefix: "", fontMode));
@@ -108,22 +109,31 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>The structural prologue + the document's accumulated stl_ appearance
     /// classes (everything except the @font-face rules).</summary>
-    private static string BuildBaseCss(Document doc, int[] pageList, ClassNamer namer, StyleRegistry styleReg)
+    private static string BuildBaseCss(Document doc, int[] pageList, ClassNamer namer, StyleRegistry styleReg,
+        HtmlSaveOptions? options)
     {
         // The page box truncates the point size before the em conversion (595.5pt →
         // 595pt → 49.58333em) and prints at single precision (G7).
-        var firstPage = doc.Pages[pageList[0]];
-        return BuildStructuralCss(namer, System.Math.Floor(firstPage.Width) / 12.0,
-            System.Math.Floor(firstPage.Height) / 12.0, styleReg.BackdropLayout) + styleReg.Css(namer);
+        // A document with no page to save has no page box: the prologue takes the default page size.
+        (double width, double height) = pageList.Length > 0
+            ? (VisiblePageBox(doc.Pages[pageList[0]]).Width, VisiblePageBox(doc.Pages[pageList[0]]).Height)
+            : (PageSize.A4.Width, PageSize.A4.Height);
+        return BuildStructuralCss(namer, System.Math.Floor(width) / 12.0,
+            System.Math.Floor(height) / 12.0, styleReg.BackdropLayout, styleReg.Band, PageBoxCss(options)) + styleReg.Css(namer);
     }
 
     /// <summary>The fixed structural stylesheet prologue (positioned text, page box, view
     /// scaling, sup/sub, IE hooks), with class selectors run through <paramref name="namer"/>
     /// so a CssClassNamesPrefix scopes them like the dynamic rules.</summary>
     private static string BuildStructuralCss(ClassNamer namer, double pageWidthEm, double pageHeightEm,
-        bool backdropLayout)
+        bool backdropLayout, ContentBand? band, string pageBoxCss)
     {
         string Em(double v) => ((float)v).ToString("G7", CultureInfo.InvariantCulture) + "em";
+        // A document trimmed to its content: the page box is the first page's band, the backdrop
+        // holder lifts by the band's top, and the text layer reaches the band's bottom.
+        var boxHeightEm = band?.HeightEm ?? pageHeightEm;
+        var layerHeightEm = band?.BottomEm ?? pageHeightEm;
+        var holderTop = band is { } lift ? $"\n\ttop: -{Em(lift.TopEm)};" : "";
         var bare = "." + namer.Stem;
         var view = namer.Sel("view");
         var ie = namer.Sel("ie");
@@ -138,7 +148,7 @@ public sealed partial class PdfToHtmlConverter
             $"@media print{{{view} {{font-size:1em; transform:scale(1);}}}}\n" +
             $"{namer.Sel("grlink")} {{ position:relative;width:100%;height:100%;z-index:1000000; }}\n" +
             $"{namer.Sel("01")} {{\n\tposition: absolute;\n\twhite-space: nowrap;\n}}\n" +
-            $"{namer.Sel("02")} {{\n\tfont-size: 1em;\n\tline-height: 0.0em;\n\twidth: {Em(pageWidthEm)};\n\theight: {Em(pageHeightEm)};\n\tborder-style: none;\n\tdisplay: block;\n\tmargin: 0em;\n}}\n" +
+            $"{namer.Sel("02")} {{\n\tfont-size: 1em;\n\tline-height: 0.0em;\n\twidth: {Em(pageWidthEm)};\n\theight: {Em(boxHeightEm)};\n{pageBoxCss}}}\n" +
             // The page box is followed by an Edge-only overflow clamp
             // (present in both stl_ dialects' emitted stylesheets).
             $"\n@supports(-ms-ime-align:auto) {{ {namer.Sel("02")} {{overflow: hidden;}}}}\n";
@@ -146,36 +156,58 @@ public sealed partial class PdfToHtmlConverter
         // 05/06; a backdrop-less document's text layer takes 03/04 directly.
         return backdropLayout
             ? prologue +
-              $"{namer.Sel("03")} {{\n\tposition: relative;\n}}\n" +
+              $"{namer.Sel("03")} {{\n\tposition: relative;{holderTop}\n}}\n" +
               $"{namer.Sel("04")} {{\n\tposition: absolute;\n\tleft: 0em;\n\ttop: 0em;\n}}\n" +
               $"{namer.Sel("05")} {{\n\tposition: relative;\n\twidth: {Em(pageWidthEm)};\n}}\n" +
-              $"{namer.Sel("06")} {{\n\theight: {Em(pageHeightEm / 10.0)};\n}}\n"
+              $"{namer.Sel("06")} {{\n\theight: {Em(layerHeightEm / 10.0)};\n}}\n"
             : prologue +
               $"{namer.Sel("03")} {{\n\tposition: relative;\n\twidth: {Em(pageWidthEm)};\n}}\n" +
-              $"{namer.Sel("04")} {{\n\theight: {Em(pageHeightEm / 10.0)};\n}}\n";
+              $"{namer.Sel("04")} {{\n\theight: {Em(layerHeightEm / 10.0)};\n}}\n";
     }
 
     /// <summary>Wrap a page's collected SVG path elements in a standalone SVG document
     /// with the viewer-independent header (px viewBox = points × 4/3). The inner matrix
     /// scales points to px and — for a sidecar document — also flips PDF's bottom-left
     /// origin to SVG's top-left. An INLINE document leaves the flip to each path's own
-    /// transform, so the composition is the same either way.</summary>
+    /// transform, so the composition is the same either way. The paths are written in the
+    /// page's user space: a page box whose corner is not the origin is moved onto the
+    /// canvas by the same matrix, and a box at the origin keeps the matrix as it was.</summary>
     private static string BuildSvgDocument(string paths, double widthPt, double heightPt,
-        int pageNumber, bool inlineSvg = false, string? inlineClass = null)
+        int pageNumber, bool inlineSvg = false, string? inlineClass = null,
+        double originX = 0, double originY = 0, double visibleHeightPt = double.NaN,
+        int quarterTurn = 0, double frameWidthPt = 0, double frameHeightPt = 0)
     {
         var pw = (int)System.Math.Round(widthPt * 4.0 / 3.0);
         var ph = (int)System.Math.Round(heightPt * 4.0 / 3.0);
+        // A page trimmed to its content shows the document down to the band's bottom only; the
+        // paths keep the page's coordinates, so the flip stays the page's.
+        var shown = double.IsNaN(visibleHeightPt) ? ph : (int)System.Math.Round(visibleHeightPt * 4.0 / 3.0);
+        const double pxPerPt = 4.0 / 3.0;
+        var tx = originX == 0 ? "0" : F(-originX * pxPerPt);
+        // The inline paths flip themselves about the page height, so the box's bottom edge
+        // moves them down; the sidecar wrapper flips, so the same edge lifts its origin.
         var g = inlineSvg
-            ? "matrix(1.3333333 0 0 1.3333333 0 0)"
-            : $"matrix(1.3333333 0 0 -1.3333333 0 {ph})";
+            ? $"matrix(1.3333333 0 0 1.3333333 {tx} {(originY == 0 ? "0" : F(originY * pxPerPt))})"
+            : $"matrix(1.3333333 0 0 -1.3333333 {tx} {(originY == 0 ? ph.ToString(CultureInfo.InvariantCulture) : F(ph + originY * pxPerPt))})";
         // An inline element states the size and positioning class the sidecar's
         // <object> wrapper used to carry; a standalone document needs neither.
         var inlineAttrs = inlineSvg
-            ? $" class=\"{inlineClass}\" width=\"{pw}\" height=\"{ph}\""
+            ? $" class=\"{inlineClass}\" width=\"{pw}\" height=\"{shown}\""
             : "";
+        var body = $"<g transform=\"{g}\">{paths}</g>";
+        // A quarter-turned page's paths are drawn in its unrotated frame (frameWidthPt x frameHeightPt) and turned
+        // onto the page box with its text: clockwise for /Rotate 90, counterclockwise for 270.
+        if (quarterTurn != 0)
+        {
+            var flip = inlineSvg ? heightPt * pxPerPt : ph;
+            var turn = quarterTurn == 90
+                ? $"matrix(0 1 -1 0 {F(flip)} 0)"
+                : $"matrix(0 -1 1 0 {F(frameHeightPt * pxPerPt - flip)} {F(frameWidthPt * pxPerPt)})";
+            body = $"<g transform=\"{turn}\">{body}</g>";
+        }
         return "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" " +
-            $"version=\"1.1\" id=\"body_{pageNumber}\"{inlineAttrs} preserveAspectRatio=\"xMinYMin meet\" viewBox=\"0 0 {pw} {ph}\">" +
-            $"<g transform=\"{g}\">{paths}</g></svg>";
+            $"version=\"1.1\" id=\"body_{pageNumber}\"{inlineAttrs} preserveAspectRatio=\"xMinYMin meet\" viewBox=\"0 0 {pw} {shown}\">" +
+            $"{body}</svg>";
     }
 
     /// <summary>Collect the document's fonts as WOFF sidecars: one file per font
@@ -266,7 +298,6 @@ public sealed partial class PdfToHtmlConverter
 
     private string RenderPage(Page page, int pageNumber)
     {
-        var mb = page.MediaBox;
         var width = page.Width;
         var height = page.Height;
 
@@ -283,7 +314,10 @@ public sealed partial class PdfToHtmlConverter
             // keeps its long-standing shape: every shown run reaches the markup.
             saveTransparentTexts: true,
             substitutors: _substitutors,
-            resources: reader.ResolveDict(page.Dict.Get("Resources")));
+            resources: PageResources(page.Dict, reader));
+        if (WidgetLayer(page.Dict, reader) is { } widgets)
+            RenderContentToHtml(widgets.Content, fonts, imageXObjects, reader, sb, height, width,
+                saveTransparentTexts: true, substitutors: _substitutors, resources: widgets.Resources);
 
         // Render link annotations
         RenderLinkAnnotations(page.Dict, reader, sb, height);
@@ -328,12 +362,14 @@ public sealed partial class PdfToHtmlConverter
         public double X, Y, FontSize = 12, Rise, Angle, RawRise;
         public bool IsType3;
         public string Family = "sans-serif", CssFamily = "sans-serif",
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
             Weight = "normal", Style = "normal", DeclStyle = "normal";
         public bool FauxBold;
-        public double R, G, B;
+#pragma warning restore S3218
+        public double R, G, B, Alpha = 1.0;
         public bool Transparent;
         public double Ascent = 1.0, LineHeight;
-        public int Z, McSeq;
+        public int Z, McSeq, Seq;
         public double TjNum;
         public int Chars;
         /// <summary>Text of the line's last merged show — an overstrike re-strokes
@@ -361,25 +397,6 @@ public sealed partial class PdfToHtmlConverter
             Rules.Add((cls, key));
             return cls;
         }
-
-        /// <summary>The stylesheet rules: one class per angle, each transform
-        /// property on its own line, vendor prefixes first (-o-, -webkit-, -moz-,
-        /// then the standard property).</summary>
-        public string Css()
-        {
-            var sb = new StringBuilder();
-            foreach (var (cls, deg) in Rules)
-            {
-                sb.Append('.').Append(cls).Append(" {\n");
-                sb.Append("-o-transform: rotate(").Append(F(deg)).Append("deg);\n");
-                sb.Append("-webkit-transform: rotate(").Append(F(deg)).Append("deg);\n");
-                sb.Append("-moz-transform: rotate(").Append(F(deg)).Append("deg);\n");
-                sb.Append("transform: rotate(").Append(F(deg)).Append("deg);\n");
-                sb.Append("transform-origin: left bottom;\n");
-                sb.Append("}\n");
-            }
-            return sb.ToString();
-        }
     }
 
     [System.ThreadStatic] private static Dictionary<string, bool>? _sysResolvable;
@@ -390,14 +407,20 @@ public sealed partial class PdfToHtmlConverter
     private static Dictionary<string, HtmlFontRecord> ResolveFonts(PdfDictionary pageDict, PdfReader reader,
         bool preferFontCmap = false, Dictionary<int, LigatureSubstitutor>? substitutors = null,
         string? defaultFontName = null, bool friendlyFamilies = false)
-        => ResolveFontsFromResources(reader.ResolveDict(pageDict.Get("Resources")), reader,
+        => ResolveFontsFromResources(PageResources(pageDict, reader), reader,
             preferFontCmap, substitutors, defaultFontName, friendlyFamilies);
+
+    /// <summary>A page's resources: its own dictionary, or the one it inherits through the
+    /// page tree (a producer may hang one dictionary on the Pages node for every page).</summary>
+    internal static PdfDictionary? PageResources(PdfDictionary pageDict, PdfReader reader)
+        => reader.ResolveDict(pageDict.Get("Resources")
+            ?? PageCollection.ResolveInheritedRawValue(pageDict, "Resources", reader));
 
     private static Dictionary<string, ImageXObject> ResolveImageXObjects(
         PdfDictionary pageDict, PdfReader reader)
     {
         var result = new Dictionary<string, ImageXObject>(StringComparer.Ordinal);
-        var resources = reader.ResolveDict(pageDict.Get("Resources"));
+        var resources = PageResources(pageDict, reader);
         if (resources is null) return result;
         var xobjectDict = reader.ResolveDict(resources.Get("XObject"));
         if (xobjectDict is null) return result;
@@ -446,24 +469,29 @@ public sealed partial class PdfToHtmlConverter
         return (family, weight, style);
     }
 
-    /// <summary>Text-decoration for a run starting at (x, baselineY), both in device
-    /// space (y-up): a same-colour hairline just below (or at) the baseline reads as
+    /// <summary>Text-decoration for a run from x to <paramref name="xEnd"/> on baselineY, all in
+    /// device space (y-up): a same-colour hairline just below (or at) the baseline reads as
     /// an underline, one through the x-height as a line-through. The rule must
-    /// horizontally cover the run's start.</summary>
+    /// horizontally cover the run's start and - when the run's end is known - nearly all of
+    /// it: a stroke ending mid-line underlines part of the text, not the run. The rules
+    /// taken are listed in <paramref name="taken"/>.</summary>
     private static string? FindDecoration(
-        List<(double Y, double X0, double X1, double Thick, double R, double G, double B)>? rules,
-        double x, double baselineY, double fontSize, double r, double g, double b)
+        List<(double Y, double X0, double X1, double Thick, double R, double G, double B, int SvgStart, int SvgEnd)>? rules,
+        double x, double xEnd, double baselineY, double fontSize, double r, double g, double b,
+        List<int> taken)
     {
         if (rules is null || rules.Count == 0) return null;
         bool under = false, through = false;
-        foreach (var rule in rules)
+        for (var ri = 0; ri < rules.Count; ri++)
         {
+            var rule = rules[ri];
             if (rule.X0 > x + 0.6 || rule.X1 < x + 0.6) continue;
+            if (xEnd > x && rule.X1 < xEnd - DecorationReachShare * (xEnd - x)) continue;
             if (Math.Abs(rule.R - r) > 0.02 || Math.Abs(rule.G - g) > 0.02
                 || Math.Abs(rule.B - b) > 0.02) continue;
             var below = baselineY - rule.Y; // positive: rule sits below the baseline
-            if (below >= -0.06 * fontSize && below <= 0.3 * fontSize) under = true;
-            else if (below < -0.1 * fontSize && below >= -0.55 * fontSize) through = true;
+            if (below >= -0.06 * fontSize && below <= 0.3 * fontSize) { under = true; taken.Add(ri); }
+            else if (below < -0.1 * fontSize && below >= -0.55 * fontSize) { through = true; taken.Add(ri); }
         }
         return (under, through) switch
         {
@@ -473,6 +501,9 @@ public sealed partial class PdfToHtmlConverter
             _ => null,
         };
     }
+
+    /// <summary>The share of a run's extent its decoration rule may stop short of.</summary>
+    private const double DecorationReachShare = 0.1;
 
     /// <summary>A page's /Contents parts joined into the single logical stream the
     /// spec defines: graphics state (the CTM in particular — a page-wide scale/flip
@@ -561,11 +592,9 @@ public sealed partial class PdfToHtmlConverter
             case "Launch":
                 // /F may be a bare path string or a file-specification dict.
                 var f = actionDict.Get("F");
-                string? path = f is PdfString fs
-                    ? Compat.Latin1.GetString(fs.Value)
-                    : reader.ResolveDict(f)?.Get("F") is PdfString fes
-                        ? Compat.Latin1.GetString(fes.Value)
-                        : null;
+                string? path = null;
+                if (f is PdfString fs) path = Compat.Latin1.GetString(fs.Value);
+                else if (reader.ResolveDict(f)?.Get("F") is PdfString fes) path = Compat.Latin1.GetString(fes.Value);
                 return path?.Replace('\\', '/');
             default:
                 return null;
@@ -577,7 +606,7 @@ public sealed partial class PdfToHtmlConverter
     /// other script is passed through unchanged.</summary>
     private static string TranslateAcrobatJs(string js)
     {
-        var launch = System.Text.RegularExpressions.Regex.Match(js, @"app\.launchURL\(\s*""([^""]*)""");
+        var launch = SafeRegex.Match(js, @"app\.launchURL\(\s*""([^""]*)""");
         if (launch.Success) return $"window.open('{launch.Groups[1].Value}')";
         if (js.Contains("getPrintParams") || js.Contains(".print(")) return "window.print()";
         if (js.Contains("closeDoc")) return "window.close()";
@@ -678,7 +707,6 @@ public sealed partial class PdfToHtmlConverter
         double r = default;
         double g = default;
         double b = default;
-        r = g = b = 0;
         var nums = new List<double>(4);
         foreach (var o in operands)
         {

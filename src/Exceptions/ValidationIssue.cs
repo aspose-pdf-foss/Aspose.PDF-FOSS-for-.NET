@@ -52,7 +52,7 @@ internal static class DocumentValidator
         CheckPages(doc, reader, catalog, issues);
         CheckAnnotations(doc, issues);
         CheckFormFields(doc, issues);
-        CheckFonts(doc, reader, issues);
+        CheckFonts(doc, issues);
         CheckInfo(doc, issues);
 
         return issues.ToArray();
@@ -87,6 +87,12 @@ internal static class DocumentValidator
             for (var i = 1; i <= doc.PageCount; i++)
             {
                 var page = doc.Pages.At(i);
+                if (page is null || page.IsUnresolvedStub)
+                {
+                    issues.Add(new ValidationIssue("error", "PAGE_TREE_KID_MISSING",
+                        $"Page {i} is a page-tree kid the file holds nowhere", $"Page {i}"));
+                    continue;
+                }
                 var mb = page.MediaBox;
                 if (mb.Width <= 0 || mb.Height <= 0)
                 {
@@ -114,6 +120,12 @@ internal static class DocumentValidator
             var pagesDict = reader.ResolveDict(catalog.Get("Pages"));
             if (pagesDict is not null)
             {
+                // The root of the page tree is no node's kid (ISO 32000-1 7.7.3.2).
+                if (pagesDict.ContainsKey("Parent"))
+                {
+                    issues.Add(new ValidationIssue("error", "PAGE_TREE_ROOT_PARENT",
+                        "The root of the page tree has a /Parent"));
+                }
                 var countObj = pagesDict.Get("Count");
                 if (countObj is PdfInteger countInt)
                 {
@@ -141,9 +153,9 @@ internal static class DocumentValidator
             for (var i = 1; i <= doc.PageCount; i++)
             {
                 var page = doc.Pages.At(i);
-                foreach (var annot in page.Annotations)
+                foreach (var annotRect in page.Annotations.Select(annot => annot.Rect))
                 {
-                    var rect = annot.Rect;
+                    var rect = annotRect;
                     if (rect is null) continue;
                     if (rect.Width < 0 || rect.Height < 0)
                     {
@@ -175,17 +187,17 @@ internal static class DocumentValidator
             if (form is null) return;
 
             var names = new HashSet<string>();
-            foreach (var field in form.Fields)
+            foreach (var fullName in form.Fields.Select(field => field.FullName))
             {
-                if (string.IsNullOrEmpty(field.FullName))
+                if (string.IsNullOrEmpty(fullName))
                 {
                     issues.Add(new ValidationIssue("error", "FIELD_MISSING_NAME",
                         "Form field is missing /T (partial name)"));
                 }
-                else if (!names.Add(field.FullName))
+                else if (!names.Add(fullName))
                 {
                     issues.Add(new ValidationIssue("warning", "FIELD_DUPLICATE_NAME",
-                        $"Duplicate field name: '{field.FullName}'"));
+                        $"Duplicate field name: '{fullName}'"));
                 }
             }
         }
@@ -195,7 +207,7 @@ internal static class DocumentValidator
         }
     }
 
-    private static void CheckFonts(Document doc, PdfReader reader, List<ValidationIssue> issues)
+    private static void CheckFonts(Document doc, List<ValidationIssue> issues)
     {
         try
         {

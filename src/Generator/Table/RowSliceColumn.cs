@@ -17,7 +17,7 @@ public partial class Table
         double[] colWidths, string fontName, int[] cellMap,
         List<(Rectangle rect, Hyperlink link)>? links, List<(byte[] data, Rectangle rect)>? imageSink,
         List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>? optionSink, List<byte[]>? graphSink,
-        List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink, Page? page,
+        List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>? checkboxSink, Page? page,
         List<(Note note, double x, double baseline, double size)>? footnoteSink,
         List<(ReservedBlock block, ReservedPart part, Rectangle rect)>? blockSink)
     {

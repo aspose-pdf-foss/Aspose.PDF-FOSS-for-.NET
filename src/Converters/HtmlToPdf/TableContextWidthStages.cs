@@ -13,14 +13,14 @@ internal static partial class HtmlToPdfConverter
         if (cfg.liftNestedTables) html = BlockRowsAsGrids(html);
         if (ps.sheetTdBoxRule) html = HrRowsAsBands(DropEmptyRows(html));
         cfg.scanHtml = cfg.liftNestedTables ? ExtractNestedTables(html, cfg.nestedHtml) : html;
-        foreach (Match cm2 in Regex.Matches(cfg.scanHtml, @"<col\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (var value in SafeRegex.Matches(cfg.scanHtml, @"<col\b[^>]*>", RegexOptions.IgnoreCase).Select(cm2 => cm2.Value))
         {
             double wpx = 0;
-            var wa = Regex.Match(cm2.Value, @"width\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+            var wa = SafeRegex.Match(value, @"width\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
             if (wa.Success) double.TryParse(wa.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out wpx);
             else
             {
-                var ws = Regex.Match(cm2.Value, @"style\s*=\s*[""'][^""']*width\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase);
+                var ws = SafeRegex.Match(value, @"style\s*=\s*[""'][^""']*width\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase);
                 if (ws.Success) double.TryParse(ws.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out wpx);
             }
             (colModel.colGroupPt ??= new List<double>()).Add(wpx * PxToPt);
@@ -29,9 +29,11 @@ internal static partial class HtmlToPdfConverter
 
         // The cascade on the table box: its inline style, then its own CLASS rules
         // (`table.AdvTbl { width: 800px }`), then the sheet's type rule.
-        string? twVal = cfg.tblStyle.TryGetValue("width", out var itw) ? itw
-            : TableClassRuleValue(cfg, "width")
-            ?? (cfg.css.TryGetValue("table", out var tw2) && tw2.TryGetValue("width", out var tw) ? tw : null);
+        string? twVal;
+        if (cfg.tblStyle.TryGetValue("width", out var itw)) twVal = itw;
+        else
+            twVal = TableClassRuleValue(cfg, "width")
+                ?? (cfg.css.TryGetValue("table", out var tw2) && tw2.TryGetValue("width", out var tw) ? tw : null);
         if (twVal is null && cfg.docElementGrid && cfg.docCss is not null
             && cfg.docCss.TryGetValue("table", out var dtw2) && dtw2.TryGetValue("width", out var dtw))
         {
@@ -52,7 +54,7 @@ internal static partial class HtmlToPdfConverter
         // (`width="600px"` - the unit spelt into the attribute - declares the same box: the jobs
         // board sizes every ad grid so, and its sheet follows the declared 600)
         if (twVal is null && cfg.liftNestedTables && cfg.tblTag.Success
-            && Regex.Match(cfg.tblTag.Value, @"\bwidth\s*=\s*[""']?\s*(\d+(?:\.\d+)?)\s*(%?)(?:px)?\s*[""'\s>]",
+            && SafeRegex.Match(cfg.tblTag.Value, @"\bwidth\s*=\s*[""']?\s*(\d+(?:\.\d+)?)\s*(%?)(?:px)?\s*[""'\s>]",
                 RegexOptions.IgnoreCase) is { Success: true } twAttr)
         {
             var twAttrPct = twAttr.Groups[2].Value.Length > 0;
@@ -70,9 +72,10 @@ internal static partial class HtmlToPdfConverter
         // respect), pins the table box inside the available width.
         else if (twVal is not null && cfg.availWidthPt > 0 && TryParseLength(twVal) is { } twAbs && twAbs > 0)
         {
-            string? maxWv = cfg.tblStyle.TryGetValue("max-width", out var imw) ? imw
-                : (cfg.css.TryGetValue("table", out var mt) && mt.TryGetValue("max-width", out var mw1) ? mw1
-                    : cfg.docCss is not null && cfg.docCss.TryGetValue("table", out var mdt) && mdt.TryGetValue("max-width", out var mw2) ? mw2 : null);
+            string? maxWv = null;
+            if (cfg.tblStyle.TryGetValue("max-width", out var imw)) maxWv = imw;
+            else if (cfg.css.TryGetValue("table", out var mt) && mt.TryGetValue("max-width", out var mw1)) maxWv = mw1;
+            else if (cfg.docCss is not null && cfg.docCss.TryGetValue("table", out var mdt) && mdt.TryGetValue("max-width", out var mw2)) maxWv = mw2;
             if (maxWv is not null && TryParseLength(maxWv) is { } mwPt && mwPt > 0)
                 twAbs = Math.Min(twAbs, mwPt);
             colModel.tableWidthFrac = Compat.Clamp(twAbs / cfg.availWidthPt, 0.05, 1.0);

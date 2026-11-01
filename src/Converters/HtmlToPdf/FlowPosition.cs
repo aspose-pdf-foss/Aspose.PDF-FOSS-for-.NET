@@ -16,5 +16,8 @@ internal static partial class HtmlToPdfConverter
         /// <summary>The horizontal box of the table laid out last (NaN until one has): a wrapper frames around its children's union.</summary>
         public double lastTableX0 = double.NaN;
         public double lastTableX1 = double.NaN;
+        /// <summary>The conversion's link list - each anchor's box and href, resolved to annotations once every
+        /// target is placed - or null for a position no link may be recorded from.</summary>
+        public List<(Page page, Rectangle rect, string url, string? text)>? pendingLinks;
     }
 }

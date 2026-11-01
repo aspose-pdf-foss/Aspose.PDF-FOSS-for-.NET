@@ -36,7 +36,7 @@ private sealed class StlPositionedState
     public double mt;
     public double mb;
     public double band;
-    public System.Text.RegularExpressions.MatchCollection pageDivs = null!;
+    public SafeMatchCollection pageDivs = null!;
     // ── Harvest every page's runs and background image first: the page WIDTH is
     // document-wide (the widest line anywhere), so layout needs the full sweep. ──
     public List<List<Aspose.Pdf.Converters.HtmlToPdfConverter.StlRun>> pagesRuns = null!;
@@ -67,10 +67,9 @@ private sealed class StlPositionedState
     public double x;
     public double sentinelAdv;
     public bool lineHasBox;
-    public double lsBudget;
     // The em-compensation dialect's sheet budget is a rule of its own
     // (see gridBudget below).
     public double gridBudget;
-    public System.Text.RegularExpressions.MatchCollection spanMatches = null!;
+    public SafeMatchCollection spanMatches = null!;
 }
 }

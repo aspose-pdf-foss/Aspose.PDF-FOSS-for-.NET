@@ -18,13 +18,45 @@ internal static partial class JpegDecoder
     /// Adobe-inverted CMYK rather than direct ink values.</param>
     /// <param name="replicateChroma">Expand subsampled chroma by replicating each sample
     /// instead of the triangle filter; see <c>ReplicateChroma</c>.</param>
+    /// <param name="keepCmyk">Return a 4-component image as its ink amounts (C, M, Y, K, 255 = full ink),
+    /// four components, instead of converting it to RGB.</param>
     /// <returns>Decoded pixels (RGB or grayscale), width, height, component count.</returns>
     public static (byte[] pixels, int width, int height, int components) Decode(byte[] data, bool invertCmyk = false,
-        bool replicateChroma = false)
+        bool replicateChroma = false, int scaleDenominator = 1, bool keepCmyk = false)
     {
-        var reader = new JpegReader(data) { InvertCmyk = invertCmyk, ReplicateChroma = replicateChroma };
+        var reader = new JpegReader(data)
+        {
+            InvertCmyk = invertCmyk, ReplicateChroma = replicateChroma, ScaleDenominator = scaleDenominator, KeepCmyk = keepCmyk,
+        };
         reader.Parse();
         return (reader.Pixels, reader.Width, reader.Height, reader.Components);
+    }
+
+    /// <summary>The frame's width and height from its SOF marker, without decoding; (0, 0) when
+    /// there is none.</summary>
+    public static (int width, int height) FrameSize(byte[] data)
+    {
+        var pos = 2; // past SOI
+        while (pos + 4 <= data.Length)
+        {
+            if (data[pos] != 0xFF || data[pos + 1] == 0xFF) { pos++; continue; }
+            var marker = data[pos + 1];
+            if (marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { pos += 2; continue; } // no length
+            if ((marker == 0xC0 || marker == 0xC1 || marker == 0xC2) && pos + 9 <= data.Length)
+                return ((data[pos + 7] << 8) | data[pos + 8], (data[pos + 5] << 8) | data[pos + 6]);
+            pos += 2 + ((data[pos + 2] << 8) | data[pos + 3]);
+        }
+        return (0, 0);
+    }
+
+    /// <summary>The largest of 8, 4 and 2 by which a frame decoded smaller still has at least
+    /// <paramref name="targetWidth"/> by <paramref name="targetHeight"/> samples; 1 when none does.</summary>
+    public static int ScaleDenominatorFor(int frameWidth, int frameHeight, double targetWidth, double targetHeight)
+    {
+        var denominator = 1;
+        while (denominator < 8 && frameWidth >= 2.0 * denominator * targetWidth && frameHeight >= 2.0 * denominator * targetHeight)
+            denominator *= 2;
+        return denominator;
     }
 
     private sealed partial class JpegReader
@@ -41,6 +73,9 @@ internal static partial class JpegDecoder
         /// <summary>Invert CMYK samples before the ink→RGB conversion (/Decode [1 0 …]).</summary>
         public bool InvertCmyk { get; init; }
 
+        /// <summary>Leave a 4-component image as its ink amounts rather than converting it to RGB.</summary>
+        public bool KeepCmyk { get; init; }
+
         /// <summary>Expand subsampled chroma by replicating each sample, not by the triangle filter.</summary>
         /// <remarks>
         /// How the reference decodes a JPEG it renders into a printed page image: a 4:2:0 photo
@@ -48,6 +83,16 @@ internal static partial class JpegDecoder
         /// filter, whose differences were all in chroma, and none replicated.
         /// </remarks>
         public bool ReplicateChroma { get; init; }
+
+        /// <summary>1, 2, 4 or 8: the output is the frame at that fraction of its size, each
+        /// block transformed to 8/n samples a side from its low-frequency corner (the
+        /// reduced-size decoding of libjpeg). The scans are read in full either way.</summary>
+        public int ScaleDenominator { get; init; } = 1;
+
+        private int BlockSide => 8 / ScaleDenominator;
+        private int _frameWidth, _frameHeight;   // the frame's own size; Width and Height are the output's
+
+        private int Reduced(int n) => (n + ScaleDenominator - 1) / ScaleDenominator;
 
         private ComponentInfo[] _components = [];
         private int[][] _quantTables = new int[4][];
@@ -150,10 +195,12 @@ internal static partial class JpegDecoder
 
         private void ParseSOF()
         {
-            var len = Read16();
-            var precision = _data[_pos++]; // bits per sample (usually 8)
-            Height = Read16();
-            Width = Read16();
+            Read16();
+            _ = _data[_pos++]; // bits per sample (usually 8)
+            _frameHeight = Read16();
+            _frameWidth = Read16();
+            Height = Reduced(_frameHeight);
+            Width = Reduced(_frameWidth);
             Components = _data[_pos++];
 
             _components = new ComponentInfo[Components];
@@ -251,7 +298,7 @@ internal static partial class JpegDecoder
 
         private void ParseSOS()
         {
-            var len = Read16();
+            Read16();
             var numComponents = _data[_pos++];
             _scanComponentIndices = new int[numComponents];
             _scanDcTableIds = new int[numComponents];
@@ -301,8 +348,8 @@ internal static partial class JpegDecoder
         private void EnsureCoefficientArrays()
         {
             if (_coefs.Length != 0) return;
-            var mcuCols = (Width + _maxH * 8 - 1) / (_maxH * 8);
-            var mcuRows = (Height + _maxV * 8 - 1) / (_maxV * 8);
+            var mcuCols = (_frameWidth + _maxH * 8 - 1) / (_maxH * 8);
+            var mcuRows = (_frameHeight + _maxV * 8 - 1) / (_maxV * 8);
             _coefs = new int[_components.Length][];
             _blocksPerLine = new int[_components.Length];
             _blocksPerCol = new int[_components.Length];
@@ -316,6 +363,12 @@ internal static partial class JpegDecoder
 
         private static int DecodeHuffman(BitStream bits, HuffmanTable table)
         {
+            var entry = table.Lookup[bits.Peek(LookupBits)];
+            if (entry != 0)
+            {
+                bits.Skip(entry & 0xF);
+                return entry >> 4;
+            }
             var code = 0;
             for (var len = 1; len <= 16; len++)
             {
@@ -332,9 +385,7 @@ internal static partial class JpegDecoder
 
         private static int ReceiveExtend(BitStream bits, int category)
         {
-            var value = 0;
-            for (var i = 0; i < category; i++)
-                value = (value << 1) | bits.ReadBit();
+            var value = bits.ReadBits(category);
 
             // Extend sign: if MSB is 0, value is negative
             if (value < (1 << (category - 1)))
@@ -364,7 +415,7 @@ internal static partial class JpegDecoder
 
         private static int Descale(long x, int n) => (int)((x + (1L << (n - 1))) >> n);
 
-        private static int Clamp(int v) => v < 0 ? 0 : v > 255 ? 255 : v;
+        private static int Clamp(int v) => v switch { < 0 => 0, > 255 => 255, _ => v };
 
         private static HuffmanTable BuildHuffmanTable(int[] counts, byte[] symbols)
         {
@@ -381,13 +432,40 @@ internal static partial class JpegDecoder
                 table.ValOffset[bits] = si - code;
                 for (var i = 0; i < counts[bits]; i++)
                 {
+                    if (bits <= LookupBits && si < symbols.Length)
+                    {
+                        // every input prefix that starts with this code decodes to its symbol
+                        var first = code << (LookupBits - bits);
+                        var entry = (ushort)((symbols[si] << 4) | bits);
+                        for (var suffix = 0; suffix < 1 << (LookupBits - bits); suffix++)
+                            table.Lookup[first | suffix] = entry;
+                    }
                     code++;
                     si++;
                 }
                 table.MaxCode[bits] = code - 1;
                 code <<= 1;
             }
+            BuildFastAc(table);
             return table;
+        }
+
+        /// <summary>Each LookupBits-bit prefix whose AC code and coefficient bits fit in it, as
+        /// the run, value and bit count the slow path would reach for it.</summary>
+        private static void BuildFastAc(HuffmanTable table)
+        {
+            for (var i = 0; i < 1 << LookupBits; i++)
+            {
+                var entry = table.Lookup[i];
+                if (entry == 0) continue;
+                var codeLength = entry & 0xF;
+                var rs = entry >> 4;
+                var size = rs & 0xF;
+                if (size == 0 || codeLength + size > LookupBits) continue;
+                var raw = (i >> (LookupBits - codeLength - size)) & ((1 << size) - 1);
+                var value = raw < 1 << (size - 1) ? raw - ((1 << size) - 1) : raw;
+                table.FastAc[i] = (value << 16) | ((rs >> 4) << 8) | (codeLength + size);
+            }
         }
 
         // JPEG zigzag order
@@ -412,14 +490,22 @@ internal static partial class JpegDecoder
         public int[] MinCode = new int[17];
         public int[] MaxCode = new int[17];
         public int[] ValOffset = new int[17];
+        // The next LookupBits bits of input decoded at once: symbol << 4 | code length, or 0
+        // for a code longer than that, which the bit-by-bit walk still resolves.
+        public ushort[] Lookup = new ushort[1 << LookupBits];
+        // An AC code and its coefficient's bits both inside the next LookupBits bits, decoded
+        // at once: value << 16 | zero run << 8 | bits used, or 0 where the slow path decodes.
+        public int[] FastAc = new int[1 << LookupBits];
     }
+
+    private const int LookupBits = 9;
 
     /// <summary>Bit-level reader for entropy-coded JPEG data, handling byte stuffing (0xFF00).</summary>
     private sealed class BitStream
     {
         private readonly byte[] _data;
         private int _pos;
-        private int _bits;
+        private long _bits;
         private int _bitsLeft;
 
         public BitStream(byte[] data, int startPos)
@@ -430,16 +516,35 @@ internal static partial class JpegDecoder
 
         public int BytePosition => _pos;
 
+        // At least count bits in the buffer (count up to 16), the newest lowest; zero bits
+        // stand in past the end of the data or at a marker, which the reader never crosses.
+        // A short buffer is topped up to seven bytes at once, so most reads find their bits
+        // waiting; the bytes read ahead are the scan's own, as the reader stops at a marker.
+        private void Fill(int count)
+        {
+            if (_bitsLeft >= count) return;
+            while (_bitsLeft <= 48)
+            {
+                _bits = (_bits << 8) | (uint)NextByte();
+                _bitsLeft += 8;
+            }
+        }
+
         public int ReadBit()
         {
-            if (_bitsLeft == 0)
-            {
-                _bits = NextByte();
-                _bitsLeft = 8;
-            }
+            Fill(1);
             _bitsLeft--;
-            return (_bits >> _bitsLeft) & 1;
+            return (int)(_bits >> _bitsLeft) & 1;
         }
+
+        /// <summary>The next <paramref name="count"/> bits, left where they are.</summary>
+        public int Peek(int count)
+        {
+            Fill(count);
+            return (int)(_bits >> (_bitsLeft - count)) & ((1 << count) - 1);
+        }
+
+        public void Skip(int count) => _bitsLeft -= count;
 
         public void AlignByte()
         {
@@ -449,9 +554,8 @@ internal static partial class JpegDecoder
         /// <summary>Read <paramref name="count"/> bits MSB-first as an unsigned value.</summary>
         public int ReadBits(int count)
         {
-            var v = 0;
-            for (var i = 0; i < count; i++)
-                v = (v << 1) | ReadBit();
+            var v = Peek(count);
+            _bitsLeft -= count;
             return v;
         }
 
@@ -472,18 +576,16 @@ internal static partial class JpegDecoder
         private int NextByte()
         {
             if (_pos >= _data.Length) return 0;
-            var b = _data[_pos++];
-            // JPEG byte stuffing: 0xFF is followed by 0x00 (which should be skipped)
+            var b = _data[_pos];
+            // JPEG byte stuffing: a 0xFF data byte is followed by 0x00, which is skipped. A
+            // 0xFF followed by anything else starts a marker: the entropy data ends before
+            // it, so the reader stays put and hands out zero bits until it is realigned.
             if (b == 0xFF)
             {
-                if (_pos < _data.Length)
-                {
-                    var next = _data[_pos];
-                    if (next == 0x00)
-                        _pos++; // skip the stuffed zero
-                    // If it's a marker (not 0x00), don't consume it
-                }
+                if (_pos + 1 >= _data.Length || _data[_pos + 1] != 0x00) return 0;
+                _pos++;
             }
+            _pos++;
             return b;
         }
     }

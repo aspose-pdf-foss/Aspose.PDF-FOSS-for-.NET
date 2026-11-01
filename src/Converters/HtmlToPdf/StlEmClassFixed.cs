@@ -34,7 +34,7 @@ internal static partial class HtmlToPdfConverter
     /// carries nothing but divs and spans, so ANY flow tag rules it out. It decides on the
     /// first one, which in practice is a few hundred bytes in.</summary>
     internal static bool IsStlEmClassCandidate(string html) =>
-        !Regex.IsMatch(html, @"<(table|p|h[1-6]|ul|ol|input|form|textarea)\b", RegexOptions.IgnoreCase);
+        !SafeRegex.IsMatch(html, @"<(table|p|h[1-6]|ul|ol|input|form|textarea)\b", RegexOptions.IgnoreCase);
 
     /// <summary>One stylesheet class, as far as this dialect reads it.</summary>
     private sealed class StlEmCls
@@ -43,7 +43,9 @@ internal static partial class HtmlToPdfConverter
         public double? LeftEm, TopEm;
         public double? FontSizeEm, LineHeightEm, LetterSpacingEm, WordSpacingEm;
         public string? Family, Color;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double? WidthPt, HeightPt, FontSizePt;
+#pragma warning restore S3218
         public double? WidthEm, HeightEm;
     }
 
@@ -53,15 +55,15 @@ internal static partial class HtmlToPdfConverter
     private static Dictionary<string, StlEmCls> ReadStlEmClasses(string css)
     {
         var map = new Dictionary<string, StlEmCls>(StringComparer.Ordinal);
-        foreach (Match m in Regex.Matches(StripAtBlocks(css), @"(?<sel>[^{}]+)\{(?<body>[^{}]*)\}"))
+        foreach (var groups in SafeRegex.Matches(StripAtBlocks(css), @"(?<sel>[^{}]+)\{(?<body>[^{}]*)\}").Select(m => m.Groups))
         {
-            var sel = m.Groups["sel"].Value.Trim();
+            var sel = groups["sel"].Value.Trim();
             if (sel.Length < 2 || sel[0] != '.') continue;
             var name = sel[1..];
-            if (!Regex.IsMatch(name, @"^[\w-]+$")) continue;   // a descendant/compound selector
-            var body = m.Groups["body"].Value;
+            if (!SafeRegex.IsMatch(name, @"^[\w-]+$")) continue;   // a descendant/compound selector
+            var body = groups["body"].Value;
             if (!map.TryGetValue(name, out var c)) map[name] = c = new StlEmCls();
-            if (Regex.IsMatch(body, @"position:\s*absolute")) c.Absolute = true;
+            if (SafeRegex.IsMatch(body, @"position:\s*absolute")) c.Absolute = true;
             c.LeftEm = StlEmNum(body, "left") ?? c.LeftEm;
             c.TopEm = StlEmNum(body, "top") ?? c.TopEm;
             c.FontSizeEm = StlEmNum(body, "font-size") ?? c.FontSizeEm;
@@ -73,9 +75,9 @@ internal static partial class HtmlToPdfConverter
             c.WidthEm = StlEmNum(body, "width") ?? c.WidthEm;
             c.HeightEm = StlEmNum(body, "height") ?? c.HeightEm;
             c.FontSizePt = StlPtNum(body, "font-size") ?? c.FontSizePt;
-            var fam = Regex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
+            var fam = SafeRegex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
             if (fam.Success) c.Family = fam.Groups["v"].Value.Trim();
-            var col = Regex.Match(body, @"(?<!-)color:\s*(?<v>[^;}]+)");
+            var col = SafeRegex.Match(body, @"(?<!-)color:\s*(?<v>[^;}]+)");
             if (col.Success) c.Color = col.Groups["v"].Value.Trim();
         }
         return map;
@@ -89,7 +91,7 @@ internal static partial class HtmlToPdfConverter
     {
         // The property name must stand alone: `top` is not `border-top`, `height` not
         // `line-height`. The unit suffix delimits the value on the right.
-        var m = Regex.Match(body, @"(?<![\w-])" + prop + @":\s*(?<v>-?[\d.]+)" + unit);
+        var m = SafeRegex.Match(body, @"(?<![\w-])" + prop + @":\s*(?<v>-?[\d.]+)" + unit);
         return m.Success && double.TryParse(m.Groups["v"].Value,
             System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
@@ -114,10 +116,11 @@ internal static partial class HtmlToPdfConverter
             if (open < 0) break;
             var depth = 0;
             var j = open;
-            for (; j < css.Length; j++)
+            while (j < css.Length)
             {
                 if (css[j] == '{') depth++;
                 else if (css[j] == '}' && --depth == 0) { j++; break; }
+                j++;
             }
             i = j;
         }
@@ -144,7 +147,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (em) { if (!StlEmResolveEmBox(c)) continue; }
             else if (c.WidthPt is not > 0 || c.HeightPt is not > 0 || c.FontSizePt is not > 0) continue;
-            var n = Regex.Matches(html, @"<div class=""" + Regex.Escape(name) + @"""[^>]*>").Count;
+            var n = SafeRegex.Matches(html, @"<div class=""" + Regex.Escape(name) + @"""[^>]*>").Count;
             if (n > bestCount || (n == bestCount && best is not null
                                   && string.CompareOrdinal(name, best) < 0))
             {
@@ -162,9 +165,9 @@ internal static partial class HtmlToPdfConverter
     {
         if (c.WidthPt is > 0 && c.HeightPt is > 0 && c.FontSizePt is > 0) return true;
         if (c.WidthEm is not > 0 || c.HeightEm is not > 0 || c.FontSizeEm is not > 0) return false;
-        c.FontSizePt = c.FontSizeEm!.Value * CssRootFontPt;
-        c.WidthPt = c.WidthEm!.Value * CssRootFontPt;
-        c.HeightPt = c.HeightEm!.Value * CssRootFontPt;
+        c.FontSizePt = c.FontSizeEm.Value * CssRootFontPt;
+        c.WidthPt = c.WidthEm.Value * CssRootFontPt;
+        c.HeightPt = c.HeightEm.Value * CssRootFontPt;
         return true;
     }
 }

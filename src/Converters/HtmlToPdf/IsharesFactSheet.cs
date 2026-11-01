@@ -21,10 +21,10 @@ internal static partial class HtmlToPdfConverter
     //   126..666 × 4 pt at y(td) 108; green band 15 pt tall to y(td) 131.16 with
     //   the Arial-Bold 10 title on baseline 127.25 (a title <sup> rides 4.16
     //   higher at 8.33); italic 8 column heads right-aligned at the value edge,
-    //   the label head on the last line's baseline; a 0.5 pt rule 2.48 below;
-    //   rows Arial 8 from rule + 10.16 pitching 12.14 (a row whose label wraps
-    //   advances only 11.6 into its first line, the continuation 10.54 below);
-    //   the closing rule 4.08 under the last row baseline.
+    //   the label head on the last line's baseline; a 0.5 pt rule 2.48 below; rows
+    //   Arial 8 from rule + 10.16 pitching 12.14 (a row whose label wraps
+    //   advances only 11.6 into its first line, the continuation 10.54 below); the
+    //   closing rule 4.08 under the last row baseline.
     //
     // Column partition: the label cell takes the table width left over by the
     // value and hang cells (CSS `td:first-child { width: 100% }`). The hang
@@ -70,7 +70,9 @@ internal static partial class HtmlToPdfConverter
         public string Pre = "";     // text before the <ins> segment
         public string Ins = "";     // the underlined <ins> segment
         public string Sup = "";     // a trailing superscript (last line only)
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public bool Delta;          // a DeltaSymbol marker opens the ins segment
+#pragma warning restore S3218
     }
 
     private sealed class IfsRow
@@ -89,7 +91,9 @@ internal static partial class HtmlToPdfConverter
         public string TitleSup = "";
         public string LabelHead = "";
         public List<IfsHeadLine> ValueHead = new();
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<IfsRow> Rows = new();
+#pragma warning restore S3218
     }
 
     // Split a value-head cell into lines at <br>, separating the text before an
@@ -101,13 +105,13 @@ internal static partial class HtmlToPdfConverter
     {
         // a trailing superscript marker rides the last line
         var sup = "";
-        var supM = Regex.Match(inner, @"<sup[^>]*>([\s\S]*?)</sup>", RegexOptions.IgnoreCase);
+        var supM = SafeRegex.Match(inner, @"<sup[^>]*>([\s\S]*?)</sup>", RegexOptions.IgnoreCase);
         if (supM.Success) { sup = flat(supM.Groups[1].Value); inner = inner.Remove(supM.Index, supM.Length); }
         var first = lines.Count;
-        var insM = Regex.Match(inner, @"<ins\b[^>]*>([\s\S]*?)</ins>", RegexOptions.IgnoreCase);
+        var insM = SafeRegex.Match(inner, @"<ins\b[^>]*>([\s\S]*?)</ins>", RegexOptions.IgnoreCase);
         if (!insM.Success)
         {
-            foreach (var piece in Regex.Split(inner, @"<br\s*/?>", RegexOptions.IgnoreCase))
+            foreach (var piece in SafeRegex.Split(inner, @"<br\s*/?>", RegexOptions.IgnoreCase))
                 if (flat(piece) is { Length: > 0 } txt)
                     lines.Add(new IfsHeadLine { Pre = txt });
             if (sup.Length > 0 && lines.Count > first) lines[^1].Sup = sup;
@@ -116,14 +120,14 @@ internal static partial class HtmlToPdfConverter
         var pre = flat(inner[..insM.Index]);
         var insBody = insM.Groups[1].Value;
         var delta = insBody.Contains("DeltaSymbol", StringComparison.Ordinal);
-        var insPieces = Regex.Split(insBody, @"<br\s*/?>", RegexOptions.IgnoreCase);
+        var insPieces = SafeRegex.Split(insBody, @"<br\s*/?>", RegexOptions.IgnoreCase);
         for (var i = 0; i < insPieces.Length; i++)
         {
             var txt = flat(insPieces[i]);
             if (txt.Length == 0 && i > 0) continue;
             lines.Add(new IfsHeadLine
             {
-                Pre = i == 0 ? pre + (pre.Length > 0 ? " " : "") : "",
+                Pre = i == 0 && pre.Length > 0 ? pre + " " : "",
                 Ins = txt,
                 Delta = delta && i == 0,
             });

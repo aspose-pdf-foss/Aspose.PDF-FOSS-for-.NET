@@ -64,11 +64,11 @@ internal static partial class HtmlToPdfConverter
             || !af.html.Contains("section-rule", StringComparison.Ordinal))
             return null;
 
-        af.pageM = Regex.Match(af.html, @"class=['""]page['""]\s*>([\s\S]*)</div>\s*</div>\s*</body>",
+        af.pageM = SafeRegex.Match(af.html, @"class=['""]page['""]\s*>([\s\S]*)</div>\s*</div>\s*</body>",
             RegexOptions.IgnoreCase);
         if (!af.pageM.Success) return null;
         af.content = af.pageM.Groups[1].Value;
-        af.titleM = Regex.Match(af.content, @"class=['""]header['""]\s*>([\s\S]*?)</div>",
+        af.titleM = SafeRegex.Match(af.content, @"class=['""]header['""]\s*>([\s\S]*?)</div>",
             RegexOptions.IgnoreCase);
         if (!af.titleM.Success) return null;
 
@@ -87,7 +87,7 @@ internal static partial class HtmlToPdfConverter
         af.orange = "0.874 0.424 0";
         af.gray = "0.396 0.396 0.396";
         af.black = "0 0 0";
-        Emit(af, "F2", AfTitleFs, AfTitleX, AfTitleBl, Flat(af, af.titleM.Groups[1].Value), af.orange);
+        Emit(af, "F2", AfTitleFs, AfTitleX, AfTitleBl, FlatKeepingNbsp(af.titleM.Groups[1].Value), af.orange);
 
         af.lastMark = AfTitleBl;      // the last baseline (text) or box bottom
         af.lastWasBox = false;

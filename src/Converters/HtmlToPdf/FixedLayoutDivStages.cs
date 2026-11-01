@@ -46,8 +46,7 @@ internal static partial class HtmlToPdfConverter
             // of that div's transparent lines at the raster's ink edge plus up to an
             // em of trailing whitespace; pure-LTR pages measure reliably and stay as-is.
             var divHasRtl = false;
-            foreach (var s in div.Spans)
-                if (HasRtlChar(s.Text)) { divHasRtl = true; break; }
+            if (div.Spans.Any(s => HasRtlChar(s.Text))) { divHasRtl = true; }
 
             foreach (var s in div.Spans)
                 foreach (var line in s.Lines)
@@ -56,7 +55,7 @@ internal static partial class HtmlToPdfConverter
                     if (Environment.GetEnvironmentVariable("STL_DEBUG_WIDTH2") is not null && r > 400)
                     {
                         var trimmed = line.TrimEnd();
-                        var spacesN = 0; foreach (var chW in line) if (chW == ' ') spacesN++;
+                        var spacesN = 0; foreach (var chW in line.Where(chW => chW == ' ')) spacesN++;
                         var trailAdvDbg = MeasureSpanLine(s, line[trimmed.Length..]);
                         Console.Error.WriteLine(Compat.Format(System.Globalization.CultureInfo.InvariantCulture,
                             $"WLINE r={r:F2} left={s.Left:F2} fs={s.FontSize:F4} ls={s.LetterSpacing:F4} ws={s.WordSpacing:F4} nsp={spacesN} nch={line.Length} trail={trailAdvDbg:F2} txt='{(trimmed.Length > 34 ? trimmed[^34..] : trimmed)}'"));

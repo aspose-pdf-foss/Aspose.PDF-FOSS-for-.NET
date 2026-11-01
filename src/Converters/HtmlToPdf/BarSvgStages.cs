@@ -23,14 +23,14 @@ internal static partial class HtmlToPdfConverter
             case "g":
             {
                 var (gx, gy) = (bv.top.tx, bv.top.ty);
-                var tr = Regex.Match(bv.attrs,
+                var tr = SafeRegex.Match(bv.attrs,
                     @"translate\(\s*([\d.-]+)\s*[, ]\s*([\d.-]+)\s*\)", RegexOptions.IgnoreCase);
                 if (tr.Success)
                 {
                     gx += double.Parse(tr.Groups[1].Value, bv.invc);
                     gy += double.Parse(tr.Groups[2].Value, bv.invc);
                 }
-                var gFill = Regex.Match(bv.attrs, @"fill\s*:\s*(#[0-9a-fA-F]{3,6})")
+                var gFill = SafeRegex.Match(bv.attrs, @"fill\s*:\s*(#[0-9a-fA-F]{3,6})")
                     is { Success: true } gf ? gf.Groups[1].Value : bv.top.fill;
                 bv.stack.Push((gx, gy, gFill));
                 if (t.Groups["self"].Success && bv.stack.Count > 1) bv.stack.Pop();

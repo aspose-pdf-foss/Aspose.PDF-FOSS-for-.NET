@@ -34,12 +34,13 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>One arm of BuildTableFromHtml's token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void HandleCloseTag(TableStyleConfig cfg, TableParseState ps, TableColumnModel colModel, Table table, Token tok, string tag, string? cssRunFace)
+    private static void HandleCloseTag(TableStyleConfig cfg, TableParseState ps, TableColumnModel colModel, Table table, string tag, string? cssRunFace)
     {
         // DataWorks control captures end here (the switch below sees only
         // opens): the select emits its chosen option's box, the textarea
         // its content box.
         CloseDataWorksFormTag(cfg, ps, tag);
+        CloseGridFieldTag(cfg, ps, tag);
         // Structure tags of a table NESTED inside a cell do not drive the
         // outer grid — the nested content flows as the host cell's text,
         // with a line break per nested CELL, so each nested cell keeps its
@@ -116,7 +117,7 @@ internal static partial class HtmlToPdfConverter
     private static double RowGroupFontPt(Token tok)
     {
         if (tok.Attributes is null || !tok.Attributes.TryGetValue("style", out var st) || st is null) return 0;
-        var m = Regex.Match(st, @"(?<![-\w])font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(st, @"(?<![-\w])font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
         return m.Success && TryParseLength(m.Groups[1].Value.Trim()) is { } pt && pt > 0 ? pt : 0;
     }
 
@@ -129,6 +130,7 @@ internal static partial class HtmlToPdfConverter
             if (ps.cell is not null && ps.line.Length > 0) PushLine(ps, cfg.redlineCells, cfg.dwFormCells, cfg.widenProbe);
             return;
         }
+        ps.rowOrdinal++;
         // A hidden row (`<tr style="display:none">` — the empty-state
         // tfoot band of a data grid) is out of the layout entirely: no
         // cells, no height, no column measures. The in-cell hidden check
@@ -184,19 +186,19 @@ internal static partial class HtmlToPdfConverter
             }
         ps.uaPrevRowRuleBelowPt = ps.rowRuleBelowPt;
         ps.rowRuleBelowPt = 0; ps.rowRuleColor = null;
-        ps.uaRowBg = ps.uaCellBoxes ? UaRowBackground(cfg, ps, tok) : null;
+        ps.uaRowBg = ps.uaCellBoxes ? UaRowBackground(cfg, tok) : null;
         if (tok.Attributes is not null && tok.Attributes.TryGetValue("style", out var trStyle))
         {
             if (ps.uaCellBoxes && UaRuleBelow(trStyle) is (var trRuleW, var trRuleC))
             { ps.rowRuleBelowPt = trRuleW; ps.rowRuleColor = trRuleC; }
-            var trfs = Regex.Match(trStyle, @"font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+            var trfs = SafeRegex.Match(trStyle, @"font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
             if (trfs.Success && TryParseLength(trfs.Groups[1].Value.Trim()) is { } trfp) ps.rowFontPt = trfp;
             // (…and a UA-boxed row's own line-height paces its cells' lines: the remittance rows' 30 px)
-            var trlh = Regex.Match(trStyle, @"(?<![-\w])line-height\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+            var trlh = SafeRegex.Match(trStyle, @"(?<![-\w])line-height\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
             if (ps.uaCellBoxes && trlh.Success
                 && UaLineHeightPct(trlh.Groups[1].Value.Trim(), ps.rowFontPt > 0 ? ps.rowFontPt : cfg.cellFontSize) is { } trlhPct && trlhPct > 0)
                 ps.rowLineHPt = (ps.rowFontPt > 0 ? ps.rowFontPt : cfg.cellFontSize) * trlhPct / WholeWidthPercent;
-            var trhm = Regex.Match(trStyle, @"height\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+            var trhm = SafeRegex.Match(trStyle, @"height\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
             if (trhm.Success && TryParseLength(trhm.Groups[1].Value.Trim()) is { } trhp && trhp > 0)
                 ps.rowMinHeightPt = trhp;
         }

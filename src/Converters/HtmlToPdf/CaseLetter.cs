@@ -16,15 +16,15 @@ internal static partial class HtmlToPdfConverter
     //
     // The geometry is measured on the expected output for this
     // fixture (it reproduces the shipped era template exactly):
-    //  - page 657 × 842: 96 left margin + the declared 630 px box + 88.5;
+    //  - page 657 × 842: 96 left margin + the declared 630 px box + 88.5,
     //  - a 9 pt line paces 10.5 (floor(1.2 × 12 px) css px), an 11 pt line
-    //    12.75, everything seats its baseline 8.0 under its band top;
+    //    12.75, everything seats its baseline 8.0 under its band top,
     //  - the heading draws ONE 20 pt darkgray line ("HSBC" bold) at x 98.25,
-    //    baseline 111.18; the address block opens at baseline 199.19;
+    //    baseline 111.18; the address block opens at baseline 199.19,
     //  - case tables: declared percent columns of the 459 box, and a column
     //    whose MIN-CONTENT (longest unbreakable token + the 1.13 pad pair)
     //    exceeds its share takes that min while the others give the surplus
-    //    up in proportion to their own slack;
+    //    up in proportion to their own slack,
     //  - a row is max-cell-lines × 10.5 + 2.25 tall (+0.375 per extra line),
     //    each cell's lines centred in the row; the marker "N." seats at the
     //    table top + 8.0.
@@ -62,20 +62,23 @@ internal static partial class HtmlToPdfConverter
     private const double ClBorderW = 0.75;
     /// <summary>Overflow guard for un-broken content (the era pages never reach it).</summary>
     private const double ClBottomPt = 770.0;
-    private static readonly Color ClHeadingInk = Color.FromArgb(169, 169, 169); // darkgray
 
     private sealed class ClCellRun { public string Text = ""; public bool Bold; }
     private sealed class ClCell
     {
         public List<ClCellRun> Runs = new();
         public int ColSpan = 1;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<List<ClCellRun>>? Lines;            // wrap result
+#pragma warning restore S3218
     }
     private sealed class ClCaseTable
     {
         public string Marker = "";
         public List<double> ColPct = new();
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<List<ClCell>> Rows = new();
+#pragma warning restore S3218
         public bool BreakBefore;
         public int SourceEnd;
     }
@@ -98,7 +101,9 @@ internal static partial class HtmlToPdfConverter
         ce.caseTop = (ce.y - ClLine9Pt) + ClCaseGapAfterProsePt;
         ce.innerBox = ClCaseGridRightPt - ClCaseGridLeftPt;
         ce.firstOnPage = false;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var ct in ce.caseTables)
+#pragma warning restore S3267
         {
             if (!DrawCaseTable(ce, ct)) break;
         }
@@ -106,7 +111,7 @@ internal static partial class HtmlToPdfConverter
         // Closing paragraph on the final page.
         if (ce.closeText.Length > 0)
         {
-            var cl2 = Wrap(ce, ce.closeText, ce.proseBox, 9);
+            var cl2 = CaseLetterWrap(ce.closeText, ce.proseBox, 9);
             var cy = ce.caseTop - ClInterCaseGapPt + ClInterCaseGapPt + ClAscSeatPt;
             for (var i = 0; i < cl2.Count; i++)
                 T(ce, 9, ce.contentX, cy + i * ClLine9Pt, cl2[i]);

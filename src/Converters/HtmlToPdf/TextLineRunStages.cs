@@ -138,9 +138,10 @@ internal static partial class HtmlToPdfConverter
                 var (crn, chex) = Text.Type0FontEmbedder.Embed(
                     cjkFontDict, bt.cjkTtf!, bt.cjkName, chunkText, stripSpacesInBaseFont: true);
                 var cx = raised ? penX + ThaiToneNudgeEm * bt.metrics.blockFontSize : penX;
-                var cy = raised
-                    ? (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y) + ThaiToneRaiseEm * bt.metrics.blockFontSize
-                    : (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y);
+                double cy;
+                if (raised)
+                    cy = (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y) + ThaiToneRaiseEm * bt.metrics.blockFontSize;
+                else cy = bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y;
                 bt.sb.Append($"/{crn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
                 bt.sb.Append($"1 0 0 1 {cx.ToString("F2", bt.invc)} {cy.ToString("F2", bt.invc)} Tm ");
                 bt.sb.Append(KernedTj(bt.cjkTtf!, chex));
@@ -160,6 +161,41 @@ internal static partial class HtmlToPdfConverter
         bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(bt.sb.ToString()));
     }
 
+    // Synthetic bold for a face that has none (probed: a bold heading's SimSun run fills and strokes
+    // its glyphs, `2 Tr`, the stroke 0.028 of the size wide in the fill colour, and spaces them a
+    // further 20/1000 em apart in its TJ; the CSS-box flow only).
+    private const double FakeBoldStrokeEm = 0.028;
+    private const int FakeBoldGlyphGap = -20;
+
+    private static bool FakeBoldSegment(BlockTextState bt, Text.Font? segFont)
+        => bt.profile.cssBoxBody && (bt.block.FontRes == "F2" || bt.block.EmBold)
+            && segFont?.FontName is { } name && !HasOwnBoldFace(name);
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> _ownBoldFace = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Whether a family has a bold program of its own: the bold lookup falls back to the regular
+    /// file for a family without one (SimSun, MS PGothic), so the two programs are compared.</summary>
+    private static bool HasOwnBoldFace(string family) => _ownBoldFace.GetOrAdd(family, f =>
+        PosFace(f + " Bold").ttf is { } bold && !(PosFace(f).ttf is { } regular && bold.AsSpan().SequenceEqual(regular)));
+
+    /// <summary>A fake-bold run: fill-and-stroke in the fill colour, every glyph set 20/1000 em further
+    /// on, the text render mode and line width restored after it.</summary>
+    private static string FakeBoldTj(BlockTextState bt, byte[] hexGlyphIds)
+    {
+        var sb = new StringBuilder();
+        if (bt.lineForeColor is { } c)
+            sb.Append($"{(c.R / 255.0).ToString("F3", bt.invc)} {(c.G / 255.0).ToString("F3", bt.invc)} {(c.B / 255.0).ToString("F3", bt.invc)} RG ");
+        else sb.Append("0 0 0 RG ");
+        sb.Append($"{(FakeBoldStrokeEm * bt.metrics.blockFontSize).ToString("F3", bt.invc)} w 2 Tr [");
+        for (var i = 0; i + 1 < hexGlyphIds.Length; i += 2)
+        {
+            if (i > 0) sb.Append(FakeBoldGlyphGap.ToString(bt.invc));
+            sb.Append('<').Append(Compat.ToHexString(hexGlyphIds.AsSpan(i, 2))).Append('>');
+        }
+        sb.Append("] TJ 1 w 0 Tr ");
+        return sb.ToString();
+    }
+
     /// <summary>Per-segment Unicode fallback: consecutive Tj runs in each segment's own face advance the text position naturally, so no per-segment measurement is needed.</summary>
     private static void WriteUnicodeSegmentRuns(BlockTextState bt, Core.PdfDictionary segFontDict)
     {
@@ -172,9 +208,12 @@ internal static partial class HtmlToPdfConverter
             if (segTtf is not null)
             {
                 var (rn, hex) = Text.Type0FontEmbedder.Embed(
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
                     segFontDict, segTtf, segFont!.FontName ?? "Unicode", segText, stripSpacesInBaseFont: true);
+#pragma warning restore S8969
                 bt.sb.Append($"/{rn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-                bt.sb.Append(KernedTj(segTtf, hex));
+                if (FakeBoldSegment(bt, segFont)) bt.sb.Append(FakeBoldTj(bt, hex));
+                else bt.sb.Append(KernedTj(segTtf, hex));
             }
             else
             {
@@ -245,11 +284,11 @@ internal static partial class HtmlToPdfConverter
             if (bt.block.AlignJustify && bt.lineIdx < bt.metrics.lines.Length - 1)
             {
                 var spaces = 0;
-                foreach (var ch in line) if (ch == ' ') spaces++;
+                foreach (var ch in line.Where(ch => ch == ' ')) spaces++;
                 if (spaces > 0)
                 {
                     var natural = MeasureFaceText(
-                        string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily!,
+                        string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily,
                         line, bt.metrics.blockFontSize);
                     var slack = bt.flow.contentWidth - bt.block.LeftIndent - natural;
                     if (slack > 0 && slack < (bt.flow.contentWidth - bt.block.LeftIndent) * 0.35)
@@ -373,7 +412,7 @@ internal static partial class HtmlToPdfConverter
                     var (pRn, pHex) = Text.Type0FontEmbedder.Embed(uafDict, puaTtf,
                         "Wingdings", puaText, stripSpacesInBaseFont: true);
                     bt.sb.Append($"/{pRn} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
-                    bt.sb.Append(KernedTj(puaTtf!, pHex));
+                    bt.sb.Append(KernedTj(puaTtf, pHex));
                 }
                 else
                 {

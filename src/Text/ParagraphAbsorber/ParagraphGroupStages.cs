@@ -32,11 +32,11 @@ public sealed partial class ParagraphAbsorber
                 contLeft = Math.Min(contLeft, gp.currentLines[li].MinX);
             gp.tOutdent = gp.curr.MinX < contLeft - 0.55 * gp.f;
         }
-        gp.tNumeric = gp.prevText.EndsWith(".") && NumericLead(gp.text);
+        gp.tNumeric = gp.prevText.EndsWith('.') && NumericLead(gp.text);
         gp.currLeadF = gp.curr.Fragments.Count > 0 && gp.curr.Fragments[0].FontSize > 0
-            ? (double)gp.curr.Fragments[0].FontSize : gp.f;
+            ? gp.curr.Fragments[0].FontSize : gp.f;
         gp.prevTailF = gp.prev.Fragments.Count > 0 && gp.prev.Fragments[^1].FontSize > 0
-            ? (double)gp.prev.Fragments[^1].FontSize : gp.prevF;
+            ? gp.prev.Fragments[^1].FontSize : gp.prevF;
         gp.tFont = gp.capital && Math.Max(gp.currLeadF, gp.prevTailF) > 1.25 * Math.Min(gp.currLeadF, gp.prevTailF);
         gp.tBullet = gp.currBullet && !gp.paraBullet
                       || gp.paraBullet && gp.currBullet && gp.curr.MinX < gp.paraLeft + 0.55 * gp.f

@@ -17,6 +17,14 @@ public sealed class Paragraphs : IList<BaseParagraph>, IReadOnlyList<BaseParagra
     /// <summary>Gets the number of paragraphs in the collection.</summary>
     public int Count => _items.Count;
 
+    private static long _additions;
+
+    /// <summary>Counts the paragraphs added to any collection: a reader that found no paragraph waiting for layout
+    /// stays right while it is unchanged.</summary>
+    internal static long Additions => System.Threading.Interlocked.Read(ref _additions);
+
+    private static void NoteAddition() => System.Threading.Interlocked.Increment(ref _additions);
+
     public bool IsReadOnly => false;
 
     /// <summary>Gets or sets the paragraph at the given zero-based index. Setting <c>null</c> throws a <c>PdfException</c>.</summary>
@@ -28,6 +36,7 @@ public sealed class Paragraphs : IList<BaseParagraph>, IReadOnlyList<BaseParagra
             if (value is null)
                 throw new PdfException("Paragraph item cannot be null.");
             _items[index] = value;
+            NoteAddition();
         }
     }
 
@@ -43,6 +52,7 @@ public sealed class Paragraphs : IList<BaseParagraph>, IReadOnlyList<BaseParagra
         // is three lines, an image added twice is drawn twice).
         if (paragraph is HtmlFragment && _items.Contains(paragraph)) return;
         _items.Add(paragraph);
+        NoteAddition();
     }
 
     /// <summary>Inserts a paragraph at the given zero-based index. Throws a <c>PdfException</c> for <c>null</c>.</summary>
@@ -51,6 +61,7 @@ public sealed class Paragraphs : IList<BaseParagraph>, IReadOnlyList<BaseParagra
         if (paragraph is null)
             throw new PdfException("Paragraph item cannot be null.");
         _items.Insert(index, paragraph);
+        NoteAddition();
     }
 
     /// <summary>Appends each paragraph of the sequence in order, as <c>Add</c> does. Throws a <c>PdfException</c> when the sequence is <c>null</c>.</summary>
@@ -63,9 +74,9 @@ public sealed class Paragraphs : IList<BaseParagraph>, IReadOnlyList<BaseParagra
     public void InsertRange(int index, IEnumerable<BaseParagraph> collection)
     {
         if (collection is null) throw new PdfException("Paragraph item cannot be null.");
-        foreach (var item in collection)
-            if (item is null) throw new PdfException("Paragraph item cannot be null.");
+        if (collection.Any(item => item is null)) throw new PdfException("Paragraph item cannot be null.");
         _items.InsertRange(index, collection);
+        NoteAddition();
     }
 
     /// <summary>Drop <paramref name="count"/> entries starting at <paramref name="index"/>.</summary>

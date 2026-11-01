@@ -110,11 +110,7 @@ public sealed partial class Page
         {
             // Path-construction operators (skip while inside BT/ET — those
             // operands are text positioning, not path geometry).
-            case "m" when !bw.inText && bw.operands.Count >= 2:
-                bw.curX = Num(bw.operands[0]); bw.curY = Num(bw.operands[1]);
-                IncludePathPoint(bw.curX, bw.curY);
-                break;
-            case "l" when !bw.inText && bw.operands.Count >= 2:
+            case "m" or "l" when !bw.inText && bw.operands.Count >= 2:
                 bw.curX = Num(bw.operands[0]); bw.curY = Num(bw.operands[1]);
                 IncludePathPoint(bw.curX, bw.curY);
                 break;

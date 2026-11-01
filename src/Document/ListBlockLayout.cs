@@ -13,7 +13,7 @@ public sealed partial class Document
         if (margin.Top > 0) flow.AdvanceY(margin.Top);
         double widest = 0;
         foreach (var item in list.Items)
-            if (item.Marker is { } m) widest = Math.Max(widest, flow.MeasureMarker(m));
+            if (item.Marker is { } m) widest = Math.Max(widest, FlowLayout.MeasureMarker(m));
         var column = widest + list.MarkerGap;
         var outerLeft = flow.LeftIndent;
         var outerRight = flow.RightIndent;
@@ -26,7 +26,7 @@ public sealed partial class Document
             foreach (var child in item.Paragraphs) LayoutListChild(lc, child);
             flow.LeftIndent = outerLeft;
             if (flow.CloseFirstLineCapture() is not { } first || item.Marker is not { } marker) continue;
-            var offset = list.MarkerAlignment == HorizontalAlignment.Left ? 0 : widest - flow.MeasureMarker(marker);
+            var offset = list.MarkerAlignment == HorizontalAlignment.Left ? 0 : widest - FlowLayout.MeasureMarker(marker);
             flow.SetListMarker(marker, first.Left + itemLeft + offset, first);
         }
         flow.RightIndent = outerRight;

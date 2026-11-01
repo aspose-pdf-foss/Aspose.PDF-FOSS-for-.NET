@@ -125,9 +125,17 @@ public sealed partial class GdiPlusPageRenderer
         savedT.Dispose();
         using var devToSS = new GdiMatrix(k, 0, 0, k, 0, 0);
 
+        // Subsample window: rows/cols 2x−1..2x (clamped) — the half-open center cell.
+        var ssRect = new System.Drawing.Rectangle(
+            Math.Max(0, rect.Left * k - 1), Math.Max(0, rect.Top * k - 1),
+            Math.Min(sw, rect.Right * k) - Math.Max(0, rect.Left * k - 1),
+            Math.Min(sh, rect.Bottom * k) - Math.Max(0, rect.Top * k - 1));
+
         var savedG = _g; var savedBmp = _bitmap; var savedScratch = _blendScratch;
         var savedScale = _scale; var savedScaleY = _scaleY; var savedPixelH = _pixelH;
-        using var ssBmp = new Bitmap(sw, sh, PixelFormat.Format32bppArgb);
+        // A pooled ×2 page layer with only the window read back below cleared: a page of
+        // nested groups no longer allocates a ×2 page per group.
+        var ssBmp = RentLayerCleared(sw, sh, ssRect);
         var sg = Graphics.FromImage(ssBmp);
         GraphicsPath? bboxSS = null;
         Region? clipSS = null;
@@ -158,11 +166,6 @@ public sealed partial class GdiPlusPageRenderer
         }
 
         savedG.Flush();
-        // Subsample window: rows/cols 2x−1..2x (clamped) — the half-open center cell.
-        var ssRect = new System.Drawing.Rectangle(
-            Math.Max(0, rect.Left * k - 1), Math.Max(0, rect.Top * k - 1),
-            Math.Min(sw, rect.Right * k) - Math.Max(0, rect.Left * k - 1),
-            Math.Min(sh, rect.Bottom * k) - Math.Max(0, rect.Top * k - 1));
         var sr = ssBmp.LockBits(ssRect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
         var dr = _bitmap.LockBits(rect, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
         try
@@ -199,6 +202,7 @@ public sealed partial class GdiPlusPageRenderer
             }
         }
         finally { ssBmp.UnlockBits(sr); _bitmap.UnlockBits(dr); }
+        _layerPool.Push(ssBmp);
     }
 
     // aliased: render the pass without anti-aliasing (SmoothingMode.None, aliased text) —
@@ -373,7 +377,7 @@ public sealed partial class GdiPlusPageRenderer
                     for (int c = 0; c < 3; c++)
                     {
                         double cg = (lrow[o + c] - (1 - a) * brow[o + c]) / a;
-                        lrow[o + c] = (byte)(cg < 0 ? 0 : cg > 255 ? 255 : cg + 0.5);
+                        lrow[o + c] = (byte)(cg switch { < 0 => 0, > 255 => 255, _ => cg + 0.5 });
                     }
                     lrow[o + 3] = (byte)(a * 255f + 0.5f);
                 }
@@ -426,7 +430,7 @@ public sealed partial class GdiPlusPageRenderer
                     for (int c = 0; c < 3; c++)
                     {
                         double cg = (lrow[o + c] * al - brow[o + c] * ab * (1 - af)) / af;
-                        lrow[o + c] = (byte)(cg < 0 ? 0 : cg > 255 ? 255 : cg + 0.5);
+                        lrow[o + c] = (byte)(cg switch { < 0 => 0, > 255 => 255, _ => cg + 0.5 });
                     }
                     lrow[o + 3] = (byte)a;
                 }

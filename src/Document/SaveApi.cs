@@ -62,49 +62,6 @@ public sealed partial class Document
         Save(scratch);
     }
 
-    /// <summary>Write the whole document over the stream it was opened from, which is left holding
-    /// only it (see <see cref="MustRewriteWhole"/>).</summary>
-    private void RewriteSource(Stream source)
-    {
-        using var whole = new MemoryStream();
-        Save(whole);
-        source.Seek(0, SeekOrigin.Begin);
-        whole.Position = 0;
-        whole.CopyTo(source);
-        source.SetLength(whole.Length);
-        source.Flush();
-    }
-
-    private void FireBeforePageGenerateEvents()
-    {
-        // Real wiring for Page.OnBeforePageGenerate: walk the page tree
-        // and fire each page's event subscribers (if any) before the
-        // writer serialises them. Mutations to page dicts inside the
-        // handler are picked up by the subsequent save.
-        for (var i = 1; i <= PageCount; i++)
-            Pages[i].RaiseBeforePageGenerate();
-        _actions?.WriteToCatalog();
-        EmitBackgroundOnPages();
-    }
-
-    private void EmitBackgroundOnPages()
-    {
-        if (Background is null) return;
-        var bg = Background;
-        for (var i = 1; i <= PageCount; i++)
-        {
-            var page = Pages[i];
-            var media = page.MediaBox;
-            // Build a "q rg 0 0 W H re f Q" prologue and prepend it to the
-            // page content stream. Real — saved PDF carries the fill rect.
-            var prologue = string.Format(System.Globalization.CultureInfo.InvariantCulture,
-                "q {0:0.######} {1:0.######} {2:0.######} rg 0 0 {3:0.######} {4:0.######} re f Q\n",
-                bg.R / 255.0, bg.G / 255.0, bg.B / 255.0,
-                media.Width, media.Height);
-            page.PrependContentStream(System.Text.Encoding.ASCII.GetBytes(prologue));
-        }
-    }
-
     /// <summary>
     /// Save the document to a file.
     /// </summary>
@@ -142,10 +99,12 @@ public sealed partial class Document
                 Save(outputFileName, new HtmlSaveOptions());
                 break;
             case SaveFormat.Markdown:
+                LayOutPendingParagraphs();
                 System.IO.File.WriteAllText(outputFileName,
                     new Converters.PdfToMarkdownConverter().SaveAsMarkdown(this), System.Text.Encoding.UTF8);
                 break;
             case SaveFormat.Xml:
+                LayOutPendingParagraphs();
                 System.IO.File.WriteAllBytes(outputFileName, Tagged.TaggedXmlExporter.Export(this));
                 break;
             case SaveFormat.Svg:
@@ -175,11 +134,13 @@ public sealed partial class Document
                     "To save a document to a html stream it's necessary to supply several additional conversion " +
                     "parameters. Please use overload of this method that uses instance of HtmlSaveOptions as second parameter.");
             case SaveFormat.Markdown:
+                LayOutPendingParagraphs();
                 var mdBytes = System.Text.Encoding.UTF8.GetBytes(
                     new Converters.PdfToMarkdownConverter().SaveAsMarkdown(this));
                 outputStream.Write(mdBytes, 0, mdBytes.Length);
                 break;
             case SaveFormat.Xml:
+                LayOutPendingParagraphs();
                 var xmlBytes = Tagged.TaggedXmlExporter.Export(this);
                 outputStream.Write(xmlBytes, 0, xmlBytes.Length);
                 break;
@@ -195,6 +156,7 @@ public sealed partial class Document
     public void Save(Stream output, HtmlSaveOptions options)
     {
         options.CheckParametersConsistensyAndThrowExceptionOtherwise(targetIsStream: true);
+        LayOutPendingParagraphs();
         WriteHtmlCore(output, options);
     }
 
@@ -204,6 +166,7 @@ public sealed partial class Document
     public void Save(string path, HtmlSaveOptions options)
     {
         options.CheckParametersConsistensyAndThrowExceptionOtherwise(targetIsStream: false);
+        LayOutPendingParagraphs();
         ValidateExplicitPageList(options.ExplicitListOfSavedPages);
         if (options.SplitIntoPages)
         {
@@ -268,6 +231,7 @@ public sealed partial class Document
         }
         if (options is PdfToMarkdown.MarkdownSaveOptions md)
         {
+            LayOutPendingParagraphs();
             // A file-backed stream still anchors the image resources directory next to
             // the markdown file it writes; a pure in-memory stream has no anchor and
             // keeps the references without saving the files.
@@ -322,6 +286,7 @@ public sealed partial class Document
         }
         if (options is PdfToMarkdown.MarkdownSaveOptions md)
         {
+            LayOutPendingParagraphs();
             var outDir = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(outputFileName));
             var markdown = PdfToMarkdown.MarkdownRenderer.Render(this, md, outDir);
             File.WriteAllText(outputFileName, markdown, new System.Text.UTF8Encoding(false));
@@ -330,6 +295,188 @@ public sealed partial class Document
         ApplyPdfSaveOptions(options);
         using var fs = File.Create(outputFileName);
         Save(fs);
+    }
+
+    /// <summary>Paragraphs added since the document was opened are laid out before a converter reads its
+    /// pages, as the PDF save lays them out (the pass is gated per page): an HTML, Markdown or XML export
+    /// of a document built in code and not yet saved read pages with nothing on them.</summary>
+    private void LayOutPendingParagraphs()
+    {
+        if (_pages is not null && _pages.Any(page => page.Paragraphs.Count > 0 && !page.LayoutApplied)) ApplyPageContent();
+    }
+
+    /// <summary>Save the document using the configured <see cref="SaveOptions"/>.</summary>
+    public void Save(SaveOptions options)
+    {
+        _ = options;
+        if (string.IsNullOrEmpty(FileName))
+            return; // No bound file; caller should use Save(Stream) or Save(string).
+        Save(FileName);
+    }
+
+    /// <summary>
+    /// Save the document to a stream.
+    /// </summary>
+    public void Save(Stream output)
+    {
+        // When the caller opts into strict signature handling, refuse to re-save a
+        // signed document — rewriting it would invalidate the existing signature.
+        RefuseSignatureChange();
+
+        // A signature holds only over the bytes it signed: a document open for update on its own
+        // stream that carries one made over its file - a signed field or a usage-rights signature -
+        // writes its update after those bytes to another target too, unless the save must write the
+        // file anew. A document read from a path or from bytes is written anew.
+        if (_sourceStream is { CanWrite: true } && output.CanSeek && !ReferenceEquals(output, _sourceStream)
+            && !WritesTheFileAnew && (HasSignatureOfTheSourceFile() || HasUsageRightsSignatureOfTheSourceFile()))
+        {
+            FireBeforePageGenerateEvents();
+            SaveIncremental(output);
+            output.Position = 0;
+            return;
+        }
+
+        PrepareSaveDocument();
+        DropUsageRightsOfTheSourceFile();
+
+        // A seekable output holds the document alone afterwards, read from its start:
+        // whatever it held before is replaced, and the position is left at 0, so
+        // `doc.Save(ms); ms.CopyTo(file)` copies the document rather than nothing. The
+        // stream the document was opened from is written through Save() instead.
+        var replacesOutput = output.CanSeek && !ReferenceEquals(output, _sourceStream);
+        if (replacesOutput)
+        {
+            output.Seek(0, SeekOrigin.Begin);
+            output.SetLength(0);
+        }
+
+        var sv = new SaveDocumentState();
+        StampSaveInfo(sv);
+
+        // A RemoveUnusedFonts edit orphaned the replaced fonts' objects (dictionaries,
+        // descriptors, /FontFile programs). Recompute reachability so the serializer drops
+        // them from the saved file instead of carrying them over — otherwise the file keeps
+        // the (now unused) embedded font programs and never shrinks.
+        OpenSaveWriter(sv, output);
+        // The classic-xref PDF/A-1 output loses the object-stream packing win; recover
+        // the size by re-deflating weakly-compressed source streams,
+        // as the conversion save does.
+        try
+        {
+            WriteSaveMetadata(sv);
+
+            // Pre-scan the catalog's inline object graph for dictionaries shared between more than
+            // one parent (e.g. a generated radio group reached from /AcroForm/Fields and from each
+            // option widget's /Parent). These are written once as a shared indirect object so the
+            // back-references survive a round-trip instead of being dropped at the write cycle.
+            WriteSaveObjects(sv);
+
+            WriteSaveTrailer(sv, output);
+        }
+        finally
+        {
+            RestoreDestinationIndexes(sv);
+        }
+        if (replacesOutput) output.Position = 0;
+    }
+
+    /// <summary>The catalog /Perms entries that hold a usage-rights signature.</summary>
+    private static readonly string[] UsageRightsEntries = ["UR", "UR3"];
+
+    /// <summary>
+    /// A usage-rights signature signs byte ranges of the file it was made over, so it cannot hold for a file
+    /// written anew, and a viewer that finds it broken locks the form it was meant to open up: the entries
+    /// stay behind with the file they signed. Only an update appended to the signed bytes keeps them (see
+    /// <see cref="Save(Stream)"/>). A certification (/DocMDP) is not touched.
+    /// </summary>
+    private void DropUsageRightsOfTheSourceFile()
+    {
+        var perms = _reader.ResolveDict(_reader.Catalog.Get("Perms"));
+        if (perms is null) return;
+        foreach (var entry in UsageRightsEntries)
+            perms.Remove(entry);
+    }
+
+    /// <summary>True when the catalog holds a usage-rights signature made over the file (one with a
+    /// /ByteRange), not one merely set on the document in memory.</summary>
+    private bool HasUsageRightsSignatureOfTheSourceFile()
+    {
+        var perms = _reader.ResolveDict(_reader.Catalog.Get("Perms"));
+        if (perms is null) return false;
+        foreach (var entry in UsageRightsEntries)
+            if (_reader.ResolveDict(perms.Get(entry))?.ContainsKey("ByteRange") == true) return true;
+        return false;
+    }
+
+    /// <summary>True when the document still carries a signature made over the file it was read from: a
+    /// signature field whose value holds the /ByteRange it signed. A signature removed in the session no
+    /// longer counts.</summary>
+    private bool HasSignatureOfTheSourceFile()
+    {
+        var form = _reader.ResolveDict(_reader.Catalog.Get("AcroForm"));
+        if (form is null || _reader.Resolve(form.Get("Fields")) is not PdfArray fields) return false;
+        var pending = new Stack<PdfObject>(fields);
+        var seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+        while (pending.Count > 0)
+        {
+            if (_reader.ResolveDict(pending.Pop()) is not { } field || !seen.Add(field)) continue;
+            if (_reader.ResolveDict(field.Get("V"))?.ContainsKey("ByteRange") == true) return true;
+            if (_reader.Resolve(field.Get("Kids")) is PdfArray kids)
+                foreach (var kid in kids) pending.Push(kid);
+        }
+        return false;
+    }
+
+    /// <summary>True when the save must write the file anew whatever signature it carries: content removed
+    /// for good, an encryption set or removed, a linearization asked for, a conversion or a version change,
+    /// or unused objects pruned - none of which an update appended to the old bytes can express.</summary>
+    private bool WritesTheFileAnew =>
+        MustRewriteWhole || _encryptor is not null
+        || (_reader.Decryptor is not null && !_reader.Trailer.ContainsKey("Encrypt"))
+        || _linearize || _isLinearized is not null || OptimizeSize
+        || _versionOverride is not null || _lastConvertedFormat is not null || _reachableObjects is not null;
+
+    /// <summary>Write the whole document over the stream it was opened from, which is left holding
+    /// only it (see <see cref="MustRewriteWhole"/>).</summary>
+    private void RewriteSource(Stream source)
+    {
+        using var whole = new MemoryStream();
+        Save(whole);
+        source.Seek(0, SeekOrigin.Begin);
+        whole.Position = 0;
+        whole.CopyTo(source);
+        source.SetLength(whole.Length);
+        source.Flush();
+    }
+
+    private void FireBeforePageGenerateEvents()
+    {
+        // Real wiring for Page.OnBeforePageGenerate: walk the page tree
+        // and fire each page's event subscribers (if any) before the
+        // writer serialises them. Mutations to page dicts inside the
+        // handler are picked up by the subsequent save.
+        for (var i = 1; i <= PageCount; i++)
+            Pages[i].RaiseBeforePageGenerate();
+        _actions?.WriteToCatalog();
+        EmitBackgroundOnPages();
+    }
+
+    private void EmitBackgroundOnPages()
+    {
+        if (Background is null) return;
+        var bg = Background;
+        for (var i = 1; i <= PageCount; i++)
+        {
+            var page = Pages[i];
+            var media = page.MediaBox;
+            // Build a "q rg 0 0 W H re f Q" prologue and prepend it to the
+            // page content stream. Real — saved PDF carries the fill rect.
+            var prologue = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "q {0:0.######} {1:0.######} {2:0.######} rg 0 0 {3:0.######} {4:0.######} re f Q\n",
+                bg.R / 255.0, bg.G / 255.0, bg.B / 255.0,
+                media.Width, media.Height);
+            page.PrependContentStream(System.Text.Encoding.ASCII.GetBytes(prologue));
+        }
     }
 
     /// <summary>Apply the supported <see cref="PdfSaveOptions"/> settings to the
@@ -357,15 +504,6 @@ public sealed partial class Document
                     fd.Set("BaseFont", new Core.PdfName(pso.DefaultFontName));
             }
         }
-    }
-
-    /// <summary>Save the document using the configured <see cref="SaveOptions"/>.</summary>
-    public void Save(SaveOptions options)
-    {
-        _ = options;
-        if (string.IsNullOrEmpty(FileName))
-            return; // No bound file; caller should use Save(Stream) or Save(string).
-        Save(FileName);
     }
 
     /// <summary>Async wrapper around <see cref="Save()"/>.</summary>
@@ -430,36 +568,5 @@ public sealed partial class Document
         cancellationToken.ThrowIfCancellationRequested();
         Save(outputFileName, options);
         return System.Threading.Tasks.Task.CompletedTask;
-    }
-
-    /// <summary>
-    /// Save the document to a stream.
-    /// </summary>
-    public void Save(Stream output)
-    {
-        // When the caller opts into strict signature handling, refuse to re-save a
-        // signed document — rewriting it would invalidate the existing signature.
-        PrepareSaveDocument();
-
-        var sv = new SaveDocumentState();
-        StampSaveInfo(sv);
-
-        // A RemoveUnusedFonts edit orphaned the replaced fonts' objects (dictionaries,
-        // descriptors, /FontFile programs). Recompute reachability so the serializer drops
-        // them from the saved file instead of carrying them over — otherwise the file keeps
-        // the (now unused) embedded font programs and never shrinks.
-        OpenSaveWriter(sv, output);
-        // The classic-xref PDF/A-1 output loses the object-stream packing win;
-        // recover the size by re-deflating weakly-compressed source streams,
-        // as the conversion save does.
-        WriteSaveMetadata(sv);
-
-        // Pre-scan the catalog's inline object graph for dictionaries shared between more than
-        // one parent (e.g. a generated radio group reached from /AcroForm/Fields and from each
-        // option widget's /Parent). These are written once as a shared indirect object so the
-        // back-references survive a round-trip instead of being dropped at the write cycle.
-        WriteSaveObjects(sv);
-
-        WriteSaveTrailer(sv, output);
     }
 }

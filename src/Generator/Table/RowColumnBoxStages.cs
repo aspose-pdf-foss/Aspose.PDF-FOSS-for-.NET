@@ -71,7 +71,7 @@ public partial class Table
     }
 
     /// <summary></summary>
-    private void DrawCellBackgroundImage(RowColumnState rc, byte[] cellBgBytes, double cellX)
+    private static void DrawCellBackgroundImage(RowColumnState rc, byte[] cellBgBytes, double cellX)
     {
         var (bl, bb, br, bt) = rc.pitchBorder is not null
             ? SideInsets(rc.pitchBorder, half: false)
@@ -86,7 +86,8 @@ public partial class Table
             {
                 try
                 {
-                    var bgName = ImageStamp.FromEncodedBytes(cellBgBytes).RegisterXObject(rc.page);
+                    var bgName = rc.page.PlacedPicture(cellBgBytes, EncodedPictureVariant, () => ImageStamp.FromEncodedBytes(cellBgBytes))!
+                        .RegisterXObject(rc.page);
                     rc.builder.SaveState();
                     rc.builder.SetMatrix(bgW, 0, 0, bgH, bgX, bgY);
                     rc.builder.DrawXObject(bgName);
@@ -118,10 +119,10 @@ public partial class Table
             // -- a box that asked for no rule of its own included. A box whose rules
             // stand inside its column width is filled whole, rules included, and
             // the rules are laid over the fill (the CSS border box).
-            var (fl, fb, fr, ft) = CollapsedCellSides(rc.cell, rc.colWidths.Length) is { } sides
-                ? CollapsedFillInsets(sides)
-                : RulesInsideColumnWidth ? (0d, 0d, 0d, 0d)
-                : SideInsets(rc.pitchBorder!, half: false);
+            double fl, fb, fr, ft;
+            if (CollapsedCellSides(rc.cell, rc.colWidths.Length) is { } sides) (fl, fb, fr, ft) = CollapsedFillInsets(sides);
+            else if (RulesInsideColumnWidth) (fl, fb, fr, ft) = (0d, 0d, 0d, 0d);
+            else (fl, fb, fr, ft) = SideInsets(rc.pitchBorder!, half: false);
             if (rc.cell.SpanCutLeft) fl = 0;
             if (rc.cell.SpanCutRight) fr = 0;
             var fill = (X: cellX + fl, Y: rc.slice.TopY - rc.slice.Height + fb,

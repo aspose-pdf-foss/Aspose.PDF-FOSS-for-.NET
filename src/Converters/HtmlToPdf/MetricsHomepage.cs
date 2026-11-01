@@ -64,8 +64,8 @@ internal static partial class HtmlToPdfConverter
     private const string MhBlue = "0 0.322 0.702";           // #0052B3 links
     private const string MhInk = "0.129 0.145 0.161";        // #212529
     /// <summary>Metrics homepage: one html fragment flattened to its plain text.</summary>
-    private static string MhFlat(string frag) => Regex.Replace(
-        DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
+    private static string MhFlat(string frag) => SafeRegex.Replace(
+        DecodeEntities(SafeRegex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
 
     private static readonly (double R, double G, double B) MhGrad0 = (0, 176, 209);    // 129deg teal
     private static readonly (double R, double G, double B) MhGrad1 = (35, 203, 176);

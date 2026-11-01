@@ -19,7 +19,7 @@ internal static partial class HtmlToPdfConverter
             double PxFrac(string st3, string prop)
             {
                 if (dv.contentWidthPt <= 0) return 0;
-                var pm = Regex.Match(st3, prop + @"\s*:\s*(\d+(?:\.\d+)?)px", RegexOptions.IgnoreCase);
+                var pm = SafeRegex.Match(st3, prop + @"\s*:\s*(\d+(?:\.\d+)?)px", RegexOptions.IgnoreCase);
                 return pm.Success && double.TryParse(pm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var pv)
@@ -41,7 +41,7 @@ internal static partial class HtmlToPdfConverter
             dv.pos = dv.end;
             while (true)
             {
-                var nm = dv.divRx.Match(dv.html, dv.pos);
+                var nm = SafeRegex.Match(dv.divRx, dv.html, dv.pos);
                 if (!nm.Success || !string.IsNullOrWhiteSpace(dv.html[dv.pos..nm.Index])) break;
                 var st3 = DivStyleOf(nm.Value);
                 if (!IsFloatColStyle(st3, dv.allowPxCols)) break;

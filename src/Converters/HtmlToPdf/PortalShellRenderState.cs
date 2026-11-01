@@ -28,7 +28,6 @@ private sealed class PortalShellRenderState
     public double pageW;
     public double pageH;
     public double left;
-    public double right;
     public double top;
     public double bottom;
     public Document doc = null!;

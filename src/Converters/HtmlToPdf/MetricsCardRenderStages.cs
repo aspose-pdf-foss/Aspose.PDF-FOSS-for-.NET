@@ -68,20 +68,20 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static void ReadMetricsCardRows(MetricsCardRenderState mc)
     {
-        foreach (Match rm in Regex.Matches(mc.innerTblM.Groups[1].Value,
+        foreach (Match rm in SafeRegex.Matches(mc.innerTblM.Groups[1].Value,
                      @"<tr\b[^>]*>([\s\S]*?)</tr\s*>", RegexOptions.IgnoreCase))
         {
-            var cells = Regex.Matches(rm.Groups[1].Value,
+            var cells = SafeRegex.Matches(rm.Groups[1].Value,
                 @"<td\b[^>]*>([\s\S]*?)</td\s*>", RegexOptions.IgnoreCase);
             if (cells.Count < 2) continue;
             var label = CollapseWs(DecodeEntities(
-                Regex.Replace(cells[0].Groups[1].Value, "<[^>]+>", " "))).Trim();
+                SafeRegex.Replace(cells[0].Groups[1].Value, "<[^>]+>", " "))).Trim();
             var valRaw = cells[1].Groups[1].Value;
-            var supM = Regex.Match(valRaw, @"<sup\b[^>]*>([\s\S]*?)</sup\s*>",
+            var supM = SafeRegex.Match(valRaw, @"<sup\b[^>]*>([\s\S]*?)</sup\s*>",
                 RegexOptions.IgnoreCase);
             var sup = supM.Success
                 ? CollapseWs(DecodeEntities(supM.Groups[1].Value)).Trim() : "";
-            var main = CollapseWs(DecodeEntities(Regex.Replace(
+            var main = CollapseWs(DecodeEntities(SafeRegex.Replace(
                 supM.Success ? valRaw[..supM.Index] : valRaw, "<[^>]+>", " "))).Trim();
             mc.rows.Add((label, main, sup));
         }

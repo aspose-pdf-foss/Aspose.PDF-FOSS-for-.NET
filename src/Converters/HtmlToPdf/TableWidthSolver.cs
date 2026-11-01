@@ -13,7 +13,7 @@ internal static partial class HtmlToPdfConverter
         Dictionary<string, string> tblStyle, Match tblTag, List<CssElem>? chainBase,
         double availWidthPt, double cellFontSize, bool cellFontShorthand, bool dwFormCells,
         bool fullWidthCjkMin, bool overDeclaredDraw, bool uaDocGrid, double padSide,
-        double rowPctDeclMax, int headerRows, bool ptCellWidths, bool uaCellBoxes,
+        double rowPctDeclMax, bool ptCellWidths, bool uaCellBoxes,
         bool uaSerifMin, double rowPxAtMax, int rowPxCellsAtMax, double naturalWidthPt, bool wordMailCells = false, bool nestedGrid = false)
     {
         var ws = new TableWidthSolveState();
@@ -31,7 +31,6 @@ internal static partial class HtmlToPdfConverter
         ws.uaDocGrid = uaDocGrid;
         ws.padSide = padSide;
         ws.rowPctDeclMax = rowPctDeclMax;
-        ws.headerRows = headerRows;
         ws.ptCellWidths = ptCellWidths;
         ws.uaCellBoxes = uaCellBoxes;
         ws.uaSerifMin = uaSerifMin;
@@ -52,7 +51,7 @@ internal static partial class HtmlToPdfConverter
         //  they yield inside it - the mailing's sixteen 40 px number boxes in a `width="100%"` grid share the
         //  450 pt container; a 10 px spacer column inside its box keeps its floor - the resume's list gutter)
         var declSumPt = 0.0;
-        foreach (var dw in colModel.colDeclW) if (dw > 0) declSumPt += dw + colModel.cellExtraPt;
+        foreach (var dw in colModel.colDeclW.Where(dw => dw > 0)) declSumPt += dw + colModel.cellExtraPt;
         var pctBoxPt = colModel.tableWidthPctOfBox && availWidthPt > 0 ? availWidthPt * colModel.tableWidthFrac : 0;
         MeasureDeclaredColumnSum(ws, colModel, nestedGrid, pctBoxPt, declSumPt, uaCellBoxes);
         // A DOCUMENT-rule element width (`table { width: 650px }`) is a fill
@@ -93,11 +92,11 @@ internal static partial class HtmlToPdfConverter
     private static double CollapsedOuterBorderHalfPt(Table table)
     {
         double left = 0, right = 0;
-        foreach (Row row in table.Rows)
+        foreach (var cells in table.Rows.Select(row => row.Cells))
         {
-            if (row.Cells.Count == 0) continue;
-            if (row.Cells[0].Border is { } lb && (lb.Side.HasFlag(BorderSide.Left) || lb.LeftAssigned)) left = Math.Max(left, lb.Left.LineWidth > 0 ? lb.Left.LineWidth : lb.Width);
-            if (row.Cells[row.Cells.Count - 1].Border is { } rb && (rb.Side.HasFlag(BorderSide.Right) || rb.RightAssigned)) right = Math.Max(right, rb.Right.LineWidth > 0 ? rb.Right.LineWidth : rb.Width);
+            if (cells.Count == 0) continue;
+            if (cells[0].Border is { } lb && (lb.Side.HasFlag(BorderSide.Left) || lb.LeftAssigned)) left = Math.Max(left, lb.Left.LineWidth > 0 ? lb.Left.LineWidth : lb.Width);
+            if (cells[cells.Count - 1].Border is { } rb && (rb.Side.HasFlag(BorderSide.Right) || rb.RightAssigned)) right = Math.Max(right, rb.Right.LineWidth > 0 ? rb.Right.LineWidth : rb.Width);
         }
         return (left + right) / 2;
     }
@@ -130,7 +129,9 @@ internal static partial class HtmlToPdfConverter
                 foreach (Cell c in r.Cells)
                     foreach (var p in c.Paragraphs)
                         if (p is Text.TextFragment { Text: { Length: > 0 } t })
+#pragma warning disable S3267 // a first-match search over a value type - FirstOrDefault cannot tell no match from a default item
                             foreach (var ch in t)
+#pragma warning restore S3267
                                 if (ch is ' ' or ' ')
                                 {
                                     foreach (var gg in ws.grids) gg.HtmlSpaceClassFirst = ch;

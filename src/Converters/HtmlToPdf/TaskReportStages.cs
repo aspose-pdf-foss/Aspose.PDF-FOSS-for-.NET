@@ -16,7 +16,7 @@ internal static partial class HtmlToPdfConverter
                 foreach (var col in row)
                     if (col.PillText.Length == 0 && col.Lines.Count == 1
                         && MeasureFaceText("Helvetica", col.Lines[0], TrValueFs) > TrGuidanceWrapPt)
-                        col.Lines = Wrap(tq, col.Lines[0], TrGuidanceWrapPt, TrValueFs);
+                        col.Lines = Wrap(col.Lines[0], TrGuidanceWrapPt, TrValueFs);
                 EmitRow(tq, row, TrStageColX);
             }
             var lastBotRule = tq.lastValueBase + TrDetailRulePt;   // the details rule
@@ -77,13 +77,13 @@ internal static partial class HtmlToPdfConverter
             }
             else if (text.StartsWith("<h2", StringComparison.OrdinalIgnoreCase))
             {
-                var h = Flat(tq, tk.Groups[1].Value);
+                var h = FlatKeepingNbsp(tk.Groups[1].Value);
                 if (tq.stage is null) tq.reportHeading = h;
                 else { tq.stage.Sections.Add((h, new List<TrCard>())); tq.task = null; }
             }
             else if (text.StartsWith("<h3", StringComparison.OrdinalIgnoreCase))
             {
-                if (tq.pendingCard is not null) tq.pendingCard.Title = Flat(tq, tk.Groups[2].Value);
+                if (tq.pendingCard is not null) tq.pendingCard.Title = FlatKeepingNbsp(tk.Groups[2].Value);
                 tq.pendingCard = null;
             }
             else // a label/value row, owned by the innermost open card
@@ -92,35 +92,35 @@ internal static partial class HtmlToPdfConverter
                 if (owner is null) continue;
                 var seg = tq.body[tk.Index..end];
                 var cols = new List<TrCol>();
-                foreach (Match cm in Regex.Matches(seg,
+                foreach (Match cm in SafeRegex.Matches(seg,
                     "<div class=\"col-sm-(?:3|12)\">((?:(?!<div class=\"col-sm)[\\s\\S])*)",
                     RegexOptions.IgnoreCase))
                 {
                     var c = cm.Groups[1].Value;
                     var col = new TrCol();
-                    var lm = Regex.Match(c, "<label[^>]*>((?:(?!</label>)[\\s\\S])*)</label>",
+                    var lm = SafeRegex.Match(c, "<label[^>]*>((?:(?!</label>)[\\s\\S])*)</label>",
                         RegexOptions.IgnoreCase);
                     if (!lm.Success) continue;
-                    col.Label = Flat(tq, lm.Groups[1].Value).ToUpperInvariant();
+                    col.Label = FlatKeepingNbsp(lm.Groups[1].Value).ToUpperInvariant();
                     var rest = c[(lm.Index + lm.Length)..];
-                    var pm = Regex.Match(rest, "<span class=\"g-status\">((?:(?!</span>)[\\s\\S])*)</span>",
+                    var pm = SafeRegex.Match(rest, "<span class=\"g-status\">((?:(?!</span>)[\\s\\S])*)</span>",
                         RegexOptions.IgnoreCase);
                     if (pm.Success)
-                        col.PillText = Flat(tq, pm.Groups[1].Value).ToUpperInvariant();
+                        col.PillText = FlatKeepingNbsp(pm.Groups[1].Value).ToUpperInvariant();
                     else
                     {
                         // attachment file names arrive one <div> per line
-                        var divLines = Regex.Matches(rest, "<div>((?:(?!</div>)[\\s\\S])*)</div>",
+                        var divLines = SafeRegex.Matches(rest, "<div>((?:(?!</div>)[\\s\\S])*)</div>",
                             RegexOptions.IgnoreCase);
                         if (divLines.Count > 0)
                             foreach (Match dm in divLines)
                             {
-                                var t = Flat(tq, dm.Groups[1].Value);
+                                var t = FlatKeepingNbsp(dm.Groups[1].Value);
                                 if (t.Length > 0) col.Lines.Add(t);
                             }
                         else
                         {
-                            var t = Flat(tq, rest);
+                            var t = FlatKeepingNbsp(rest);
                             if (t.Length > 0) col.Lines.Add(t);
                         }
                     }

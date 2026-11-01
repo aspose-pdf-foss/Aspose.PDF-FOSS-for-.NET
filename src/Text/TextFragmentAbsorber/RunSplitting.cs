@@ -81,8 +81,8 @@ public sealed partial class TextFragmentAbsorber
                     subCum[k] = cum[start + k] - baseAdv;
                     subEnds[k] = ends[start + k] - baseAdv;
                 }
-                // The last char's recorded end folds its trailing Tc/Tw pad in;
-                // the piece's INK width must not carry it (rects would span the
+                // The last char's recorded end folds its trailing Tc/Tw pad in; the
+                // piece's INK width must not carry it (rects would span the
                 // column gap to the next piece).
                 var lastPad = run.CharSpacing
                     + (run.Text[cut - 1] == ' ' ? run.WordSpacing : 0.0);
@@ -106,7 +106,9 @@ public sealed partial class TextFragmentAbsorber
             {
                 runs.RemoveAt(ri);
                 runs.InsertRange(ri, pieces);
+#pragma warning disable S127 // a run split into pieces - the scan steps past the pieces it just inserted
                 ri += pieces.Count - 1;
+#pragma warning restore S127
             }
         }
     }
@@ -119,9 +121,10 @@ public sealed partial class TextFragmentAbsorber
     /// merely touches a line's band (or a character edge) leaves it alone.</summary>
     private static void SplitRunsByExcludeRects(List<RawTextRun> runs, Rectangle[] excludeRects)
     {
-        for (var ri = 0; ri < runs.Count; ri++)
+        var ri = 0;
+        while (ri < runs.Count)
         {
-            ri = SplitRunByExcludeRects(runs, excludeRects, ri);
+            ri = SplitRunByExcludeRects(runs, excludeRects, ri) + 1;
         }
     }
 

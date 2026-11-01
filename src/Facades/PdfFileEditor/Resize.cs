@@ -17,11 +17,13 @@ public sealed partial class PdfFileEditor
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Resize the contents of all pages in a document by applying a scale/translate
     /// transform derived from the margin parameters.
     /// </summary>
     public void ResizeContents(Document source, ContentsResizeParameters parameters)
+#pragma warning restore S2325
     {
         if (source is null) throw new ArgumentNullException(nameof(source));
         if (parameters is null) throw new ArgumentNullException(nameof(parameters));
@@ -30,11 +32,13 @@ public sealed partial class PdfFileEditor
             ResizePage(source.Pages.At(i), parameters);
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Resize the contents of specific pages in a document by applying a scale/translate
     /// transform derived from the margin parameters.
     /// </summary>
     public void ResizeContents(Document source, int[] pages, ContentsResizeParameters parameters)
+#pragma warning restore S2325
     {
         if (source is null) throw new ArgumentNullException(nameof(source));
         if (pages is null) throw new ArgumentNullException(nameof(pages));
@@ -51,9 +55,11 @@ public sealed partial class PdfFileEditor
     {
         // The visible page is the crop box, and that is the box the margins and the
         // content share: a page cropped narrower than its media box scales by the crop
-        // box's width and height. The transform itself is applied in page space, so the
-        // margins land as bare offsets from the origin rather than from the crop box's
-        // corner, and the boxes themselves are left where they were.
+        // box's width and height. The transform is applied in page space, so the margins land
+        // as offsets from the page's origin rather than from the crop box's corner, and the
+        // boxes themselves are left where they were. The page's origin is the MEDIA box's
+        // corner: a page whose media box does not start at 0,0 is scaled about that corner,
+        // or its content would leave the page altogether.
         var box = page.CropBox;
         double w = box.Width;
         double h = box.Height;
@@ -67,8 +73,9 @@ public sealed partial class PdfFileEditor
 
         double sx = contentW / w;
         double sy = contentH / h;
-        double tx = left;
-        double ty = bottom;
+        var origin = page.MediaBox;
+        double tx = left + origin.LLX * (1 - sx);
+        double ty = bottom + origin.LLY * (1 - sy);
 
         page.ApplyContentResizeAsForm(sx, sy, tx, ty);
 
@@ -141,14 +148,18 @@ public sealed partial class PdfFileEditor
         /// <summary>True when <see cref="Value"/> is a percentage of the page dimension.</summary>
         public bool IsPercent => _isPercent;
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
         /// <summary>Set this value as a percentage of the page dimension.</summary>
         public double PercentValue
+#pragma warning restore S2376
         {
             set { _value = value; _isPercent = true; _isAuto = false; }
         }
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
         /// <summary>Set this value as an absolute number of points.</summary>
         public double UnitValue
+#pragma warning restore S2376
         {
             set { _value = value; _isPercent = false; _isAuto = false; }
         }

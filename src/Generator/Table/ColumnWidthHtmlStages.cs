@@ -34,17 +34,17 @@ public partial class Table
                     // min-content 25 pt). Whatever the declared shares cannot hold
                     // falls back to the proportional rule.
                     surplus -= GrowDeclaredPercentColumns(pw.widths, pw.declShare, surplus);
-                    if (HtmlUaAutoYield) YieldAutoColumnsToDeclared(pw, hMins, hMaxs);
+                    if (HtmlUaAutoYield) YieldAutoColumnsToDeclared(pw, hMins);
                     if (surplus > 0.01)
                     {
                         // …and a column with a DECLARED absolute width is FIXED: the
                         // surplus belongs to the auto columns beside it.
                         double sumAutoMax = 0;
                         for (var i = 0; i < pw.widths.Length; i++)
-                            if (!HtmlColFixed(pw, i)) sumAutoMax += hMaxs[i];
+                            if (!HtmlColFixed(i)) sumAutoMax += hMaxs[i];
                         var share = sumAutoMax > 0 ? sumAutoMax : sumMax;
                         for (var i = 0; i < pw.widths.Length; i++)
-                            if (sumAutoMax <= 0 || !HtmlColFixed(pw, i))
+                            if (sumAutoMax <= 0 || !HtmlColFixed(i))
                                 pw.widths[i] += surplus * hMaxs[i] / share;
                     }
                 }
@@ -94,10 +94,10 @@ public partial class Table
                     {
                         double sumRoom = 0;
                         for (var i = 0; i < pw.widths.Length; i++)
-                            if (!HtmlColFixed(pw, i)) sumRoom += Math.Max(0, hMaxs[i] - pw.widths[i]);
+                            if (!HtmlColFixed(i)) sumRoom += Math.Max(0, hMaxs[i] - pw.widths[i]);
                         if (sumRoom > 0)
                             for (var i = 0; i < pw.widths.Length; i++)
-                                pw.widths[i] += HtmlColFixed(pw, i) ? 0
+                                pw.widths[i] += HtmlColFixed(i) ? 0
                                     : surplus * Math.Max(0, hMaxs[i] - pw.widths[i]) / sumRoom;
                         else
                             for (var i = 0; i < pw.widths.Length; i++)

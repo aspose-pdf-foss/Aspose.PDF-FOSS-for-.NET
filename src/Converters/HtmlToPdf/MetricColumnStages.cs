@@ -53,9 +53,9 @@ internal static partial class HtmlToPdfConverter
     /// the larger of the strut's descent half and the bottom margin (2.25 pt). Probed at 12 pt
     /// Times: 14.70 = 12 + 2.70 (the strut's descent half wins below); measured at 10 pt Arial:
     /// 14.25 = 12 + 2.25 (the box wins above, the margin below).</summary>
-    private static (double above, double below) MetricCheckboxLine(MetricParseState mps, bool stdSerif, bool wrapperStacks, double hheaSum, string face, (double asc, double sum) fm, MetricCell mc, double cellFs)
+    private static (double above, double below) MetricCheckboxLine(MetricParseState mps, bool stdSerif, bool wrapperStacks, string face, (double asc, double sum) fm, MetricCell mc, double cellFs)
     {
-        var box = CellLineOf(mps, stdSerif, wrapperStacks, hheaSum, face, fm, mc, cellFs);
+        var box = CellLineOf(mps, stdSerif, wrapperStacks, face, fm, mc, cellFs);
         var cfm = CellFm(fm, mc);
         var sum = cfm.sum <= 1.0 ? 1.2 : cfm.sum;
         var halfLeading = (box - cellFs * sum) / 2;
@@ -65,9 +65,9 @@ internal static partial class HtmlToPdfConverter
             Math.Max(strutBelow, Table.UaCheckboxMarginBlockPt));
     }
 
-    private static double MetricCheckboxLineHeight(MetricParseState mps, bool stdSerif, bool wrapperStacks, double hheaSum, string face, (double asc, double sum) fm, MetricCell mc, double cellFs)
+    private static double MetricCheckboxLineHeight(MetricParseState mps, bool stdSerif, bool wrapperStacks, string face, (double asc, double sum) fm, MetricCell mc, double cellFs)
     {
-        var (above, below) = MetricCheckboxLine(mps, stdSerif, wrapperStacks, hheaSum, face, fm, mc, cellFs);
+        var (above, below) = MetricCheckboxLine(mps, stdSerif, wrapperStacks, face, fm, mc, cellFs);
         return above + below;
     }
 
@@ -226,8 +226,8 @@ internal static partial class HtmlToPdfConverter
             {
                 // pt-report grids spread the width:100% surplus over the auto
                 // columns ∝ their content width (probed: the monitoring row's
-                // 86/96 pt columns land at ~186/207, the nbsp spacers at ~5);
-                // the UA-serif letter sheets keep their last-column stretch.
+                // 86/96 pt columns land at ~186/207, the nbsp spacers at ~5); the
+                // UA-serif letter sheets keep their last-column stretch.
                 // …and a NESTED UA grid spreads it the same way its parent does (probed on
                 // the complaint report's right-hand label grid: its two columns take 25.28
                 // and 22.68 of a 47.95 pt surplus, exactly their 104.17 : 93.44 max-content
@@ -294,7 +294,7 @@ internal static partial class HtmlToPdfConverter
             takes[c] = mt.colW[c] <= mt.colPx[c] + 0.01;
             if (takes[c]) declSum += mt.colPx[c];
         }
-        if (declSum <= 0) { for (var c = 0; c < mt.nCols; c++) mt.colW[c] += mt.surplus / mt.nCols; return; }
+        if (declSum <= 0) { for (var c = 0; c < mt.nCols; c++) { mt.colW[c] += mt.surplus / mt.nCols; } return; }
         for (var c = 0; c < mt.nCols; c++)
             if (takes[c]) mt.colW[c] += mt.surplus * mt.colPx[c] / declSum;
     }
@@ -310,7 +310,7 @@ internal static partial class HtmlToPdfConverter
             mt.fixedSum = (mt.nCols + 1) * mt.s + mt.nCols * 2 * mt.p
                 // the declared box is a BORDER box: a bordered grid's rules take their
                 // share of it (one per boundary when collapsed, two per column otherwise)
-                + (mt.mps.bordered ? (mt.mps.attrCollapse ? (mt.nCols + 1) * mt.bw : mt.nCols * 2 * mt.bw) : 0)
+                + ((mt.mps.bordered, mt.mps.attrCollapse) switch { (false, _) => 0, (_, true) => (mt.nCols + 1) * mt.bw, _ => mt.nCols * 2 * mt.bw })
                 + 2 * mt.frameW;
             for (var c = 0; c < mt.nCols; c++) if (DeclaredCol(mt, c)) mt.fixedSum += mt.colW[c];
             mt.surplus = mt.tableWpt - mt.fixedSum - mt.natSum;
@@ -567,7 +567,8 @@ internal static partial class HtmlToPdfConverter
                 w = Math.Max(w, MetricInputsMaxContentPt(mt, mc, inputs));
             // a report cell's declared IMAGE box is content width too — the
             // logo column sizes to its 210px box, not to its alt text
-            if (mt.paragraphCells && mc.ImgWPt > 0)
+            // (a picture sized as a share of the cell follows the column; it asks for no width)
+            if (mt.paragraphCells && mc.ImgWPt > 0 && mc.ImgWFrac <= 0)
                 w = Math.Max(w, mc.ImgWPt);
             // Div-stacked cell content sizes its column the same way — each
             // segment's unwrapped advance is the cell's max-content.
@@ -599,7 +600,7 @@ internal static partial class HtmlToPdfConverter
                         continue;
                     }
                     var subText = CollapseWs(DecodeEntities(
-                        Regex.Replace(sub, "<[^>]+>", " "))).Trim();
+                        SafeRegex.Replace(sub, "<[^>]+>", " "))).Trim();
                     if (subText.Length > 0)
                         subMax = Math.Max(subMax, MeasureFaceText(mt.face, subText,
                             mc.FontSize ?? mt.mps.fontSize));

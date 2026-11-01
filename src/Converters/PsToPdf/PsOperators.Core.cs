@@ -64,7 +64,7 @@ internal sealed partial class PsInterpreter
         Def("counttomark", i =>
         {
             var mark = i.FindMark();
-            if (mark < 0) throw new PsErrorSignal("unmatchedmark");
+            if (mark < 0) throw new PsErrorException("unmatchedmark");
             i.Push(i.OperandCount - mark - 1);
         });
     }
@@ -93,7 +93,7 @@ internal sealed partial class PsInterpreter
         {
             var from = source.AsArray!;
             var to = target.AsArray!;
-            if (to.Length < from.Length) throw new PsErrorSignal("rangecheck");
+            if (to.Length < from.Length) throw new PsErrorException("rangecheck");
             for (var k = 0; k < from.Length; k++) to[k] = from[k];
             return PsValue.Arr(to.Interval(0, from.Length));
         }
@@ -102,7 +102,7 @@ internal sealed partial class PsInterpreter
         {
             var from = source.AsString!;
             var to = target.AsString!;
-            if (to.Length < from.Length) throw new PsErrorSignal("rangecheck");
+            if (to.Length < from.Length) throw new PsErrorException("rangecheck");
             to.Put(0, from);
             return PsValue.Str(to.Interval(0, from.Length));
         }
@@ -111,12 +111,12 @@ internal sealed partial class PsInterpreter
         {
             // Snapshot first: a program may copy a dictionary onto itself, and
             // writing into the map being walked would break the enumeration.
-            var entries = new List<KeyValuePair<PsValue, PsValue>>(source.AsDictionary!.Entries);
-            foreach (var pair in entries) target.AsDictionary!.Put(pair.Key, pair.Value);
+            var entries = new List<KeyValuePair<PsValue, PsValue>>(source.AsDictionary.Entries);
+            foreach (var pair in entries) target.AsDictionary.Put(pair.Key, pair.Value);
             return target;
         }
 
-        throw new PsErrorSignal("typecheck");
+        throw new PsErrorException("typecheck");
     }
 
     private void RegisterArithmeticOperators()
@@ -129,14 +129,16 @@ internal sealed partial class PsInterpreter
         {
             var b = i.PopInt();
             var a = i.PopInt();
-            if (b == 0) throw new PsErrorSignal("undefinedresult");
+            if (b == 0) throw new PsErrorException("undefinedresult");
+#pragma warning disable S2184 // integer division intended
             i.Push(PsValue.Int(a / b));
+#pragma warning restore S2184
         });
         Def("mod", i =>
         {
             var b = i.PopInt();
             var a = i.PopInt();
-            if (b == 0) throw new PsErrorSignal("undefinedresult");
+            if (b == 0) throw new PsErrorException("undefinedresult");
             i.Push(PsValue.Int(a % b));
         });
         Def("neg", i => Unary(i, a => -a));
@@ -207,16 +209,18 @@ internal sealed partial class PsInterpreter
     {
         var b = i.Pop();
         var a = i.Pop();
-        if (!a.IsNumber || !b.IsNumber) throw new PsErrorSignal("typecheck");
+        if (!a.IsNumber || !b.IsNumber) throw new PsErrorException("typecheck");
         var result = op(a.Number, b.Number);
         var integral = a.Type == PsType.Integer && b.Type == PsType.Integer;
+#pragma warning disable S1244 // integrality test - exact by definition
         i.Push(integral && result == Math.Floor(result) ? PsValue.Int(result) : PsValue.Num(result));
+#pragma warning restore S1244
     }
 
     private static void Unary(PsInterpreter i, Func<double, double> op)
     {
         var a = i.Pop();
-        if (!a.IsNumber) throw new PsErrorSignal("typecheck");
+        if (!a.IsNumber) throw new PsErrorException("typecheck");
         var result = op(a.Number);
         i.Push(a.Type == PsType.Integer ? PsValue.Int(result) : PsValue.Num(result));
     }
@@ -232,7 +236,7 @@ internal sealed partial class PsInterpreter
             return;
         }
 
-        if (!a.IsNumber || !b.IsNumber) throw new PsErrorSignal("typecheck");
+        if (!a.IsNumber || !b.IsNumber) throw new PsErrorException("typecheck");
         i.Push(PsValue.Int(bits(a.ToInt(), b.ToInt())));
     }
 
@@ -241,7 +245,7 @@ internal sealed partial class PsInterpreter
         var a = i.Pop();
         if (a.Type == PsType.Boolean) i.Push(!a.ToBool());
         else if (a.IsNumber) i.Push(PsValue.Int(~a.ToInt()));
-        else throw new PsErrorSignal("typecheck");
+        else throw new PsErrorException("typecheck");
     }
 
     private void RegisterRelationalOperators()
@@ -279,7 +283,7 @@ internal sealed partial class PsInterpreter
 
         var sa = AsComparableText(a);
         var sb = AsComparableText(b);
-        if (sa is null || sb is null) throw new PsErrorSignal("typecheck");
+        if (sa is null || sb is null) throw new PsErrorException("typecheck");
         i.Push(accept(string.CompareOrdinal(sa, sb)));
     }
 
@@ -298,10 +302,10 @@ internal sealed partial class PsInterpreter
         Def("for", ForOperator);
         Def("repeat", RepeatOperator);
         Def("loop", LoopOperator);
-        Def("exit", i => throw new PsExitSignal());
-        Def("stop", i => throw new PsStopSignal());
+        Def("exit", i => throw new PsExitException());
+        Def("stop", i => throw new PsStopException());
         Def("stopped", StoppedOperator);
-        Def("quit", i => throw new PsQuitSignal());
+        Def("quit", i => throw new PsQuitException());
         Def("start", i => { });
         Def("countexecstack", i => i.Push(0));
         Def("execstack", i => i.Push(PsValue.Arr(new PsArray(0))));
@@ -326,8 +330,10 @@ internal sealed partial class PsInterpreter
         var limit = i.PopNumber();
         var step = i.PopNumber();
         var start = i.Pop();
-        if (!start.IsNumber) throw new PsErrorSignal("typecheck");
+        if (!start.IsNumber) throw new PsErrorException("typecheck");
+#pragma warning disable S1244 // integrality test - exact by definition
         var integral = start.Type == PsType.Integer && step == Math.Floor(step);
+#pragma warning restore S1244
         try
         {
             for (var v = start.Number; step >= 0 ? v <= limit : v >= limit; v += step)
@@ -337,7 +343,7 @@ internal sealed partial class PsInterpreter
                 if (step == 0) break;
             }
         }
-        catch (PsExitSignal)
+        catch (PsExitException)
         {
             // `exit` leaves the innermost loop and is not an error.
         }
@@ -351,8 +357,9 @@ internal sealed partial class PsInterpreter
         {
             for (var k = 0; k < count; k++) i.ExecuteProcedure(proc);
         }
-        catch (PsExitSignal)
+        catch (PsExitException)
         {
+            // exit ends the loop - the operator finishes normally
         }
     }
 
@@ -363,8 +370,9 @@ internal sealed partial class PsInterpreter
         {
             while (true) i.ExecuteProcedure(proc);
         }
-        catch (PsExitSignal)
+        catch (PsExitException)
         {
+            // exit ends the loop - the operator finishes normally
         }
     }
 
@@ -378,11 +386,11 @@ internal sealed partial class PsInterpreter
             i.Invoke(proc);
             i.Push(false);
         }
-        catch (PsStopSignal)
+        catch (PsStopException)
         {
             i.Push(true);
         }
-        catch (PsErrorSignal e)
+        catch (PsErrorException e)
         {
             i.RecordError(e.ErrorName);
             i.Push(true);

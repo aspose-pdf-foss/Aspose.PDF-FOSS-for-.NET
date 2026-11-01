@@ -19,7 +19,7 @@ public sealed partial class TextFragmentAbsorber
         tj.segTx = tj.xr.tx;
         tj.segTy = tj.xr.ty;
         tj.consumedW = 0;
-        tj.lastStrLen = 0; // decoded length of last PdfString element
+        // decoded length of last PdfString element
         tj.charCumWidthsList = new List<double>();
         tj.charEndPositionsList = new List<double>();
 
@@ -40,12 +40,11 @@ public sealed partial class TextFragmentAbsorber
             foreach (var pre in tj.arr)
             {
                 if (pre is not PdfString preS) continue;
-                var preDec = DecodeBytes(preS.Value, tj.xr.toUnicode, tj.xr.fontDict, tj.xr.reader, tj.xr.useFontEngineEncoding);
+                var preDec = DecodeBytes(preS.Value, tj.xr.toUnicode, tj.xr.fontDict, tj.xr.reader);
                 if (preDec.Length >= 2) { tj.tjArmed = true; tj.tjMultiGlyphPiece = true; break; }
                 var preArm = false;
-                foreach (var preC in preDec)
-                    if (!char.IsUpper(preC) && !char.IsPunctuation(preC))
-                    { preArm = true; break; }
+                if (preDec.Any(preC => !char.IsUpper(preC) && !char.IsPunctuation(preC)))
+                { preArm = true; }
                 if (preArm) { tj.tjArmed = true; break; }
             }
         tj.tjSynthSpaces = tj.tjArmed && tj.tjPieceCount >= 2
@@ -91,8 +90,7 @@ public sealed partial class TextFragmentAbsorber
         var item = tj.arr[tjIdx];
         if (item is PdfString ps)
         {
-            var decoded = DecodeBytes(ps.Value, tj.xr.toUnicode, tj.xr.fontDict, tj.xr.reader, tj.xr.useFontEngineEncoding);
-            tj.lastStrLen = decoded.Length;
+            var decoded = DecodeBytes(ps.Value, tj.xr.toUnicode, tj.xr.fontDict, tj.xr.reader);
             // Build per-character cumulative widths from byte-level metrics
             // so that TJ kerning before/between segments is correctly tracked.
             double segAdvance = 0;

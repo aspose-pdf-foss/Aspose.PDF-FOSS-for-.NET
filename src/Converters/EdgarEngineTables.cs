@@ -12,7 +12,7 @@ internal static partial class EdgarHtmlRenderer
 {
     sealed partial class Engine
     {
-        ColModel BuildColModel(Node table, List<Node> rows, int nCols, Style tableStyle)
+        ColModel BuildColModel(List<Node> rows, int nCols, Style tableStyle)
         {
             var m = new ColModel
             {
@@ -31,7 +31,7 @@ internal static partial class EdgarHtmlRenderer
                 {
                     int span = Math.Max(1, ParseIntAttr(td, "colspan"));
                     var wAttr = td.Attr("width");
-                    if (wAttr.EndsWith("%") && double.TryParse(wAttr.TrimEnd('%'), out var p))
+                    if (wAttr.EndsWith('%') && double.TryParse(wAttr.TrimEnd('%'), NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var p))
                         m.Pct[col] = Math.Max(m.Pct[col], p);
                     if (span == 1)
                     {
@@ -80,7 +80,7 @@ internal static partial class EdgarHtmlRenderer
             return m;
         }
 
-        double[] DistributeColumns(ColModel m, double W)
+        static double[] DistributeColumns(ColModel m, double W)
         {
             int n = m.NCols;
             var colW = new double[n];
@@ -186,7 +186,7 @@ internal static partial class EdgarHtmlRenderer
                     nCols = Math.Max(nCols, c);
                 }
                 if (nCols == 0) continue;
-                var model = BuildColModel(table, rows, nCols, st);
+                var model = BuildColModel(rows, nCols, st);
                 best = Math.Max(best, model.Min.Sum());
             }
             return best;
@@ -211,13 +211,13 @@ internal static partial class EdgarHtmlRenderer
             }
             if (nCols == 0) return;
 
-            var model = BuildColModel(table, rows, nCols, st);
+            var model = BuildColModel(rows, nCols, st);
 
             // table width: N% of the content box (100% default); absent → shrink
             // to max-content, capped at the content box
             double W = _contentW;
             var wAttr = table.Attr("width");
-            if (wAttr.EndsWith("%") && double.TryParse(wAttr.TrimEnd('%'), out var wp))
+            if (wAttr.EndsWith('%') && double.TryParse(wAttr.TrimEnd('%'), NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var wp))
                 W = wp / 100.0 * _contentW;
             else if (wAttr.Length == 0)
                 W = Math.Min(_contentW, Math.Max(model.Min.Sum(), model.Max.Sum()));
@@ -267,7 +267,7 @@ internal static partial class EdgarHtmlRenderer
                 if (block.Tag == "p")
                 {
                     ApplyStyleAttr(block.Attr("style"), st);
-                    var wDecl = Regex.Match(block.Attr("style"), @"(?:^|;)\s*width\s*:\s*([\d.]+)\s*pt",
+                    var wDecl = SafeRegex.Match(block.Attr("style"), @"(?:^|;)\s*width\s*:\s*([\d.]+)\s*pt",
                         RegexOptions.IgnoreCase);
                     if (wDecl.Success)
                         forcedW = double.Parse(wDecl.Groups[1].Value, CultureInfo.InvariantCulture);
@@ -365,7 +365,7 @@ internal static partial class EdgarHtmlRenderer
                 }
                 var metricRun = runs.Where(r => r.Text.Length > 0).OrderByDescending(r => r.Size).FirstOrDefault();
                 if (metricRun is null) continue;
-                var (pitch, asc, desc) = LineBox(metricRun.Face, metricRun.Size, st.LineHeight);
+                var (_, asc, desc) = LineBox(metricRun.Face, metricRun.Size, st.LineHeight);
                 var wrapped = WrapRuns(runs, Math.Max(1, width - st.MarginLeft), st.TextIndent);
                 for (int li = 0; li < wrapped.Count; li++)
                 {
@@ -447,7 +447,7 @@ internal static partial class EdgarHtmlRenderer
         {
             var bg = tr.Attr("bgcolor");
             if (bg.Length == 0) return -1;
-            var m = Regex.Match(bg, @"#?([0-9A-Fa-f]{6})");
+            var m = SafeRegex.Match(bg, @"#?([0-9A-Fa-f]{6})");
             return m.Success ? int.Parse(m.Groups[1].Value, NumberStyles.HexNumber) : -1;
         }
 
@@ -458,7 +458,7 @@ internal static partial class EdgarHtmlRenderer
         {
             int hAttr = 0;
             foreach (var td in cells)
-                if (int.TryParse(td.Attr("height"), out var hv)) hAttr = Math.Max(hAttr, hv);
+                if (int.TryParse(td.Attr("height"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var hv)) hAttr = Math.Max(hAttr, hv);
             bool anyBorderPara = cells.Any(td => td.Descendants().Any(d =>
                 d.Tag == "p" && d.Attr("style").Contains("border", StringComparison.OrdinalIgnoreCase)));
             bool anyTdBorder = cells.Any(td => TdBorderBottom(td) > 0);
@@ -468,7 +468,9 @@ internal static partial class EdgarHtmlRenderer
             if (hAttr > 0)
             {
                 double h = hAttr * 0.75 + (carryIn.Length > 0 ? carryIn.Max() : 0);
-                double top = _atPageTop ? _y + (_dropTopMargins ? 0 : (_margins.Count > 0 ? _margins.Max() : 0)) : _y + (_margins.Count > 0 ? _margins.Max() : 0) + _prevBorderBottom;
+                double top;
+                if (_atPageTop) top = _y + ((_dropTopMargins, _margins.Count) switch { (true, _) => 0, (_, > 0) => _margins.Max(), _ => 0 });
+                else top = _y + (_margins.Count > 0 ? _margins.Max() : 0) + _prevBorderBottom;
                 _atPageTop = false;
                 _margins.Clear();
                 if (top + h > BottomLimit) { BreakPage(false); top = _y; }
@@ -543,7 +545,7 @@ internal static partial class EdgarHtmlRenderer
         double SeatRowTop(List<CellFlow> flows)
         {
             double rowTop;
-            if (_atPageTop) { rowTop = _y + (_dropTopMargins ? 0 : (_margins.Count > 0 ? _margins.Max() : 0)); _atPageTop = false; }
+            if (_atPageTop) { rowTop = _y + ((_dropTopMargins, _margins.Count) switch { (true, _) => 0, (_, > 0) => _margins.Max(), _ => 0 }); _atPageTop = false; }
             else
             {
                 rowTop = _y + _prevBorderBottom + (_margins.Count > 0 ? _margins.Max() : 0);

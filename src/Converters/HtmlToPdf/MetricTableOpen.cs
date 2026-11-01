@@ -32,7 +32,7 @@ internal static partial class HtmlToPdfConverter
         // table class's typography does (probed: `style="font-size:14px"` draws its rows
         // at 10.5 where the body is 12).
         if (ta.TryGetValue("style", out var tfst) && tfst is not null
-            && Regex.Match(tfst, @"(?<![-\w])font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } tfsm
+            && SafeRegex.Match(tfst, @"(?<![-\w])font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } tfsm
             && TryParseCssFontSize(tfsm.Groups[1].Value.Trim()) is { } tfs && tfs > 0)
         {
             mt.mps.fontSize = tfs; mt.mps.tableClassFont = true;
@@ -41,7 +41,7 @@ internal static partial class HtmlToPdfConverter
         // …and its inline font-family is the face of every cell that names no closer one, as a
         // class face is (measured: a wrapper `<table style="font-family: Arial">` draws Arial).
         if (ta.TryGetValue("style", out var tffSt) && tffSt is not null
-            && Regex.Match(tffSt, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } tffm
+            && SafeRegex.Match(tffSt, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } tffm
             && FirstFontFamily(tffm.Groups[1].Value) is { Length: > 0 } tfam
             && (!mt.stdSerif || SourceEngineFaces.Contains(tfam)))
             mt.mps.tableClassFace = tfam;
@@ -66,11 +66,11 @@ internal static partial class HtmlToPdfConverter
         if (!ta.TryGetValue("style", out var st) || st is null) return;
         // A table's inline `font-weight: bold` is inherited typography: every cell
         // under it draws bold unless it re-declares the weight.
-        if (Regex.IsMatch(st, @"(?<![-\w])font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(st, @"(?<![-\w])font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
             mt.mps.tableBold = true;
         // …and its `padding-left` insets the columns from its frame. A UNITLESS value is
         // CSS pixels here (the dunning letter's `padding-left : 10` seats them 7.5 in).
-        var padM = Regex.Match(st, @"(?<![-\w])padding-left\s*:\s*([\d.]+)\s*(px|pt)?",
+        var padM = SafeRegex.Match(st, @"(?<![-\w])padding-left\s*:\s*([\d.]+)\s*(px|pt)?",
             RegexOptions.IgnoreCase);
         if (padM.Success && double.TryParse(padM.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -81,7 +81,7 @@ internal static partial class HtmlToPdfConverter
         // a `padding-bottom: 15px` card closes 15 px under its last row; a `padding: 5px` card
         // opens 5 px under its frame)
         // (…an inline style that states no padding leaves the class padding standing)
-        if (mt.stdSerif && (!mt.mps.ptFormCells || Regex.IsMatch(st, @"(?<![-\w])padding", RegexOptions.IgnoreCase)))
+        if (mt.stdSerif && (!mt.mps.ptFormCells || SafeRegex.IsMatch(st, @"(?<![-\w])padding", RegexOptions.IgnoreCase)))
         {
             var (tpT, _, tpB, _) = CssPaddingSidesPt(st, UaDefaultFontPt);
             mt.mps.tablePadTopPt = tpT;

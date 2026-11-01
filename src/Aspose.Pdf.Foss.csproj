@@ -10,19 +10,20 @@
 
     <!-- Package / release metadata -->
     <PackageId>Aspose.PDF.FOSS</PackageId>
-    <Version>26.10.0</Version>
+    <Version>26.11.0</Version>
     <Product>Aspose.PDF FOSS for .NET</Product>
     <PackageReleaseNotes>
-26.10.0 - multi-target, security and accessibility release.
+26.11.0 - fidelity release: XFA forms, HTML in and out, PDF/A and text.
 
-Platforms: the package now targets netstandard2.0, net48, net8.0, net9.0 and net10.0; graphical page comparison, TIFF binarization and image merging (except to GIF) run on managed code everywhere, and Linux resolves common Windows faces to installed stand-ins.
-New: TextPdfComparer compares the text of two documents, with ComparisonOptions, HTML/Markdown/JSON/PDF result writers and change statistics; SvgExtractor writes a page's vector graphics as SVG; ThumbnailDevice; DictionaryEditor edits page, catalog and resource dictionaries; BarcodeField and FileSelectBoxField; Bates numbering and pagination artifacts; BoxBlock (rounded corners, background pictures), ListBlock and ReservedBlock for generated layouts; OpenTypeFeatures; PostScript and EPS input through PsLoadOptions.
-Security: SignaturesCompromiseDetector reports forged signatures and how much of a document its signatures cover; UnsignedContentAbsorber finds content added after the last signature; non-throwing TryVerifySignature and Signature.TryVerify; external signing through ExternalSignature and SignHash; managed ECDSA verification; HiddenDataSanitizer; the AES-GCM crypt filter; certificate-encrypted documents open with the recipient's RSA key.
-Redaction: applying a redaction removes the glyphs, path parts and image pixels under the area, the fields and annotations it touches, the alternate text restating removed content, the page thumbnail and private data; redacted JBIG2 scans stay JBIG2 through a new lossless encoder; a redacted document is always saved whole.
-Accessibility: auto-tagging reads columns, running headers, tables (spans, stacked and split tables), lists, figures, formulas and links; StructureElement.GetMarkedContent reads the content an element marks and MarkedContentItem.SaveImage writes its images; AutoTaggingSettings.CustomProgressHandler reports tagging progress; PDF/UA conversion describes fields, links and media and logs what it cannot convert.
-Also: printing sends pages as drawing commands, falling back to an image only for Type 3 text, grayscale or image jobs; tables size columns to their content, repeat header and footer bands, round their corners and split row-spanning cells across pages; software-renderer fixes for strokes, sub-pixel fills and Type 3 glyphs; plus many HTML-to-PDF layout fixes.
+New: LinkAnnotation.Hyperlink; UpdateAppearances on underline and squiggly annotations; ChoiceField.SetValue; StructureElement.Remove; Page.ProcessSpecialSymbols; ExtGState.FillOpacity and StrokeOpacity; PdfFunction.ClampInput and ClampOutput; ImageLoadException, raised for image bytes no decoder can read instead of an image that silently draws nothing.
+XFA: dynamic forms render and convert to standard forms closer to their design - load-time scripts run before the pages are painted, fields and text draws continue across content areas and pages, captions, check boxes and radio buttons take the sizes they declare, and a converted form lists exactly the fields its template defines, filled from their data bindings.
+HTML: HTML-to-PDF and HTML import read more real-world pages - stylesheet selectors and exclusions, list markers, preformatted blocks that clip, form controls at their CSS sizes, bordered, spanning and block-laid table cells; PDF-to-HTML ships the fonts widget appearances use, keeps right-to-left text in its order and keeps page text out of PNG backgrounds; SVG import handles nested svg viewports, symbols drawn through use, text-only foreignObject and SVG images in data URIs.
+PDF/A and fonts: conversions repair TrueType and Type 1 font dictionaries (CharSet, CIDToGIDMap, encodings), restate soft masks and trim oversized Indexed palettes; the standard Asian faces are found by name; font fallback prefers installed broad-coverage faces and never puts a fixed-pitch face in place of a proportional one.
+Text: replacements keep right-to-left lines shaped and in visual order and move the rest of their line by the width they gained; sub- and superscripts set on a segment draw as scripts; auto-tagging reads raised marks, list labels and suffixes on the lines they belong to; the table absorber finds column boundaries and spanned cells inside ruled tables.
+Signing and redaction: SHA-1 PKCS#1 and PKCS#7 signatures are written as their handlers define, a nested signature field is found by its full name, and a signing update keeps the form dictionary's entries; an applied redaction draws its overlay appearance and removes its own mark, and JPEG images in CMYK, palette or Lab colour stay lossless in their own colour space.
+Also: CMYK colours are written as CMYK; generated layouts read correctly on rotated pages; rendering fixes for clip paths, thin strokes and indexed images; faster saves of dense pages, duplicate-stream optimization and XFA field reads.
 
-Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.10.0
+Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/releases/tag/v26.11.0
     </PackageReleaseNotes>
     <Authors>Aspose</Authors>
     <Company>Aspose Pty Ltd</Company>
@@ -62,7 +63,7 @@ Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/
 <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0' Or '$(TargetFramework)' == 'net48'">
   <PackageReference Include="System.Text.Json" Version="8.0.5" />
   <PackageReference Include="System.Memory" Version="4.5.5" />
-  <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.0.1" />
+  <PackageReference Include="System.Security.Cryptography.Pkcs" Version="8.0.2" />
   <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
   <PackageReference Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
   <!-- Build-time only (PrivateAssets=all): they add nothing to the shipped package.
@@ -116,6 +117,12 @@ Full release notes: https://github.com/aspose-pdf-foss/Aspose.PDF-FOSS-for-.NET/
   <EmbeddedResource Include="Text\Resources\AdobeCid.GB1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.GB1.bin" />
   <EmbeddedResource Include="Text\Resources\AdobeCid.Korea1.bin" LogicalName="Aspose.Pdf.Text.Resources.AdobeCid.Korea1.bin" />
   <EmbeddedResource Include="Text\Resources\AdobeGlyphList.txt" LogicalName="Aspose.Pdf.Text.Resources.AdobeGlyphList.txt" />
+  <EmbeddedResource Include="Text\Resources\CMap.UniJIS-UCS2-H.bin" LogicalName="Aspose.Pdf.Text.Resources.CMap.UniJIS-UCS2-H.bin" />
+  <EmbeddedResource Include="Text\Resources\CMap.90ms-RKSJ-H.bin" LogicalName="Aspose.Pdf.Text.Resources.CMap.90ms-RKSJ-H.bin" />
+  <EmbeddedResource Include="Text\Resources\CMap.UniGB-UCS2-H.bin" LogicalName="Aspose.Pdf.Text.Resources.CMap.UniGB-UCS2-H.bin" />
+  <EmbeddedResource Include="Text\Resources\CMap.GBK-EUC-H.bin" LogicalName="Aspose.Pdf.Text.Resources.CMap.GBK-EUC-H.bin" />
+  <EmbeddedResource Include="Text\Resources\CMap.UniCNS-UCS2-H.bin" LogicalName="Aspose.Pdf.Text.Resources.CMap.UniCNS-UCS2-H.bin" />
+  <EmbeddedResource Include="Text\Resources\CMap.UniKS-UCS2-H.bin" LogicalName="Aspose.Pdf.Text.Resources.CMap.UniKS-UCS2-H.bin" />
 </ItemGroup>
 
   <!-- Force a full rebuild of this project on EVERY build, even when no source

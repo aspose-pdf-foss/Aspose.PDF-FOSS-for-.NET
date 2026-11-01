@@ -30,8 +30,8 @@ private sealed class SvgConvertState
     public double vbH;
     public bool hasViewBox;
     // Page geometry from load-option PageInfo (all values CSS px ×0.75): an
-    // explicit Width/Height replaces the content-derived dimension;
-    // otherwise margins grow the page around the artwork. The artwork itself is
+    // explicit Width/Height replaces the content-derived dimension; otherwise
+    // margins grow the page around the artwork. The artwork itself is
     // never scaled — it anchors to the left/top margin when one is set, else to
     // the right/bottom margin (which can push it off-page), else to the origin.
     public double pageW;

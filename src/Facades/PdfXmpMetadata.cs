@@ -16,12 +16,14 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
 {
     private static readonly Dictionary<string, string> _defaultNamespaces = new(StringComparer.Ordinal)
     {
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
         ["xmp"] = "http://ns.adobe.com/xap/1.0/",
         ["dc"] = "http://purl.org/dc/elements/1.1/",
         ["pdf"] = "http://ns.adobe.com/pdf/1.3/",
         ["xmpMM"] = "http://ns.adobe.com/xap/1.0/mm/",
         ["xmpRights"] = "http://ns.adobe.com/xap/1.0/rights/",
         ["pdfaid"] = "http://www.aiim.org/pdfa/ns/id/",
+#pragma warning restore S5332
     };
 
     private readonly Dictionary<string, string> _namespaces = new(_defaultNamespaces, StringComparer.Ordinal);
@@ -80,8 +82,6 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
         _metadata = document.GetOrCreateMetadata();
     }
 
-    private string? _outputPath;
-
     /// <summary>Bind a PDF document by path, target the given output path
     /// when Save() is called later. Mirrors the BindPdf(in, out)
     /// pattern.</summary>
@@ -90,6 +90,8 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
         BindPdf(inputPath);
         _outputPath = outputPath;
     }
+
+    private string? _outputPath;
 
     /// <summary>Save the bound document with any XMP metadata edits to the
     /// output path supplied to <see cref="BindPdf(string, string)"/>, falling
@@ -134,23 +136,31 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
     /// <inheritdoc />
     public bool IsReadOnly => false;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers may add and remove keys.</summary>
     public bool IsFixedSize => false;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>True: this facade is single-threaded; callers serialise their own access.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Sentinel object returned for <see cref="ICollection.SyncRoot"/>-style locking.</summary>
     public object SyncRoot { get; } = new();
 
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
     /// <summary>All property keys present in the bound metadata.</summary>
     public ICollection<string> Keys => _metadata?.Keys.ToList() ?? new List<string>();
+#pragma warning restore S2365
 
     /// <summary>All property values present in the bound metadata. Each value
     /// carries its property key, so <see cref="XmpValue.ToNamedValue"/> yields
     /// the <c>"prefix:name"</c> key alongside the value.</summary>
     public ICollection<XmpValue> Values =>
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
         _metadata?.Keys.Select(k =>
+#pragma warning restore S2365
             new XmpValue(new KeyValuePair<string, XmpValue>(k, new XmpValue(_metadata[k] ?? string.Empty)))).ToList()
             ?? new List<XmpValue>();
 
@@ -190,8 +200,9 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
     public void Add(string key, XmpValue value)
     {
         EnsureBound();
-        if (_metadata!.ContainsKey(key))
-            throw new ArgumentException($"Key '{key}' already exists.", nameof(key));
+        // A bound document's packet already holds the common properties (dates, producer,
+        // creator tool): adding one of them through the facade sets its value.
+        if (_metadata!.ContainsKey(key)) _metadata.Remove(key);
         _metadata.Add(key, value);
     }
 
@@ -210,8 +221,8 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
     /// <summary>Add a key/value pair (IDictionary contract).</summary>
     public void Add(KeyValuePair<string, XmpValue> item) => Add(item.Key, item.Value);
 
-    /// <summary>Register a PDF/A extension object under <paramref name="namespacePrefix"/>.
-    /// Stored only in this build.</summary>
+    /// <summary>Register a PDF/A extension object under <paramref name="namespacePrefix"/>: an extension property is
+    /// described in the bound document's extension schema for the namespace.</summary>
     public void Add(XmpPdfAExtensionObject xmpPdfAExtensionObject,
                     string namespacePrefix,
                     string namespaceUri,
@@ -227,6 +238,8 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
             ExtensionFields[namespacePrefix] = schema;
         }
         schema.Objects.Add(xmpPdfAExtensionObject);
+        if (xmpPdfAExtensionObject is XmpPdfAExtensionProperty property)
+            _metadata?.AddExtensionProperty(namespacePrefix, namespaceUri, schemaDescription, property);
     }
 
     /// <summary>Remove every property from the bound metadata.</summary>
@@ -255,8 +268,10 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
     /// <summary>Returns true when the bound XMP metadata contains the given raw property key; false when nothing is bound.</summary>
     public bool ContainsKey(string key) => _metadata is not null && _metadata.ContainsKey(key);
 
+#pragma warning disable S927 // public API: the published parameter name
     /// <summary>Copy all key/value pairs into <paramref name="array"/> starting at <paramref name="index"/>.</summary>
     public void CopyTo(KeyValuePair<string, XmpValue>[] array, int index)
+#pragma warning restore S927
     {
         if (array is null) throw new ArgumentNullException(nameof(array));
         if (index < 0) throw new ArgumentOutOfRangeException(nameof(index));
@@ -291,11 +306,15 @@ public sealed class PdfXmpMetadata : IDictionary<string, XmpValue>
     public string? GetPrefixByNamespaceURI(string namespaceURI)
     {
         if (namespaceURI is null) return null;
+#pragma warning disable S3267 // a first-match search over a value type - FirstOrDefault cannot tell no match from a default item
         foreach (var kv in _namespaces)
+#pragma warning restore S3267
             if (string.Equals(kv.Value, namespaceURI, StringComparison.Ordinal))
                 return kv.Key;
         if (_metadata is not null)
+#pragma warning disable S3267 // a first-match search over a value type - FirstOrDefault cannot tell no match from a default item
             foreach (var kv in _metadata.CustomNamespaces)
+#pragma warning restore S3267
                 if (string.Equals(kv.Value, namespaceURI, StringComparison.Ordinal))
                     return kv.Key;
         return null;

@@ -105,6 +105,29 @@ public sealed partial class ParagraphAbsorber
         }
     }
 
+    /// <summary>Two section bottoms no further apart than this stand on the same line of text.</summary>
+    private const double LevelBottomTolerance = 2.0;
+
+    /// <summary>Sections whose bottoms stand on the same line - the two columns of a page,
+    /// ending level but for a descender - are read left to right, whichever bottom is
+    /// the lower by a fraction of a point. Expects the sections ordered by bottom edge.</summary>
+    private static void OrderLevelSectionsLeftToRight(List<MarkupSection> sections)
+    {
+        for (var start = 0; start < sections.Count;)
+        {
+            var end = start + 1;
+            while (end < sections.Count
+                && sections[start].Rectangle.LLY - sections[end].Rectangle.LLY <= LevelBottomTolerance)
+                end++;
+            if (end - start > 1)
+            {
+                var level = sections.GetRange(start, end - start).OrderBy(s => s.Rectangle.LLX).ToList();
+                for (var i = 0; i < level.Count; i++) sections[start + i] = level[i];
+            }
+            start = end;
+        }
+    }
+
     private PageMarkup BuildMarkup(Page page, TextFragmentCollection fragments)
     {
         if (fragments.Count == 0)
@@ -175,13 +198,8 @@ public sealed partial class ParagraphAbsorber
             foreach (var section in sections)
                 MapSection(section, display);
 
-        // Sections are ordered by their BOTTOM edge, top-to-bottom (LLY
-        // descending), ties left-to-right - in the reported (display) space.
-        sections.Sort((x, y) =>
-        {
-            var dy = y.Rectangle.LLY.CompareTo(x.Rectangle.LLY);
-            return dy != 0 ? dy : x.Rectangle.LLX.CompareTo(y.Rectangle.LLX);
-        });
+        // Sections are reported in reading order, in the reported (display) space.
+        sections = InReadingOrder(sections);
 
         // A section rectangle is reported on the integer point grid: the union of
         // its line boxes rounded OUTWARD (floor of the lower-left, ceiling of the
@@ -244,9 +262,9 @@ public sealed partial class ParagraphAbsorber
     private static void MapSection(MarkupSection section, Frame frame)
     {
         section.Rectangle = frame.MapRect(section.Rectangle);
-        foreach (var para in section.Paragraphs)
-            for (var pi = 0; pi < para.Points.Length; pi++)
-                para.Points[pi] = frame.Map(para.Points[pi].X, para.Points[pi].Y);
+        foreach (var points in section.Paragraphs.Select(para => para.Points))
+            for (var pi = 0; pi < points.Length; pi++)
+                points[pi] = frame.Map(points[pi].X, points[pi].Y);
     }
 
     private List<MarkupSection> FindSections(List<TextFragment> fragments, double pageW, double pageH)
@@ -277,7 +295,9 @@ public sealed partial class ParagraphAbsorber
                     var (rect, pos) = f.SwapGeometry(mapped, new Position(mapped.LLX, mapped.LLY));
                     saved.Add((f, rect, pos));
                 }
+#pragma warning disable S2234 // vertical text is laid out in a frame whose width is the page height
                 var found = FindSectionsHorizontal(verticalFrags, pageH, pageW);
+#pragma warning restore S2234
                 var back = frame.Inverse();
                 foreach (var section in found) MapSection(section, back);
                 sections.AddRange(found);

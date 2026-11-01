@@ -13,8 +13,10 @@ public static partial class PageExtensions
     private static void Pt(RegionCollectState rc, double x, double y)
     {
         if (!rc.started) { rc.minX = rc.maxX = x; rc.minY = rc.maxY = y; rc.started = true; return; }
-        if (x < rc.minX) rc.minX = x; if (y < rc.minY) rc.minY = y;
-        if (x > rc.maxX) rc.maxX = x; if (y > rc.maxY) rc.maxY = y;
+        if (x < rc.minX) rc.minX = x;
+        if (y < rc.minY) rc.minY = y;
+        if (x > rc.maxX) rc.maxX = x;
+        if (y > rc.maxY) rc.maxY = y;
     }
 
     private static void EmitIfIntersecting(RegionCollectState rc, string paintOp)
@@ -93,10 +95,7 @@ public static partial class PageExtensions
                     case "g" or "rg" or "k" or "sc" or "scn": rc.gs.FillColor = OpLine(rc.operands, op); break;
 
                     // Path construction (ignore inside text objects).
-                    case "m" when !rc.inText && rc.operands.Count >= 2:
-                        rc.curX = Num(rc.operands[0]); rc.curY = Num(rc.operands[1]); Pt(rc, rc.curX, rc.curY);
-                        rc.path.Append(OpLine(rc.operands, op)).Append('\n'); break;
-                    case "l" when !rc.inText && rc.operands.Count >= 2:
+                    case "m" or "l" when !rc.inText && rc.operands.Count >= 2:
                         rc.curX = Num(rc.operands[0]); rc.curY = Num(rc.operands[1]); Pt(rc, rc.curX, rc.curY);
                         rc.path.Append(OpLine(rc.operands, op)).Append('\n'); break;
                     case "c" when !rc.inText && rc.operands.Count >= 6:

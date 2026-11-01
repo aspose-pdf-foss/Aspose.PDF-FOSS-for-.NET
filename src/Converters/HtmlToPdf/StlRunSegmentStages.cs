@@ -16,7 +16,7 @@ internal static partial class HtmlToPdfConverter
                 : UnionStlSegments(rr.sp.htmlFaces, rr.r.Family, segText);
             foreach (var (pieceTtf, pieceParser, pieceUpm, pieceText) in
                 pieces is null
-                    ? new[] { ((byte[])rr.faceTtf!, rr.faceParser, rr.faceUpm, segText) }
+                    ? new[] { (rr.faceTtf!, rr.faceParser, rr.faceUpm, segText) }
                     : pieces.Select(p => (p.face.Ttf, p.face.Parser, p.face.Upm, p.text)))
             {
                 if (pieceText.Length == 0) continue;

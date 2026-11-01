@@ -41,13 +41,13 @@ public sealed partial class TableAbsorber
             // Compute bounding rect
             double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
             foreach (var row in cleaned)
-                foreach (var cell in row.Cells)
+                foreach (var cellRect in row.Cells.Select(cell => cell.Rect))
                 {
-                    if (cell.Rect is null) continue;
-                    if (cell.Rect.LLX < minX) minX = cell.Rect.LLX;
-                    if (cell.Rect.LLY < minY) minY = cell.Rect.LLY;
-                    if (cell.Rect.URX > maxX) maxX = cell.Rect.URX;
-                    if (cell.Rect.URY > maxY) maxY = cell.Rect.URY;
+                    if (cellRect is null) continue;
+                    if (cellRect.LLX < minX) minX = cellRect.LLX;
+                    if (cellRect.LLY < minY) minY = cellRect.LLY;
+                    if (cellRect.URX > maxX) maxX = cellRect.URX;
+                    if (cellRect.URY > maxY) maxY = cellRect.URY;
                 }
             var rect = Compat.IsFinite(minX) ? new Rectangle(minX, minY, maxX, maxY) : null;
             bt.result.Add(new AbsorbedTable { Rows = cleaned, Rect = rect });
@@ -63,24 +63,25 @@ public sealed partial class TableAbsorber
         if (bt.colsInRow.Count == 0) return true;
 
         bt.gridMinCol = int.MaxValue; var gridMaxCol = int.MinValue;
-        foreach (var p in bt.component)
+        foreach (var pc in bt.component.Select(p => p.c))
         {
-            if (p.c < bt.gridMinCol) bt.gridMinCol = p.c;
-            if (p.c > gridMaxCol) gridMaxCol = p.c;
+            if (pc < bt.gridMinCol) bt.gridMinCol = pc;
+            if (pc > gridMaxCol) gridMaxCol = pc;
         }
+        bt.rowRuled = bt.vEdges is not null && bt.vEdges.Any(ve =>
+            ve.X > bt.colBounds[bt.gridMinCol] + EdgeTol
+            && ve.X < bt.colBounds[gridMaxCol + 1] - EdgeTol
+            && Math.Min(ve.Y2, bt.yTop) - Math.Max(ve.Y1, bt.yBot) >= (bt.yTop - bt.yBot) * 0.5);
         bt.spanning = bt.colsInRow.Count == 2
             && bt.colsInRow[0] == bt.gridMinCol && bt.colsInRow[1] == gridMaxCol
             && gridMaxCol - bt.gridMinCol >= 2
             // ...and no interior vertical rule CROSSES the band: crossing
             // verticals mean the sparse row is the pass-through interior of
             // row-span cells, not a caption spanning the grid.
-            && (bt.vEdges is null || !bt.vEdges.Any(ve =>
-                ve.X > bt.colBounds[bt.gridMinCol] + EdgeTol
-                && ve.X < bt.colBounds[gridMaxCol + 1] - EdgeTol
-                && Math.Min(ve.Y2, bt.yTop) - Math.Max(ve.Y1, bt.yBot) >= (bt.yTop - bt.yBot) * 0.5));
+            && !bt.rowRuled;
         bt.cellSpans = bt.spanning
             ? new List<(int cFrom, int cTo)> { (bt.colsInRow[0], bt.colsInRow[^1]) }
-            : bt.colsInRow.Select(c => (cFrom: c, cTo: c)).ToList();
+            : RowCellSpans(bt, r);
 
         bt.cells = new List<AbsorbedCell>();
         foreach (var (cFrom, cTo) in bt.cellSpans)
@@ -100,10 +101,11 @@ public sealed partial class TableAbsorber
         var xRight = bt.colBounds[cTo + 1];
         if ((xRight - xLeft) < MinCellW || (bt.yTop - bt.yBot) < MinCellH) return true;
 
-        // Extend a single-column cell down across uncovered boundaries
-        // (row-span); the swallowed grid positions emit no cell of their own.
+        // Extend a cell down across uncovered boundaries (row-span); the
+        // swallowed grid positions emit no cell of their own. A caption spanning
+        // the whole grid stays in its row.
         var cellBot = bt.yBot;
-        if (cFrom == cTo)
+        if (!bt.spanning)
         {
             var minRowIdx = bt.rowIndices[0];
             var rCur = r;
@@ -111,11 +113,11 @@ public sealed partial class TableAbsorber
             // validation - an interior position under an uncovered
             // boundary is the INSIDE of this tall cell.
             while (rCur - 1 >= minRowIdx
-                && !bt.consumed.Contains((rCur - 1, cFrom))
+                && !Enumerable.Range(cFrom, cTo - cFrom + 1).Any(c => bt.consumed.Contains((rCur - 1, c)))
                 && !BoundaryCovered(bt, bt.rowBounds[rCur], xLeft, xRight))
             {
                 rCur--;
-                bt.consumed.Add((rCur, cFrom));
+                for (var c = cFrom; c <= cTo; c++) bt.consumed.Add((rCur, c));
                 cellBot = bt.rowBounds[rCur];
             }
         }
@@ -153,7 +155,11 @@ public sealed partial class TableAbsorber
             frag.Segments[1].Rectangle = runRect;
             return frag;
         }));
-        bt.cells.Add(new AbsorbedCell { Text = cellText, Rect = cellRect, TextFragments = AbsorbedCell.ToCollection(frags) });
+        bt.cells.Add(new AbsorbedCell
+        {
+            Text = cellText, Rect = cellRect, TextFragments = AbsorbedCell.ToCollection(frags),
+            ColSpan = bt.spanning ? 1 : cTo - cFrom + 1,
+        });
         return true;
     }
 }

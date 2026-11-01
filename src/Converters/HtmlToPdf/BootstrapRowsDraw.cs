@@ -22,17 +22,14 @@ internal static partial class HtmlToPdfConverter
             $"q {c.R / 255.0:0.###} {c.G / 255.0:0.###} {c.B / 255.0:0.###} RG {sw:0.##} w " +
             $"{x + sw / 2:F2} {bs.pageHeight - yTd - h + sw / 2:F2} {w - sw:F2} {h - sw:F2} re S Q\n")));
 
-    private static string Flat(BootstrapRowsState bs, string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
-
     // ── the column set of one .row: [(pct, inner html)] ──
-    private static List<(double frac, string body)> RowCols(BootstrapRowsState bs, string rowBody)
+    private static List<(double frac, string body)> RowCols(string rowBody)
     {
         var cols = new List<(double, string)>();
-        foreach (Match cm in Regex.Matches(rowBody,
+        foreach (var groups in SafeRegex.Matches(rowBody,
             @"<div\b[^>]*class\s*=\s*['""]col-xs-(\d+)[^'""]*['""][^>]*>(?<b>[\s\S]*?)</div>",
-            RegexOptions.IgnoreCase))
-            cols.Add((int.Parse(cm.Groups[1].Value) / 12.0, cm.Groups["b"].Value));
+            RegexOptions.IgnoreCase).Select(cm => cm.Groups))
+            cols.Add((int.Parse(groups[1].Value) / 12.0, groups["b"].Value));
         return cols;
     }
 
@@ -43,7 +40,7 @@ internal static partial class HtmlToPdfConverter
     {
         var rowL = boxL - BrRowExpand;
         var rowW = boxR + BrRowExpand - rowL;
-        var cols = RowCols(bs, rowBody);
+        var cols = RowCols(rowBody);
         var maxH = BrLineH;
         var colX = rowL;
         foreach (var (frac, colBody) in cols)
@@ -53,21 +50,21 @@ internal static partial class HtmlToPdfConverter
             var wrapW = colW - 2 * BrColPad;
             var y = rowTop;
             // bold label segment, then the value after the <br>
-            var boldM = Regex.Match(colBody, @"<b\b[^>]*>(?<t>[\s\S]*?)</b>", RegexOptions.IgnoreCase);
+            var boldM = SafeRegex.Match(colBody, @"<b\b[^>]*>(?<t>[\s\S]*?)</b>", RegexOptions.IgnoreCase);
             var rest = boldM.Success
                 ? colBody.Remove(boldM.Index, boldM.Length) : colBody;
-            var linkM = Regex.Match(rest, @"<a\b[^>]*>(?<t>[\s\S]*?)</a>", RegexOptions.IgnoreCase);
+            var linkM = SafeRegex.Match(rest, @"<a\b[^>]*>(?<t>[\s\S]*?)</a>", RegexOptions.IgnoreCase);
             var isLink = false;
             string valueText;
-            if (linkM.Success && Flat(bs, rest).Length == Flat(bs, linkM.Groups["t"].Value).Length)
+            if (linkM.Success && Flat(rest).Length == Flat(linkM.Groups["t"].Value).Length)
             {
-                valueText = Flat(bs, linkM.Groups["t"].Value);
+                valueText = Flat(linkM.Groups["t"].Value);
                 isLink = true;
             }
-            else valueText = Flat(bs, rest);
+            else valueText = Flat(rest);
             if (boldM.Success)
             {
-                var lbl = Flat(bs, boldM.Groups["t"].Value);
+                var lbl = Flat(boldM.Groups["t"].Value);
                 if (lbl.Length > 0)
                 {
                     if (draw) EmitRun(bs, "FB", BrFontPt, textX, y + bs.drop, lbl,
@@ -80,7 +77,7 @@ internal static partial class HtmlToPdfConverter
                 {
                     if (ln.Length == 0) continue;
                     if (draw) EmitRun(bs, "FA", BrFontPt, textX, y + bs.drop, ln,
-                        isLink ? BrLink : headFg ? BrHeadFg : BrText);
+                        (isLink, headFg) switch { (true, _) => BrLink, (_, true) => BrHeadFg, _ => BrText });
                     y += BrLineH;
                 }
             maxH = Math.Max(maxH, y - rowTop);

@@ -1,4 +1,4 @@
-using System.Drawing;
+﻿using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.Versioning;
@@ -24,6 +24,8 @@ public sealed partial class GdiPlusPageRenderer
     private void DrawAnnotations(PdfDictionary pageDict)
     {
         if (_reader.Resolve(pageDict.Get("Annots")) is not PdfArray annots) return;
+        // Whether the form asks viewers to build its field appearances, read once per page.
+        bool? formNeedsAppearances = null;
         foreach (var item in annots)
         {
             var annot = _reader.ResolveDict(item);
@@ -32,6 +34,18 @@ public sealed partial class GdiPlusPageRenderer
             if ((flags & AnnotHiddenFlag) != 0 || (flags & AnnotNoViewFlag) != 0) continue;
             var subtype = annot.GetName("Subtype");
 
+            // A field value the file carries without a usable appearance is laid out as a viewer
+            // lays it out, instead of the field being painted as an empty box.
+            if (subtype == "Widget")
+            {
+                formNeedsAppearances ??= Aspose.Pdf.Forms.WidgetRenderAppearance.FormNeedsAppearances(_reader);
+                var valueForm = Aspose.Pdf.Forms.WidgetRenderAppearance.Build(annot, _reader, formNeedsAppearances.Value);
+                if (valueForm is not null)
+                {
+                    SafeDraw(() => DrawAppearanceForm(annot, valueForm));
+                    continue;
+                }
+            }
             if (_reader.ResolveDict(annot.Get("AP")) is not null)
             {
                 SafeDraw(() => DrawAppearanceAnnotation(annot));
@@ -55,6 +69,13 @@ public sealed partial class GdiPlusPageRenderer
             {
                 var form = Aspose.Pdf.Annotations.PopupAppearance.BuildOpenPopupForm(annot, _reader);
                 if (form is not null) SafeDraw(() => DrawAppearanceForm(annot, form));
+            }
+            // A /FreeText stored without /AP is laid out from its contents and default
+            // appearance (PDF 32000 §12.5.6.6), as a viewer draws it.
+            else if (subtype == "FreeText")
+            {
+                var laidOut = Aspose.Pdf.Annotations.FreeTextAnnotation.WithRenderAppearance(annot, _reader);
+                if (laidOut is not null) SafeDraw(() => DrawAppearanceAnnotation(laidOut));
             }
         }
     }
@@ -89,10 +110,11 @@ public sealed partial class GdiPlusPageRenderer
         }
         else
         {
-            if (annot.Get("Rect") is not PdfArray rect || rect.Count < 4) return;
-            double rx1 = NumFrom(rect[0]), ry1 = NumFrom(rect[1]), rx2 = NumFrom(rect[2]), ry2 = NumFrom(rect[3]);
-            rMinX = Math.Min(rx1, rx2); rMaxX = Math.Max(rx1, rx2);
-            rMinY = Math.Min(ry1, ry2); rMaxY = Math.Max(ry1, ry2);
+            // The rectangle and its numbers may be indirect objects: a form filler writes them so.
+            if (_reader.Resolve(annot.Get("Rect")) is not PdfArray rect || rect.Count < 4) return;
+            var r = Aspose.Pdf.Rectangle.FromPdfArray(rect, _reader);
+            rMinX = Math.Min(r.LLX, r.URX); rMaxX = Math.Max(r.LLX, r.URX);
+            rMinY = Math.Min(r.LLY, r.URY); rMaxY = Math.Max(r.LLY, r.URY);
         }
         double rW = rMaxX - rMinX, rH = rMaxY - rMinY;
         if (rW <= 0 || rH <= 0) return;
@@ -105,8 +127,10 @@ public sealed partial class GdiPlusPageRenderer
         {
             var tx = fm[0] * cx + fm[2] * cy + fm[4];
             var ty = fm[1] * cx + fm[3] * cy + fm[5];
-            if (tx < tMinX) tMinX = tx; if (tx > tMaxX) tMaxX = tx;
-            if (ty < tMinY) tMinY = ty; if (ty > tMaxY) tMaxY = ty;
+            if (tx < tMinX) tMinX = tx;
+            if (tx > tMaxX) tMaxX = tx;
+            if (ty < tMinY) tMinY = ty;
+            if (ty > tMaxY) tMaxY = ty;
         }
         double tW = tMaxX - tMinX, tH = tMaxY - tMinY;
         if (tW <= 0 || tH <= 0) return;
@@ -174,8 +198,10 @@ public sealed partial class GdiPlusPageRenderer
                 for (int j = 0; j < 8; j += 2)
                 {
                     double px = NumFrom(qp[i + j]), py = NumFrom(qp[i + j + 1]);
-                    if (px < minX) minX = px; if (px > maxX) maxX = px;
-                    if (py < minY) minY = py; if (py > maxY) maxY = py;
+                    if (px < minX) minX = px;
+                    if (px > maxX) maxX = px;
+                    if (py < minY) minY = py;
+                    if (py > maxY) maxY = py;
                 }
                 float w = (float)(maxX - minX), h = (float)(maxY - minY);
                 if (w > 0 && h > 0) path.AddRectangle(new RectangleF((float)minX, (float)minY, w, h));
@@ -218,23 +244,15 @@ public sealed partial class GdiPlusPageRenderer
         var bits = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
         try
         {
-            var stride = bits.Stride;
-            var scan = bits.Scan0;
-            var row = new byte[stride];
+            var rowBytes = w * 4;
             for (int y = 0; y < h; y++)
             {
-                System.Runtime.InteropServices.Marshal.Copy(scan + y * stride, row, 0, stride);
-                int di = y * w * 4;
-                for (int x = 0; x < w; x++)
-                {
-                    int si = x * 4;
-                    // GDI+ Format32bppArgb is little-endian BGRA in memory.
-                    data[di + 0] = row[si + 2]; // R
-                    data[di + 1] = row[si + 1]; // G
-                    data[di + 2] = row[si + 0]; // B
-                    data[di + 3] = row[si + 3]; // A
-                    di += 4;
-                }
+                // GDI+ Format32bppArgb is little-endian BGRA in memory: the row is copied as
+                // it is and its blue and red bytes are then swapped in place.
+                System.Runtime.InteropServices.Marshal.Copy(bits.Scan0 + y * bits.Stride, data, y * rowBytes, rowBytes);
+                var row = data.AsSpan(y * rowBytes, rowBytes);
+                for (int i = 0; i < rowBytes; i += 4)
+                    (row[i], row[i + 2]) = (row[i + 2], row[i]);
             }
         }
         finally { bmp.UnlockBits(bits); }

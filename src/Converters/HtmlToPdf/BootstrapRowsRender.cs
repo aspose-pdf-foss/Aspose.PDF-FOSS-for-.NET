@@ -21,9 +21,9 @@ internal static partial class HtmlToPdfConverter
             || !body.TryGetValue("font-size", out var bodyFsV)
             || !bodyFsV.TrimEnd().EndsWith("px", StringComparison.OrdinalIgnoreCase)
             || !bs.css.ContainsKey(".panel")
-            || !Regex.IsMatch(bs.html, @"class\s*=\s*['""]panel panel-", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(bs.html, @"class\s*=\s*['""]col-xs-\d", RegexOptions.IgnoreCase)
-            || Regex.IsMatch(bs.html, @"class\s*=\s*['""]container['""]", RegexOptions.IgnoreCase))
+            || !SafeRegex.IsMatch(bs.html, @"class\s*=\s*['""]panel panel-", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(bs.html, @"class\s*=\s*['""]col-xs-\d", RegexOptions.IgnoreCase)
+            || SafeRegex.IsMatch(bs.html, @"class\s*=\s*['""]container['""]", RegexOptions.IgnoreCase))
             return null;
         bs.face = "Arial";
         if (body.TryGetValue("font-family", out var famV))
@@ -52,13 +52,13 @@ internal static partial class HtmlToPdfConverter
         bs.drop = MetricBaselineDrop(BrFontPt, BrLineH, fmv);
         bs.dropH3 = MetricBaselineDrop(BrH3FontPt, BrH3LineH, fmv);
 
-        bs.bodyM = Regex.Match(bs.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
+        bs.bodyM = SafeRegex.Match(bs.html, @"<body\b[^>]*>", RegexOptions.IgnoreCase);
         bs.pos = bs.bodyM.Success ? bs.bodyM.Index + bs.bodyM.Length : 0;
         bs.yTd = BrMarginY;                       // flow position (top-down)
         bs.pendingMb = 0.0;                       // margin awaiting MAX-collapse
         bs.construct = new Regex(
             @"<h3\b[^>]*>(?<h3>[\s\S]*?)</h3>|<hr\s*/?>|<p\b[^>]*class\s*=\s*['""]text-center['""][^>]*>(?<pc>[\s\S]*?)</p>|<div\b[^>]*class\s*=\s*['""]\s*(?<cls>row|panel panel-[\w-]+)\s*['""][^>]*>",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         while (true)
         {
             if (!EmitBootstrapConstruct(bs)) break;

@@ -172,7 +172,9 @@ internal static class PsImages
         {
             request.BitsPerComponent = 1;
             request.MaskInvert = request.Decode != null && request.Decode.Length > 0 &&
+#pragma warning disable S1244 // the Decode array as written ([1 0] inverts) - literal operands, exact on purpose
                                  request.Decode[0] == 1;
+#pragma warning restore S1244
         }
 
         return request;
@@ -273,7 +275,7 @@ internal static class PsImages
 
     private static PdfStream Compressed(PdfDictionary dict, byte[] data)
     {
-        var packed = IO.Filters.ManagedDeflater.DeflateZlib(data);
+        var packed = IO.Filters.ManagedDeflater.DeflateSamples(data);
         dict.Set("Filter", new PdfName("FlateDecode"));
         dict.Set("Length", new PdfInteger(packed.Length));
         return new PdfStream(dict, packed);

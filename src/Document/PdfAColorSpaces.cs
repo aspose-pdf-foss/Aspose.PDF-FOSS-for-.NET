@@ -42,25 +42,25 @@ public sealed partial class Document
         }
 
         foreach (var page in Pages)
-        foreach (var resources in PageResourceDictionaries(page))
-        {
-            if (_reader.ResolveDict(resources.Get("ColorSpace")) is { } spaces)
-                foreach (var key in spaces.Keys)
-                    Report(spaces.Get(key), ColorSpaceComponents(spaces.Get(key), 0));
-
-            if (_reader.ResolveDict(resources.Get("XObject")) is not { } xObjects) continue;
-            foreach (var key in xObjects.Keys)
+            foreach (var resources in PageResourceDictionaries(page))
             {
-                var xObject = _reader.ResolveStream(xObjects.Get(key))?.Dict;
-                if (xObject is null) continue;
-                // A transparency group blends in a space of its own, whatever the page's;
-                // the group dictionary is what states it, so that is what is reported.
-                if (_reader.ResolveDict(xObject.Get("Group")) is { } group)
-                    Report(xObject.Get("Group"), ColorSpaceComponents(group.Get("CS"), 0));
-                if (xObject.GetName("Subtype") == "Image")
-                    Report(xObjects.Get(key), ColorSpaceComponents(xObject.Get("ColorSpace"), 0));
+                if (_reader.ResolveDict(resources.Get("ColorSpace")) is { } spaces)
+                    foreach (var key in spaces.Keys)
+                        Report(spaces.Get(key), ColorSpaceComponents(spaces.Get(key), 0));
+
+                if (_reader.ResolveDict(resources.Get("XObject")) is not { } xObjects) continue;
+                foreach (var key in xObjects.Keys)
+                {
+                    var xObject = _reader.ResolveStream(xObjects.Get(key))?.Dict;
+                    if (xObject is null) continue;
+                    // A transparency group blends in a space of its own, whatever the page's; the
+                    // group dictionary is what states it, so that is what is reported.
+                    if (_reader.ResolveDict(xObject.Get("Group")) is { } group)
+                        Report(xObject.Get("Group"), ColorSpaceComponents(group.Get("CS"), 0));
+                    if (xObject.GetName("Subtype") == "Image")
+                        Report(xObjects.Get(key), ColorSpaceComponents(xObject.Get("ColorSpace"), 0));
+                }
             }
-        }
     }
 
     /// <summary>The number of components the document's output intent describes, taken from

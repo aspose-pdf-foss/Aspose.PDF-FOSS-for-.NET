@@ -96,7 +96,7 @@ internal static class FlateDecodeFilter
 
         // Some PDFs ship raw deflate without the zlib wrapper.
         try { return ManagedInflater.InflateRaw(data); }
-        catch { }
+        catch { /* not raw deflate either - the data is returned as it is, below */ }
 
         // Give up: return the input untouched rather than crashing.
         return data;
@@ -118,7 +118,8 @@ internal static class FlateDecodeFilter
     private static byte[] RemovePngPredictor(byte[] data, int columns, int colors, int bpc)
     {
         var bytesPerPixel = Math.Max(1, colors * bpc / 8);
-        var rowBytes = columns * colors * bpc / 8;
+        // A row of samples narrower than a whole number of bytes is padded to the next byte.
+        var rowBytes = (columns * colors * bpc + 7) / 8;
         var srcRowBytes = rowBytes + 1; // +1 for filter type byte
 
         if (data.Length == 0) return data;

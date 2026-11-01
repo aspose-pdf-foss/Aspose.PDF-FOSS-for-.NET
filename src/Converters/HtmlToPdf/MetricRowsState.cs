@@ -21,7 +21,6 @@ private sealed class MetricRowsState
     public double lineH;
     public string face = null!;
     public string boldFace = null!;
-    public double hheaSum;
     public (double asc, double sum) fm;
     public double p;
     public double pageWidth;
@@ -29,10 +28,8 @@ private sealed class MetricRowsState
     public double marginTop;
     public double marginBottom;
     public double tableWpt;
-    public double tablePct;
     public double baseFontSize;
     public bool paragraphCells;
-    public string tableHtml = null!;
     public double symInsetPt;
     public IReadOnlyDictionary<string, Dictionary<string, string>> css = null!;
     /// <summary>Whether the sheet asks cells or rows to avoid a break inside (read once per grid).</summary>
@@ -42,7 +39,6 @@ private sealed class MetricRowsState
     public HtmlLoadOptions? loadOptions;
     public System.Globalization.CultureInfo invc = null!;
     public Dictionary<string, string> flatRes = null!;
-    public bool reportCells;
     public bool serifReportCells;
     public bool stdSerif;
     public bool wrapperStacks;
@@ -51,8 +47,6 @@ private sealed class MetricRowsState
     public bool tableHasText;
     public bool tableRuleFace;
     public double tableX;
-    public double marginLeft;
-    public double contentWidth;
     /// <summary>The sheet's adjacent-sibling cell rules, forwarded into nested grids.</summary>
     public List<CssSiblingCellRule>? siblingCellRules;
     public List<Aspose.Pdf.Converters.HtmlToPdfConverter.MetricCell> r = null!;
@@ -70,8 +64,8 @@ private sealed class MetricRowsState
     public bool rowHasRealText;
     public double rowBoxH;
     public double rowNaturalBoxH;
-    // a tr style height floors the row's box (the letter's paced rows);
-    // a CLASS height — on the row or a cell — paces it exactly (the
+    // a tr style height floors the row's box (the letter's paced rows); a
+    // CLASS height — on the row or a cell — paces it exactly (the
     // boleto's h13/h12 grid rows and its 1px .cut tear-off row)
     public double rowCellClassH;
     public bool rowHasText;
@@ -98,15 +92,15 @@ private sealed class MetricRowsState
     public MetricCell mc = null!;
     public double cellFs;
     public double cellLineH;
-    // Middle vertical alignment (the HTML cell default);
-    // a valign='top' cell seats its first line at the row top.
+    // Middle vertical alignment (the HTML cell default); a
+    // valign='top' cell seats its first line at the row top.
     // the collapsed class grid top-aligns its cells
     public double lineTop;
     public double cellShear;   // the synthetic italic slant the cell's runs draw with (0 = none)
     public string mFace = null!;
-    // Browser-UA flow draws the Standard-14 serif faces (F5/F6);
-    // the MSHTML metric flow keeps its embedded-face resources;
-    // a <font face>/font-family cell brings its own WinAnsi face.
+    // Browser-UA flow draws the Standard-14 serif faces (F5/F6); the
+    // MSHTML metric flow keeps its embedded-face resources; a
+    // <font face>/font-family cell brings its own WinAnsi face.
     public string fontRes = null!;
     public double segTop;
     public double sgPrevMb;

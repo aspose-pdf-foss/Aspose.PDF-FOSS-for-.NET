@@ -45,8 +45,14 @@ private sealed class CollectTextOpsState
     public Stack<(double, double, double, double, double, double)> ctmStack = null!;
     public Stack<(double size, string? name, Aspose.Pdf.Core.PdfDictionary? dict, Dictionary<int, string>? toUni, double tc, double tw, double leading)> tsStack = null!;
     public double curTw;
+    // The clip box in force, saved and restored by q/Q; the rectangle of the last `re`
+    // until a W makes it the clip (null once the path is not a single rectangle).
+    public (double left, double bottom, double right, double top) clip = NoClip;
+    public Stack<(double, double, double, double)> clipStack = new();
+    public (double left, double bottom, double right, double top)? pathRect;
     // Pending positioning-Tm record, consumed by the next text-showing op.
     public (bool has, int xStart, int xEnd, double xVal) pendingTm;
+    public (int start, int end) pendingTmY;
     public (bool has, int xStart, int xEnd, double xVal) pendingTd;
     // Showing text ADVANCES the text matrix by what it drew (PDF 32000-1 §9.4.4). Without
     // that, consecutive shows inside one BT block all report the first one's origin: a

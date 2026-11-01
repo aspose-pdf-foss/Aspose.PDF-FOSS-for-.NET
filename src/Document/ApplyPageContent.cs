@@ -53,7 +53,8 @@ public sealed partial class Document : IDisposable
         // after -- the page was made to hold this, and the flow continued onto
         // it. Appending would read the other way round in the extracted text.
         // One prepend per page, over the fragments concatenated in the order they
-        // were asked for, since prepending each in turn would reverse them.
+        // were asked for, since prepending each in turn would reverse them. A positioned
+        // fragment's hyperlink covers the box its text is written in, as a flowed one's does.
         foreach (var group in _finalPagePlacements.GroupBy(p => p.PageNumber))
         {
             while (Pages.Count < group.Key) Pages.Add();
@@ -61,6 +62,7 @@ public sealed partial class Document : IDisposable
             var blocks = new List<byte[]>();
             var builder = new Text.TextBuilder(page) { ContentSink = blocks.Add };
             foreach (var (_, fragment) in group) builder.AppendTextInline(fragment);
+            foreach (var (_, fragment) in group) EmitPositionedFragmentLink(page, fragment);
             if (blocks.Count == 0) continue;
             var total = blocks.Sum(b => b.Length);
             var joined = new byte[total];
@@ -73,9 +75,10 @@ public sealed partial class Document : IDisposable
 
     /// <summary>
     /// Apply page-level Paragraphs, Headers, and Footers to each page's content stream.
-    /// Called automatically before save.
+    /// Called automatically before save; an incremental save passes the pages it lays out
+    /// (<paramref name="laysOut"/>), the others are left as they are.
     /// </summary>
-    private void ApplyPageContent()
+    private void ApplyPageContent(Func<Page, bool>? laysOut = null)
     {        // Form fields (combo/list/check/text boxes, radio groups) added to the
         // generator paragraph tree must be registered in the AcroForm before the
         // pages are written, so they round-trip as real fields.
@@ -92,6 +95,8 @@ public sealed partial class Document : IDisposable
         pc.overflowPages = new List<(byte[] content, double width, double height)>();
         pc.overflowImages = new Dictionary<int, List<(byte[] data, Rectangle rect)>>();
         _overflowCheckboxes.Clear();
+        _overflowCellLinks.Clear();
+        _deferredPageCountLines.Clear();
         pc.pendingFlows = new List<(FlowLayout flow, int slotStart, int slotEnd)>();
         pc.pendingTocEmits = new List<(Page tocPage, string fontName, List<Page> contPages,
             System.Collections.Generic.List<(int slot, byte[] preLeader, double textEnd, double lastY,
@@ -101,7 +106,7 @@ public sealed partial class Document : IDisposable
                 System.Func<string, double>? measure)> entries)>();
         pc.pagesSnapshot = Pages.ToList();
         pc.headingAutoCounters = new Dictionary<int, int>();
-        foreach (var page in pc.pagesSnapshot)
+        foreach (var page in pc.pagesSnapshot.Where(page => laysOut is null || laysOut(page)))
             LayoutPage(page, pc);
 
 
@@ -120,12 +125,22 @@ public sealed partial class Document : IDisposable
             pg.Footer?.RenderToPage(pg, isHeader: false, pg.Number, this,
                 !_deferredNumberBands.TryGetValue(pg, out var drawsTables) || drawsTables);
         }
+        // So do the table cells written with the count of their moment.
+        ApplyDeferredPageCounts();
         EmitDeferredTocLeaders(pc.pendingTocEmits, pc.pendingFlows, pc.overflowPageRefs);
+        // What the pass wrote on a turned page was laid out in the page as shown; it turns into media space
+        // now, before the stamps, which turn themselves.
+        foreach (var (page, mark) in pc.turnedPages) page.TurnGeneratedContent(mark);
+        // Stamps added before the layout draw over it, on the pages and numbers it settled.
+        ApplyDeferredStamps();
     }
 
-    // Checkbox widgets a multi-page table laid out on its spill pages, keyed by
-    // overflow slot; bound to the page when the slot materialises.
-    private readonly Dictionary<int, List<(Forms.CheckboxField cbf, Rectangle rect)>> _overflowCheckboxes = new();
+    // Widgets and annotations a multi-page table laid out in cells on its spill pages, keyed
+    // by overflow slot; bound to the page when the slot materialises.
+    private readonly Dictionary<int, List<(Annotations.Annotation annot, Rectangle rect)>> _overflowCheckboxes = new();
+
+    // The cell hyperlinks of those pages, keyed and linked the same way.
+    private readonly Dictionary<int, List<(Rectangle rect, Hyperlink link)>> _overflowCellLinks = new();
 
     private List<Page> AddOverflowPages(
         List<(byte[] content, double width, double height)> overflowPages,
@@ -179,26 +194,52 @@ public sealed partial class Document : IDisposable
                 if (ownerIdx >= 1) insertedFor[ownerIdx] = already + 1;
             }
             newPage.MediaBox = new Rectangle(0, 0, width, height);
+            // The slot was laid out in its owner's frame as shown, so the page is added unturned at that
+            // size and shows the content the way the owner shows the content it continues.
             // The page continues its owner: it takes the owner's font names first, so
             // content written against those names (a Times paragraph's F1) reaches the
             // same faces here, and only then registers a default of its own.
-            if (owner is not null) MergePageFontResources(owner, newPage);
-            Table.RegisterFont(newPage);
+            if (owner is not null)
+            {
+                MergePageFontResources(owner, newPage);
+                newPage.InheritDeferredStamps(owner);
+            }
+            var defaultFont = Table.RegisterFont(newPage);
             if (owner is not null)
             {
                 Text.TextParagraph.CarryExtGStates(owner, newPage);
                 Text.TextParagraph.CarryXObjects(owner, newPage, content);
             }
             newPage.AddContentStream(content);
+            Table.DropFontUnnamedBy(newPage, defaultFont, content);
             if (overflowImages.TryGetValue(slot, out var imgs))
                 foreach (var (data, rect) in imgs)
-                    newPage.AddImage(data, rect);
+                    newPage.AddLayoutImage(data, rect);
             if (_overflowCheckboxes.TryGetValue(slot, out var cbs))
-                foreach (var (cbf, rect) in cbs)
-                    cbf.PlaceWidget(newPage, rect);
+                foreach (var (annot, rect) in cbs)
+                    Table.PlaceCellAnnotation(annot, newPage, rect);
+            if (_overflowCellLinks.TryGetValue(slot, out var links))
+                foreach (var (rect, link) in links)
+                    Table.AddCellLink(newPage, rect, link);
             overflowPageRefs.Add(newPage);
         }
         return overflowPageRefs;
+    }
+
+    /// <summary>A positioned fragment's hyperlink as a Link annotation over the box its text was written in: from
+    /// its position, as wide as the text measures and a font size tall.</summary>
+    private const double DefaultFragmentFontSize = 12;
+
+    private static void EmitPositionedFragmentLink(Page page, Text.TextFragment fragment)
+    {
+        if (fragment.HyperlinkValue is not { } link || fragment.Position is not { } at) return;
+        var size = fragment.TextState.FontSize > 0 ? fragment.TextState.FontSize : DefaultFragmentFontSize;
+        // The box is as wide as the text measures in its face; a fragment not yet laid out has no rectangle.
+        var width = fragment.Rectangle is { Width: > 0 } box ? box.Width
+            : Text.TextPaginator.CreateMeasurer(Text.TextBuilder.MapToStandard14Public(fragment.TextState), size,
+                fragment.TextState.FontData ?? fragment.TextState.Font?.SourceFontData)(fragment.Text ?? string.Empty);
+        if (width <= 0) return;
+        page.EmitHyperlinkAnnotation(new Rectangle(at.XIndent, at.YIndent, at.XIndent + width, at.YIndent + size), link);
     }
 
     private void FinaliseDeferredFlows(
@@ -369,6 +410,10 @@ public sealed partial class Document : IDisposable
         // NormalAppearance after save.
         PlacePageAnnotations(page);
 
+        // From here on a turned page is written in the page as shown (see Page.MarkShownFrameContent).
+        var shownFrame = page.MarkShownFrameContent();
+        if (shownFrame is not null) pc.turnedPages.Add((page, shownFrame));
+
         // Render page Header/Footer set through Page.Header / Page.Footer.
         // Independent of the paragraph layout below (a page may carry only a
         // header), so it runs before the LayoutApplied gate and guards itself.
@@ -405,7 +450,12 @@ public sealed partial class Document : IDisposable
         // an already-present watermark from the content) so re-saving a document
         // that already carries a watermark doesn't stamp a second copy.
         if (page.PendingWatermark is { Available: true, Image: { } wmImage })
+        {
+            // The artifact places itself on the page as shown.
+            if (shownFrame is not null) page.TurnGeneratedContent(shownFrame);
             new WatermarkArtifact { SourceImage = wmImage }.AddToPage(page);
+            if (shownFrame is not null) page.KeepAsWritten(shownFrame);
+        }
 
         page.LayoutApplied = true;
     }

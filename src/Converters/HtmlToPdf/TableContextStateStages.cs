@@ -23,9 +23,13 @@ internal static partial class HtmlToPdfConverter
         ps.uaTableClasses = new List<string>(cfg.tblClasses).ToArray();
         ps.cellPadAttrDeclared = cfg.tblCellPadAttr is not null;
         ps.wordMailCells = wordMailCells;
-        ps.cellFamily = cfg.defaultCellFace is { Length: > 0 } dcf ? dcf
-            // (…and in the browser's default serif when nothing names a face)
-            : uaCellBoxes ? "Times New Roman" : null;
+        ps.nestedGrid = cfg.nestedGrid;
+        ps.formGridDialect = cfg.formGridDialect;
+        ps.hidingChains = HidingDescendantRules(cfg.css, cfg.docCss);
+        if (cfg.defaultCellFace is { Length: > 0 } dcf) ps.cellFamily = dcf;
+        // (…and in the browser's default serif when nothing names a face)
+        else if (uaCellBoxes) ps.cellFamily = "Times New Roman";
+        else ps.cellFamily = null;
         // font-weight inherits: a weight the table declares - inline, or through the class
         return ps;
     }
@@ -38,42 +42,42 @@ internal static partial class HtmlToPdfConverter
         cfg.tblCellSpacingDeclared = false;
         if (cfg.tblTag.Success)
         {
-            var sm = Regex.Match(cfg.tblTag.Value, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+            var sm = SafeRegex.Match(cfg.tblTag.Value, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
             // JSON-escaped dialect: the style value is an unquoted token truncated at the
             // first whitespace (see ParseAttributes) — parse the declarations it kept.
             if (!sm.Success && cfg.tblTag.Value.IndexOf("\\\"", StringComparison.Ordinal) >= 0)
-                sm = Regex.Match(cfg.tblTag.Value, @"style\s*=\s*(\S+)", RegexOptions.IgnoreCase);
+                sm = SafeRegex.Match(cfg.tblTag.Value, @"style\s*=\s*(\S+)", RegexOptions.IgnoreCase);
             if (sm.Success)
-                foreach (Match d in StyleDeclRx.Matches(sm.Groups[1].Value))
-                    cfg.tblStyle[d.Groups[1].Value.Trim().ToLowerInvariant()] = d.Groups[2].Value.Trim();
-            var bm = Regex.Match(cfg.tblTag.Value, @"(?<!\w)border\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+                foreach (var groups in SafeRegex.Matches(StyleDeclRx, sm.Groups[1].Value).Select(d => d.Groups))
+                    cfg.tblStyle[groups[1].Value.Trim().ToLowerInvariant()] = groups[2].Value.Trim();
+            var bm = SafeRegex.Match(cfg.tblTag.Value, @"(?<!\w)border\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
             if (bm.Success) cfg.tblBorderAttr = bm.Groups[1].Value;
-            var bcAttr = Regex.Match(cfg.tblTag.Value, @"bordercolor\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+            var bcAttr = SafeRegex.Match(cfg.tblTag.Value, @"bordercolor\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
             if (bcAttr.Success) cfg.tblBorderColorAttr = bcAttr.Groups[1].Value;
-            var cm = Regex.Match(cfg.tblTag.Value, @"cellpadding\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+            var cm = SafeRegex.Match(cfg.tblTag.Value, @"cellpadding\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
             if (cm.Success) cfg.tblCellPadAttr = cm.Groups[1].Value;
-            var csAttr = Regex.Match(cfg.tblTag.Value, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+            var csAttr = SafeRegex.Match(cfg.tblTag.Value, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
             if (csAttr.Success && PresentationalLengthPt(csAttr.Groups[1].Value) is { } csPt)
             {
                 colModel.tblCellSpacingPt = csPt;
                 cfg.tblCellSpacingDeclared = true;
                 colModel.cellSpacingPt = colModel.tblCellSpacingPt;
             }
-            var hm = Regex.Match(cfg.tblTag.Value, @"height\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+            var hm = SafeRegex.Match(cfg.tblTag.Value, @"height\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
             if (hm.Success) double.TryParse(hm.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out colModel.tblHeightPx);
         }
 
         // Stylesheet rules addressed at the table's own class(es). The table-level
-        // rule (".listTable { font/width/color }") merges UNDER the inline style;
-        // ".cls td" / ".cls th" (the parser collapses ".cls tr td" to these) style
+        // rule (".listTable { font/width/color }") merges UNDER the inline style; ".cls
+        // td" / ".cls th" (the parser collapses ".cls tr td" to these) style
         // the cell grid. Border declarations stay out of the merge — a class border
         // is the table's OUTER frame, not a box on every cell.
         cfg.tblClasses = new List<string>();
         if (cfg.tblTag.Success)
         {
-            var clm = Regex.Match(cfg.tblTag.Value, @"class\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+            var clm = SafeRegex.Match(cfg.tblTag.Value, @"class\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
             if (clm.Success)
                 foreach (var c in clm.Groups[1].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
                     cfg.tblClasses.Add(c);
@@ -84,11 +88,10 @@ internal static partial class HtmlToPdfConverter
             && collapseV.Contains("collapse", StringComparison.OrdinalIgnoreCase);
         cfg.tblClassDecl = TableOwnClassRule(cfg, cfg.tblClasses, "");
         if (cfg.tblClassDecl is not null)
-            foreach (var kv in cfg.tblClassDecl)
-                if (kv.Key is "font-size" or "font-family" or "font-weight" or "color"
+            foreach (var kv in cfg.tblClassDecl.Where(kv => kv.Key is "font-size" or "font-family" or "font-weight" or "color"
                         or "width" or "max-width"
-                    && !cfg.tblStyle.ContainsKey(kv.Key))
-                    cfg.tblStyle[kv.Key] = kv.Value;
+                    && !cfg.tblStyle.ContainsKey(kv.Key)))
+                cfg.tblStyle[kv.Key] = kv.Value;
         // …and the sheet's CHAIN rule on the table (`#right_column TABLE { … }`, reached through the
         // containers the grid stands in) merges under those the same way: its typography and box
         // declarations are the table's where nothing closer says otherwise. Its border is the
@@ -102,7 +105,7 @@ internal static partial class HtmlToPdfConverter
             var te = new CssElem { Tag = "table" };
             if (cfg.tblTag.Success)
             {
-                var im2 = Regex.Match(cfg.tblTag.Value, @"\bid\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
+                var im2 = SafeRegex.Match(cfg.tblTag.Value, @"\bid\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
                 if (im2.Success) te.Id = im2.Groups[1].Value;
                 if (cfg.tblClasses.Count > 0) te.Classes = cfg.tblClasses.ToArray();
             }
@@ -118,16 +121,15 @@ internal static partial class HtmlToPdfConverter
             if (_ancestorGridSheet && AncestorTableDecls(cfg) is { } ancDecls)
             {
                 if (cfg.tblChainDecls is null) cfg.tblChainDecls = ancDecls;
-                else foreach (var kv in ancDecls) if (!cfg.tblChainDecls.ContainsKey(kv.Key)) cfg.tblChainDecls[kv.Key] = kv.Value;
+                else foreach (var kv in ancDecls.Where(kv => !cfg.tblChainDecls.ContainsKey(kv.Key))) cfg.tblChainDecls[kv.Key] = kv.Value;
             }
             if (cfg.tblChainDecls is not null && _ancestorGridSheet && cfg.cssAncestors is { Count: > 0 })
-                foreach (var kv in cfg.tblChainDecls)
-                    // (its width keeps the chain arm below, which resolves a percent of the BOX)
-                    if (kv.Key is "font-size" or "font-family" or "font-weight" or "color"
+                foreach (var kv in cfg.tblChainDecls.Where(kv => kv.Key is "font-size" or "font-family" or "font-weight" or "color"
                             or "border-spacing" or "border-collapse"
                             or "background" or "background-color"
-                        && !cfg.tblStyle.ContainsKey(kv.Key))
-                        cfg.tblStyle[kv.Key] = kv.Value;
+                        && !cfg.tblStyle.ContainsKey(kv.Key)))
+                    // (its width keeps the chain arm below, which resolves a percent of the BOX)
+                    cfg.tblStyle[kv.Key] = kv.Value;
         }
     }
 }

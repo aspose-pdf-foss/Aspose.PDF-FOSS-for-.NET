@@ -102,7 +102,7 @@ internal static class PsImageData
         {
             interpreter.Invoke(source);
         }
-        catch (PsErrorSignal)
+        catch (PsErrorException)
         {
             return null;
         }
@@ -162,7 +162,7 @@ internal static class PsImageData
                 value = lo + value * (hi - lo);
             }
 
-            sample[c] = value < 0 ? 0 : value > 1 ? 1 : value;
+            sample[c] = value switch { < 0 => 0, > 1 => 1, _ => value };
         }
     }
 

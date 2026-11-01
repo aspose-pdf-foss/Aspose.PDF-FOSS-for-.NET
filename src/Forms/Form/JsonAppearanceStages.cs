@@ -59,8 +59,8 @@ public sealed partial class Form
                 var fontEntry = new PdfDictionary();
                 fontEntry.Set("Type", new PdfName("Font"));
                 fontEntry.Set("Subtype", new PdfName("Type1"));
-                fontEntry.Set("BaseFont", new PdfName(MapStandardAlias(alias!)));
-                ja.fontDict.Set(alias!, fontEntry);
+                fontEntry.Set("BaseFont", new PdfName(MapStandardAlias(alias)));
+                ja.fontDict.Set(alias, fontEntry);
             }
         }
     }

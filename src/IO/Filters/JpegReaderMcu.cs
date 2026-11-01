@@ -40,8 +40,8 @@ internal static partial class JpegDecoder
             // scanner output) otherwise gets scrambled by the interleaved MCU layout.
             var ciN = _scanComponentIndices[0];
             var compN = _components[ciN];
-            var compWidth = (Width * compN.H + _maxH - 1) / _maxH;
-            var compHeight = (Height * compN.V + _maxV - 1) / _maxV;
+            var compWidth = (_frameWidth * compN.H + _maxH - 1) / _maxH;
+            var compHeight = (_frameHeight * compN.V + _maxV - 1) / _maxV;
             var blockCols = (compWidth + 7) / 8;
             var blockRows = (compHeight + 7) / 8;
             var dcTableN = _dcTables[_scanDcTableIds[0]];
@@ -67,17 +67,8 @@ internal static partial class JpegDecoder
                     Array.Clear(blockN, 0, blockN.Length);
                     dcPred[ciN] = DecodeBlock(bits, blockN, dcPred[ciN], dcTableN!, acTableN!);
                     Dequantize(blockN, qtN);
-                    IDCT(blockN);
-
-                    var pxN = bx * 8;
-                    var pyN = by * 8;
-                    for (var y = 0; y < 8; y++)
-                    {
-                        var dst = (pyN + y) * bwBuf + pxN;
-                        var src = y * 8;
-                        for (var x = 0; x < 8; x++)
-                            buffers[ciN][dst + x] = (byte)Clamp(blockN[src + x] + 128);
-                    }
+                    InverseTransform(blockN);
+                    PlaceBlock(blockN, buffers[ciN], bwBuf, bx * BlockSide, by * BlockSide);
                     restartCounter++;
                 }
             }

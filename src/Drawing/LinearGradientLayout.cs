@@ -238,10 +238,10 @@ public sealed class LinearGradientLayout
                     GradientHintKind.RelativeBetweenStops => stops[i].Hint,
                     _ => offsets[i + 1] - offsets[i] < ZeroEpsilon ? 1 : (hints[i] - offsets[i]) / (offsets[i + 1] - offsets[i]),
                 };
-                exponent = double.IsNaN(between) ? 1
-                    : between <= ZeroEpsilon ? 0
-                    : between >= 1 - ZeroEpsilon ? double.PositiveInfinity
-                    : Math.Log(0.5) / Math.Log(between);
+                if (double.IsNaN(between)) exponent = 1;
+                else if (between <= ZeroEpsilon) exponent = 0;
+                else if (between >= 1 - ZeroEpsilon) exponent = double.PositiveInfinity;
+                else exponent = Math.Log(0.5) / Math.Log(between);
             }
             result.Add(new Stop(stops[i].Color, offsets[i], exponent));
         }

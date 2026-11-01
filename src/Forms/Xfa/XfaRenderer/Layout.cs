@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using System.Xml;
 
@@ -30,14 +30,16 @@ internal static partial class XfaRenderer
         return EditChrome.Box;
     }
 
+    /// <summary>True for a box its relevant attribute leaves out of print (a screen-only "-print").</summary>
+    private static bool ExcludedFromPrint(XmlElement e) => e.GetAttribute("relevant").Contains("-print", StringComparison.Ordinal);
+
     private static bool Hidden(XmlElement e) =>
         e.GetAttribute("presence") is "hidden" or "invisible" or "inactive"
         // A `relevant="-print"` SUBFORM (e.g. a designer cover sheet meant only for
         // on-screen viewing) is excluded from the static render.
-        // Fields with -print (Save/Print/Reset toolbar buttons) are
-        // still painted — they stay in the converted document.
-        || (e.LocalName == "subform"
-            && e.GetAttribute("relevant").Contains("-print", StringComparison.Ordinal));
+        // Fields with -print (Save/Print/Reset toolbar buttons) stay in the
+        // converted document, drawn by their screen-only widgets.
+        || (e.LocalName == "subform" && ExcludedFromPrint(e));
 
     /// <summary>A decorative draw carrying an explicit y inside a flow container is a positioned
     /// overlay (a spacer/line) and does not consume flow height. Layout subforms flow even with an
@@ -48,7 +50,7 @@ internal static partial class XfaRenderer
     /// <summary>Lay out a container's children starting at top-left (x,y) in top-down coordinates.</summary>
     private static void Layout(Ctx ctx, XmlElement e, double x, double y, string path, double availW = 0)
     {
-        var (mt, mb, ml, mr) = Margins(e);
+        var (mt, _, ml, mr) = Margins(e);
         double cx = x + ml, cy = y + mt;
         var layout = e.GetAttribute("layout");
         if (layout is "" ) layout = "position";
@@ -85,34 +87,8 @@ internal static partial class XfaRenderer
                     break;
                 }
             case "row":
-                {
-                    // A table's columnWidths override the cells' own widths: cell k sits at
-                    // the cumulative column x and spans colSpan columns (Designer cells often
-                    // carry stale w attributes narrower/wider than their column).
-                    var colWidths = (e.ParentNode as XmlElement)?.GetAttribute("columnWidths")
-                        ?.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(s => Len(s, 0)).Where(v => v > 0).ToList();
-                    double xx = cx; int col = 0;
-                    foreach (var c in kids)
-                    {
-                        double cw;
-                        if (colWidths is { Count: > 0 } && col < colWidths.Count)
-                        {
-                            // colSpan="-1" spans all remaining columns (XFA spec).
-                            int span = int.TryParse(c.GetAttribute("colSpan"), out var sp) && sp != 0
-                                ? (sp < 0 ? Math.Max(1, colWidths.Count - col) : sp)
-                                : 1;
-                            cw = 0;
-                            for (int s2 = 0; s2 < span && col + s2 < colWidths.Count; s2++) cw += colWidths[col + s2];
-                            col += span;
-                            c.SetAttribute("w", cw.ToString("0.###", CultureInfo.InvariantCulture) + "pt");
-                        }
-                        else cw = BoxW(c);
-                        Place(ctx, c, xx, cy, path, cw);
-                        xx += cw;
-                    }
-                    break;
-                }
+                LayoutRow(ctx, e, kids, cx, cy, path);
+                break;
             default: // positioned
                 {
                     // A positioned container's <para hAlign="center"> centres its content
@@ -131,7 +107,7 @@ internal static partial class XfaRenderer
                         var slack = W - extent;
                         if (slack > 0 && extent > 0) alignShift = hA == "center" ? slack / 2 : slack;
                         if (alignShift > 0 && System.Environment.GetEnvironmentVariable("XFA_ALIGN") is not null)
-                            System.Console.Error.WriteLine($"ALIGN	{e.GetAttribute("name")}	W={W:F1}	extent={extent:F1}	shift={alignShift:F1}");
+                            System.Console.Error.WriteLine($"ALIGN\t{e.GetAttribute("name")}\tW={W:F1}\textent={extent:F1}\tshift={alignShift:F1}");
                     }
                     foreach (var c in kids)
                     {
@@ -145,7 +121,7 @@ internal static partial class XfaRenderer
 
     /// <summary>Place one box at top-left (x,y); paint if it is a leaf; recurse if a container.
     /// Returns its laid-out height.</summary>
-    private static double Place(Ctx ctx, XmlElement e, double x, double y, string path, double availW = 0)
+    private static double Place(Ctx ctx, XmlElement e, double x, double y, string path, double availW = 0, double rowHeight = 0)
     {
         if (Hidden(e)) return 0;
         // A field's auto width follows the probed minW + caption-reserve law; other
@@ -155,11 +131,14 @@ internal static partial class XfaRenderer
         // widthless master text draw otherwise wraps one word per line) — EXCEPT a
         // vector line draw, whose w=0 means a VERTICAL rule (a form's
         // banner draws its warning triangles from such lines; inflating one paints
-        // a strike through the caption).
+        // a strike through the caption). A text draw grown to its text keeps that
+        // width where the room is narrower: it is never wrapped at the container or the
+        // page edge (measured on a long text in a narrow positioned container).
         var isLineDraw = e.LocalName == "draw" && FirstChild(e, "value") is { } lv
             && lv.ChildNodes.OfType<XmlElement>().Any(c => c.LocalName == "line");
         if (w <= 0 && !isLineDraw) w = Math.Max(4, availW);
-        double h = Height(ctx, e, w);
+        // A cell is as tall as its row, whatever its own content takes.
+        double h = Math.Max(Height(ctx, e, w), rowHeight);
         // anchorType: a positioned element's (x,y) names the given corner/edge of its
         // box, not the top-left (a topRight-anchored title sits to the LEFT of its x).
         // A FLOWED parent (tb/lr-tb/table) ignores its children's x/y entirely, so
@@ -168,20 +147,18 @@ internal static partial class XfaRenderer
         // off the page's left edge).
         var parentLayout = (e.ParentNode as XmlElement)?.GetAttribute("layout") ?? "";
         var parentFlows = parentLayout is "tb" or "lr-tb" or "rl-tb" or "table" or "row";
-        if (!parentFlows && (e.GetAttribute("x").Length > 0 || e.GetAttribute("y").Length > 0))
-            switch (e.GetAttribute("anchorType"))
-            {
-                case "topCenter": x -= w / 2; break;
-                case "topRight": x -= w; break;
-                case "middleLeft": y -= h / 2; break;
-                case "middleCenter": x -= w / 2; y -= h / 2; break;
-                case "middleRight": x -= w; y -= h / 2; break;
-                case "bottomLeft": y -= h; break;
-                case "bottomCenter": x -= w / 2; y -= h; break;
-                case "bottomRight": x -= w; y -= h; break;
-            }
+        if (TurnOf(e) is var turn && turn != 0)
+        {
+            PlaceTurned(ctx, e, turn, parentFlows, x, y, w, h, ChildPath(path, e));
+            return h;
+        }
+        if (!parentFlows)
+        {
+            var (ax, ay) = AnchorOffset(e, w, h);
+            x -= ax; y -= ay;
+        }
         var name = e.GetAttribute("name");
-        string p2 = name.Length > 0 ? (path.Length > 0 ? $"{path}.{name}[{SiblingIndex(e)}]" : $"{name}[{SiblingIndex(e)}]") : path;
+        var p2 = ChildPath(path, e);
         switch (e.LocalName)
         {
             case "field":
@@ -193,6 +170,25 @@ internal static partial class XfaRenderer
                 PaintContainerFill(ctx, e, x, y, w, h);
                 Layout(ctx, e, x, y, p2, availW); return h;
         }
+    }
+
+    /// <summary>How far the top-left corner of a positioned box of the given size lies left of
+    /// and above its (x, y): that point names the corner or edge the box's anchorType says.</summary>
+    private static (double dx, double dy) AnchorOffset(XmlElement e, double w, double h)
+    {
+        if (e.GetAttribute("x").Length == 0 && e.GetAttribute("y").Length == 0) return (0, 0);
+        return e.GetAttribute("anchorType") switch
+        {
+            "topCenter" => (w / 2, 0),
+            "topRight" => (w, 0),
+            "middleLeft" => (0, h / 2),
+            "middleCenter" => (w / 2, h / 2),
+            "middleRight" => (w, h / 2),
+            "bottomLeft" => (0, h),
+            "bottomCenter" => (w / 2, h),
+            "bottomRight" => (w, h),
+            _ => (0, 0),
+        };
     }
 
     /// <summary>A box's laid-out width: its declared w, else the extent of its
@@ -210,6 +206,23 @@ internal static partial class XfaRenderer
         return extent > 0 ? extent : BoxW(e);
     }
 
+    /// <summary>The SOM path of a box below its container's: its name and index among same-named siblings. An unnamed
+    /// field bound by a reference is addressed by its class and index ("#field[0]"), so the value its reference names
+    /// is found by its path; any other unnamed box adds no step.</summary>
+    private static string ChildPath(string path, XmlElement e)
+    {
+        var segment = PathSegment(e);
+        if (segment is null) return path;
+        return path.Length > 0 ? $"{path}.{segment}" : segment;
+    }
+
+    private static string? PathSegment(XmlElement e)
+    {
+        var name = e.GetAttribute("name");
+        if (name.Length > 0) return $"{name}[{SiblingIndex(e)}]";
+        return e.LocalName == "field" && DataRefOf(e).Length > 0 ? $"#field[{SiblingIndex(e)}]" : null;
+    }
+
     private static int SiblingIndex(XmlElement e)
     {
         int idx = 0;
@@ -221,6 +234,7 @@ internal static partial class XfaRenderer
     private static double Height(Ctx ctx, XmlElement e, double outerW = 0)
     {
         if (Hidden(e)) return 0;
+        if (TurnsItsBox(e)) return Len(e.GetAttribute("w"), 0);    // a quarter-turned box stands on its width
         double? h = LenN(e.GetAttribute("h")), minH = LenN(e.GetAttribute("minH"));
         if (e.LocalName == "field") return FieldHeight(ctx, e, h, minH);
         if (e.LocalName == "draw") return DrawHeight(ctx, e, outerW, h, minH);
@@ -267,8 +281,7 @@ internal static partial class XfaRenderer
         for (XmlElement? a = e; a is not null; a = a.ParentNode as XmlElement)
         {
             if (a.LocalName is not ("subform" or "field" or "draw" or "exclGroup" or "area")) break;
-            var n = a.GetAttribute("name");
-            if (n.Length > 0) parts.Add($"{n}[{SiblingIndex(a)}]");
+            if (PathSegment(a) is { } segment) parts.Add(segment);
         }
         parts.Reverse();
         return string.Join(".", parts);
@@ -276,6 +289,8 @@ internal static partial class XfaRenderer
 
     private static string? FieldValueText(Ctx ctx, XmlElement e)
     {
+        if (ctx.PageScripts?.MeasuredOn(e, ctx.PageNum) is { } paged) return paged;
+        if (CalculatedValue(e) is { } calculated) return ApplyPicture(e, calculated);
         string? val = null;
         if (!BindsNoData(e))
         {
@@ -284,8 +299,10 @@ internal static partial class XfaRenderer
             // without it a bound field MEASURES as empty and loses the value pads
             // its painted height carries (a bound row: 14.7 empty vs the
             // 23.6 with its value).
-            if (val is null && ctx.RawValue is not null)
+            // A field without a name has no path of its own: the one of its container names that container's data.
+            if (val is null && ctx.RawValue is not null && PathSegment(e) is not null)
                 val = ctx.RawValue(SomPathOf(e));
+            val ??= ChainedReferenceValue(ctx, e);
             if (val is null && ctx.DataRoot is not null)
             {
                 // Non-repeated fields carry no data-idx scope (only occur-expanded
@@ -303,25 +320,25 @@ internal static partial class XfaRenderer
                         val = leaves[0].InnerText;
                 }
             }
-            if (!string.IsNullOrEmpty(val)) val = ApplyPicture(e, val!);
+            if (!string.IsNullOrEmpty(val)) val = ApplyPicture(e, val);
         }
         if (string.IsNullOrEmpty(val))
         {
-            val = InnerText(e, "value");
-            if (!string.IsNullOrEmpty(val)) val = ApplyPicture(e, val!);
+            val = DefaultOrScriptValue(ctx, e);
+            if (!string.IsNullOrEmpty(val)) val = ApplyPicture(e, val);
         }
         return val;
     }
 
     /// <summary>Laid-out line count of plain text in a given width: hard line breaks
     /// (LF/CR/U+2028/U+2029) and greedy word wraps both count.</summary>
-    private static int LineCount(string text, double maxWidth, double fs, bool bold)
+    private static int LineCount(string text, double maxWidth, double fs, bool bold, bool serif = false, double? breakWidth = null)
     {
         text = text.Replace((char)0x2028, (char)0x0A).Replace((char)0x2029, (char)0x0A)
                    .Replace((char)0x0D, (char)0x0A);
         int n = 0;
         foreach (var para in text.Split('\n'))
-            n += WrapLine(para, maxWidth, fs, bold).Count();
+            n += WrapLine(para, maxWidth, fs, bold, serif, breakWidth).Count();
         return n;
     }
 
@@ -378,8 +395,8 @@ internal static partial class XfaRenderer
         {
             var cap = InnerText(e, "caption");
             var (cfs, cbold) = CaptionFont(e);
-            reserve = res > 0 ? res
-                : (string.IsNullOrWhiteSpace(cap) ? 0 : TextWidth(cap!.Trim(), cfs, cbold) + 4);
+            if (res > 0) reserve = res;
+            else reserve = string.IsNullOrWhiteSpace(cap) ? 0 : TextWidth(cap.Trim(), cfs, cbold, FontSerif(CaptionFontOwner(e))) * CaptionWideFactor(e) + 4;
         }
         double content = 0;
         var val = FieldValueText(ctx, e);
@@ -387,9 +404,9 @@ internal static partial class XfaRenderer
         {
             var fs = FontSize(e);
             var (_, _, ml, mr) = Margins(e);
-            foreach (var line in val!.Split('\n'))
+            foreach (var line in val.Split('\n'))
             {
-                var lw = TextWidth(line.TrimEnd(), fs, false) + ml + mr;
+                var lw = TextWidth(line.TrimEnd(), fs, false, FontSerif(e)) * FontWideFactor(e) + ml + mr;
                 if (lw > content) content = lw;
             }
         }
@@ -398,11 +415,16 @@ internal static partial class XfaRenderer
 
     private static double BoxW(XmlElement e)
     {
+        if (TurnsItsBox(e)) return Len(e.GetAttribute("h"), 0);    // and is as wide as it was tall
         double? w = LenN(e.GetAttribute("w"));
         if (w is not null) return w.Value;
         // A table cell with no explicit width takes its column's width from the table's columnWidths.
+        // A column declared with no width sizes to what it holds: a text cell to its text.
         var col = ColumnWidth(e);
-        if (col is not null) return col.Value;
+        if (col is > 0) return col.Value;
+        if (col is not null && e.LocalName == "draw" && NaturalTextWidth(e) is > 0 and var natural) return natural;
+        // A text draw that declares no width is as wide as its text.
+        if (GrownTextWidth(e) is > 0 and var grown) return grown;
         // A leaf sized only by its minimum (Designer buttons carry minW/minH, no w/h)
         // occupies at least that width — 0 would stack lr-tb siblings onto one spot.
         if (e.LocalName is "field" or "draw" && LenN(e.GetAttribute("minW")) is { } minW)

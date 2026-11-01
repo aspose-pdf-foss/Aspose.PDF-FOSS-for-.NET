@@ -456,8 +456,13 @@ public sealed partial class Document : IDisposable
     {
         get
         {
-            var actionDict = _reader.ResolveDict(_reader.Catalog.Get("OpenAction"));
-            return actionDict is not null ? PdfAction.Create(actionDict, _reader) : null;
+            // The entry is an action or, as the setter also writes it, a destination array.
+            return _reader.Resolve(_reader.Catalog.Get("OpenAction")) switch
+            {
+                PdfDictionary actionDict => PdfAction.Create(actionDict, _reader),
+                PdfArray destination => Annotations.ExplicitDestination.FromArray(destination, _reader),
+                _ => null,
+            };
         }
         set
         {
@@ -470,7 +475,7 @@ public sealed partial class Document : IDisposable
                     _reader.Catalog.Set("OpenAction", action.Dict);
                     break;
                 case Annotations.ExplicitDestination dest:
-                    _reader.Catalog.Set("OpenAction", dest.ToPdfArrayPublic());
+                    _reader.Catalog.Set("OpenAction", dest.ToLocalPdfArray());
                     break;
             }
         }
@@ -512,8 +517,9 @@ public sealed partial class Document : IDisposable
     private EmbeddedFileCollection? _embeddedFiles;
 
     /// <summary>Format a <see cref="DateTime"/> as a PDF date string
-    /// (<c>D:yyyyMMddHHmmssZ</c>, UTC) per PDF 32000-1 §7.9.4.</summary>
-    private static string FormatPdfDate(DateTime value)
+    /// (<c>D:yyyyMMddHHmmssZ</c>, UTC) per PDF 32000-1 §7.9.4 - Gregorian, whatever
+    /// the calendar of the current culture.</summary>
+    internal static string FormatPdfDate(DateTime value)
         => "D:" + value.ToUniversalTime().ToString("yyyyMMddHHmmss",
                System.Globalization.CultureInfo.InvariantCulture) + "Z";
 

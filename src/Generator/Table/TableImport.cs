@@ -53,8 +53,8 @@ public partial class Table
             if (n > 0) return n;
         }
         var max = 0;
-        foreach (var r in Rows)
-            if (r.Cells.Count > max) max = r.Cells.Count;
+        foreach (var count in Rows.Select(r => r.Cells).Select(cells => cells.Count).Where(count => count > max))
+            max = count;
         return max;
     }
 

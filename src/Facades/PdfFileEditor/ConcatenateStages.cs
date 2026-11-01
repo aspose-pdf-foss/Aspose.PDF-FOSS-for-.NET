@@ -38,6 +38,9 @@ public sealed partial class PdfFileEditor
         {
             cc.acroFormDict ??= new PdfDictionary();
             cc.acroFormDict.Set("XFA", cc.xfaArr);
+            // Dynamic forms merged keep asking for a render: their pages are notices, the forms live in the packet.
+            if (XfaInputsAllNeedRendering(cc.inputReaders))
+                cc.catalogDict.Set("NeedsRendering", PdfBoolean.True);
         }
 
         if (cc.acroFormDict is not null)
@@ -196,13 +199,13 @@ public sealed partial class PdfFileEditor
     }
 
     /// <summary>The multi-XFA merge: every input's top-level field nodes re-parented under one synthetic root field, applying the same renames as the template merge.</summary>
-    private void MergeXfaFieldTrees(ConcatenationState cc)
+    private static void MergeXfaFieldTrees(ConcatenationState cc)
     {
         int rootNum = cc.writer.AllocateObjectNumber();
         // Group each input's top-level field nodes by their merged name. Same merged
         // name → one output node whose /Kids are the union of all members' kids
-        // (KeepFieldsUnique=false → a single eApp[0] carrying every source's pages);
-        // differing subtrees rename to eApp1[0]/eApp2[0] and stay separate.
+        // (KeepFieldsUnique=false → a single eApp[0] carrying every source's pages); differing
+        // subtrees rename to eApp1[0]/eApp2[0] and stay separate.
         var groupOrder = new List<string>();
         var groupMembers = new Dictionary<string, List<(PdfReader rdr, PdfDictionary dict)>>();
         for (int i = 0; i < cc.inputReaders.Count; i++)
@@ -263,7 +266,7 @@ public sealed partial class PdfFileEditor
                 var v = firstDict.Get(key);
                 if (v is not null) nodeDict.Set(key, RemapObject(v, firstRdr, nodeRemap, cc.writer));
             }
-            nodeDict.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes(newName)));
+            nodeDict.Set("T", Aspose.Pdf.Forms.Field.EncodePdfTextString(newName));
             nodeDict.Set("Parent", new PdfIndirectRef(rootNum, 0));
             nodeDict.Set("Kids", nodeKids);
             cc.writer.WriteIndirectObject(nodeNum, nodeDict);
@@ -290,8 +293,8 @@ public sealed partial class PdfFileEditor
         }
     }
 
-    /// <summary>Write the page tree, then start the catalog with every input's embedded files merged into one name tree.</summary>
-    private void WritePageTreeAndEmbeddedFiles(ConcatenationState cc, List<int> allPageObjNums)
+    /// <summary>Write the page tree, then start the catalog with every input's embedded files and named destinations merged into one name tree each.</summary>
+    private static void WritePageTreeAndEmbeddedFiles(ConcatenationState cc, List<int> allPageObjNums)
     {
         cc.kids = new PdfArray();
         foreach (var pObjNum in allPageObjNums)
@@ -322,6 +325,7 @@ public sealed partial class PdfFileEditor
         cc.catalogDict.Set("Pages", new PdfIndirectRef(2, 0));
 
         // Add /Names/EmbeddedFiles if any were found
+        var namesDict = new PdfDictionary();
         if (cc.embeddedEntries.Count > 0)
         {
             var namesArr = new PdfArray();
@@ -335,8 +339,11 @@ public sealed partial class PdfFileEditor
             var efObjNum = cc.writer.AllocateObjectNumber();
             cc.writer.WriteIndirectObject(efObjNum, efTreeDict);
 
-            var namesDict = new PdfDictionary();
             namesDict.Set("EmbeddedFiles", new PdfIndirectRef(efObjNum, 0));
+        }
+        MergeNamedDestinations(cc, namesDict);
+        if (namesDict.Count > 0)
+        {
             var namesObjNum = cc.writer.AllocateObjectNumber();
             cc.writer.WriteIndirectObject(namesObjNum, namesDict);
 
@@ -365,8 +372,9 @@ public sealed partial class PdfFileEditor
         cc.inputOutlineSeeds = new List<Dictionary<int, int>>();
         cc.structParentBases = new List<int>();
         cc.structParentNext = 0;
-        foreach (var inputData in inputFiles)
+        for (var inputIndex = 0; inputIndex < inputFiles.Length; inputIndex++)
         {
+            var inputData = inputFiles[inputIndex];
             PdfReader reader;
             try
             {
@@ -374,6 +382,12 @@ public sealed partial class PdfFileEditor
             }
             catch (Exception ex)
             {
+                // Told to carry on past a damaged input, the concatenation leaves it out and reports it.
+                if (CorruptedFileAction == ConcatenateCorruptedFileAction.ConcatenateIgnoringCorruptedObjects)
+                {
+                    _corrupted.Add(new CorruptedItem(null, inputIndex, ex));
+                    continue;
+                }
                 // An input that is not a PDF at all names ITSELF in the failure: the
                 // concatenation reports which file (1-based) it choked on and keeps the
                 // parse error as the InnerException, so callers can read the root cause.
@@ -382,6 +396,9 @@ public sealed partial class PdfFileEditor
             }
             cc.inputReaders.Add(reader);
             var catalog = reader.Catalog;
+            // The merged file is written plain: an encrypted input (open to its empty user
+            // password) hands its streams over deciphered, not as ciphertext.
+            reader.EnsurePlaintextStreams();
             var pagesDict = reader.ResolveDict(catalog.Get("Pages"));
             if (pagesDict is null) { cc.inputPageCounts.Add(0); cc.inputOutlineSeeds.Add(new Dictionary<int, int>()); cc.structParentBases.Add(cc.structParentNext); continue; }
 
@@ -391,16 +408,24 @@ public sealed partial class PdfFileEditor
             cc.inputPageCounts.Add(pages.Count);
 
             // This input's slice of the merged parent-tree key space.
+            // An input without a tree has no parent tree to answer its keys.
+            var structParentShift = DropStructParents;
             cc.structParentBases.Add(cc.structParentNext);
             if (reader.ResolveDict(catalog.Get("StructTreeRoot")) is { } structRootDict)
+            {
+                structParentShift = cc.structParentNext;
                 cc.structParentNext += StructParentKeySpan(structRootDict, reader);
+            }
 
             // Per-input object remapping: sourceObjNum → outputObjNum.
             // Objects referenced by multiple pages in the same input are written once
             // and shared via indirect refs — preventing resource duplication bloat.
             var objRemap = new Dictionary<int, int>();
-            var pageSrcToOut = new Dictionary<int, int>();
             if (cc.firstReader is null) { cc.firstReader = reader; cc.firstObjRemap = objRemap; }
+            // A page reference met inside a page (a link's /Dest, a GoTo /D, an annotation's
+            // /P) takes the number that page is written at, so it names a page of the tree.
+            var pageNumbers = new HashSet<int>(pageSrcNums.Where(n => n >= 0));
+            var writtenPages = new HashSet<int>();
 
             for (var pi = 0; pi < pages.Count; pi++)
             {
@@ -409,23 +434,25 @@ public sealed partial class PdfFileEditor
                 // output obj num and the referenced object is written once.
                 // RemapObject uses writer.AllocateObjectNumber() so it stays in sync
                 // with deferred stream promotions inside PdfWriter.WriteDictionary.
-                var cloned = (PdfDictionary)RemapObject(pageDict, reader, objRemap, cc.writer);
+                var cloned = (PdfDictionary)RemapObject(pageDict, reader, objRemap, cc.writer,
+                    structParentShift: structParentShift, pageNumbers: pageNumbers);
                 cloned.Set("Parent", new PdfIndirectRef(2, 0));
-                if (cc.structParentBases[cc.structParentBases.Count - 1] is > 0 and var spBase
-                    && cloned.Get("StructParents") is PdfInteger spKey)
-                    cloned.Set("StructParents", new PdfInteger(spKey.Value + spBase));
 
-                var pageObjNum = cc.writer.AllocateObjectNumber();
+                // A page referenced before it was reached already has its number; one the
+                // tree lists twice is written twice.
+                var source = pageSrcNums[pi];
+                if (source < 0 || !objRemap.TryGetValue(source, out var pageObjNum) || writtenPages.Contains(pageObjNum))
+                {
+                    pageObjNum = cc.writer.AllocateObjectNumber();
+                    if (source >= 0 && !objRemap.ContainsKey(source)) objRemap[source] = pageObjNum;
+                }
+                writtenPages.Add(pageObjNum);
                 cc.writer.WriteIndirectObject(pageObjNum, cloned);
                 allPageObjNums.Add(pageObjNum);
-                // Remember where this SOURCE page landed (for the outline seed
-                // below) without touching objRemap itself — the main pass keeps
-                // its allocation order.
-                if (pageSrcNums[pi] >= 0) pageSrcToOut[pageSrcNums[pi]] = pageObjNum;
             }
-            var outlineSeed = new Dictionary<int, int>(objRemap);
-            foreach (var kv in pageSrcToOut) outlineSeed[kv.Key] = kv.Value;
-            cc.inputOutlineSeeds.Add(outlineSeed);
+            // The map now names every page where it landed: outlines, named destinations
+            // and the structure tree remap through it onto the pages of the tree.
+            cc.inputOutlineSeeds.Add(new Dictionary<int, int>(objRemap));
         }
     }
 }

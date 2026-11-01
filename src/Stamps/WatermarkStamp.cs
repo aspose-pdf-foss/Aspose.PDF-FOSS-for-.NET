@@ -52,6 +52,9 @@ public sealed class WatermarkStamp : Stamp
 
         var builder = new ContentStreamBuilder();
         builder.SaveState();
+        // Centred in the page as shown: a turned page's frame is the stamp's one matrix.
+        if (page.ShownToMediaMatrix() is { } frame)
+            builder.SetMatrix(frame.A, frame.B, frame.C, frame.D, frame.E, frame.F);
 
         // Apply opacity via ExtGState if not fully opaque
         if (Opacity < 1.0)

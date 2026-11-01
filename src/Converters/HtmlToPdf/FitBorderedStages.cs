@@ -109,10 +109,10 @@ internal static partial class HtmlToPdfConverter
             if (c >= r.Count || r[c].ColSpan > 1 || r[c].DivSegs is not { Count: > 0 } segs) continue;
             foreach (var sg in segs)
                 foreach (var word in sg.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                foreach (var seg in CjkWordSegments(word))
-                    minC = Math.Max(minC, MeasureFaceText(
-                        sg.Bold || r[c].Bold ? fb.boldFace : sg.Face ?? fb.face, seg,
-                        sg.FontSize ?? r[c].FontSize ?? fb.mps.fontSize));
+                    foreach (var seg in CjkWordSegments(word))
+                        minC = Math.Max(minC, MeasureFaceText(
+                            sg.Bold || r[c].Bold ? fb.boldFace : sg.Face ?? fb.face, seg,
+                            sg.FontSize ?? r[c].FontSize ?? fb.mps.fontSize));
         }
         return minC;
     }
@@ -134,10 +134,10 @@ internal static partial class HtmlToPdfConverter
             }
             foreach (var word in fb.stdSerif ? DashSegments(r[c].Text.Replace('\u0001', ' '))
                          : r[c].Text.Replace('\u0001', ' ').Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            foreach (var seg in CjkWordSegments(word))
-                minC = Math.Max(minC, MeasureFaceText(
-                    CellFaceName(fb.face, fb.boldFace, r[c]), seg,
-                    r[c].FontSize ?? fb.mps.fontSize));
+                foreach (var seg in CjkWordSegments(word))
+                    minC = Math.Max(minC, MeasureFaceText(
+                        CellFaceName(fb.face, fb.boldFace, r[c]), seg,
+                        r[c].FontSize ?? fb.mps.fontSize));
         }
         return minC;
     }
@@ -162,7 +162,7 @@ internal static partial class HtmlToPdfConverter
         if (fb.sumB + fb.chromeB > fb.bankAvail)
         {
             var minB = new double[fb.nCols];
-            for (var c = 0; c < fb.nCols; c++) minB[c] = MetricColumnMinContent(fb, c);
+            for (var c = 0; c < fb.nCols; c++) minB[c] = SeparatedColumnMinContent(fb, c);
             double slackSum = 0;
             for (var c = 0; c < fb.nCols; c++) slackSum += Math.Max(0, fb.colW[c] - minB[c]);
             var deficitB = fb.sumB + fb.chromeB - fb.bankAvail;
@@ -194,7 +194,34 @@ internal static partial class HtmlToPdfConverter
             if (leftoverB > 0 && fb.nCols > 0) fb.colW[fb.nCols - 1] += leftoverB;
         }
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_MCOL") == "1")
-            Console.Error.WriteLine($"[fitsep] nCols={fb.nCols} fills={fb.tableFills} pct={fb.tablePct} wpt={fb.tableWpt:0.##} availW={fb.availW:0.##} chromeB={fb.chromeB:0.##} sumB={fb.sumB:0.##} natural=[{string.Join(",", Array.ConvertAll(fb.naturalB, w => w.ToString("0.#")))}] w=[{string.Join(",", Array.ConvertAll(fb.colW, w => w.ToString("0.#")))}] hugs={fb.mps.borderHugs} cell0='{(fb.rows.Count > 0 && fb.rows[0].Count > 0 ? (fb.rows[0][0].Text.Length > 30 ? fb.rows[0][0].Text[..30] : fb.rows[0][0].Text) : "")}' bold0={(fb.rows.Count > 0 && fb.rows[0].Count > 0 ? fb.rows[0][0].Bold : false)} face='{fb.face}'");
+        {
+            var cell0 = fb.rows.Count > 0 && fb.rows[0].Count > 0 ? fb.rows[0][0].Text : "";
+            Console.Error.WriteLine($"[fitsep] nCols={fb.nCols} fills={fb.tableFills} pct={fb.tablePct} wpt={fb.tableWpt:0.##} availW={fb.availW:0.##} chromeB={fb.chromeB:0.##} sumB={fb.sumB:0.##} natural=[{string.Join(",", Array.ConvertAll(fb.naturalB, w => w.ToString("0.#")))}] w=[{string.Join(",", Array.ConvertAll(fb.colW, w => w.ToString("0.#")))}] hugs={fb.mps.borderHugs} cell0='{(cell0.Length > 30 ? cell0[..30] : cell0)}' bold0={(fb.rows.Count > 0 && fb.rows[0].Count > 0 && fb.rows[0][0].Bold)} face='{fb.face}'");
+        }
+    }
+
+    /// <summary>A separated column's floor: its widest word, and the min-content of any grid nested in
+    /// its cells - a nested grid squeezed below that overflows its column onto the next one.</summary>
+    private static double SeparatedColumnMinContent(FitBorderedState fb, int c)
+        => Math.Max(MetricColumnMinContentWithSegs(fb, c), NestedGridsMinContent(fb, c));
+
+    /// <summary>The widest min-content of the grids nested in a column's own cells (0 where none).</summary>
+    private static double NestedGridsMinContent(FitBorderedState fb, int c)
+    {
+        if (!fb.stdSerif || fb.host is null) return 0;
+        if (fb.nestedMin is null)
+        {
+            fb.nestedMin = new double[fb.nCols];
+            for (var k = 0; k < fb.nCols; k++) fb.nestedMin[k] = double.NaN;
+        }
+        if (!double.IsNaN(fb.nestedMin[c])) return fb.nestedMin[c];
+        double minC = 0;
+        foreach (var r in fb.rows)
+            if (c < r.Count && r[c].ColSpan <= 1 && r[c].SubTables is { Count: > 0 } subs)
+                foreach (var sub in subs)
+                    minC = Math.Max(minC, MetricGridMinContentPt(fb.host, sub, r[c]));
+        fb.nestedMin[c] = minC;
+        return minC;
     }
 
     /// <summary>A hugging grid over its box: a width-less grid gives the deficit back in proportion to
@@ -213,17 +240,18 @@ internal static partial class HtmlToPdfConverter
                 foreach (var r in fb.rows)
                     if (c < r.Count && r[c].Text.Length > 0)
                         foreach (var seg in DashSegments(r[c].Text.Replace('\u0001', ' ')))
-                        foreach (var seg2 in CjkWordSegments(seg))
-                            minH[c] = Math.Max(minH[c], MeasureFaceText(
-                                r[c].Bold ? fb.boldFace : fb.face, seg2, r[c].FontSize ?? fb.mps.fontSize));
+                            foreach (var seg2 in CjkWordSegments(seg))
+                                minH[c] = Math.Max(minH[c], MeasureFaceText(
+                                    r[c].Bold ? fb.boldFace : fb.face, seg2, r[c].FontSize ?? fb.mps.fontSize));
+                minH[c] = Math.Max(minH[c], NestedGridsMinContent(fb, c));
                 slackH += Math.Max(0, fb.colW[c] - minH[c]);
             }
             var deficitH = sumH + fb.gridChrome - fb.availB;
             if (fb.tablePct <= 0 && fb.tableWpt <= 0 && slackH > 0)
             {
                 // A WIDTH-LESS hugging grid over its box gives the deficit back over its free
-                // columns in proportion to their slack above min-content (CSS automatic layout;
-                // measured on the surgery-lights grids: both tables solve 232.2/168 from 330/222
+                // columns in proportion to their slack above min-content (CSS automatic layout; measured
+                // on the surgery-lights grids: both tables solve 232.2/168 from 330/222
                 // and 835/541 max-contents), floored at the widest unbreakable word.
                 for (var c = 0; c < fb.nCols; c++)
                     if (fb.colPx[c] <= 0 && fb.colW[c] > 0)

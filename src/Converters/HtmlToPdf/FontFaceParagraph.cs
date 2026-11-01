@@ -15,17 +15,17 @@ internal static partial class HtmlToPdfConverter
             foreach (var f in famFaces)
                 if (f.Bold && !f.Italic) { face = f; break; }
 
-        var size = Pt(ff, PropOf(ff, pCls, divCls, "font-size"));
+        var size = Pt(PropOf(ff, pCls, divCls, "font-size"));
         if (size <= 0) size = 12;
         var color = ParseCssColorRgb(PropOf(ff, pCls, divCls, "color")) ?? (0, 0, 0);
         var centered = PropOf(ff, pCls, divCls, "text-align").StartsWith("center", System.StringComparison.OrdinalIgnoreCase);
-        var mt = Pt(ff, PropOf(ff, pCls, divCls, "margin-top"));
-        var mb = Pt(ff, PropOf(ff, pCls, divCls, "margin-bottom"));
-        var pb = Pt(ff, PropOf(ff, pCls, divCls, "padding-bottom"));
+        var mt = Pt(PropOf(ff, pCls, divCls, "margin-top"));
+        var mb = Pt(PropOf(ff, pCls, divCls, "margin-bottom"));
+        var pb = Pt(PropOf(ff, pCls, divCls, "padding-bottom"));
         var borderDecl = PropOf(ff, pCls, divCls, "border-bottom");
-        var borderW = Pt(ff, borderDecl);
+        var borderW = Pt(borderDecl);
         var borderColor = borderDecl.Length > 0
-            ? ParseCssColorRgb(Regex.Match(borderDecl, @"(rgba?\([^)]*\)|#[0-9a-fA-F]{3,6})").Value)
+            ? ParseCssColorRgb(SafeRegex.Match(borderDecl, @"(rgba?\([^)]*\)|#[0-9a-fA-F]{3,6})").Value)
             : null;
 
         // Adjacent vertical margins collapse to the larger.
@@ -95,11 +95,11 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Font face sheet: the @font-face rules read into the face table.</summary>
     private static void ParseFontFaceRules(FontFaceSheetState ff)
     {
-        foreach (Match m in Regex.Matches(ff.css, @"@font-face\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline))
+        foreach (Match m in SafeRegex.Matches(ff.css, @"@font-face\s*\{(?<body>[^}]*)\}", RegexOptions.Singleline))
         {
             var body = m.Groups["body"].Value;
-            var fam = Regex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
-            var src = Regex.Match(body, @"url\(""?(?<u>[^)""]+?)""?\)");
+            var fam = SafeRegex.Match(body, @"font-family:\s*""?(?<v>[^;""}]+)");
+            var src = SafeRegex.Match(body, @"url\(""?(?<u>[^)""]+?)""?\)");
             if (!fam.Success || !src.Success) continue;
             var bytes = LoadConverterImage(src.Groups["u"].Value, ff.options);
             if (bytes is null || bytes.Length < 4) continue;
@@ -114,8 +114,8 @@ internal static partial class HtmlToPdfConverter
                     Ttf = sfnt,
                     Parser = parser,
                     Upm = parser.UnitsPerEm > 0 ? parser.UnitsPerEm : 1000,
-                    Bold = Regex.IsMatch(body, @"font-weight:\s*(bold|[7-9]00)", RegexOptions.IgnoreCase),
-                    Italic = Regex.IsMatch(body, @"font-style:\s*italic", RegexOptions.IgnoreCase),
+                    Bold = SafeRegex.IsMatch(body, @"font-weight:\s*(bold|[7-9]00)", RegexOptions.IgnoreCase),
+                    Italic = SafeRegex.IsMatch(body, @"font-style:\s*italic", RegexOptions.IgnoreCase),
                 };
                 ReadWinMetrics(sfnt, face);
             }

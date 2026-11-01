@@ -33,10 +33,10 @@ internal static partial class EdgarHtmlRenderer
     public static bool IsEdgarFilingDoc(string html)
     {
         if (html.IndexOf("<style", StringComparison.OrdinalIgnoreCase) >= 0) return false;
-        if (Regex.Matches(html, @"<p\s+style=.page-break-before:always").Count < 3) return false;
-        if (!Regex.IsMatch(html, @"<hr\s[^>]*size=""?3", RegexOptions.IgnoreCase)) return false;
-        if (!Regex.IsMatch(html, @"<h5[^>]*>\s*<a\s+href=""#", RegexOptions.IgnoreCase)) return false;
-        return Regex.IsMatch(html, @"font-family:ARIAL", RegexOptions.IgnoreCase);
+        if (SafeRegex.Matches(html, @"<p\s+style=.page-break-before:always").Count < 3) return false;
+        if (!SafeRegex.IsMatch(html, @"<hr\s[^>]*size=""?3", RegexOptions.IgnoreCase)) return false;
+        if (!SafeRegex.IsMatch(html, @"<h5[^>]*>\s*<a\s+href=""#", RegexOptions.IgnoreCase)) return false;
+        return SafeRegex.IsMatch(html, @"font-family:ARIAL", RegexOptions.IgnoreCase);
     }
 
     // ── Geometry constants for this dialect ────────────────────────────────────
@@ -48,7 +48,6 @@ internal static partial class EdgarHtmlRenderer
     const double BottomLimit = 770.0;    // td: flow may not cross 842-72
     const double H5Em = 9.96;            // h5 font-size 0.83em of 12pt
     const double H5Margin = 14.94;       // h5 UA margin: 1.5em
-    const double HrBottomTd = 86.94;     // beveled rule strip bottom (explicit pages)
 
     // ── Entry ───────────────────────────────────────────────────────────────────
 
@@ -59,7 +58,7 @@ internal static partial class EdgarHtmlRenderer
             var dom = ParseDom(html);
             var body = dom.Descendants().FirstOrDefault(n => n.Tag == "body") ?? dom;
             var eng = new Engine(options);
-            return eng.Render(body, html);
+            return eng.Render(body);
         }
         catch
         {
@@ -98,14 +97,14 @@ internal static partial class EdgarHtmlRenderer
         { "p", "table", "tr", "td", "th", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "li", "div", "center", "blockquote" };
 
     static readonly Regex TagRx = new(@"<(/?)([A-Za-z][A-Za-z0-9]*)((?:[^>""']|""[^""]*""|'[^']*')*?)(/?)>",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled, RegexLimits.Timeout);
     static readonly Regex AttrRx = new(
         "([A-Za-z_:][-A-Za-z0-9_:.]*)\\s*(?:=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\">]+)))?",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled, RegexLimits.Timeout);
 
     internal static Node ParseDom(string html)
     {
-        html = Regex.Replace(html, @"<!--.*?-->", "", RegexOptions.Singleline);
+        html = SafeRegex.Replace(html, @"<!--.*?-->", "", RegexOptions.Singleline);
         var root = new Node { Tag = "#root" };
         var cur = root;
         int idx = 0;
@@ -116,7 +115,7 @@ internal static partial class EdgarHtmlRenderer
             if (t.Length > 0)
                 cur.Children.Add(new Node { Text = t, Parent = cur });
         }
-        foreach (Match m in TagRx.Matches(html))
+        foreach (Match m in SafeRegex.Matches(TagRx, html))
         {
             AddText(idx, m.Index);
             idx = m.Index + m.Length;
@@ -173,12 +172,13 @@ internal static partial class EdgarHtmlRenderer
     {
         if (string.IsNullOrWhiteSpace(s)) return null;
         var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in AttrRx.Matches(s))
+        foreach (var groups in SafeRegex.Matches(AttrRx, s).Select(m => m.Groups))
         {
-            var name = m.Groups[1].Value;
-            var val = m.Groups[2].Success ? m.Groups[2].Value
-                : m.Groups[3].Success ? m.Groups[3].Value
-                : m.Groups[4].Success ? m.Groups[4].Value : "";
+            var name = groups[1].Value;
+            string val = "";
+            if (groups[2].Success) val = groups[2].Value;
+            else if (groups[3].Success) val = groups[3].Value;
+            else if (groups[4].Success) val = groups[4].Value;
             dict[name] = val;
         }
         return dict.Count > 0 ? dict : null;
@@ -195,7 +195,7 @@ internal static partial class EdgarHtmlRenderer
         {
             if (s[i] != '&') { sb.Append(s[i]); continue; }
             // numeric
-            var m = Regex.Match(s.Substring(i, Math.Min(12, s.Length - i)), @"^&#(x?)([0-9A-Fa-f]+);?");
+            var m = SafeRegex.Match(s.Substring(i, Math.Min(12, s.Length - i)), @"^&#(x?)([0-9A-Fa-f]+);?");
             if (m.Success && m.Groups[2].Length > 0)
             {
                 int code = m.Groups[1].Length > 0
@@ -203,11 +203,13 @@ internal static partial class EdgarHtmlRenderer
                     : int.Parse(m.Groups[2].Value);
                 // Windows-1252 mapping for the C1 range the filings use (&#147; etc.)
                 sb.Append(Cp1252C1(code));
+#pragma warning disable S127 // tokenizer - a matched tag or entity is consumed whole, the loop steps past it
                 i += m.Length - 1;
+#pragma warning restore S127
                 continue;
             }
             // named
-            var nm = Regex.Match(s.Substring(i, Math.Min(10, s.Length - i)), @"^&([A-Za-z]+)(;?)");
+            var nm = SafeRegex.Match(s.Substring(i, Math.Min(10, s.Length - i)), @"^&([A-Za-z]+)(;?)");
             if (nm.Success)
             {
                 var name = nm.Groups[1].Value;
@@ -242,7 +244,9 @@ internal static partial class EdgarHtmlRenderer
                         }
                     }
                     sb.Append(rep);
+#pragma warning disable S127 // tokenizer - a matched tag or entity is consumed whole, the loop steps past it
                     i += consumed; // '&' + name (+';')
+#pragma warning restore S127
                     continue;
                 }
             }
@@ -340,7 +344,7 @@ internal static partial class EdgarHtmlRenderer
                 }
             }
         }
-        catch { }
+        catch { /* a font program that does not parse leaves the fallback metrics in place */ }
         _faces[name] = face;
         return face;
     }
@@ -391,17 +395,17 @@ internal static partial class EdgarHtmlRenderer
             var val = kv[1].Trim();
             switch (prop)
             {
-                case "font-size": if (TryLen(val, s.Size) is { } fs) s.Size = fs; break;
+                case "font-size": if (TryLen(val, s.Size) is { } fs) { s.Size = fs; } break;
                 case "font-family": s.Family = val.Split(',')[0].Trim().Trim('"', '\''); break;
                 case "font-weight": s.Bold = val.StartsWith("bold", StringComparison.OrdinalIgnoreCase) || val == "700"; break;
                 case "font-style": s.Italic = val.StartsWith("italic", StringComparison.OrdinalIgnoreCase); break;
-                case "margin-top": if (TryLen(val, s.Size) is { } mt) s.MarginTop = mt; break;
-                case "margin-bottom": if (TryLen(val, s.Size) is { } mb) s.MarginBottom = mb; break;
-                case "margin-left": if (TryLen(val, s.Size) is { } ml) s.MarginLeft = ml; break;
-                case "text-indent": if (TryLen(val, s.Size) is { } ti) s.TextIndent = ti; break;
-                case "line-height": if (TryLen(val, s.Size) is { } lh2) s.LineHeight = lh2; break;
-                case "page-break-before": if (val.Equals("always", StringComparison.OrdinalIgnoreCase)) s.PageBreakBefore = true; break;
-                case "color": if (TryColor(val) is { } c) s.Color = c; break;
+                case "margin-top": if (TryLen(val, s.Size) is { } mt) { s.MarginTop = mt; } break;
+                case "margin-bottom": if (TryLen(val, s.Size) is { } mb) { s.MarginBottom = mb; } break;
+                case "margin-left": if (TryLen(val, s.Size) is { } ml) { s.MarginLeft = ml; } break;
+                case "text-indent": if (TryLen(val, s.Size) is { } ti) { s.TextIndent = ti; } break;
+                case "line-height": if (TryLen(val, s.Size) is { } lh2) { s.LineHeight = lh2; } break;
+                case "page-break-before": if (val.Equals("always", StringComparison.OrdinalIgnoreCase)) { s.PageBreakBefore = true; } break;
+                case "color": if (TryColor(val) is { } c) { s.Color = c; } break;
                 case "border-top": (s.BorderTopW, s.BorderTopColor) = ParseBorder(val); break;
                 case "border-bottom": (s.BorderBottomW, s.BorderBottomColor) = ParseBorder(val); break;
                 case "text-align": s.Align = val.ToLowerInvariant(); break;
@@ -414,13 +418,13 @@ internal static partial class EdgarHtmlRenderer
         double w = default;
         int color = default;
         w = 0; color = 0;
-        var m = Regex.Match(val, @"([\d.]+)\s*(px|pt)");
+        var m = SafeRegex.Match(val, @"([\d.]+)\s*(px|pt)");
         if (m.Success)
         {
             w = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
             if (m.Groups[2].Value == "px") w *= 0.75;
         }
-        var c = Regex.Match(val, @"#([0-9A-Fa-f]{6})");
+        var c = SafeRegex.Match(val, @"#([0-9A-Fa-f]{6})");
         if (c.Success) color = int.Parse(c.Groups[1].Value, NumberStyles.HexNumber);
         return (w, color);
     }
@@ -428,7 +432,7 @@ internal static partial class EdgarHtmlRenderer
     internal static double? TryLen(string val, double em)
     {
         double pt = 0;
-        var m = Regex.Match(val.Trim(), @"^(-?[\d.]+)\s*(pt|px|em|%)?$");
+        var m = SafeRegex.Match(val.Trim(), @"^(-?[\d.]+)\s*(pt|px|em|%)?$");
         if (!m.Success) return null;
         var num = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
         pt = m.Groups[2].Value switch
@@ -444,7 +448,7 @@ internal static partial class EdgarHtmlRenderer
     static int? TryColor(string val)
     {
         int color = 0;
-        var m = Regex.Match(val.Trim(), @"^#([0-9A-Fa-f]{6})$");
+        var m = SafeRegex.Match(val.Trim(), @"^#([0-9A-Fa-f]{6})$");
         if (m.Success) { color = int.Parse(m.Groups[1].Value, NumberStyles.HexNumber); return color; }
         switch (val.Trim().ToLowerInvariant())
         {
@@ -535,7 +539,7 @@ internal static partial class EdgarHtmlRenderer
 
         // ——— structure walk ————————————————————————————————————————————
 
-        public Document? Render(Node body, string html)
+        public Document? Render(Node body)
         {
             var arial = GetFace("Arial", false, false);
             var tnr = GetFace("Times New Roman", false, false);
@@ -677,7 +681,7 @@ internal static partial class EdgarHtmlRenderer
             double top;
             if (_atPageTop)
             {
-                top = _y + (_dropTopMargins ? 0 : (_margins.Count > 0 ? _margins.Max() : 0));
+                top = _y + ((_dropTopMargins, _margins.Count) switch { (true, _) => 0, (_, > 0) => _margins.Max(), _ => 0 });
                 _atPageTop = false;
             }
             else
@@ -713,13 +717,13 @@ internal static partial class EdgarHtmlRenderer
                 var path = System.IO.Path.Combine(basePath, src);
                 if (System.IO.File.Exists(path)) data = System.IO.File.ReadAllBytes(path);
             }
-            catch { }
+            catch { /* an image file that cannot be read is left out */ }
             if (data is null) return;
             if (TryJpegSize(data) is not (var wPx, var hPx)) { wPx = 100; hPx = 40; }
             double w = wPx * 0.75, h = hPx * 0.75;
 
             double top;
-            if (_atPageTop) { _margins.Add(st.MarginTop); top = _y + (_dropTopMargins ? 0 : (_margins.Count > 0 ? _margins.Max() : 0)); _atPageTop = false; }
+            if (_atPageTop) { _margins.Add(st.MarginTop); top = _y + ((_dropTopMargins, _margins.Count) switch { (true, _) => 0, (_, > 0) => _margins.Max(), _ => 0 }); _atPageTop = false; }
             else
             {
                 _margins.Add(st.MarginTop);
@@ -744,7 +748,6 @@ internal static partial class EdgarHtmlRenderer
         {
             int w = default;
             int h = default;
-            w = h = 0;
             if (d.Length < 4 || d[0] != 0xFF || d[1] != 0xD8) return null;
             int i = 2;
             while (i + 9 < d.Length)
@@ -772,8 +775,8 @@ internal static partial class EdgarHtmlRenderer
         // min = line-indent + longest word, explicit <p width:Xpt> forces min=max=X).
         // Colspan (min m, max M) over cols S: m > Σmin(S) → min_i = m·max_i/Σmax(S)
         // (equal split when Σmax=0); M > Σmax(S) → max_i likewise. Distribution at
-        // table width W: pct claims p′·W (p′ cumulative-capped at 100 L→R);
-        // need_i = max(0, claim−min); B = W−Σmin; over-constrained → pro-rata by
+        // table width W: pct claims p′·W (p′ cumulative-capped at 100 L→R); need_i
+        // = max(0, claim−min); B = W−Σmin; over-constrained → pro-rata by
         // need; then autos fill min→max the same way; surplus → autos ∝ max
         // (equal when all maxes 0; to pct cols ∝ p′ when no autos).
         // Page growth: pageW = max(595, maxOverTables(Σcolmin) + 186).
@@ -786,7 +789,7 @@ internal static partial class EdgarHtmlRenderer
 
         static int ParseIntAttr(Node td, string name)
         {
-            return int.TryParse(td.Attr(name), out var v) ? v : 1;
+            return int.TryParse(td.Attr(name), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : 1;
         }
 
         // One laid-out line inside a cell: offset (of the line box TOP) from the

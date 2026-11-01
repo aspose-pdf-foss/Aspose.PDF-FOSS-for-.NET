@@ -70,14 +70,14 @@ internal static partial class FontSubsetter
         fontFileStream.Dict.Remove("Filter");
         fontFileStream.Dict.Remove("DecodeParms");
         fontFileStream.Dict.Set("Length", new PdfInteger(subsetData.Length));
+        // Length1 is the stream's own key: the length of the program it now holds.
+        fontFileStream.Dict.Set("Length1", new PdfInteger(subsetData.Length));
 
         foreach (var (fontDict, descriptor, baseFont, ownCodes) in entry.fonts)
         {
-            // Update Length1 in the font descriptor
-            descriptor.Set("Length1", new PdfInteger(subsetData.Length));
 
             // Update Widths array based on used character range
-            UpdateWidths(fontDict, ownCodes, parser, su.reader);
+            UpdateWidths(fontDict, ownCodes, parser, su.reader, keepStated: !entry.isPending);
 
             // Add subset prefix to BaseFont name
             AddSubsetPrefix(fontDict, descriptor, baseFont);
@@ -85,29 +85,27 @@ internal static partial class FontSubsetter
         return true;
     }
 
-    /// <summary></summary>
-    private static bool CollectFontSubsetCodes(FontSubsetState su, int fontObjNum, HashSet<int> charCodes)
+    /// <summary>One simple font's used codes, joined to those of the other fonts that share
+    /// its embedded TrueType program.</summary>
+    private static void CollectFontSubsetCodes(FontSubsetState su, PdfDictionary fontDict, HashSet<int> charCodes)
     {
-        var fontObj = su.reader.Resolve(new PdfIndirectRef(fontObjNum, 0));
-        if (fontObj is not PdfDictionary fontDict) return true;
-
         var baseFont = fontDict.GetName("BaseFont");
-        if (baseFont is null) return true;
+        if (baseFont is null) return;
 
-        if (fontDict.GetName("Subtype") == "Type0") return true; // handled above
+        if (fontDict.GetName("Subtype") == "Type0") return; // the composite pass
 
         // Skip Standard 14 fonts
-        if (IsStandard14(baseFont)) return true;
+        if (IsStandard14(baseFont)) return;
 
         // Get font descriptor
         var descriptorObj = fontDict.Get("FontDescriptor");
-        if (descriptorObj is null) return true;
+        if (descriptorObj is null) return;
         var descriptor = su.reader.ResolveDict(descriptorObj);
-        if (descriptor is null) return true;
+        if (descriptor is null) return;
 
         // Only process TrueType fonts with FontFile2
         var fontFileRef = descriptor.Get("FontFile2");
-        if (fontFileRef is null) return true;
+        if (fontFileRef is null) return;
 
         // The program stream may be an original file object (resolvable through the
         // reader) or one that a preceding pass (e.g. PDF/A font embedding) allocated but
@@ -117,8 +115,7 @@ internal static partial class FontSubsetter
         var isPendingProgram = fontFileStream is null;
         if (fontFileStream is null && fontFileRef is PdfIndirectRef nref)
             fontFileStream = su.resolveNewStream?.Invoke(nref.ObjectNumber);
-        if (fontFileStream is null) return true;
-
+        if (fontFileStream is null) return;
 
         // The content stream records single-byte character codes; the glyph cmap may be
         // keyed by those raw codes (symbol/Mac cmaps common in Word subset fonts) or by
@@ -126,15 +123,18 @@ internal static partial class FontSubsetter
         // in). Offer both the raw code and its WinAnsi→Unicode mapping so the subsetter
         // keeps the right glyph whichever cmap the program carries — extra non-matching
         // codes resolve to gid 0 and are ignored, so this never drops a used glyph.
+        // A code's character is the one its font's /Encoding names: a /Differences name
+        // overrides the base, and may name a glyph the base encoding has no code for.
         var subsetCodes = new HashSet<int>(charCodes);
-        foreach (var code in charCodes)
-            if (code is >= 0 and <= 255)
-            {
-                subsetCodes.Add(Cp1252.GetString(new[] { (byte)code })[0]);
-                // Symbolic (3,0) cmaps — ubiquitous in Word-produced subset
-                // fonts — key their glyphs at 0xF000+code.
-                subsetCodes.Add(0xF000 | code);
-            }
+        var names = EncodingGlyphNames(fontDict, su.reader);
+        foreach (var code in charCodes.Where(code => code is >= 0 and <= 255))
+        {
+            subsetCodes.Add(Cp1252.GetString(new[] { (byte)code })[0]);
+            if (EncodedCharacter(names, code) is { } character) subsetCodes.Add(character);
+            // Symbolic (3,0) cmaps — ubiquitous in Word-produced subset
+            // fonts — key their glyphs at 0xF000+code.
+            subsetCodes.Add(SymbolCmapBase | code);
+        }
 
         if (!su.byProgram.TryGetValue(fontFileStream, out var entry))
         {
@@ -143,6 +143,6 @@ internal static partial class FontSubsetter
         }
         entry.subsetCodes.UnionWith(subsetCodes);
         entry.fonts.Add((fontDict, descriptor, baseFont, charCodes));
-        return true;
+        return;
     }
 }

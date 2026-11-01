@@ -194,14 +194,16 @@ public sealed partial class Document
                 == HtmlSaveOptions.RasterImagesSavingModes.AsEmbeddedPartsOfPngPageBackground,
             svgImageRefs: options.RasterImagesSavingMode
                 == HtmlSaveOptions.RasterImagesSavingModes.AsExternalPngFilesReferencedViaSvg,
-            options: options, imagesUrl: imagesUrl);
+            options: options, imagesUrl: imagesUrl,
+            pageFileOf: page => System.Array.IndexOf(pages, page) is var at and >= 0
+                ? System.Uri.EscapeDataString(SplitPageFileName(stem, at + 1)) : null);
         WriteSidecars(sidecars, filesDir, imagesDir);
 
         for (var h = 1; h <= pages.Length; h++)
         {
             var bytes = System.Text.Encoding.UTF8.GetBytes(
                 Converters.HtmlTextFormat.Crlfify(pageHtmls[h - 1]));
-            var supposedName = stem + h + ".html";
+            var supposedName = SplitPageFileName(stem, h);
 
             var strategy = options.CustomHtmlSavingStrategy;
             if (strategy is not null)
@@ -227,6 +229,9 @@ public sealed partial class Document
 
         ReportHtmlConversionProgress(options, analysisPhase: false);
     }
+
+    /// <summary>The file the h-th saved page (1-based) of a split save is written to.</summary>
+    private static string SplitPageFileName(string stem, int h) => stem + h + ".html";
 
     /// <summary>Write the sidecar files, routing image-typed ones to
     /// <paramref name="imagesDir"/> and the rest (stylesheet, fonts) to

@@ -6,8 +6,8 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
 // The access-form render helpers: flattened markup text, numeric parsing, the page flush and new page, the run emitter, the question box and the rule.
-    private static string Flat(AccessFormState af, string s) => CollapseWs(DecodeEntities(
-        Regex.Replace(s, @"<[^>]+>", " "))).Trim();
+    private static string FlatKeepingNbsp(string s) => CollapseWs(DecodeEntities(
+        SafeRegex.Replace(s, @"<[^>]+>", " "))).Trim();
 
     private static string N(AccessFormState af, double v) => v.ToString("0.###", af.inv);
 

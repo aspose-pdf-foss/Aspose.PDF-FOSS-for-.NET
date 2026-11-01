@@ -7,7 +7,7 @@ namespace Aspose.Pdf.Facades;
 
 public sealed partial class PdfFileMend
 {
-    private void AddImageToPage(Page page, byte[] imageData, float llx, float lly, float urx, float ury,
+    private static void AddImageToPage(Page page, byte[] imageData, float llx, float lly, float urx, float ury,
         BlendMode blend = BlendMode.Normal)
     {
         var width = urx - llx;

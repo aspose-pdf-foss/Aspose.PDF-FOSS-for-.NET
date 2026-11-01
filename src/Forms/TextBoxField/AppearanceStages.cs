@@ -19,6 +19,9 @@ public partial class TextBoxField
     // Cp1252 literal path even when the /DA names a composite face.
     private static string ShowOp(TextBoxAppearanceState ap, string s)
     {
+        if (ap.compositeProgram is not null)
+            return HexString(Aspose.Pdf.Text.Type0FontEmbedder.Embed(
+                ap.compositeFonts!, ap.compositeProgram, "", Aspose.Pdf.Text.BidiText.ToVisualOrder(s)).hexGlyphIds);
         if (ap.compositeCmap is not null)
         {
             var sb = new System.Text.StringBuilder(s.Length * 4 + 2);
@@ -32,14 +35,20 @@ public partial class TextBoxField
         {
             var (_, hex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
                 ap.uniFontDict, ap.uniTtf!, ap.uniFamily, Aspose.Pdf.Text.BidiText.ToVisualOrder(s));
-            var sb = new System.Text.StringBuilder(hex.Length * 2 + 2);
-            sb.Append('<');
-            foreach (var b in hex) sb.Append(b.ToString("X2"));
-            sb.Append('>');
-            return sb.ToString();
+            return HexString(hex);
         }
         var esc = s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
         return $"({esc})";
+    }
+
+    /// <summary>The bytes as a PDF hex string.</summary>
+    private static string HexString(byte[] bytes)
+    {
+        var sb = new System.Text.StringBuilder(bytes.Length * 2 + 2);
+        sb.Append('<');
+        foreach (var b in bytes) sb.Append(b.ToString("X2"));
+        sb.Append('>');
+        return sb.ToString();
     }
 
     /// <summary>Wrap the content in a form XObject with the box, rotation and resources, and install it as the normal appearance.</summary>
@@ -74,20 +83,29 @@ public partial class TextBoxField
             ap.apStream.Dict.Set("Resources", uniResDict);
             // A font embedded for a fill lives in the AcroForm default resources
             // too (Acrobat's convention) — document-level font enumeration only
-            // walks page resources and /DR, not appearance streams.
-            MirrorFillFontIntoDr(ap.uniFontDict.Get(ap.uniRes));
+            // walks page resources and /DR, not appearance streams. A field whose own /DA
+            // names a face the form's /DR does not define gets its /DA pointed at the
+            // mirrored face: a viewer regenerating the appearance from such a /DA would
+            // otherwise draw the value with a Latin stand-in and drop the glyphs it lacks.
+            // A /DA naming a real /DR font keeps its name, so a later regeneration here
+            // draws the value through this same path, as it did before.
+            var daNamesNoDrFont = Dict.Get("DA") is PdfString && ResolveDrFontDict(ap.fontName) is null;
+            var drName = MirrorFillFontIntoDr(ap.uniFontDict.Get(ap.uniRes), createResources: daNamesNoDrFont);
+            if (daNamesNoDrFont && drName is not null)
+                Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(DaWithFont(ap.da, drName))));
         }
         else
         {
-            // A simple (non-composite) /DR font that carries its own program metrics
-            // (TrueType Verdana, Arial, …) is referenced verbatim: the synthesized
-            // /Type1 stand-in would make renderers substitute a default face with
-            // different metrics for any non-Standard-14 family.
-            PdfDictionary? apFont = null;
-            if (ap.compositeCmap is not null)
-                apFont = AppearanceFontFromDr(ap.fontName);
-            else if (ResolveDrFontDict(ap.fontName) is { } drSimple && drSimple.GetName("Subtype") == "TrueType")
-                apFont = drSimple;
+            // A simple (non-composite) /DR font that describes its own face (TrueType
+            // Verdana, an unembedded WinAnsi Type 1 Minion) is referenced verbatim: the
+            // synthesized /Type1 stand-in would make renderers substitute a default face
+            // with different metrics for any non-Standard-14 family.
+            var apFont = ap.compositeCmap is not null
+                ? AppearanceFontFromDr(ap.fontName)
+                : SimpleDrFontAsWritten(ap.fontName);
+            // With no face to stand in for a subset that cannot show the value, the literal text must not
+            // stay bound to that subset through the old appearance's resources.
+            if (apFont is null && ap.subsetLacksGlyphs) apFont = MakeAppearanceFont(ap.fontName);
             ap.apStream.Dict.Set("Resources", BuildTextAppearanceResources(ap.fontName, ap.resolvedRes, apFont));
         }
 
@@ -137,12 +155,12 @@ public partial class TextBoxField
         var slStyleNamed = StyleNamedFace && !slComposite
                            && StyleLineHeightPt is null && DsLineHeightPt() is null
                            && DrEmbeddedFaceProgram(ap.fontName) is null;
-        var slY = slComposite
-            ? ap.h / 2 - ap.fontSize * 0.3
-            : slStyleNamed
-                ? (ap.h - ap.fontSize * StyleFaceSingleLineBoxEm(ap.fontName, ap.fontSize)) / 2
-                : (ap.h - (StyleLineHeightPt ?? DsLineHeightPt() ?? ApLineHeight(ap.fontName, ap.fontSize))) / 2
-                  + ap.fontSize * ApDescent(ap.fontName) / 1000.0;
+        double slY;
+        if (slComposite) slY = ap.h / 2 - ap.fontSize * 0.3;
+        else if (slStyleNamed) slY = (ap.h - ap.fontSize * StyleFaceSingleLineBoxEm(ap.fontName, ap.fontSize)) / 2;
+        else
+            slY = (ap.h - (StyleLineHeightPt ?? DsLineHeightPt() ?? ApLineHeight(ap.fontName, ap.fontSize))) / 2
+                + ap.fontSize * ApDescent(ap.fontName) / 1000.0;
         ap.textBody = $"{Format(tx)} {Format(slY)} Td\n{ShowOp(ap, text)} Tj\n";
     }
 
@@ -168,7 +186,9 @@ public partial class TextBoxField
             // Lines whose baseline falls below the box are clipped away by the
             // appearance BBox; stop emitting them so the visible appearance
             // matches regardless of whether a renderer honours the BBox clip.
-            if (firstY - li * lineHeight < 0) break;
+            // The first line is always shown: a box shorter than one line pitch
+            // clips its descenders, it does not hide the value.
+            if (li > 0 && firstY - li * lineHeight < 0) break;
             if (li > 0)
             {
                 var x = LineX(lines[li]);
@@ -201,7 +221,7 @@ public partial class TextBoxField
             // trailing empty segment, which is discarded; a value with no
             // space anywhere collapses its empty segments entirely.
             if (rawLines.Count > 0 && rawLines[^1].Length == 0
-                && (text.EndsWith("\n") || text.EndsWith("\r")))
+                && (text.EndsWith('\n') || text.EndsWith('\r')))
                 rawLines.RemoveAt(rawLines.Count - 1);
             if (!text.Contains(' '))
                 rawLines = rawLines.Where(l => l.Length > 0).ToList();
@@ -236,29 +256,27 @@ public partial class TextBoxField
         // A face the caller NAMED in a Style string paces by its own line pitch
         // (StyleFacePitchEm); a face loaded into /DR keeps the bbox model.
         var styleNamed = StyleNamedFace && authoredFace is null && !legacyComposite;
-        var lineHeight = StyleLineHeightPt ?? DsLineHeightPt() ?? (authoredFace is not null
-            ? ap.fontSize * AuthoredFacePitchEm
-            : legacyComposite
-                ? ap.fontSize * 1.15
-                : styleNamed
-                    ? ap.fontSize * StyleFacePitchEm(ap.fontName, ap.fontSize)
-                    : ApLineHeight(ap.fontName, ap.fontSize));
+        var lineHeight = StyleLineHeightPt ?? DsLineHeightPt() ?? ((authoredFace, legacyComposite, styleNamed) switch
+        {
+            (not null, _, _) => ap.fontSize * AuthoredFacePitchEm,
+            (_, true, _) => ap.fontSize * 1.15,
+            (_, _, true) => ap.fontSize * StyleFacePitchEm(ap.fontName, ap.fontSize),
+            _ => ApLineHeight(ap.fontName, ap.fontSize),
+        });
         // First baseline: 2pt below the box top's line slot — H − 2 − L.
         // The composite generator instead seats the first line box at the
         // top with the baseline a typographic descent above its bottom.
-        var firstY = authoredFace is not null
-            ? ap.h - WidgetBorderInset - ap.fontSize
+        double firstY;
+        if (authoredFace is not null)
+            firstY = ap.h - WidgetBorderInset - ap.fontSize
                 + System.Math.Abs(
-                    Aspose.Pdf.Text.FontRepository.ReadTtfTypoDescentEm(authoredFace)) * ap.fontSize
-            : legacyComposite
-                ? ap.h - lineHeight - ReadTypoDescentEm(ap.fontName) * ap.fontSize
-                : styleNamed && StyleLineHeightPt is null
-                    // A style-named block hangs its first baseline one FONT SIZE
-                    // below the box top, whatever the face: measured 62 / 52 / 65
-                    // in a 72 pt box at 10 / 20 / 7 pt, identical across every face
-                    // probed.
-                    ? ap.h - ap.fontSize
-                    : ap.h - 2 - lineHeight;
+                    Aspose.Pdf.Text.FontRepository.ReadTtfTypoDescentEm(authoredFace)) * ap.fontSize;
+        else if (legacyComposite) firstY = ap.h - lineHeight - ReadTypoDescentEm(ap.fontName) * ap.fontSize;
+        // A style-named block seats its first baseline by the face: a classic
+        // family hangs it a name-keyed depth under the border inset, any other
+        // face one FONT SIZE below the box top (see StyleFaceFirstBaseline).
+        else if (styleNamed && StyleLineHeightPt is null) firstY = StyleFaceFirstBaseline(ap.fontName, ap.fontSize, ap.h);
+        else firstY = ap.h - 2 - lineHeight;
 
         // TextVerticalAlignment shifts the whole line block down by the
         // unused vertical slack (all of it for Bottom, half for Center).
@@ -320,7 +338,7 @@ public partial class TextBoxField
                 }
             }
         }
-        else if (TextBoxField.FitIntoRectangle && !IsMultiline && text.Length > 0)
+        else if (Field.FitIntoRectangle && !IsMultiline && text.Length > 0)
         {
             // FitIntoRectangle: shrink the /DA size so the value fits the widget — measure
             // the run at its real per-glyph advances (DR /Widths → embedded hmtx → system
@@ -333,8 +351,10 @@ public partial class TextBoxField
             var heightCap = ap.h * 0.83;
             ap.fontSize = System.Math.Max(4, System.Math.Min(ap.fontSize, System.Math.Min(widthCap, heightCap)));
         }
+#pragma warning disable S3060 // the type test is the rule itself; moving it into the subclasses would scatter it
         else if (IsMultiline && text.Length > 0 && this is not RichTextBoxField
-                 && (!Scrollable || Field.FitIntoRectangle || TextBoxField.FitIntoRectangle))
+#pragma warning restore S3060
+                 && (!Scrollable || Field.FitIntoRectangle))
         {
             // (Rich text is exempt: a rich-text field keeps its /DA size
             // even when the value overflows a DoNotScroll box — a 3-line 20 pt value
@@ -402,7 +422,8 @@ public partial class TextBoxField
         ap.ury = 20;
         if (ap.rectArr is { Count: >= 4 })
         {
-            var r = Rectangle.FromPdfArray(ap.rectArr);
+            // The numbers of the box may be indirect objects: a form filler writes them so.
+            var r = Rectangle.FromPdfArray(ap.rectArr, Reader);
             ap.llx = r.LLX; ap.lly = r.LLY; ap.urx = r.URX; ap.ury = r.URY;
         }
         ap.w = ap.urx - ap.llx;
@@ -411,10 +432,20 @@ public partial class TextBoxField
         ap.apRotation = AppearanceRotation();
         if (ap.apRotation is 90 or 270) (ap.w, ap.h) = (ap.h, ap.w);
 
-        ap.needsComposite = false;
-        foreach (var ch in text) if (ch > 'ÿ') { ap.needsComposite = true; break; }
-        ap.drFontDict = ap.needsComposite ? ResolveDrFontDict(ap.fontName) : null;
-        ap.compositeCmap = LoadCompositeCmap(ap.drFontDict);
+        // A /DA that names an embedded composite face of /DR draws in it whatever the text: no simple face of
+        // that name exists to stand in for it.
+        var drFont = ResolveDrFontDict(ap.fontName);
+        var drComposite = drFont?.GetName("Subtype") == "Type0" ? LoadCompositeCmap(drFont) : null;
+        (ap.compositeProgram, ap.compositeFonts) = drComposite is not null ? SessionCompositeProgram(drFont!) : (null, null);
+        // An embedded subset holds only the glyphs it was made for (a subset read from a file declares
+        // advances for those alone): a value it lacks a glyph of would show .notdef or empty glyphs, so
+        // the value is drawn in the full face of the subset's family instead.
+        var subsetLacksGlyphs = ap.subsetLacksGlyphs = drComposite is not null
+            && !CoversValue(drComposite, text, ap.compositeProgram is null ? DeclaredWidthCids(drFont!) : null);
+        if (subsetLacksGlyphs) (drComposite, ap.compositeProgram, ap.compositeFonts) = (null, null, null);
+        ap.needsComposite = subsetLacksGlyphs || drComposite is not null || text.Any(ch => ch > 'ÿ');
+        ap.drFontDict = ap.needsComposite && !subsetLacksGlyphs ? drFont : null;
+        ap.compositeCmap = drComposite ?? LoadCompositeCmap(ap.drFontDict);
 
         ap.uniTtf = null;
         ap.uniFamily = "";
@@ -422,17 +453,12 @@ public partial class TextBoxField
         ap.uniRes = "";
         if (ap.needsComposite && ap.compositeCmap is null)
         {
-            ap.uniFamily = NormalizeStdFontName(ap.fontName);
-            ap.uniTtf = Aspose.Pdf.Text.SystemFontResolver.Resolve(ap.uniFamily)
-                     ?? Aspose.Pdf.Text.SystemFontResolver.Resolve("Arial");
+            ap.uniFamily = subsetLacksGlyphs && drFont!.GetName("BaseFont") is { Length: > 0 } subsetName
+                ? Aspose.Pdf.Text.SystemFontResolver.NormalizeBaseFontName(subsetName)
+                : NormalizeStdFontName(ap.fontName);
             // The /DA face must actually cover the value's beyond-WinAnsi chars —
             // a CJK fill through a Latin /DA font needs a script face instead.
-            if ((ap.uniTtf is not { Length: > 12 } || !CoversBeyondAnsi(ap.uniTtf, text))
-                && TextStamp.TryResolveCjkTtf(text) is { } cjk)
-            {
-                ap.uniTtf = cjk.ttf;
-                ap.uniFamily = cjk.name;
-            }
+            (ap.uniTtf, ap.uniFamily) = ResolveUnicodeFace(ap.uniFamily, text);
             if (ap.uniTtf is { Length: > 12 })
             {
                 ap.uniFontDict = new PdfDictionary();
@@ -445,4 +471,62 @@ public partial class TextBoxField
             }
         }
     }
+
+    /// <summary>The program of a composite /DR face this session embedded, with the /DR font dictionary it
+    /// was embedded in; nulls for a face read from the file.</summary>
+    private (byte[]? program, PdfDictionary? fonts) SessionCompositeProgram(PdfDictionary type0)
+    {
+        if (ResolveDrFonts() is not { } fonts) return (null, null);
+        var cid = Reader.Resolve(type0.Get("DescendantFonts")) is PdfArray { Count: > 0 } desc ? Reader.ResolveDict(desc[0]) : null;
+        var fd = cid is null ? null : Reader.ResolveDict(cid.Get("FontDescriptor"));
+        var file = fd is null ? null : Reader.ResolveStream(fd.Get("FontFile2") ?? fd.Get("FontFile3"));
+        var program = file is null ? null : Aspose.Pdf.Text.Type0FontEmbedder.SourceProgramOf(file);
+        return program is not null && Aspose.Pdf.Text.Type0FontEmbedder.IsEmbedded(fonts, program)
+            ? (program, fonts) : (null, null);
+    }
+
+    /// <summary>True when the face's cmap has a real glyph for every printable character of the value, and
+    /// the font declares an advance for it when <paramref name="declared"/> lists the declared ones.</summary>
+    private static bool CoversValue(System.Collections.Generic.Dictionary<int, int> cmap, string text,
+        HashSet<int>? declared)
+    {
+        foreach (var ch in text)
+        {
+            if (ch < ' ' || char.IsSurrogate(ch)) continue;
+            if (!cmap.TryGetValue(ch, out var gid) || gid == 0) return false;
+            if (declared is not null && !declared.Contains(gid)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>The CIDs a subset font (its name carries a subset tag) gives an advance in its /W, or null
+    /// when the font is whole or has no /W: nothing then says which glyphs it holds.</summary>
+    private HashSet<int>? DeclaredWidthCids(PdfDictionary type0)
+    {
+        if (type0.GetName("BaseFont") is not { Length: > SubsetTagLength } name || name[SubsetTagLength - 1] != '+') return null;
+        var cid = Reader.Resolve(type0.Get("DescendantFonts")) is PdfArray { Count: > 0 } desc ? Reader.ResolveDict(desc[0]) : null;
+        if (cid is null || Reader.Resolve(cid.Get("W")) is not PdfArray w || w.Count == 0) return null;
+        var cids = new HashSet<int>();
+        var i = 0;
+        while (i + 1 < w.Count)
+        {
+            var first = (int)(AsNumber(Reader.Resolve(w[i])) ?? 0);
+            if (Reader.Resolve(w[i + 1]) is PdfArray run)
+            {
+                for (var k = 0; k < run.Count; k++) cids.Add(first + k);
+                i += 2;
+                continue;
+            }
+            var last = (int)(AsNumber(Reader.Resolve(w[i + 1])) ?? first);
+            for (var c = first; c <= last && c - first < MaxWidthRange; c++) cids.Add(c);
+            i += 3;
+        }
+        return cids;
+    }
+
+    // Six letters and a plus sign: "ABCDEF+".
+    private const int SubsetTagLength = 7;
+
+    // A /W range wider than a font can hold glyphs is malformed; it is read only this far.
+    private const int MaxWidthRange = 65536;
 }

@@ -13,13 +13,12 @@ internal sealed partial class TextStateModifier
     /// of the new font is embedded into the document and the run's active Tf
     /// operator is repointed at the freshly registered resource. Mirrors the
     /// match-by-decoded-text approach used by ModifyFontSize / ModifyForegroundColor.
-    /// When <paramref name="segmentScoped"/> is set the caller is restyling ONE SEGMENT
-    /// of a run, so only those glyphs change font and the run is split around them; a
-    /// fragment-scoped change restyles the whole matched run by repointing its Tf,
-    /// which leaves the show operators intact for a text replacement that follows.
+    /// Text that is only part of a run - a segment's, or an absorbed fragment's - changes
+    /// font for those glyphs alone and the run is split around them; a match that is the
+    /// whole run repoints its Tf, which leaves the show operators intact.
     /// </summary>
     public void ModifyFont(Page page, string text, Font newFont, double? targetY = null,
-        bool segmentScoped = false, OverflowRelay? relay = null)
+        OverflowRelay? relay = null)
     {
         var reader = page.Reader;
         if (reader is null) return;
@@ -57,14 +56,14 @@ internal sealed partial class TextStateModifier
         if (range is null)
         {
             if (ModifyFontInFormXObjects(page.Dict, reader, doc, text, isCore, ttf, baseName,
-                    newFont, segmentScoped, exactOnly: true))
+                    newFont, exactOnly: true))
                 return;
             range = FindTfNameRange(combined, text, page.Dict, reader, targetRes, exactOnly: false);
         }
         if (range is null)
         {
             if (ModifyFontInFormXObjects(page.Dict, reader, doc, text, isCore, ttf, baseName,
-                    newFont, segmentScoped, exactOnly: false))
+                    newFont, exactOnly: false))
                 return;
             // The fragment's glyphs may be spread over several show operators.
             if (FindSpannedTfSpans(combined, text, page.Dict, reader, targetRes) is { Count: > 0 } spans)
@@ -85,10 +84,9 @@ internal sealed partial class TextStateModifier
             return;
         }
         var resName = RegisterFontResource(page.Dict, reader, doc, isCore, ttf, baseName, newFont);
-        // A match inside a longer run switches font for those glyphs only. ⚠ Segment-scoped
-        // ONLY: a FRAGMENT-level assignment repoints the whole covering Tf — the
-        // same distinction the size path draws, and the corpus pins it both ways.
-        if (segmentScoped && site.LitStart >= 0 && origName is not null
+        // A match inside a longer run switches font for those glyphs only: repointing the
+        // covering Tf re-faced the rest of the run and every later run shown under it.
+        if (site.LitStart >= 0 && origName is not null
             && SplitFontRun(combined, site.LitStart, site.LitEnd, text, origName, resName, site.Size) is { } split)
         {
             page.SetContentStream(split);
@@ -96,8 +94,8 @@ internal sealed partial class TextStateModifier
         }
         // Same rule for a run drawn as a TJ array: the phrase there is spread over several
         // kerned pieces, so the literal splitter above cannot see it and the run was being
-        // re-faced whole even for a segment-scoped change.
-        if (segmentScoped && site.LitStart < 0 && origName is not null && site.ShowStart >= 0
+        // re-faced whole.
+        if (site.LitStart < 0 && origName is not null && site.ShowStart >= 0
             && SplitShowRunTJ(combined, site.ShowStart, site.ShowEnd, text,
                    TfOps(resName, site.Size), TfOps(origName, site.Size), null) is { } tjSplit)
         {
@@ -119,7 +117,7 @@ internal sealed partial class TextStateModifier
 
     private bool ModifyFontInFormXObjects(PdfDictionary dict, PdfReader reader,
         Document doc, string text, bool isCore, byte[]? ttf, string baseFontName,
-        Font? newFont = null, bool segmentScoped = false, bool exactOnly = false)
+        Font? newFont = null, bool exactOnly = false)
     {
         var resources = reader.ResolveDict(dict.Get("Resources"));
         if (resources is null) return false;
@@ -148,13 +146,14 @@ internal sealed partial class TextStateModifier
                 }
                 var resName = RegisterFontResource(xobjStream.Dict, reader, doc, isCore, ttf, baseFontName, newFont);
                 byte[]? xsplit = null;
-                if (segmentScoped && origName is not null)
-                    xsplit = site.LitStart >= 0
-                        ? SplitFontRun(streamData, site.LitStart, site.LitEnd, text, origName, resName, site.Size)
-                        : site.ShowStart >= 0
-                            ? SplitShowRunTJ(streamData, site.ShowStart, site.ShowEnd, text,
-                                  TfOps(resName, site.Size), TfOps(origName, site.Size), null)
-                            : null;
+                if (origName is not null)
+                {
+                    if (site.LitStart >= 0) xsplit = SplitFontRun(streamData, site.LitStart, site.LitEnd, text, origName, resName, site.Size);
+                    else if (site.ShowStart >= 0)
+                        xsplit = SplitShowRunTJ(streamData, site.ShowStart, site.ShowEnd, text,
+                            TfOps(resName, site.Size), TfOps(origName, site.Size), null);
+                    else xsplit = null;
+                }
                 var modified = xsplit ?? PatchName(streamData, site.NameStart, site.NameEnd, resName);
                 // A run's font is often re-selected by a redundant `/F Tf` that shows no
                 // text (immediately overridden). Repoint those to the replacement too, so
@@ -177,7 +176,7 @@ internal sealed partial class TextStateModifier
             }
 
             if (ModifyFontInFormXObjects(xobjStream.Dict, reader, doc, text, isCore, ttf, baseFontName,
-                    newFont, segmentScoped, exactOnly))
+                    newFont, exactOnly))
                 return true;
         }
         return false;
@@ -273,7 +272,7 @@ internal sealed partial class TextStateModifier
     /// (a page or Form XObject dict) and return its new resource name. A Standard-14 font
     /// becomes a plain Type1 dictionary (no descriptor / font file); any other font is
     /// embedded as a WinAnsi TrueType via <see cref="FontEmbedder"/>.</summary>
-    private string RegisterFontResource(PdfDictionary container, Aspose.Pdf.IO.PdfReader reader,
+    private static string RegisterFontResource(PdfDictionary container, Aspose.Pdf.IO.PdfReader reader,
         Document doc, bool isCore, byte[]? ttf, string baseName, Font? newFont = null)
     {
         // Consolidate: use a deterministic resource key per replacement font so that
@@ -305,7 +304,7 @@ internal sealed partial class TextStateModifier
             // assignment; record what was written so that choice can be applied to it.
             if (newFont is not null && embedder.FontDict is not null)
                 newFont.TrackMaterialised(doc, embedder.FontDict, baseName,
-                    embedder.DescriptorObjNum, embedder.FontFileObjNum);
+                    embedder.Descriptor, embedder.FontFileObjNum);
         }
         return resName;
     }
@@ -424,7 +423,7 @@ internal sealed partial class TextStateModifier
     /// <param name="exactOnly">Accept only a run whose text IS the fragment's, so the
     /// caller can look for the fragment's own run in every scope before settling for one
     /// that merely contains the text.</param>
-    private FontSwapSite? FindTfNameRange(byte[] streamBytes, string text,
+    private static FontSwapSite? FindTfNameRange(byte[] streamBytes, string text,
         PdfDictionary pageDict, PdfReader reader, string? alreadyReplacedRes = null,
         bool exactOnly = false)
     {
@@ -470,7 +469,7 @@ internal sealed partial class TextStateModifier
     /// shows no text before the next Tf (a redundant selection) to
     /// <paramref name="newResName"/>. Runs that DO show text are left untouched — only the
     /// no-op selections are rewritten, so this never changes visible text.</summary>
-    private byte[] RepointRedundantTfs(byte[] data, string origName, string newResName)
+    private static byte[] RepointRedundantTfs(byte[] data, string origName, string newResName)
     {
         var lexer = new PdfLexer(data);
         var operands = new List<(int start, int end, byte[]? str)>();
@@ -478,7 +477,8 @@ internal sealed partial class TextStateModifier
         int pendingNameStart = -1, pendingNameEnd = -1; string? pendingFontName = null;
         bool sawGlyphs = false; bool haveOpenTf = false;
 
-        while (true)
+        var streamEnded = false;
+        while (!streamEnded)
         {
             var startPos = (int)lexer.Position;
             var token = lexer.NextToken();
@@ -500,7 +500,7 @@ internal sealed partial class TextStateModifier
                     while (true)
                     {
                         var t = lexer.NextToken();
-                        if (t.Kind == TokenKind.Eof) goto finish;
+                        if (t.Kind == TokenKind.Eof) { streamEnded = true; break; }
                         if (t.Kind == TokenKind.ArrayEnd) break;
                         if ((t.Kind == TokenKind.LiteralString || t.Kind == TokenKind.HexString)
                             && t.BytesValue is { Length: > 0 }) sawGlyphs = true;
@@ -538,7 +538,6 @@ internal sealed partial class TextStateModifier
                     break;
             }
         }
-        finish:
         if (patches.Count == 0) return data;
 
         // Apply right-to-left so earlier offsets stay valid.
@@ -564,8 +563,8 @@ internal sealed partial class TextStateModifier
     private static string SanitizeResName(string baseName)
     {
         var sb = new System.Text.StringBuilder(baseName.Length);
-        foreach (var c in baseName)
-            if (char.IsLetterOrDigit(c)) sb.Append(c);
+        foreach (var c in baseName.Where(c => char.IsLetterOrDigit(c)))
+            sb.Append(c);
         return sb.Length > 0 ? sb.ToString() : "Font";
     }
 

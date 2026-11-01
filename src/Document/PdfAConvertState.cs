@@ -63,6 +63,10 @@ private sealed class PdfAConvertState
     // makes the conversion report failure even though every fixable repair above
     // was still applied.
     public bool hasUnconvertable;
+    // Part 1 with layers: a form, an image or a marked-content property a page draws belongs
+    // to a membership dictionary that can hide it while every layer is on. Noted by the walk
+    // over the pages' images.
+    public bool membershipHides;
     // The extraction inputs, captured from the method parameters.
     public PdfFormatConversionOptions options = null!;
 }

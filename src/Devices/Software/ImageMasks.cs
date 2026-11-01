@@ -66,36 +66,64 @@ public sealed partial class SoftwarePageRenderer
     }
 
     /// <summary>
+    /// The colour key of a palette-coded image names INDEX values (PDF 32000 §8.9.6.4), so it is
+    /// matched against the indices before the palette is applied, rather than against the colours
+    /// the palette yields, which a one-component key never matched: a keyed single-colour image
+    /// painted its colour as an opaque block over the page.
+    /// </summary>
+    private static (byte[]? alpha, int alphaW, int alphaH) FoldIndexColorKeyMask(DrawImageState di)
+    {
+        if (di.ctx.Reader.Resolve(di.dict.Get("Mask")) is not PdfArray) return (di.smask, di.smaskW, di.smaskH);
+        var indices = di.decoded;
+        if (di.bpc != 8)
+        {
+            indices = new byte[di.imgW * di.imgH];
+            var rowBytes = (di.imgW * di.bpc + 7) / 8;
+            for (var y = 0; y < di.imgH; y++)
+                for (var x = 0; x < di.imgW; x++)
+                    indices[y * di.imgW + x] = (byte)ReadPackedIndex(di.decoded, y * rowBytes, x, di.bpc);
+        }
+        return FoldColorKeyMask(di.dict, di.ctx.Reader, indices, di.imgW, di.imgH, 1, di.smask, di.smaskW, di.smaskH);
+    }
+
+    /// <summary>
     /// PDF 32000 §11.6.5.3: an /SMask carrying /Matte stores the base image's colour samples
     /// PRE-BLENDED against that matte colour, so the true colour is c = m + (c' - m) / a.
     /// Compositing the stored samples as if they were straight makes the image too dark —
     /// a full-bleed slide background came out ~50 levels grey where it should be near white.
     /// The GDI+ decoder has done this since its own Matte work; this is the software half.
-    /// Like GDI+, only un-premultiply when the mask is (near-)uniform: dividing a SHAPED
-    /// mask's thin edges by a tiny alpha only blows highlights out to white, and its opaque
-    /// interior needs no correction anyway.
+    /// Like GDI+, each pixel is divided by its own coverage, read off the mask's grid: a
+    /// shaped mask's interior is as pre-blended as a flat overlay's, and a pixel of no
+    /// coverage shows nothing whatever colour it keeps.
     /// </summary>
-    private static void UnpremultiplyMatte(byte[] samples, int components,
-        PdfObject? smaskRef, byte[]? alpha, PdfReader reader)
+    private static void UnpremultiplyMatte(byte[] samples, int components, int width, int height,
+        PdfObject? smaskRef, byte[]? alpha, int alphaWidth, int alphaHeight, PdfReader reader)
     {
-        if (alpha is null || alpha.Length == 0 || samples.Length == 0 || components <= 0) return;
+        if (alpha is null || alpha.Length == 0 || samples.Length == 0 || components <= 0 || width <= 0 || height <= 0) return;
         if (reader.ResolveStream(smaskRef)?.Dict.Get("Matte") is not PdfArray matte || matte.Count == 0) return;
 
-        int amin = 255, amax = 0;
-        foreach (var a in alpha) { if (a < amin) amin = a; if (a > amax) amax = a; }
-        if (amax - amin > 8 || amax <= 0) return;   // shaped mask — leave the samples alone
-
-        var aScale = amax / 255.0;
         double M(int i) => i < matte.Count ? NumFrom(matte[i]) * 255.0 : 0;
         var m0 = M(0);
         var m = matte.Count >= 3 ? new[] { m0, M(1), M(2) } : new[] { m0, m0, m0 };
+        // A mask of another size than the image is read at the image pixel's place on it.
+        var aw = alphaWidth > 0 && alphaHeight > 0 ? alphaWidth : width;
+        var ah = alphaWidth > 0 && alphaHeight > 0 ? alphaHeight : height;
 
-        for (var i = 0; i + components <= samples.Length; i += components)
+        var pixels = Math.Min(samples.Length / components, width * height);
+        for (var p = 0; p < pixels; p++)
+        {
+            var ax = aw == width ? p % width : (int)((long)(p % width) * aw / width);
+            var ay = ah == height ? p / width : (int)((long)(p / width) * ah / height);
+            var at = ay * aw + ax;
+            var a = at < alpha.Length ? alpha[at] : (byte)255;
+            if (a == 0) continue;
+            var i = p * components;
             for (var c = 0; c < components && c < 3; c++)
             {
-                var v = m[c] + (samples[i + c] - m[c]) / aScale;
-                samples[i + c] = (byte)(v < 0 ? 0 : v > 255 ? 255 : v);
+                var v = m[c] + (samples[i + c] - m[c]) * 255.0 / a;
+                samples[i + c] = (byte)(v switch { < 0 => 0, > 255 => 255, _ => v });
             }
+        }
     }
 
     /// <summary>Paint an ImageMask whose current fill is a pattern: build a device-space
@@ -193,7 +221,8 @@ public sealed partial class SoftwarePageRenderer
                 double v = (-rx * ctm[1] + ry * ctm[0]) * inv;
                 if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
                 int sx = (int)(u * imgW); if (sx >= imgW) sx = imgW - 1;
-                int sy = (int)((1.0 - v) * imgH); if (sy >= imgH) sy = imgH - 1; if (sy < 0) sy = 0;
+                int sy = (int)((1.0 - v) * imgH); if (sy >= imgH) sy = imgH - 1;
+                if (sy < 0) sy = 0;
                 long bi = (long)sy * rowBytes + (sx >> 3);
                 int bit = bi < decoded.Length ? (decoded[(int)bi] >> (7 - (sx & 7))) & 1 : 1 - paintBit;
                 if (bit == paintBit) { cov[dy * ctx.PixelW + dx] = 255; any = true; }

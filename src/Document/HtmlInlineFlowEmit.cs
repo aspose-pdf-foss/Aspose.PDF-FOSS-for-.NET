@@ -9,7 +9,7 @@ public sealed partial class Document
 
     private static UaFace InlineFaceFor(HtmlInlineFlowState st, string? family, bool bold, bool italic)
     {
-        var fam = string.IsNullOrEmpty(family) ? st.baseFamily : family!;
+        var fam = string.IsNullOrEmpty(family) ? st.baseFamily : family;
         var key = fam.ToLowerInvariant() + (bold ? "|b" : "") + (italic ? "|i" : "");
         if (st.faces.TryGetValue(key, out var cached) && cached is not null) return cached;
         var face = TryLoadInlineFace(st, fam, bold, italic)
@@ -28,12 +28,16 @@ public sealed partial class Document
     private static double InlineTextWidth(HtmlInlineFlowState st, HtmlInlineItem item, string text)
     {
         var (face, size) = InlineRunFace(st, item);
-        return face.Width(text, size);
+        var pieces = InlineFacePieces(st, item, face, text);
+        if (pieces.Count == 1) return pieces[0].Face.Width(text, size);
+        var w = 0.0;
+        foreach (var (piece, pieceFace) in pieces) w += pieceFace.Width(piece, size);
+        return w;
     }
 
     /// <summary>Seat one text cell: its background box (ascent to descent), the glyphs in
     /// the run's colour, an underline 0.1 em thick 0.1 em under the baseline, and its link.</summary>
-    private void EmitInlineText(HtmlInlineFlowState st, HtmlInlineCell c, double x0, double baseline)
+    private static void EmitInlineText(HtmlInlineFlowState st, HtmlInlineCell c, double x0, double baseline)
     {
         var item = c.Item;
         var (face, size) = InlineRunFace(st, item);
@@ -46,14 +50,20 @@ public sealed partial class Document
                .Rectangle(x0, baseline - face.Descent(size), c.W, face.Ascent(size) + face.Descent(size))
                .Fill().RestoreState();
         }
-        var (res, hex) = Text.Type0FontEmbedder.Embed(st.fontDict, face.Ttf, face.Name, text,
-            stripSpacesInBaseFont: true, resNameHint: face.ResName);
         csb.SaveState();
         if (fore is not null) csb.SetFillColor(fore);
-        csb.BeginText().SetFont(res, size).MoveTextPosition(x0, baseline);
-        if (face.KernAdjustments(text) is { } adj) csb.ShowTextHexKerned(hex, adj);
-        else csb.ShowTextHex(hex);
-        csb.EndText();
+        // (characters the run's face lacks draw in the face of their script, piece by piece)
+        var penX = x0;
+        foreach (var (piece, pieceFace) in InlineFacePieces(st, item, face, text))
+        {
+            var (res, hex) = Text.Type0FontEmbedder.Embed(st.fontDict, pieceFace.Ttf, pieceFace.Name, piece,
+                stripSpacesInBaseFont: true, resNameHint: pieceFace.ResName);
+            csb.BeginText().SetFont(res, size).MoveTextPosition(penX, baseline);
+            if (pieceFace.KernAdjustments(piece) is { } adj) csb.ShowTextHexKerned(hex, adj);
+            else csb.ShowTextHex(hex);
+            csb.EndText();
+            penX += pieceFace.Width(piece, size);
+        }
         if (item.Underline)
         {
             var thick = size * FlowLayout.HtmlDecoThicknessEm;
@@ -70,7 +80,7 @@ public sealed partial class Document
     /// <summary>A relative href becomes a file URI under the fragment's base path.</summary>
     private static string InlineHrefUrl(string href, string? basePath)
     {
-        if (System.Text.RegularExpressions.Regex.IsMatch(href, @"^[a-zA-Z][a-zA-Z0-9+.-]*:") || string.IsNullOrEmpty(basePath))
+        if (SafeRegex.IsMatch(href, @"^[a-zA-Z][a-zA-Z0-9+.-]*:") || string.IsNullOrEmpty(basePath))
             return href;
         try { return new Uri(System.IO.Path.Combine(basePath, href)).AbsoluteUri; }
         catch { return href; }
@@ -78,7 +88,7 @@ public sealed partial class Document
 
     /// <summary>Place a picture standing on the baseline (or centred on the x-height);
     /// returns how far it hangs under the baseline.</summary>
-    private static double EmitInlineImage(HtmlInlineFlowState st, HtmlInlineCell c, double x0, double top, double baseline)
+    private static double EmitInlineImage(HtmlInlineFlowState st, HtmlInlineCell c, double x0, double baseline)
     {
         var item = c.Item;
         var bottom = item.ImageMiddle

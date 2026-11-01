@@ -55,10 +55,10 @@ internal static partial class AutoTagger
     // A list label on its own: a bullet glyph, or a number / letter / roman numeral with . or ) - a number may
     // carry a letter, as a form's lines do (7a., 12b)) - or a number in brackets, as a list of references labels its entries.
     private static readonly Regex LabelOnly = new(
-        @"^\s*([•◦▪▫‣⁃●○■□◆◇➢➤►▸–—\-\*·]|\(?(\d{1,3}[a-z]?|[a-zA-Z]|[ivxlcdmIVXLCDM]{1,6})[.)]|\[\d{1,3}\])\s*$", RegexOptions.Compiled);
+        @"^\s*([•◦▪▫‣⁃●○■□◆◇➢➤►▸–—\-\*·]|\(?(\d{1,3}[a-z]?|[a-zA-Z]|[ivxlcdmIVXLCDM]{1,6})[.)]|\[\d{1,3}\])\s*$", RegexOptions.Compiled, RegexLimits.Timeout);
     // A label that starts a fragment followed by the item's text.
     private static readonly Regex LabelLead = new(
-        @"^\s*([•◦▪▫‣⁃●○■□◆◇➢➤►▸·]|\d{1,3}[a-z]?[.)]|\[\d{1,3}\])\s+\S", RegexOptions.Compiled);
+        @"^\s*([•◦▪▫‣⁃●○■□◆◇➢➤►▸·]|\d{1,3}[a-z]?[.)]|\[\d{1,3}\])\s+\S", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Whether a line at the body's size, all bold, is the bold lead of a paragraph running on into the next
     /// line: the next line of its column opens with bold words, then turns to the body's type - a run-in heading, no
@@ -67,7 +67,9 @@ internal static partial class AutoTagger
     {
         if (Math.Abs(line.Size - pa.bodySize) > 0.6) return false;
         var at = pa.lines.IndexOf(line);
+#pragma warning disable S1244 // both sides copy one stored value - exact equality is the grouping
         var next = pa.lines.Skip(at + 1).FirstOrDefault(l => l.Running == 0 && l.Frags.Count > 0 && l.ColumnRight == line.ColumnRight);
+#pragma warning restore S1244
         if (next is null || line.Y - next.Y > MaxPitchFactor * pa.bodySize) return false;
         var words = next.Frags.Where(f => !string.IsNullOrWhiteSpace(f.Text)).ToList();
         return words.Count >= 2 && IsBold(words[0].Font) && words.Skip(1).Any(f => !IsBold(f.Font));
@@ -253,7 +255,9 @@ internal static partial class AutoTagger
     {
         var column = line.ColumnRight;
         var right = column > 0 ? column : pa.margin;
+#pragma warning disable S1244 // both sides copy one stored value - exact equality is the grouping
         var left = pa.lines.Where(l => l.Running == 0 && l.Frags.Count > 0 && l.ColumnRight == column)
+#pragma warning restore S1244
             .Select(l => l.MinX).DefaultIfEmpty(line.MinX).Min();
         return (left, right);
     }
@@ -342,7 +346,9 @@ internal static partial class AutoTagger
         if (pa.justifiedColumns.TryGetValue(line.ColumnRight, out var known)) return known;
         var (left, right) = ColumnBounds(pa, line);
         var tol = Math.Max(EdgeToleranceFloor, EdgeToleranceEms * pa.bodySize);
+#pragma warning disable S1244 // both sides copy one stored value - exact equality is the grouping
         var column = pa.lines.Where(l => l.Running == 0 && l.Frags.Count > 0 && l.ColumnRight == line.ColumnRight).OrderByDescending(l => l.Y).ToList();
+#pragma warning restore S1244
         // A line ending a sentence under which a paragraph starts (a gap, an indent, or nothing) is a paragraph's last
         // line, set short however the column is set: no evidence. One the text goes on under at its pitch is a line like
         // any other - short of the edge, it tells the column is ragged.
@@ -468,11 +474,16 @@ internal static partial class AutoTagger
         var first = line.Frags[0];
         // A line holding its bullet again further along is entries set across it in columns, no list item (a number
         // again at a line's end is the entry's line number).
-        if (LabelOnly.IsMatch(first.Text) && !first.Text.Any(char.IsLetterOrDigit)
+        if (SafeRegex.IsMatch(LabelOnly, first.Text) && !first.Text.Any(char.IsLetterOrDigit)
             && line.Frags.Skip(1).Any(f => f.Text.Trim() == first.Text.Trim())) return null;
-        if (LabelOnly.IsMatch(first.Text) && line.Frags.Count >= 2 && line.Frags[1].X >= first.R - 1)
+        if (SafeRegex.IsMatch(LabelOnly, first.Text) && line.Frags.Count >= 2 && line.Frags[1].X >= first.R - 1)
+        {
+            // (a note's number raised after the label - "a.6" - is no text of the item: its body starts after the mark)
+            foreach (var f in line.Frags.Skip(1))
+                if (!RaisedNoteMark(line, f)) return f.X;
             return line.Frags[1].X;
-        var lead = LabelLead.Match(first.Text);
+        }
+        var lead = SafeRegex.Match(LabelLead, first.Text);
         if (lead.Success && first.Text.Length > 0)
         {
             // The label and its text share one fragment: estimate the body start by the share
@@ -515,6 +526,12 @@ internal static partial class AutoTagger
         return rowY;
     }
 
+    /// <summary>The bottom of a line's last line and of its first: a row joined of the lines its cells wrap over (see
+    /// <see cref="JoinWrappedLabels"/>) stands midway between them, its last line under it and its first over it.</summary>
+    private static double LastLineY(Line line) => double.IsNaN(line.LastBaseline) ? line.Y : line.Y - (line.Baseline - line.LastBaseline);
+
+    private static double FirstLineY(Line line) => double.IsNaN(line.FirstBaseline) ? line.Y : line.Y + (line.FirstBaseline - line.Baseline);
+
     private static bool InRegion(Line line, Aspose.Pdf.Rectangle region) =>
         line.Y >= region.LLY - 2 && line.Y <= region.URY + 2
         && line.MinX <= region.URX && (line.Frags.Count == 0 || line.Frags[^1].R >= region.LLX);
@@ -547,13 +564,23 @@ internal static partial class AutoTagger
         if (rows.Count < MinGutterLines) return gutters;
         var left = rows.Min(r => r.Min(f => f.L));
         var right = rows.Max(r => r.Max(f => f.R));
+        // A row has text before x when its leftmost fragment ends by x, and after x when its
+        // rightmost one starts at x or beyond; the scan below visits every x across the page.
+        var rowSpans = rows.Select(r => (Spans: r.ToArray(), MinR: r.Min(f => f.R), MaxL: r.Max(f => f.L))).ToArray();
         double? start = null;
         for (var x = left; x <= right + 1; x += 1)
         {
-            var crossed = rows.Count(r => r.Any(f => f.L < x && f.R > x));
-            var before = rows.Count(r => r.Any(f => f.R <= x));
-            var after = rows.Count(r => r.Any(f => f.L >= x));
-            var both = rows.Count(r => r.Any(f => f.R <= x) && r.Any(f => f.L >= x));
+            int crossed = 0, before = 0, after = 0, both = 0;
+            foreach (var (spans, minR, maxL) in rowSpans)
+            {
+                var hasBefore = minR <= x;
+                var hasAfter = maxL >= x;
+                if (hasBefore) before++;
+                if (hasAfter) after++;
+                if (hasBefore && hasAfter) both++;
+                foreach (var f in spans)
+                    if (f.L < x && f.R > x) { crossed++; break; }
+            }
             // Two page columns rarely share a baseline: most of their lines stand on one side only.
             // A table's rows have text on both sides of its gaps.
             var open = x <= right && crossed <= GutterCrossShare * rows.Count
@@ -599,7 +626,7 @@ internal static partial class AutoTagger
             var j = i + 1;
             if (n >= 2 && ListBodyX(lines[i]) is null)
                 while (j < lines.Count && cells[j].Count == n && ListBodyX(lines[j]) is null && !OpensWithRaisedMark(lines[j])
-                       && lines[j - 1].Y - lines[j].Y < ParagraphPitchFactor * Math.Max(lines[j].Size, lines[j - 1].Size))
+                       && LastLineY(lines[j - 1]) - FirstLineY(lines[j]) < ParagraphPitchFactor * Math.Max(lines[j].Size, lines[j - 1].Size))
                     j++;
             if (n >= 2 && j - i >= 2 && !NumberedHeadings(lines, i, j) && TextTable(lines, cells, i, j, figures) is { } found)
             {
@@ -639,12 +666,17 @@ internal static partial class AutoTagger
     /// <summary>Whether a line opens with a raised mark: its first text a number, set smaller than the line and raised
     /// over its baseline - a footnote's number before its text.</summary>
     private static bool OpensWithRaisedMark(Line line)
-        => line.Frags.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f.Text)) is { } first && first.Text.Trim().All(char.IsDigit)
-           && first.Size <= line.Size - NoteMarkSizeStep && first.Base >= line.Baseline + NoteMarkRiseEms * line.Size;
+        => line.Frags.FirstOrDefault(f => !string.IsNullOrWhiteSpace(f.Text)) is { } first && RaisedNoteMark(line, first);
+
+    /// <summary>Whether <paramref name="f"/> is a note's number raised over <paramref name="line"/>: digits, set smaller
+    /// than the line and raised over its baseline.</summary>
+    private static bool RaisedNoteMark(Line line, (double X, double R, string Text, double Y, double Base, double Size, string? Font) f)
+        => f.Text.Trim().Length > 0 && f.Text.Trim().All(char.IsDigit)
+           && f.Size <= line.Size - NoteMarkSizeStep && f.Base >= line.Baseline + NoteMarkRiseEms * line.Size;
 
     // A section's number: "4", "4.1", "4.2.1.".
     private static readonly System.Text.RegularExpressions.Regex SectionNumber = new(@"^\d{1,2}(\.\d{1,2})*\.?$",
-        System.Text.RegularExpressions.RegexOptions.Compiled);
+        System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Whether lines that split into cells alike are numbered headings, no table's rows: each set in bold or in
     /// italics throughout, opening with a section's number ("4  Definitions" over "4.1  Definitions and Abbreviations",
@@ -652,7 +684,7 @@ internal static partial class AutoTagger
     private static bool NumberedHeadings(List<Line> lines, int from, int to)
         => Enumerable.Range(from, to - from).All(r => lines[r].Frags.Where(f => !string.IsNullOrWhiteSpace(f.Text)).ToList() is { Count: > 0 } frags
                                                       && (frags.All(f => IsBold(f.Font)) || frags.All(f => IsItalic(f.Font)))
-                                                      && SectionNumber.IsMatch(frags[0].Text.Trim()));
+                                                      && SafeRegex.IsMatch(SectionNumber, frags[0].Text.Trim()));
 
     private static bool IsItalic(string? font) =>
         font is not null && (font.IndexOf("Italic", StringComparison.OrdinalIgnoreCase) >= 0
@@ -682,7 +714,7 @@ internal static partial class AutoTagger
             var frags = lines[r].Frags.Where(f => !string.IsNullOrWhiteSpace(f.Text)).ToList();
             // A period - a year, a quarter, a month - heads a column as a word does.
             if (!frags.All(f => IsBold(f.Font))
-                && frags.Count(f => NumericCell.IsMatch(f.Text) && !PeriodCell.IsMatch(f.Text.Trim())) >= HeaderNumericShare * frags.Count) break;
+                && frags.Count(f => SafeRegex.IsMatch(NumericCell, f.Text) && !SafeRegex.IsMatch(PeriodCell, f.Text.Trim())) >= HeaderNumericShare * frags.Count) break;
             lead++;
         }
         return lead;
@@ -696,7 +728,7 @@ internal static partial class AutoTagger
     // A column heading naming a period: a year, a quarter, a half, a month, a fiscal year.
     private static readonly Regex PeriodCell = new(
         @"^(?:(?:19|20)\d\d[a-z]?|Q[1-4]|H[12]|FY\s?\d{2,4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?(?:\s?(?:19|20)?\d\d)?)$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
     /// <summary>The table with the lines from <paramref name="newFrom"/> up to its first line added as rows over it.</summary>
     private static (Aspose.Pdf.Rectangle region, int rows, int cols, List<double> colX, List<double> rowY) RowsOver(
@@ -810,7 +842,7 @@ internal static partial class AutoTagger
         // Row edges, bottom to top: below the last row, between rows, above the first.
         var size = lines[from].Size;
         var rowY = RowEdges(lines, from, to, size);
-        var region = new Aspose.Pdf.Rectangle(colX[0], lines[to - 1].Y - 1, colX[^1], TopEdge(lines, from, lines[from].Y + size));
+        var region = new Aspose.Pdf.Rectangle(colX[0], LastLineY(lines[to - 1]) - 1, colX[^1], TopEdge(lines, from, lines[from].Y + size));
         return (region, to - from, n, colX, rowY);
     }
 
@@ -874,12 +906,12 @@ internal static partial class AutoTagger
         table = (table.region, table.rows, table.cols, colX, table.rowY);
         var size = lines[from].Size;
         var rowY = RowEdges(lines, from, to, size);
-        var region = new Aspose.Pdf.Rectangle(table.colX[0], lines[to - 1].Y - 1, table.colX[^1], TopEdge(lines, from, lines[from].Y + size));
+        var region = new Aspose.Pdf.Rectangle(table.colX[0], LastLineY(lines[to - 1]) - 1, table.colX[^1], TopEdge(lines, from, lines[from].Y + size));
         return (region, to - from, table.cols, table.colX, rowY);
     }
 
     // A table-of-contents line's leader: dots or dashes running from the title to the page number.
-    private static readonly Regex LeaderOnly = new(@"^[\s.\u00B7\u2022\u2026_-]{3,}$", RegexOptions.Compiled);
+    private static readonly Regex LeaderOnly = new(@"^[\s.\u00B7\u2022\u2026_-]{3,}$", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Whether one of the columns holds nothing but leaders (the dotted lines of a
     /// table of contents between the titles and their page numbers): contents lines, no table.</summary>
@@ -888,7 +920,7 @@ internal static partial class AutoTagger
         {
             var (x, right) = cells[r][c];
             var text = string.Concat(lines[r].Frags.Where(f => (f.X + f.R) / 2 >= x - 1 && (f.X + f.R) / 2 <= right + 1).Select(f => f.Text));
-            return LeaderOnly.IsMatch(text);
+            return SafeRegex.IsMatch(LeaderOnly, text);
         }));
 
     /// <summary>Whether one of the columns holds nothing but list labels (a column of bullets
@@ -902,7 +934,7 @@ internal static partial class AutoTagger
             {
                 var (x, right) = cells[r][c];
                 var text = string.Concat(lines[r].Frags.Where(f => (f.X + f.R) / 2 >= x - 1 && (f.X + f.R) / 2 <= right + 1).Select(f => f.Text));
-                labels = LabelOnly.IsMatch(text);
+                labels = SafeRegex.IsMatch(LabelOnly, text);
             }
             if (labels) return true;
         }
@@ -974,26 +1006,72 @@ internal static partial class AutoTagger
         return !Enumerable.Range(from, to - from).Any(r => lines[r].Frags.Any(f => f.Text.Any(char.IsDigit)));
     }
 
-    /// <summary>A line's cells: its fragments merged while the gap between them is small.</summary>
+    /// <summary>A line's cells: its fragments merged while the gap between them is small. A row joined of the lines its
+    /// cells wrap over (<see cref="JoinWrappedLabels"/>) has its row line's cells, each with the wrapped lines' fragments
+    /// standing over it: a wrapped line running on into the next column's text ("Immunology, Hepatology" up to "TRAPS,
+    /// HIDS/MKD") parts where the row's cells do.</summary>
     private static List<(double X, double R)> Cells(Line line)
     {
+        if (double.IsNaN(line.LastBaseline)) return GapCells(line.Frags, line.Size);
+        var onRow = line.Frags.Where(f => Math.Abs(f.Base - line.LastBaseline) < TouchTolerance).ToList();
+        var cells = GapCells(onRow, line.Size);
+        var loose = new List<(double X, double R, string Text, double Y, double Base, double Size, string? Font)>();
+        foreach (var f in line.Frags.Except(onRow).Where(f => !string.IsNullOrWhiteSpace(f.Text)))
+        {
+            var under = Enumerable.Range(0, cells.Count).Where(c => cells[c].X < f.R && cells[c].R > f.X).ToList();
+            if (under.Count == 0)
+            {
+                loose.Add(f);
+                continue;
+            }
+            var joined = (X: Math.Min(f.X, cells[under[0]].X), R: Math.Max(f.R, cells[under[^1]].R));
+            cells.RemoveRange(under[0], under.Count);
+            cells.Insert(under[0], joined);
+        }
+        // (a wrapped line's text over no cell of the row - the row's number its label opens with - joins the cell it
+        // closes up to, as the line's fragments do)
+        foreach (var f in loose)
+        {
+            var near = Enumerable.Range(0, cells.Count).Where(c => Math.Max(cells[c].X - f.R, f.X - cells[c].R) <= CellGapFactor * line.Size)
+                .OrderBy(c => Math.Max(cells[c].X - f.R, f.X - cells[c].R)).Cast<int?>().FirstOrDefault();
+            if (near is { } c) cells[c] = (Math.Min(cells[c].X, f.X), Math.Max(cells[c].R, f.R));
+            else cells.Add((f.X, f.R));
+        }
+        return cells.OrderBy(c => c.X).ToList();
+    }
+
+    /// <summary>Fragments merged into cells while the gap between them is small - or a word space, between the groups of
+    /// a number whose thousands a space parts ("2 434").</summary>
+    private static List<(double X, double R)> GapCells(
+        IEnumerable<(double X, double R, string Text, double Y, double Base, double Size, string? Font)> frags, double size)
+    {
         var cells = new List<(double X, double R)>();
-        foreach (var f in line.Frags)
+        string? last = null;
+        foreach (var f in frags)
         {
             if (string.IsNullOrWhiteSpace(f.Text)) continue;
-            if (cells.Count > 0 && f.X - cells[^1].R <= CellGapFactor * line.Size)
+            var gap = f.X - (cells.Count > 0 ? cells[^1].R : double.NaN);
+            if (cells.Count > 0 && (gap <= CellGapFactor * size
+                                    || (gap <= ThousandsGapEms * size && SafeRegex.IsMatch(LeadingDigitGroup, last!.Trim())
+                                        && SafeRegex.IsMatch(ThousandsGroup, f.Text.Trim()))))
                 cells[^1] = (cells[^1].X, Math.Max(cells[^1].R, f.R));
             else
                 cells.Add((f.X, f.R));
+            last = f.Text;
         }
         return cells;
     }
+
+    // The groups of a number whose thousands a space parts stand at most this many of its size apart (a word space).
+    private const double ThousandsGapEms = 0.4;
+    private static readonly Regex LeadingDigitGroup = new(@"^[-\u2212]?\d{1,3}$", RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex ThousandsGroup = new(@"^\d{3}([.,]\d+)?$", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Attach each link annotation to the paragraph or list whose lines it overlaps: the
     /// paragraph's content (a list item's body) then splits around the link (Link → OBJR + content). A paragraph's
     /// links are read in the order they stand in - line by line, along each line - whatever
     /// order the page lists its annotations in.</summary>
-    private static void AttachLinks(PageAnalysisState pa, PageWork pw)
+    private static void AttachLinks(PageAnalysisState pa)
     {
         var homes = new Dictionary<int, List<(Aspose.Pdf.Core.PdfObject Ref, Aspose.Pdf.Rectangle Rect)>>();
         foreach (var linkRef in GetLinkRefs(pa.page))
@@ -1030,9 +1108,11 @@ internal static partial class AutoTagger
                 // A link wrapped over two lines is two annotations with one target, nothing between them - the first ending
                 // its line, the second starting the next: one Link. Two links to one place with text between are two.
                 var target = LinkTarget(pa.page, linkRef);
-                var group = b.Links is { Count: > 0 } prior && target is not null
-                    && Equals(target, LinkTarget(pa.page, prior[^1])) && Wrapped(lines, b.LinkRects![^1], rect)
-                    ? b.LinkGroups![^1] : (b.LinkGroups?.Count > 0 ? b.LinkGroups[^1] + 1 : 0);
+                int group;
+                if (b.Links is { Count: > 0 } prior && target is not null
+                    && Equals(target, LinkTarget(pa.page, prior[^1])) && Wrapped(lines, b.LinkRects![^1], rect))
+                    group = b.LinkGroups![^1];
+                else group = b.LinkGroups?.Count > 0 ? b.LinkGroups[^1] + 1 : 0;
                 (b.Links ??= []).Add(linkRef);
                 (b.LinkRects ??= []).Add(rect);
                 (b.LinkGroups ??= []).Add(group);
@@ -1077,7 +1157,9 @@ internal static partial class AutoTagger
     {
         var dy = cy >= l.Y - 2 && cy <= l.Y + l.Size + 2 ? 0 : Math.Min(Math.Abs(cy - l.Y), Math.Abs(cy - l.Y - l.Size));
         var right = l.Frags.Count > 0 ? l.Frags[^1].R : l.MinX;
-        var dx = cx < l.MinX - 2 ? l.MinX - cx : cx > right + 2 ? cx - right : 0;
+        double dx = 0;
+        if (cx < l.MinX - 2) dx = l.MinX - cx;
+        else if (cx > right + 2) dx = cx - right;
         return dy + dx;
     }
 
@@ -1243,12 +1325,12 @@ internal static partial class AutoTagger
     // A page number on its own: "7", "- 7 -", "Page 7", "7 of 12".
     private static readonly Regex PageNumber = new(
         @"^\W*(page\s*)?\d{1,4}(\s*(of|/)\s*\d{1,4})?\W*$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
     // ... or a well-formed roman numeral in one case: "iv", "XII" (not a word like "did").
     private static readonly Regex RomanPageNumber = new(
         @"^\W*(?=[ivxlcdm]+\W*$|[IVXLCDM]+\W*$)(?i:m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3}))\W*$",
-        RegexOptions.Compiled);
-    private static readonly Regex Digits = new(@"\d+", RegexOptions.Compiled);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+    private static readonly Regex Digits = new(@"\d+", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Mark running headers and footers: a line in the top or bottom band of the page
     /// whose text (digits aside) recurs on at least half the pages of a multi-page document - or
@@ -1267,7 +1349,7 @@ internal static partial class AutoTagger
                 var top = line.Y > rect.URY - band;
                 if (!top && line.Y + line.Size >= rect.LLY + band) continue;
                 var text = string.Join(" ", line.Frags.Select(f => f.Text.Trim())).Trim();
-                bands.Add((line, top, Digits.Replace(text, "#"), p));
+                bands.Add((line, top, SafeRegex.Replace(Digits, text, "#"), p));
             }
         }
 
@@ -1287,13 +1369,13 @@ internal static partial class AutoTagger
             .Where(o => o.Page == b.Page && o.Top == b.Top && (b.Top ? o.Line.Y > b.Line.Y : o.Line.Y < b.Line.Y))
             .OrderBy(o => Math.Abs(o.Line.Y - b.Line.Y)).FirstOrDefault() is { Line: not null } edge
             && Math.Abs(edge.Line.Y - b.Line.Y) < TuckedLeading * Math.Max(edge.Line.Size, b.Line.Size)
-            && !recurring.Contains((edge.Top, edge.Key)) && !PageNumber.IsMatch(TextOf(edge.Line));
+            && !recurring.Contains((edge.Top, edge.Key)) && !SafeRegex.IsMatch(PageNumber, TextOf(edge.Line));
         foreach (var b in bands)
         {
             var (line, top, key, _) = b;
             var text = TextOf(line);
-            if ((recurring.Contains((top, key)) && !Tucked(b)) || PageNumber.IsMatch(text)
-                || (pages.Count >= 2 && RomanPageNumber.IsMatch(text)))
+            if ((recurring.Contains((top, key)) && !Tucked(b)) || SafeRegex.IsMatch(PageNumber, text)
+                || (pages.Count >= 2 && SafeRegex.IsMatch(RomanPageNumber, text)))
                 line.Running = top ? ContentMarker.HeaderArtifact : ContentMarker.FooterArtifact;
         }
     }

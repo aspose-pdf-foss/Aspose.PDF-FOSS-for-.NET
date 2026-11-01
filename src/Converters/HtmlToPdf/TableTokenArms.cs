@@ -40,7 +40,7 @@ internal static partial class HtmlToPdfConverter
             {
                 if (uaRule.TryGetValue("font-size", out var ufs))
                 {
-                    var upm = Regex.Match(ufs.Trim(), @"^([\d.]+)\s*%$");
+                    var upm = SafeRegex.Match(ufs.Trim(), @"^([\d.]+)\s*%$");
                     if (upm.Success && double.TryParse(upm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                             System.Globalization.CultureInfo.InvariantCulture, out var uPct) && uPct > 0)
                         ps.curFontPt = uaBase * uPct / 100.0;
@@ -87,7 +87,7 @@ internal static partial class HtmlToPdfConverter
             Color? aCol = null;
             if (tok.Attributes is not null
                 && tok.Attributes.TryGetValue("style", out var aSt)
-                && Regex.Match(aSt, @"(?<![-\w])color\s*:\s*([^;]+)",
+                && SafeRegex.Match(aSt, @"(?<![-\w])color\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase) is { Success: true } aCm)
                 aCol = ParseCssColor(aCm.Groups[1].Value.Trim());
             aCol ??= cfg.docAnchorColor;
@@ -114,17 +114,14 @@ internal static partial class HtmlToPdfConverter
     {
         if (ps.cell is not null)
         {
-            // Form-grid: a bold run OPENING mid-line marks a style-run
-            // boundary (the segment so far keeps the regular face).
-            var uaRuns = ps.uaCellBoxes;
-            if (cfg.formGridDialect || cfg.wordMailCells || uaRuns)
-            {
-                ps.lineRunMarks ??= new();
-                if (ps.lineRunMarks.Count == 0)
-                    ps.lineRunMarks.Add((0, ps.boldDepth > 0));
-            }
+            // A bold run OPENING mid-line marks a style-run boundary (the segment so far
+            // keeps the regular face); every cell records them, the close decides which
+            // lines draw run by run.
+            ps.lineRunMarks ??= new();
+            if (ps.lineRunMarks.Count == 0)
+                ps.lineRunMarks.Add((0, ps.boldDepth > 0));
             ps.boldDepth++;
-            if (cfg.formGridDialect || cfg.wordMailCells || uaRuns) ps.lineRunMarks!.Add((ps.line.Length, true));
+            ps.lineRunMarks.Add((ps.line.Length, true));
             // Probe: the min-content measure applies real bold metrics per
             // RUN (a bold word followed by a regular superscript measures
             // each piece with its own face), marked by sentinels.
@@ -147,12 +144,12 @@ internal static partial class HtmlToPdfConverter
                 if (tok.Attributes is not null
                     && tok.Attributes.TryGetValue("style", out var preSt) && preSt is not null)
                 {
-                    var preFf = Regex.Match(preSt, @"font-family\s*:\s*([^;]+)",
+                    var preFf = SafeRegex.Match(preSt, @"font-family\s*:\s*([^;]+)",
                         RegexOptions.IgnoreCase);
                     if (preFf.Success
                         && FirstFontFamily(preFf.Groups[1].Value) is { Length: > 0 } preFam)
                         ps.curFamily = preFam;
-                    var preFs = Regex.Match(preSt, @"font-size\s*:\s*([\d.]+)\s*em",
+                    var preFs = SafeRegex.Match(preSt, @"font-size\s*:\s*([\d.]+)\s*em",
                         RegexOptions.IgnoreCase);
                     if (preFs.Success && double.TryParse(preFs.Groups[1].Value,
                             System.Globalization.NumberStyles.Float,
@@ -170,7 +167,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void OpenLineBreak(TableStyleConfig cfg, TableParseState ps, Table table)
+    private static void OpenLineBreak(TableStyleConfig cfg, TableParseState ps)
     {
         if (ps.cell is not null)
         {

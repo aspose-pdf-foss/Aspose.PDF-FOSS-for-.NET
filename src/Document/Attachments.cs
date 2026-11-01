@@ -67,7 +67,8 @@ public sealed partial class Document
     /// `the-key` with `/F` and `/UF` both `named.txt` — the key never reaches
     /// either entry, and two files of the same name under two keys both survive.
     /// </summary>
-    internal void AddEmbeddedFile(string key, string fileName, byte[]? fileData,
+    /// <returns>The reference the file specification is written under.</returns>
+    internal PdfIndirectRef AddEmbeddedFile(string key, string fileName, byte[]? fileData,
         string? description, string? mimeType, bool compress,
         DateTime? creationDate, DateTime? modDate, AFRelationship relationship)
     {
@@ -143,7 +144,9 @@ public sealed partial class Document
         // The name-tree key names the same file, and loses the same characters if written
         // as Latin-1 bytes it has no room for.
         numsArray.Insert(insertAt, FileSpecification.FileNameEntry(key));
-        numsArray.Insert(insertAt + 1, new PdfIndirectRef(fsObjNum, 0));
+        var reference = new PdfIndirectRef(fsObjNum, 0);
+        numsArray.Insert(insertAt + 1, reference);
         efTree.Set("Names", numsArray);
+        return reference;
     }
 }

@@ -69,19 +69,16 @@ internal static partial class PdfAValidator
 
         // 5. PDF version check
         var version = document.PdfVersion;
-        if (version is not null)
+        // 1.3, matching what conversion leaves behind — a converted document must
+        // not fail the validation of the very format it was just converted to.
+        if (version is not null && string.Compare(version, "1.3", StringComparison.Ordinal) < 0)
         {
-            // 1.3, matching what conversion leaves behind — a converted document must
-            // not fail the validation of the very format it was just converted to.
-            if (string.Compare(version, "1.3", StringComparison.Ordinal) < 0)
+            issues.Add($"PDF version {version} is below 1.3 (minimum for PDF/A).");
+            violations.Add(new PdfAViolation
             {
-                issues.Add($"PDF version {version} is below 1.3 (minimum for PDF/A).");
-                violations.Add(new PdfAViolation
-                {
-                    Rule = "PdfVersion",
-                    Description = $"PDF version {version} is below 1.3 (minimum for PDF/A).",
-                });
-            }
+                Rule = "PdfVersion",
+                Description = $"PDF version {version} is below 1.3 (minimum for PDF/A).",
+            });
         }
     }
 
@@ -100,7 +97,7 @@ internal static partial class PdfAValidator
         }
 
         // 1. Must have XMP metadata
-        CheckMetadata(document, format, issues, violations);
+        CheckMetadata(document, issues, violations);
 
         // 1b. ZUGFeRD: the invoice profile requires the ZUGFeRD XMP extension schema
         // (zf:DocumentType/DocumentFileName/... in urn:ferd:pdfa:CrossIndustryDocument).
@@ -157,8 +154,10 @@ internal static partial class PdfAValidator
             return new PdfAValidationResult { IsValid = false, Format = format };
 
         // OUTPUT-INTENT GATE (silent like the claim gate): a matched claim without a
-        // /GTS_PDFA1 output intent fails without logging.
-        if (!string.IsNullOrEmpty(claimPart) && !HasPdfAOutputIntent(document))
+        // /GTS_PDFA1 output intent fails without logging. An intent describes device colour,
+        // so a file that paints through calibrated and profiled spaces alone needs none.
+        if (!string.IsNullOrEmpty(claimPart) && !HasPdfAOutputIntent(document)
+            && MayPaintUndescribedDeviceColor(document))
             return new PdfAValidationResult { IsValid = false, Format = format };
         return null;
     }

@@ -48,8 +48,8 @@ private sealed class TableColumnModel
     // Redline: a column declared at CONFLICTING percents across rows (the
     // review tables mix 86.58% single-cell rows into a 13.42/86.58 grid).
     public bool colPctConflict = false;
-    // Column-spanning cells constrain the SUM of the columns they cross, not each one;
-    // recorded here and resolved after all single-column widths are known.
+    // Column-spanning cells constrain the SUM of the columns they cross, not each one; recorded
+    // here and resolved after all single-column widths are known.
     public List<(int start, int span, double min, double max, double hdr)> spanConstraints = new List<(int start, int span, double min, double max, double hdr)>();
     // The widest whole line a column-spanning NOWRAP cell keeps, measured in the cell's own face:
     // the grid can be no narrower than it whatever its columns declare (probed on the land-register

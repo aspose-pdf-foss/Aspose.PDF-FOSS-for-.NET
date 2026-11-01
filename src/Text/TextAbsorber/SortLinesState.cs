@@ -15,6 +15,8 @@ private sealed class SortLinesState
     // Extract only the page's text
     public string pageText = null!;
     public string[] lines = null!;
+    // Per line: the tracked runs lying wholly inside it, in recording order.
+    public List<RunSpan>[] lineSpans = null!;
     // An RTL line assembled from several tracked runs needs the geometric
     // row rebuild below even when the page has nothing to sort: a producer
     // that lays logical Hebrew words out left-to-right (one show per word,

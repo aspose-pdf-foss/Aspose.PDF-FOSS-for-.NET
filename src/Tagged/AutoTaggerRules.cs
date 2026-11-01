@@ -16,8 +16,8 @@ internal static partial class AutoTagger
     // The block a rule closes stands over it: this share of the narrower of the two overlaps the other
     // across (a block in the next column over, level with the rule, closes nothing).
     private const double RuleUnderShare = 0.5;
-    // Two rules over the same span at most this far apart (points) are one rule drawn twice (a thick line and a thin one);
-    // a short rule's ends lie within this many points of the heading's text it rules.
+    // Two rules over the same span at most this far apart (points) are one rule drawn twice (a thick line and a thin one); a
+    // short rule's ends lie within this many points of the heading's text it rules.
     private const double DoubleRuleGap = 4.0;
     private const double RuleSpanTolerance = 2.0;
     // Blocks whose feet stand this near (points) are as near a rule under them.

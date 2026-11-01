@@ -9,7 +9,7 @@ internal static partial class HtmlToPdfConverter
     private static List<StlPara> ParseStlParas(string seg)
     {
         var paras = new List<StlPara>();
-        foreach (Match dm in Regex.Matches(seg,
+        foreach (Match dm in SafeRegex.Matches(seg,
             @"<div class=""[^""]*"" style=""left:(?<l>-?[\d.]+)em;\s*top:(?<t>-?[\d.]+)em;?"">(?<body>.*?)</div>",
             RegexOptions.Singleline))
         {
@@ -17,20 +17,20 @@ internal static partial class HtmlToPdfConverter
             // Linked runs are spans wrapped in <a href="…"> inside the div; the
             // wrapped characters keep the URL so the reflow paints them as links.
             var anchors = new List<(int Start, int End, string Url)>();
-            foreach (Match am in Regex.Matches(body,
+            foreach (Match am in SafeRegex.Matches(body,
                 @"<a\s+[^>]*href=""(?<href>[^""]*)""[^>]*>(?<ab>.*?)</a>",
                 RegexOptions.Singleline))
                 anchors.Add((am.Index, am.Index + am.Length,
                     DecodeEntities(am.Groups["href"].Value)));
             var sups = new List<(int Start, int End)>();
-            foreach (Match um in Regex.Matches(body, @"<sup[^>]*>.*?</sup>",
+            foreach (Match um in SafeRegex.Matches(body, @"<sup[^>]*>.*?</sup>",
                 RegexOptions.Singleline))
                 sups.Add((um.Index, um.Index + um.Length));
             var sbLine = new StringBuilder();
             var urls = new List<string?>();
             var extra = new List<double>();
             var supFlags = new List<bool>();
-            foreach (Match sm in Regex.Matches(body,
+            foreach (Match sm in SafeRegex.Matches(body,
                 @"<span class=""(?<cls>[^""]*)""(?<attrs>[^>]*)>(?<stext>.*?)</span>",
                 RegexOptions.Singleline))
             {
@@ -44,12 +44,12 @@ internal static partial class HtmlToPdfConverter
                 // span's word-spacing × the reflow em, on top of the glyph —
                 // negative values included.
                 double wsEm = 0;
-                var wsm = Regex.Match(sm.Groups["attrs"].Value, @"word-spacing:\s*(-?[\d.]+)em");
+                var wsm = SafeRegex.Match(sm.Groups["attrs"].Value, @"word-spacing:\s*(-?[\d.]+)em");
                 if (wsm.Success)
                     wsEm = double.Parse(wsm.Groups[1].Value,
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture);
-                var stext = DecodeEntities(Regex.Replace(sm.Groups["stext"].Value, "<[^>]+>", ""));
+                var stext = DecodeEntities(SafeRegex.Replace(sm.Groups["stext"].Value, "<[^>]+>", ""));
                 foreach (var ch in stext)
                 {
                     sbLine.Append(ch);
@@ -105,7 +105,7 @@ internal static partial class HtmlToPdfConverter
         var segEnd = p + 1 < pos.pageDivs.Count ? pos.pageDivs[p + 1].Index : html.Length;
         var seg = html[segStart..segEnd];
 
-        var spans = ReadPositionedSpans(pos, seg, p);
+        var spans = ReadPositionedSpans(pos, seg);
 
         var (links, lines) = ReadPositionedLinks(pos, seg, spans);
 
@@ -120,12 +120,12 @@ internal static partial class HtmlToPdfConverter
         // hotspot within a row-spanning link) or (2) an annot covering no extracted
         // text (image/flag hotspots), the latter deduplicated by URL in document
         // order.
-        PlacePositionedGraphicalLinks(pos, seg, spans, links, iconPage);
+        PlacePositionedGraphicalLinks(pos, spans, links, iconPage);
         return true;
     }
 
     /// <summary>The output sheet's width: the stl_ dialect measures its own longest unit, the pdf-page shape pads the source page.</summary>
-    private static void SolvePositionedPageWidth(PositionedSpansState pos, string html, HtmlLoadOptions? options)
+    private static void SolvePositionedPageWidth(PositionedSpansState pos, string html)
     {
         pos.stlPages = new List<List<StlPara>>();
         pos.stlBoxIsSheet = Math.Abs(pos.srcDivW - StlPageFloorPt) < 1.0
@@ -152,18 +152,21 @@ internal static partial class HtmlToPdfConverter
                 foreach (var para in pageParas)
                 {
                     double unitW = 0;
-                    for (var ci = 0; ci < para.Text.Length; ci++)
+                    var ci = 0;
+                    while (ci < para.Text.Length)
                     {
                         if (IsStlBreakSpace(para.Text, ci))
                         {
                             maxUnitW = Math.Max(maxUnitW, unitW);
                             unitW = 0;
+                            ci++;
                             continue;
                         }
                         var fs = para.Sup[ci] ? StlSupFontSizePt : FontSizePt;
                         var (charW, last) = MeasureSerifRawChar(para.Text, ci, fs);
                         ci = last;
                         unitW += charW + para.Extra[ci];
+                        ci++;
                     }
                     maxUnitW = Math.Max(maxUnitW, unitW);
                 }
@@ -185,14 +188,14 @@ internal static partial class HtmlToPdfConverter
             {
                 // Style-less stl_ page container: read the box width (em) from the
                 // container's stylesheet class; 1 em = 12 pt in the stl_ scheme.
-                var clsAttr = Regex.Match(pos.pageDivs[0].Value, @"class=""(?<c>[^""]+)""");
+                var clsAttr = SafeRegex.Match(pos.pageDivs[0].Value, @"class=""(?<c>[^""]+)""");
                 if (clsAttr.Success)
                 {
                     var css = GatherStlCss(html, options);
                     foreach (var cls in clsAttr.Groups["c"].Value.Split(' ',
                                  StringSplitOptions.RemoveEmptyEntries))
                     {
-                        var box = Regex.Match(css,
+                        var box = SafeRegex.Match(css,
                             @"\." + Regex.Escape(cls) + @"\s*\{[^}]*width:\s*(?<w>[\d.]+)em[^}]*height:\s*(?<h>[\d.]+)em",
                             RegexOptions.Singleline);
                         if (box.Success && double.TryParse(box.Groups["w"].Value,

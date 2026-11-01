@@ -26,6 +26,8 @@ public sealed partial class TextFragmentAbsorber
             ExtractionTmTy = em.firstRun.TmBaseY,
             TrailingTcPageSpace = em.trailingTc,
             ReplaceOptions = TextReplaceOptions,
+            ReadsRightToLeft = sf.bidiPerm is not null
+                && MatchReadsRightToLeft(sf.concatenated, match.Index, match.Index + match.Length),
         };
         DetectMatchUnderline(sf, em, match);
         ApplyCapturedMarks(sf, em);
@@ -34,4 +36,18 @@ public sealed partial class TextFragmentAbsorber
         _fragments.Add(em.fragment);
         return true;
     }
+
+    /// <summary>Whether the nearest letter on either side of a match, on its own line, reads right to left:
+    /// the match then sits in a right-to-left line, whose edits keep their right edge.</summary>
+    private static bool MatchReadsRightToLeft(string text, int start, int end)
+    {
+        var before = start - 1;
+        while (before >= 0 && !char.IsLetter(text[before]) && !IsLineBreak(text[before])) before--;
+        var after = end;
+        while (after < text.Length && !char.IsLetter(text[after]) && !IsLineBreak(text[after])) after++;
+        return (before >= 0 && BidiReorderer.IsRtlChar(text[before]))
+            || (after < text.Length && BidiReorderer.IsRtlChar(text[after]));
+    }
+
+    private static bool IsLineBreak(char c) => c is '\r' or '\n';
 }

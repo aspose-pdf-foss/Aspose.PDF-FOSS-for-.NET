@@ -7,8 +7,8 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
 // Case letter helpers: text cleanup, stroke flush, rules, text runs, measurement and wrapping.
-    private static string Clean(CaseLetterState ce, string s) => Regex.Replace(DecodeEntities(
-        Regex.Replace(s, "<[^>]+>", " ")).Replace(' ', ' '), @"\s+", " ").Trim();
+    private static string Clean(string s) => SafeRegex.Replace(DecodeEntities(
+        SafeRegex.Replace(s, "<[^>]+>", " ")).Replace(' ', ' '), @"\s+", " ").Trim();
 
     private static void FlushStrokes(CaseLetterState ce)
     {
@@ -27,17 +27,17 @@ internal static partial class HtmlToPdfConverter
         => EmitGridsterText(ce.page, ce.resByFace, size, x, ClPageH - baselineTop, text,
             bold ? "Arial,Bold" : "Arial");
 
-    private static double W(CaseLetterState ce, string s, double size, bool bold = false)
+    private static double W(string s, double size, bool bold = false)
         => MeasureFaceText(bold ? "Arial,Bold" : "Arial", s, size);
 
-    private static List<string> Wrap(CaseLetterState ce, string text, double box, double size, bool bold = false)
+    private static List<string> CaseLetterWrap(string text, double box, double size, bool bold = false)
     {
         var lines = new List<string>();
         var cur = new StringBuilder();
         foreach (var word in text.Split(' ', System.StringSplitOptions.RemoveEmptyEntries))
         {
             var cand = cur.Length == 0 ? word : cur + " " + word;
-            if (cur.Length > 0 && W(ce, cand, size, bold) > box) { lines.Add(cur.ToString()); cur.Clear(); cur.Append(word); }
+            if (cur.Length > 0 && W(cand, size, bold) > box) { lines.Add(cur.ToString()); cur.Clear(); cur.Append(word); }
             else { cur.Clear(); cur.Append(cand); }
         }
         if (cur.Length > 0) lines.Add(cur.ToString());

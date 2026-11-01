@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextReplacer
 {
     /// <summary>Tj replace: the array elements after the match copied through, the end string keeping only its tail bytes.</summary>
-    private void EmitTjSuffixElements(TjReplaceState tj)
+    private static void EmitTjSuffixElements(TjReplaceState tj)
     {
         tj.firstSuffixString = true;
         for (var i = tj.endArrIdx; i < tj.arr.Count; i++)
@@ -36,7 +36,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>Tj replace: the elements before the match copied and the replacement emitted with its kern compensation.</summary>
-    private void EmitTjPrefixAndReplacement(TjReplaceState tj)
+    private static void EmitTjPrefixAndReplacement(TjReplaceState tj)
     {
         tj.newArr = new PdfArray();
 
@@ -56,11 +56,11 @@ public sealed partial class TextReplacer
             var preBytes = new byte[tj.startOffset];
             Buffer.BlockCopy(startStr.Value, 0, preBytes, 0, tj.startOffset);
             var preStr = DecodeString(preBytes, tj.toUnicode, tj.fontDict, tj.reader);
-            tj.preRepBytes = EncodeString(preStr + tj.replacement, tj.toUnicode, tj.fontDict);
+            tj.preRepBytes = EncodeString(preStr + tj.replacement, tj.toUnicode, tj.fontDict, tj.reader);
         }
         else
         {
-            tj.preRepBytes = EncodeString(tj.replacement, tj.toUnicode, tj.fontDict);
+            tj.preRepBytes = EncodeString(tj.replacement, tj.toUnicode, tj.fontDict, tj.reader);
         }
         tj.newArr.Add(new PdfString(tj.preRepBytes, tj.useHex2));
 
@@ -92,7 +92,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>Tj replace: the char-to-element map built over the array's strings.</summary>
-    private void BuildTjCharMap(TjReplaceState tj)
+    private static void BuildTjCharMap(TjReplaceState tj)
     {
         tj.lastMapCh = '\0';
         for (var i = 0; i < tj.arr.Count; i++)
@@ -103,20 +103,17 @@ public sealed partial class TextReplacer
                 for (var k = 0; k < decMap.Length; k++) tj.charMap.Add(i);
                 if (decMap.Length > 0) tj.lastMapCh = decMap[^1];
             }
-            else if ((tj.arr[i] is PdfInteger ia && tj.tjRule.Breaks(ia.Value))
-                  || (tj.arr[i] is PdfReal ra && tj.tjRule.Breaks(ra.Value)))
+            else if (((tj.arr[i] is PdfInteger ia && tj.tjRule.Breaks(ia.Value))
+                  || (tj.arr[i] is PdfReal ra && tj.tjRule.Breaks(ra.Value))) && tj.lastMapCh != '\0' && tj.lastMapCh != ' ')
             {
-                if (tj.lastMapCh != '\0' && tj.lastMapCh != ' ')
-                {
-                    tj.charMap.Add(-1); // synthetic space
-                    tj.lastMapCh = ' ';
-                }
+                tj.charMap.Add(-1); // synthetic space
+                tj.lastMapCh = ' ';
             }
         }
     }
 
     /// <summary>Tj replace: the array's strings concatenated into one searchable text.</summary>
-    private void ConcatTjArrayText(TjReplaceState tj)
+    private static void ConcatTjArrayText(TjReplaceState tj)
     {
         tj.fullText = new StringBuilder();
         tj.parts = new List<(int index, string text, bool isHex)>();
@@ -130,12 +127,9 @@ public sealed partial class TextReplacer
                 tj.parts.Add((i, decoded, s.IsHex));
                 tj.fullText.Append(decoded);
             }
-            else if ((tj.arr[i] is PdfInteger adj && tj.tjRule.Breaks(adj.Value))
-                  || (tj.arr[i] is PdfReal adjR && tj.tjRule.Breaks(adjR.Value)))
-            {
-                if (tj.fullText.Length > 0 && tj.fullText[^1] != ' ')
-                    tj.fullText.Append(' ');
-            }
+            else if (((tj.arr[i] is PdfInteger adj && tj.tjRule.Breaks(adj.Value))
+                  || (tj.arr[i] is PdfReal adjR && tj.tjRule.Breaks(adjR.Value))) && tj.fullText.Length > 0 && tj.fullText[^1] != ' ')
+                tj.fullText.Append(' ');
         }
     }
 }

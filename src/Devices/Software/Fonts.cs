@@ -102,6 +102,21 @@ public sealed partial class SoftwarePageRenderer
         return (parser, hScale);
     }
 
+    /// <summary>Shared by both renderers: true when the font embeds its program (a /FontFile,
+    /// /FontFile2 or /FontFile3 on its descriptor, or on its descendant's). Only an embedded
+    /// program's own byte-keyed table says what a code shows; a host face standing in for a
+    /// named font knows the codes through the font's encoding alone, so a MacRoman bullet
+    /// must not be looked up by its byte, which is the yen sign in the host face's table.</summary>
+    internal static bool HasEmbeddedProgram(Dictionary<string, PdfDictionary>? fontDicts, IO.PdfReader reader, string? fontName)
+    {
+        if (fontName is null || fontDicts is null || !fontDicts.TryGetValue(fontName, out var fontDict)) return false;
+        var descriptor = reader.ResolveDict(fontDict.Get("FontDescriptor"));
+        if (descriptor is null && reader.Resolve(fontDict.Get("DescendantFonts")) is PdfArray { Count: > 0 } descendants)
+            descriptor = reader.ResolveDict(reader.ResolveDict(descendants[0])?.Get("FontDescriptor"));
+        return descriptor is not null
+            && (descriptor.ContainsKey("FontFile") || descriptor.ContainsKey("FontFile2") || descriptor.ContainsKey("FontFile3"));
+    }
+
     /// <summary>The host face that stands in for a font name the resources never
     /// defined. Arial, the same last resort the GDI+ renderer falls back to, so the two
     /// rasterisers substitute alike; cached under the missing name so the lookup and the
@@ -161,20 +176,34 @@ public sealed partial class SoftwarePageRenderer
     /// axis-aligned path and land at the pen exactly as before; a run whose text matrix
     /// rotates or skews goes through the 2x2 map and walks its own baseline, so
     /// <paramref name="penX"/> is read as a distance along that baseline rather than as a
-    /// raster x. Every glyph the renderer draws comes through here.</summary>
+    /// raster x. Every glyph the renderer draws comes through here, and a run that strokes
+    /// its glyphs (see <see cref="RenderContext.TextStroke"/>) strokes each outline after
+    /// its fill.</summary>
     private static void BlitGlyph(RenderContext ctx, GlyphOutline outline, int unitsPerEm,
         double effectiveSize, double hScale, double penX, double penY,
         byte r, byte g, byte b, byte a)
     {
         if (unitsPerEm <= 0) return;
+        if (ExactGlyphPlacement)
+            BlitGlyphAtPen(ctx, outline, unitsPerEm, effectiveSize, hScale, penX, penY, r, g, b, a);
+        else
+            BlitGlyphSnapped(ctx, outline, unitsPerEm, effectiveSize, hScale, penX, penY, r, g, b, a);
+        if (ctx.TextStroke is { } stroke)
+            StrokeGlyphOutline(ctx, outline, unitsPerEm, effectiveSize, hScale, penX, penY, stroke);
+    }
+
+    /// <summary>Rasterise one glyph with its pen truncated to the pixel (see
+    /// <see cref="ExactGlyphPlacement"/>) and put it on the page.</summary>
+    private static void BlitGlyphSnapped(RenderContext ctx, GlyphOutline outline, int unitsPerEm,
+        double effectiveSize, double hScale, double penX, double penY,
+        byte r, byte g, byte b, byte a)
+    {
         if (ctx.GlyphEmMatrix is { } em)
         {
             if (GlyphRasterizer.RasterizeTransformed(outline,
                     em[0] / unitsPerEm, em[1] / unitsPerEm, em[2] / unitsPerEm, em[3] / unitsPerEm)
                 is not (var mask, var rw, var rh, var rbx, var rby)) return;
-            var dist = penX - ctx.GlyphOriginX;
-            var ox = ctx.GlyphOriginX + dist * ctx.BaselineUx;
-            var oy = ctx.GlyphOriginY + dist * ctx.BaselineUy;
+            var (ox, oy) = EmPenOrigin(ctx, penX, penY);
             BlitAlphaMask(ctx, mask, rw, rh, (int)Math.Round(ox) + rbx, (int)Math.Round(oy) + rby,
                 r, g, b, a);
             return;
@@ -189,12 +218,14 @@ public sealed partial class SoftwarePageRenderer
     /// <summary>Blit a single-channel alpha mask onto the RGBA pixel buffer with the given color.
     /// Every glyph the renderer draws goes through here, which is also where a text CLIP
     /// (Tr 4-7) collects its shape: while <see cref="RenderContext.TextClipAccum"/> is open the
-    /// glyph coverage is unioned into it, and Tr 7 collects WITHOUT painting.</summary>
+    /// glyph coverage is unioned into it, and Tr 7 collects WITHOUT painting, as do the
+    /// stroke-only modes Tr 1 and 5, whose paint is the stroke alone.</summary>
     private static void BlitAlphaMask(RenderContext ctx, byte[] alpha, int maskW, int maskH,
         int dstX, int dstY, byte r, byte g, byte b, byte a)
     {
         var clipAccum = ctx.TextClipAccum;
-        var paints = clipAccum is null || ctx.TextClipPaints;
+        var paints = (clipAccum is null || ctx.TextClipPaints) && ctx.TextFills;
+        if (!paints && clipAccum is null) return;
         for (var my = 0; my < maskH; my++)
         {
             var dy = dstY + my;
@@ -213,8 +244,8 @@ public sealed partial class SoftwarePageRenderer
                     // saturate one another into a heavier shape than either alone.
                     var idx = dy * ctx.PixelW + dx;
                     if (maskVal > clipAccum[idx]) clipAccum[idx] = maskVal;
-                    if (!paints) continue;
                 }
+                if (!paints) continue;
 
                 var effectiveA = (byte)((maskVal * a) / 255);
                 SetPixel(ctx, dx, dy, r, g, b, effectiveA);

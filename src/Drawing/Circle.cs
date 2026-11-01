@@ -38,10 +38,10 @@ public sealed class Circle : Shape
     {
         ApplyOpacity(builder, page);
         builder.SetLineWidth(GraphInfo.LineWidth);
-        if (GraphInfo.StrokeColor is { } sc)
-            builder.SetStrokeColor(sc.R, sc.G, sc.B);
-        if (GraphInfo.FillColorInternal is { } fc)
-            builder.SetFillColor(fc.R, fc.G, fc.B);
+        if (GraphInfo.Color is { } sc)
+            builder.SetStrokeColor(sc);
+        if (GraphInfo.FillColor is { } fc)
+            builder.SetFillColor(fc);
 
         // Approximate circle with 4 Bézier curves
         var k = 0.5522847498; // magic constant

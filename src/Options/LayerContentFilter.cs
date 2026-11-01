@@ -111,9 +111,7 @@ internal static partial class LayerContentFilter
 
     private static bool InTarget(List<bool?> ocStack)
     {
-        foreach (var e in ocStack)
-            if (e == true) return true;
-        return false;
+        return ocStack.Contains(true);
     }
 
     private static bool IsTargetOcOperand(string operands, string layerId)
@@ -193,11 +191,42 @@ internal static partial class LayerContentFilter
     /// formatted with up to 17 decimal places (invariant culture).</summary>
     private static string FormatNumber(string token)
     {
+        if (IsInWriterShape(token)) return token;
         if (double.TryParse(token, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var v))
             return v.ToString("0.#################", System.Globalization.CultureInfo.InvariantCulture);
         return token;
     }
+
+    /// <summary>True for a token the formatter would print as it is, so it needs no parse
+    /// and no formatting: an optional minus, an integer part without a leading zero (or a lone
+    /// 0), an optional fraction without a trailing zero, no exponent, and at most fifteen
+    /// significant digits - the formatter's precision, beyond which it rounds.</summary>
+    private static bool IsInWriterShape(string token)
+    {
+        var start = token.Length > 0 && token[0] == '-' ? 1 : 0;
+        var dot = token.IndexOf('.');
+        var integerEnd = dot < 0 ? token.Length : dot;
+        if (integerEnd == start) return false;
+        if (token[start] == '0' && integerEnd - start > 1) return false;
+        if (dot >= 0 && (dot == token.Length - 1 || token[token.Length - 1] == '0')) return false;
+        if (dot >= 0 && token.Length - dot - 1 > FormatterDecimals) return false;
+        var significant = 0;
+        for (var i = start; i < token.Length; i++)
+        {
+            if (i == dot) continue;
+            var c = token[i];
+            if (c < '0' || c > '9') return false;
+            if (significant > 0 || c != '0') significant++;
+        }
+        return significant <= FormatterPrecision;
+    }
+
+    /// <summary>The significant digits the number format keeps.</summary>
+    private const int FormatterPrecision = 15;
+
+    /// <summary>The decimal places the number format keeps - its seventeen '#'.</summary>
+    private const int FormatterDecimals = 17;
 
     /// <summary>Rewrite an inline dictionary with minimal spacing — a space only
     /// between two tokens neither of which is self-delimiting
@@ -229,17 +258,9 @@ internal static partial class LayerContentFilter
                 i = end + 1;
             }
             else if (c == '[') (tok, i) = ScanArray(body, i);
-            else if (c == '/')
-            {
-                var start = i;
-                i++;
-                while (i < body.Length && body[i] is not (' ' or '\t' or '\r' or '\n'
-                       or '(' or '<' or '[' or '/' or '>' or ')' or ']'))
-                    i++;
-                tok = body[start..i];
-            }
             else
             {
+                // A name and any other token run to the next delimiter alike.
                 var start = i;
                 i++;
                 while (i < body.Length && body[i] is not (' ' or '\t' or '\r' or '\n'

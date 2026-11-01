@@ -80,8 +80,8 @@ internal static partial class Jbig2Decoder
         {
             Data = data,
             Segments = segments,
-            TextRegions = ctx.Captures!,
-            GenericRegions = ctx.GenericCaptures!,
+            TextRegions = ctx.Captures,
+            GenericRegions = ctx.GenericCaptures,
             PageWidth = ctx.PageWidth,
             PageHeight = ctx.PageHeight,
             Page = page,

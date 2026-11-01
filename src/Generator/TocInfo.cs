@@ -66,7 +66,7 @@ public sealed partial class TocInfo
     public bool IsCountTocPages { get; set; }
 
     /// <summary>Tab-leader style between heading text and page number.</summary>
-    public TabLeaderType LineDash { get; set; } = TabLeaderType.None;
+    public TabLeaderType LineDash { get; set; }
 
     /// <summary>String inserted before each page number ("p. ", "Page ", …).</summary>
     public string? PageNumbersPrefix { get; set; }
@@ -233,11 +233,18 @@ public partial class Heading : BaseParagraph
     internal (byte[] content, double height) Build(Page page, double x, double y, string fontName)
         => Build(page, x, y, fontName, "");
 
-    internal (byte[] content, double height) Build(Page page, double x, double y,
-        string fontName, string numberPrefix)
+    /// <summary>The height <see cref="Build(Page, double, double, string, string)"/> takes at
+    /// <paramref name="x"/> on <paramref name="page"/>, without drawing it.</summary>
+    internal double MeasureHeight(Page page, double x)
+    {
+        var tb = WrapLines(page, x);
+        return tb.fontSize + (tb.lines.Count - 1) * tb.lineSpacing;
+    }
+
+    /// <summary>The heading's size, line pitch and its text wrapped to the page width.</summary>
+    private TocBuildState WrapLines(Page page, double x)
     {
         var tb = new TocBuildState();
-        tb.builder = new Content.ContentStreamBuilder();
         tb.totalText = string.Join("", Segments.Select(s => s.Text));
         // Real Helvetica advances for the wrap: the crude half-em estimate
         // under-fills typical lines (breaking ~10 chars early); each line
@@ -253,14 +260,15 @@ public partial class Heading : BaseParagraph
             }
             return w;
         }
-        tb.fontSize = TextState.FontSizeTouched ? TextState.FontSize
-            : Segments.FirstOrDefault(s => s.TextState.FontSizeTouched)?.TextState.FontSize
-            ?? (Segments.Count > 0 ? Segments[1].TextState.FontSize : 12);
+        if (TextState.FontSizeTouched) tb.fontSize = TextState.FontSize;
+        else
+            tb.fontSize = Segments.FirstOrDefault(s => s.TextState.FontSizeTouched)?.TextState.FontSize
+                ?? (Segments.Count > 0 ? Segments[1].TextState.FontSize : 12);
         tb.lineSpacing = Segments.Count > 0 && Segments[1].TextState.LineSpacing > 0
             ? Segments[1].TextState.LineSpacing
             : tb.fontSize * 1.2;
 
-        tb.availWidth = page.Width - x - 72; // right margin
+        tb.availWidth = page.LayoutFrameWidth - x - 72; // right margin
 
         tb.lines = new List<string>();
         tb.cur = new System.Text.StringBuilder();
@@ -280,6 +288,14 @@ public partial class Heading : BaseParagraph
             }
         }
         if (tb.cur.Length > 0 || tb.lines.Count == 0) tb.lines.Add(tb.cur.ToString());
+        return tb;
+    }
+
+    internal (byte[] content, double height) Build(Page page, double x, double y,
+        string fontName, string numberPrefix)
+    {
+        var tb = WrapLines(page, x);
+        tb.builder = new Content.ContentStreamBuilder();
 
         tb.capHeight = Aspose.Pdf.Text.Standard14Fonts.GetCapHeight("Helvetica");
         tb.ascent = tb.capHeight > 0 ? tb.capHeight / 1000.0 * tb.fontSize : tb.fontSize * 0.7;
@@ -288,9 +304,9 @@ public partial class Heading : BaseParagraph
         // Every content heading opens with an EMPTY text show at
         // the line start in the auto-created first segment's own size (so
         // extraction reports an empty 10 pt fragment before a 12 pt heading).
-        if (Segments.Count > 1 && string.IsNullOrEmpty(Segments[0].Text))
-            tb.builder.BeginText().SetFont(fontName, Segments[0].TextState.FontSize > 0
-                    ? (double)Segments[0].TextState.FontSize : 10)
+        if (Segments.Count > 1 && string.IsNullOrEmpty(Segments[1].Text))
+            tb.builder.BeginText().SetFont(fontName, Segments[1].TextState.FontSize > 0
+                    ? (double)Segments[1].TextState.FontSize : 10)
                 .SetFillColor(0, 0, 0)
                 .MoveTextPosition(x, tb.baseline).ShowText(string.Empty).EndText();
 

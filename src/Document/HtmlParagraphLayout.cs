@@ -15,7 +15,7 @@ public sealed partial class Document : IDisposable
 {
     private const double psFs = 12.0, psPitch = 13.5, psAscent = 10.85;
 
-    private void LayoutProcedureStepRows(List<Converters.HtmlToPdfConverter.StepRow> psRows, HtmlFragment html, FlowLayout flow, Page page, double marginLeft, double marginRight, double marginTop, double marginBottom)
+    private void LayoutProcedureStepRows(List<Converters.HtmlToPdfConverter.StepRow> psRows, FlowLayout flow, Page page, double marginLeft, double marginRight)
     {
         // Procedure-step form rows: each bullet column numbers a
         // content column of widget lines — text runs, underlined
@@ -27,7 +27,7 @@ public sealed partial class Document : IDisposable
         // acknowledge widgets stack blanks and small labels at
         // the sheet's right end, and a clog row draws its full-
         // height right border.
-        var psWrapRight = page.Width - 34.8;
+        var psWrapRight = page.LayoutFrameWidth - 34.8;
 
 
 
@@ -36,7 +36,7 @@ public sealed partial class Document : IDisposable
         // whole words first, char-break only an overlong word
         // the first word of s (leading spaces included in its span)
         for (var prowIdx = 0; prowIdx < psRows.Count; prowIdx++)
-            LayoutStepRow(prowIdx, psRows, html, flow, page, marginLeft, marginRight, marginTop, marginBottom, psWrapRight);
+            LayoutStepRow(prowIdx, psRows, flow, page, marginLeft, marginRight, psWrapRight);
     }
 
     // height consumed instead of moving the flow cursor, so a nested
@@ -56,11 +56,7 @@ public sealed partial class Document : IDisposable
 
     private static bool HasNestedTables(Table t)
     {
-        foreach (var r in t.Rows)
-            foreach (var c in r.Cells)
-                foreach (var p in c.Paragraphs)
-                    if (p is Table) return true;
-        return false;
+        return t.Rows.Any(r => r.Cells.Any(c => c.Paragraphs.Any(p => p is Table)));
     }
 
     /// <summary>The embedded face a caller set on the page's or the document's

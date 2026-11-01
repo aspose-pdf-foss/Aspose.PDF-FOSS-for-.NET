@@ -58,7 +58,7 @@ private sealed class BootstrapScreenState
     public string jumboBtn2Label = null!;
     public Color jumboBtnFill = null!;
     public Color jumboBtnBorder = null!;
-    public List<Aspose.Pdf.Converters.HtmlToPdfConverter.BsBlock> blocks = null!;
+    public List<Aspose.Pdf.Converters.HtmlToPdfConverter.IBsBlock> blocks = null!;
     // ── layout ──
     public Document doc = null!;
     public Page page = null!;
@@ -69,7 +69,6 @@ private sealed class BootstrapScreenState
     public double yTd;
     public double lastPMarB;
     public Dictionary<string, string> body = null!;
-    public Color bodyBg = null!;
     public double bodyFs;
     public double lineFactor;
     public (double asc, double sum) fm;

@@ -11,10 +11,12 @@ namespace Aspose.Pdf.Forms;
 public sealed partial class Form
 {
     /// <summary>The stages of the XFA datasets replace: the packet rewrite, the single-stream form and the array form.</summary>
-    private void ReplaceXfaDatasetsInArray(XfaDatasetsReplaceState xd, PdfArray xfaArray)
+    private static void ReplaceXfaDatasetsInArray(XfaDatasetsReplaceState xd, PdfArray xfaArray)
     {
         // XFA array without a named "datasets" part — create one
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
         const string xfaNs2 = "http://www.xfa.org/schema/xfa-data/1.0/";
+#pragma warning restore S5332
         var datasetsDoc = new XmlDocument();
         var datasetsEl2 = datasetsDoc.CreateElement("xfa", "datasets", xfaNs2);
         datasetsDoc.AppendChild(datasetsEl2);
@@ -57,7 +59,9 @@ public sealed partial class Form
         if (datasetsEl is null && xdpDoc.DocumentElement is not null)
         {
             // Create <xfa:datasets> element and insert before postamble
+#pragma warning disable S5332 // a namespace name or registry identifier, never fetched
             const string xfaNs = "http://www.xfa.org/schema/xfa-data/1.0/";
+#pragma warning restore S5332
             datasetsEl = xdpDoc.CreateElement("xfa", "datasets", xfaNs);
             // Try to insert before the closing </xdp:xdp> (last child or before postamble)
             xdpDoc.DocumentElement.AppendChild(datasetsEl);
@@ -77,8 +81,9 @@ public sealed partial class Form
         }
 
         // Clear existing data and import the root element of the imported XML
+        var keepNamespaces = XfaDataIsNamespaced(dataEl);
         dataEl.InnerXml = "";
-        ImportDataChildren(xd.importedXml, xdpDoc, dataEl);
+        ImportDataChildren(xd.importedXml, xdpDoc, dataEl, keepNamespaces);
 
         // Write updated XDP back to the stream (no BOM)
         using var ms = new MemoryStream();
@@ -111,10 +116,11 @@ public sealed partial class Form
         }
         if (dataNs is null) return false;
 
+        var keepNamespaces = XfaDataIsNamespaced(dataNs);
         dataNs.InnerXml = "";
         // Unwrap xfa:data / xfa:datasets wrapper if present in the imported XML,
         // so we don't double-nest (e.g. <data><xfa:data><form1>.)
-        ImportDataChildren(xd.importedXml, existingDoc, dataNs);
+        ImportDataChildren(xd.importedXml, existingDoc, dataNs, keepNamespaces);
 
         using var ms = new MemoryStream();
         SaveXmlNoBom(existingDoc, ms);

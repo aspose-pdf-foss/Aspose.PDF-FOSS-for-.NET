@@ -86,8 +86,7 @@ public class CheckboxField : Field
             }
         var annots = Reader.Resolve(page.Dict.Get("Annots")) as PdfArray;
         if (annots is null) { annots = new PdfArray(); page.Dict.Set("Annots", annots); }
-        foreach (var a in annots)
-            if (ReferenceEquals(Reader.Resolve(a), Dict)) return; // already present
+        if (annots.Any(a => ReferenceEquals(Reader.Resolve(a), Dict))) return; // already present
         annots.Add(Dict);
     }
 
@@ -128,17 +127,20 @@ public class CheckboxField : Field
         // Wrap in q/Q so the drawing is graphics-state isolated; the trailing Q
         // is the final operator, with the glyph strokes just before it.
         sb.Append("q 1 w ");
-        // Interior fill only when the widget declares a background colour (/MK /BG);
-        // a checkbox with no background stays transparent (an explicit empty
+        // Interior fill only when the widget declares a background colour (/MK /BG); a
+        // checkbox with no background stays transparent (an explicit empty
         // background must not paint a fill). The black border is always stroked.
         var mkDict = Reader.ResolveDict(Dict.Get("MK"));
         if (mkDict is not null && MkColorOperator(mkDict.Get("BG"), fill: true) is { } bgFill)
             sb.Append($"{bgFill} 0 0 {Fmt(w)} {Fmt(h)} re f ");
         // The box outline strokes only when the widget declares a border colour
-        // (/MK /BC) — a default (colourless) unchecked checkbox stays invisible;
-        // callers that want visible boxes set Characteristics.Border.
+        // (/MK /BC) — a default (colourless) unchecked checkbox stays invisible; callers
+        // that want visible boxes set Characteristics.Border.
+        // A border the /BS styles, widens or dashes is drawn as it asks, by the painter every field shares.
         if (mkDict is not null && MkColorOperator(mkDict.Get("BC"), fill: false) is { } bcStroke)
-            sb.Append($"{bcStroke} 0 0 {Fmt(w)} {Fmt(h)} re S ");
+            sb.Append(HasStyledBorder(Dict)
+                ? BuildBsBorder(Dict, w, h, bcStroke, Reader.Resolve(mkDict.Get("BG")) is PdfArray face && face.Count > 0 ? MkColor(face) : System.Drawing.Color.Gray)
+                : $"{bcStroke} 0 0 {Fmt(w)} {Fmt(h)} re S ");
         if (drawGlyph)
         {
             var inset = System.Math.Min(w, h) * 0.2;
@@ -182,10 +184,10 @@ public class CheckboxField : Field
             var oldOn = OnValue;
             if (value == oldOn) return;
             if (HasWidgetKids)
-                foreach (var kid in AllKids()) RenameOnState(kid, oldOn, value);
+                foreach (var kid in AllKids()) RenameOnState(kid, value);
             else
             {
-                RenameOnState(Dict, oldOn, value);
+                RenameOnState(Dict, value);
                 // A checkbox constructed without an /AP yet (export value set before the appearance
                 // is generated) has no on-state to rename — establish one so the value is recorded.
                 EnsureCheckboxOnState(Dict, value);
@@ -196,28 +198,26 @@ public class CheckboxField : Field
         }
     }
 
-    /// <summary>Re-key a widget's non-"Off" appearance state from <paramref name="oldOn"/>
+    /// <summary>Re-key a widget's non-"Off" appearance state from <c>oldOn</c>
     /// to <paramref name="newOn"/> across /AP/N and /AP/D, and follow it in the widget /AS.</summary>
-    private bool RenameOnState(PdfDictionary widget, string oldOn, string newOn)
+    private void RenameOnState(PdfDictionary widget, string newOn)
     {
         var ap = Reader.ResolveDict(widget.Get("AP"));
-        if (ap is null) return false;
-        bool renamed = false;
+        if (ap is null) return;
         foreach (var apKey in new[] { "N", "D" })
         {
             if (Reader.Resolve(ap.Get(apKey)) is not PdfDictionary states) continue;
             string? key = null;
-            foreach (var k in states.Keys) if (k != "Off") { key = k; break; }
+            var k = states.Keys.FirstOrDefault(k => k != "Off");
+            if (k is not null) { key = k; }
             if (key is null || key == newOn) continue;
             var stream = states.Get(key);
             if (stream is null) continue;
             states.Remove(key);
             states.Set(newOn, stream);
-            renamed = true;
         }
         if (widget.GetName("AS") is { } asName && asName != "Off")
             widget.Set("AS", new PdfName(newOn));
-        return renamed;
     }
 
     /// <summary>Ensure <paramref name="widget"/> declares an /AP/N on-state named
@@ -230,7 +230,7 @@ public class CheckboxField : Field
         var n = Reader.ResolveDict(ap.Get("N"));
         if (n is null) { n = new PdfDictionary(); ap.Set("N", n); }
         bool hasOn = false;
-        foreach (var k in n.Keys) if (k != "Off") { hasOn = true; break; }
+        if (n.Keys.Any(k => k != "Off")) { hasOn = true; }
         if (!hasOn) n.Set(onValue, new PdfDictionary());
         if (!n.ContainsKey("Off")) n.Set("Off", new PdfDictionary());
     }
@@ -246,10 +246,7 @@ public class CheckboxField : Field
     {
         var ap = Reader.ResolveDict(kid.Get("AP"));
         var n = ap is null ? null : Reader.ResolveDict(ap.Get("N"));
-        if (n is not null)
-            foreach (var k in n.Keys)
-                if (k != "Off") return k;
-        return null;
+        return n?.Keys.FirstOrDefault(k => k != "Off");
     }
 
     /// <summary>The currently-selected export value of a grouped checkbox: the
@@ -392,8 +389,7 @@ public class CheckboxField : Field
     {
         if (string.IsNullOrEmpty(value) || string.Equals(value, "Off", StringComparison.OrdinalIgnoreCase))
             return false;
-        foreach (var s in AllowedStates)
-            if (s != "Off" && string.Equals(s, value, StringComparison.Ordinal)) return true;
+        if (AllowedStates.Any(s => s != "Off" && string.Equals(s, value, StringComparison.Ordinal))) return true;
         return HasWidgetKids && KidOnValues().Contains(value);
     }
 
@@ -501,10 +497,8 @@ public class CheckboxField : Field
                 var nObj = Reader.Resolve(apDict.Get("N"));
                 if (nObj is PdfDictionary nDict)
                 {
-                    foreach (var key in nDict.Keys)
-                    {
-                        if (key != "Off") return key;
-                    }
+                    var key = nDict.Keys.FirstOrDefault(key => key != "Off");
+                    if (key is not null) return key;
                 }
             }
             return "Yes"; // default
@@ -582,7 +576,7 @@ public class CheckboxField : Field
     /// checkbox appearance cannot represent but XFA still stores literally.</summary>
     private bool IsArbitraryNonState(string? value)
         => !string.IsNullOrEmpty(value)
-           && !value!.Equals("Off", StringComparison.OrdinalIgnoreCase)
+           && !value.Equals("Off", StringComparison.OrdinalIgnoreCase)
            && value != "0"
            && !AllowedStates.Contains(value)
            && !(HasWidgetKids && KidOnValues().Contains(value))

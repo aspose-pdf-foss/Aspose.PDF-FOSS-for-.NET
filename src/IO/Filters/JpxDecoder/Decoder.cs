@@ -104,11 +104,8 @@ internal static partial class JpxDecoder
             }
 
             if (tiles.Count == 0 || _comps.Length == 0) return false;
-            // Constrained subset: one precinct per resolution, any number of quality layers.
-            // The LRCP (0), RLCP (1) and RPCL (2) progressions are accepted; the per-tile
-            // packet loop below emits packets in the resolution / layer / component order each
-            // progression dictates. (_progOrder is forced to -1 above when custom precincts
-            // are present.)
+            // Constrained subset: any precincts and quality layers; the LRCP (0), RLCP (1)
+            // and RPCL (2) progressions, read in the order each dictates (PacketOrder).
             if (_progOrder < 0 || _progOrder > 2 || _numLayers < 1) return false;
             if (_comps.Length != 1 && _comps.Length != 3 && _comps.Length != 4) return false;
             foreach (var c in _comps) if (c.Dx != 1 || c.Dy != 1) return false;
@@ -200,12 +197,7 @@ internal static partial class JpxDecoder
             _ycb = U8() + 2;
             _cbStyle = U8();
             _transform = U8(); // 1 = 5/3 reversible, 0 = 9/7 irreversible
-            if ((scod & 1) != 0)
-            {
-                // Custom precincts present — not in subset; consume but flag via numLayers check later.
-                // (default-precinct subset only)
-                _progOrder = -1; // force rejection
-            }
+            ReadPrecinctSizes(custom: (scod & 1) != 0);
         }
 
         private void ParseQcd(int segEnd)
@@ -279,7 +271,7 @@ internal static partial class JpxDecoder
             // Tier-1 + dequant per code-block, scatter into subband coefficient planes.
             foreach (var res in resolutions)
                 foreach (var band in res.Bands)
-                    DecodeBandBlocks(comp, band);
+                    DecodeBandBlocks(band);
 
             // Inverse DWT to reconstruct tile-component samples.
             InverseDwt(comp, resolutions);
@@ -287,8 +279,8 @@ internal static partial class JpxDecoder
 
         // Inverse multiple-component transform + DC level shift, producing the final
         // unsigned sample values per component. For mct=1 the three components carry a
-        // reversible (RCT) or irreversible (ICT) colour transform that must be undone;
-        // otherwise each component is independent. Level shift is applied here so the
+        // reversible (RCT) or irreversible (ICT) colour transform that must be undone; otherwise
+        // each component is independent. Level shift is applied here so the
         // colour transform operates on the signed (pre-shift) samples.
         private void InverseMct()
         {
@@ -332,7 +324,8 @@ internal static partial class JpxDecoder
                 for (int i = 0; i < comp.Data.Length; i++)
                 {
                     int val = comp.Data[i] + shift;
-                    comp.Data[i] = val < 0 ? 0 : (val > maxv ? maxv : val);
+                    if (val < 0) comp.Data[i] = 0;
+                    else comp.Data[i] = val > maxv ? maxv : val;
                 }
             }
         }
@@ -369,6 +362,7 @@ internal static partial class JpxDecoder
                         MakeBand(3, ox0, oy0, ox1, oy1, r),     // HH
                     };
                 }
+                BuildPrecincts(R, r);
                 res[r] = R;
             }
             return res;
@@ -377,17 +371,16 @@ internal static partial class JpxDecoder
         private Subband MakeBand(int orient, int x0, int y0, int x1, int y1, int r)
         {
             var b = new Subband { Orient = orient, X0 = x0, Y0 = y0, X1 = x1, Y1 = y1 };
-            // Code-block nominal dims (precinct = full subband, so cb dims are the COD values,
-            // halved at resolution > 0 only when precinct sizes shrink — not in this subset).
-            b.Cbw = 1 << Math.Min(_xcb, 15);
-            b.Cbh = 1 << Math.Min(_ycb, 15);
+            // Code-block nominal dims: the COD values, capped by the precinct in subband terms.
+            b.Cbw = 1 << Math.Min(_xcb, BandPrecinctExponent(_ppx, r));
+            b.Cbh = 1 << Math.Min(_ycb, BandPrecinctExponent(_ppy, r));
             int w = x1 - x0, h = y1 - y0;
-            b.Gain = orient == 0 ? 0 : (orient == 3 ? 2 : 1);
+            b.Gain = orient switch { 0 => 0, 3 => 2, _ => 1 };
             // Subband index for quantization: LL of last level is 0; then per resolution
             // (HL,LH,HH). bandIndex = (numLevels - r==numLevels?0) ...
             AssignQuant(b, r);
 
-            if (w <= 0 || h <= 0) { b.Blocks = Array.Empty<SubbandBlock>(); b.InclTree = new TagTree(1, 1); b.ZbpTree = new TagTree(1, 1); return b; }
+            if (w <= 0 || h <= 0) { b.Blocks = Array.Empty<SubbandBlock>(); return b; }
 
             // Code-block grid aligned to multiples of cb dims (anchored at subband origin
             // rounded down to the code-block grid).
@@ -408,8 +401,6 @@ internal static partial class JpxDecoder
                     blocks.Add(new SubbandBlock { X0 = cbx0, Y0 = cby0, X1 = cbx1, Y1 = cby1 });
                 }
             b.Blocks = blocks.ToArray();
-            b.InclTree = new TagTree(b.NumBlocksW, b.NumBlocksH);
-            b.ZbpTree = new TagTree(b.NumBlocksW, b.NumBlocksH);
             return b;
         }
 
@@ -440,14 +431,16 @@ internal static partial class JpxDecoder
             }
             else
             {
-                b.Expn = idx < expn.Length ? expn[idx] : (expn.Length > 0 ? expn[^1] : 0);
-                b.Mant = idx < mant.Length ? mant[idx] : (mant.Length > 0 ? mant[^1] : 0);
+                if (idx < expn.Length) b.Expn = expn[idx];
+                else b.Expn = expn.Length > 0 ? expn[^1] : 0;
+                if (idx < mant.Length) b.Mant = mant[idx];
+                else b.Mant = mant.Length > 0 ? mant[^1] : 0;
             }
         }
 
-        // ── Tier-2 packet reading (one quality layer / single precinct) ──
+        // ── Tier-2 packet reading (one layer of one precinct) ──
 
-        private void ReadResolutionPacket(PacketReader pr, Resolution res, int layer)
+        private void ReadResolutionPacket(PacketReader pr, Resolution res, int layer, int precinct)
         {
             // The packet header bits follow on immediately from the previous packet (a
             // non-empty packet's body left the stream byte-aligned). An empty packet is a
@@ -474,15 +467,16 @@ internal static partial class JpxDecoder
 
             foreach (var band in res.Bands)
             {
-                for (int by = 0; by < band.NumBlocksH; by++)
-                    for (int bx = 0; bx < band.NumBlocksW; bx++)
+                var pc = band.Precincts[precinct];
+                for (int by = pc.R0; by < pc.R1; by++)
+                    for (int bx = pc.C0; bx < pc.C1; bx++)
                     {
                         var blk = band.Blocks[by * band.NumBlocksW + bx];
                         bool included;
                         if (!blk.Included)
                             // First inclusion: the tag-tree value (the layer at which the
                             // block first appears) must be below this layer's threshold.
-                            included = band.InclTree.Decode(pr, bx, by, layer + 1);
+                            included = pc.InclTree.Decode(pr, bx - pc.C0, by - pc.R0, layer + 1);
                         else
                             included = pr.ReadBit() == 1;
 
@@ -492,7 +486,7 @@ internal static partial class JpxDecoder
                         {
                             // zero bit-planes via tag-tree (unbounded threshold)
                             int zbp = 0;
-                            while (zbp < 64 && !band.ZbpTree.Decode(pr, bx, by, zbp + 1)) zbp++;
+                            while (zbp < 64 && !pc.ZbpTree.Decode(pr, bx - pc.C0, by - pc.R0, zbp + 1)) zbp++;
                             blk.ZeroBitplanes = zbp;
                             blk.Included = true;
                             blk.Lblock = 3;
@@ -519,9 +513,8 @@ internal static partial class JpxDecoder
             // may receive bytes in several layers, so each layer's contribution is
             // appended to the bytes already collected for that block.
             foreach (var band in res.Bands)
-                for (int i = 0; i < band.Blocks.Length; i++)
+                foreach (var blk in PrecinctBlocks(band, band.Precincts[precinct]))
                 {
-                    var blk = band.Blocks[i];
                     if (blk.SegmentLengths.Count == 0) continue;
                     int total = 0; foreach (var l in blk.SegmentLengths) total += l;
                     var add = pr.ReadBytes(total);
@@ -537,7 +530,7 @@ internal static partial class JpxDecoder
                 }
         }
 
-        private int ReadNumPasses(PacketReader pr)
+        private static int ReadNumPasses(PacketReader pr)
         {
             // ISO 15444-1 Table B.4
             if (pr.ReadBit() == 0) return 1;
@@ -552,7 +545,7 @@ internal static partial class JpxDecoder
 
         // ── Tier-1 EBCOT decode of all blocks in a subband ──────────
 
-        private void DecodeBandBlocks(Component comp, Subband band)
+        private void DecodeBandBlocks(Subband band)
         {
             int bw = band.X1 - band.X0, bh = band.Y1 - band.Y0;
             if (bw <= 0 || bh <= 0) return;
@@ -580,7 +573,7 @@ internal static partial class JpxDecoder
             Dequantize(band, bandCoeffs, bw, bh);
         }
 
-        private int GuardMaxBitplanes(Subband band)
+        private static int GuardMaxBitplanes(Subband band)
         {
             // Mb = guard + expn - 1 (guard from the band's governing QCD/QCC)
             return band.Guard + band.Expn - 1;
@@ -590,11 +583,12 @@ internal static partial class JpxDecoder
         {
             // Store reconstructed coefficients into a band-keyed buffer attached to the
             // resolution via Coeffs on the band for the IDWT to consume.
+            // Tier-1 coefficients come in half units (their reconstruction midpoint is a half step).
             var outp = new int[bw * bh];
             if (_transform == 1)
             {
-                // Reversible 5/3: coefficients are integers, no scaling.
-                Array.Copy(coeffs, outp, coeffs.Length);
+                // Reversible 5/3: integers, no scaling; the half drops, as it does from a fully decoded sample.
+                for (int i = 0; i < coeffs.Length; i++) outp[i] = coeffs[i] / 2;
             }
             else
             {
@@ -615,7 +609,7 @@ internal static partial class JpxDecoder
                 {
                     int q = coeffs[i];
                     if (q == 0) { outp[i] = 0; continue; }
-                    double v = q * delta;
+                    double v = q * delta / 2;
                     outp[i] = (int)Math.Round(v);
                 }
             }
@@ -658,7 +652,7 @@ internal static partial class JpxDecoder
                     comp.Data[y * comp.W + x] = cur[y * curW + x];
         }
 
-        private Subband Band(Resolution r, int orient)
+        private static Subband Band(Resolution r, int orient)
         {
             foreach (var b in r.Bands) if (b.Orient == orient) return b;
             return r.Bands[0];
@@ -684,7 +678,7 @@ internal static partial class JpxDecoder
         }
 
         // 5/3 reversible inverse transform (one level), in-place on interleaved grid.
-        private void Idwt53(int[] a, int w, int h, Resolution R)
+        private static void Idwt53(int[] a, int w, int h, Resolution R)
         {
             var tmp = new int[Math.Max(w, h)];
             bool evenX = (R.X0 & 1) == 0;
@@ -693,7 +687,7 @@ internal static partial class JpxDecoder
             for (int x = 0; x < w; x++) { Row53(a, x, w, h, tmp, evenY); }
         }
 
-        private void Row53(int[] a, int off, int stride, int n, int[] tmp, bool even)
+        private static void Row53(int[] a, int off, int stride, int n, int[] tmp, bool even)
         {
             if (n == 1) return;
             for (int i = 0; i < n; i++) tmp[i] = a[off + i * stride];
@@ -711,14 +705,15 @@ internal static partial class JpxDecoder
         {
             if (i < 0) i = -i;
             if (i >= n) i = 2 * n - 2 - i;
-            if (i < 0) i = 0; if (i >= n) i = n - 1;
+            if (i < 0) i = 0;
+            if (i >= n) i = n - 1;
             return s[i];
         }
 
         // 9/7 irreversible inverse transform (one level).
         private const double K = 1.230174104914001;
         private const double A = -1.586134342059924, B = -0.052980118572961, G = 0.882911075530934, D = 0.443506852043971;
-        private void Idwt97(int[] a, int w, int h, Resolution R)
+        private static void Idwt97(int[] a, int w, int h, Resolution R)
         {
             var col = new double[h];
             var row = new double[w];
@@ -727,12 +722,16 @@ internal static partial class JpxDecoder
             for (int x = 0; x < w; x++) Row97(a, x, w, h, col, evenY);
         }
 
-        private void Row97(int[] a, int off, int stride, int n, double[] t, bool even)
+        private static void Row97(int[] a, int off, int stride, int n, double[] t, bool even)
         {
             if (n == 1) return;
             for (int i = 0; i < n; i++) t[i] = a[off + i * stride];
             // Undo scaling: low-pass (even positions) ×K, high-pass (odd) ÷K.
-            for (int i = 0; i < n; i++) t[i] = (i % 2 == (even ? 0 : 1)) ? t[i] * K : t[i] / K;
+            for (int i = 0; i < n; i++)
+            {
+                if (i % 2 == (even ? 0 : 1)) t[i] = t[i] * K;
+                else t[i] = t[i] / K;
+            }
             // Inverse lifting (reverse of forward predict/update), even=low, odd=high.
             Lift97(t, n, even ? 0 : 1, -D); // update-2^-1 on low
             Lift97(t, n, even ? 1 : 0, -G); // predict-2^-1 on high
@@ -745,7 +744,9 @@ internal static partial class JpxDecoder
             for (int i = start; i < n; i += 2)
             {
                 double l = i - 1 >= 0 ? s[i - 1] : s[1];
-                double r = i + 1 < n ? s[i + 1] : s[n - 2 >= 0 ? n - 2 : 0];
+                double r;
+                if (i + 1 < n) r = s[i + 1];
+                else r = s[n - 2 >= 0 ? n - 2 : 0];
                 s[i] += coef * (l + r);
             }
         }
@@ -763,7 +764,7 @@ internal static partial class JpxDecoder
                     {
                         int v = (y < c.H && x < c.W) ? c.Data[y * c.W + x] : 0;
                         if (c.Prec != 8) v = c.Prec > 8 ? (v >> (c.Prec - 8)) : (v << (8 - c.Prec));
-                        Pixels[(y * Width + x) * Components + ci] = (byte)(v < 0 ? 0 : v > 255 ? 255 : v);
+                        Pixels[(y * Width + x) * Components + ci] = (byte)(v switch { < 0 => 0, > 255 => 255, _ => v });
                     }
             }
 

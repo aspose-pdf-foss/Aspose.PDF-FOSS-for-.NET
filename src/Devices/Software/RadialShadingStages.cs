@@ -74,7 +74,7 @@ public sealed partial class SoftwarePageRenderer : IPageRenderer
             }
 
             rs.input[0] = rs.domLo + t * rs.domLen;
-            var col = rs.radial.Function!.Evaluate(rs.input);
+            var col = EvaluateInPlace(rs.radial.Function!, rs.input, ref rs.output);
             if (col is null) continue;
 
             var (r, g, b) = ComponentsToRgb(col, rs.csName, rs.radial.TintTransform, rs.radial.AltSpaceName);

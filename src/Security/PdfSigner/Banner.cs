@@ -19,35 +19,63 @@ namespace Aspose.Pdf.Security;
 /// face is a Type0/Identity-H CIDFontType2 with the program embedded — Arial for latin
 /// text, MS Gothic as soon as a character needs it.
 /// </remarks>
-/// <summary>Which metadata labels a caller-shaped appearance keeps even when their
-/// value is empty.</summary>
-internal sealed record BannerLabels(bool Reason, bool Location, bool Contact);
+/// <summary>What a caller-shaped appearance states: which of the reason, location and contact
+/// lines it shows (empty or not), the label of every line and the formats of the date.</summary>
+internal sealed record BannerLabels(bool Reason, bool Location, bool Contact)
+{
+    public string SignedLabel { get; init; } = "Digitally signed by";
+    public string DateLabel { get; init; } = "Date";
+    public string ReasonLabel { get; init; } = "Reason";
+    public string LocationLabel { get; init; } = "Location";
+    public string ContactLabel { get; init; } = "Contact";
+    public string DateFormat { get; init; } = "yyyy.MM.dd HH:mm:ss";
+    public string LocalDateFormat { get; init; } = "yyyy.MM.dd HH:mm:ss zzz";
+    public CultureInfo Culture { get; init; } = CultureInfo.InvariantCulture;
+}
 
 internal static class SignatureBanner
 {
     /// <summary>Lines the banner draws, in order. A line whose value is empty is
     /// dropped, so a signature with no reason shows no "Reason:" row - unless the caller
-    /// shaped the appearance (<paramref name="labels"/>), which keeps every label it did
-    /// not switch off ("Reason: " with nothing after it). Under a shaped appearance the
-    /// date carries its UTC offset only when it is a local wall-clock time: a date the
-    /// caller set outright shows bare (measured: an explicit 2022-01-01 prints
-    /// "Date: 2022.01.01 00:00:00", the signing moment "... +03:00"). The plain banner
-    /// keeps the offset on every date - the templates of the era it is measured against
-    /// carry it.</summary>
+    /// shaped the appearance (<paramref name="labels"/>), which shows exactly the lines it
+    /// switched on ("Reason: " with nothing after it), each under its own label. Under a
+    /// shaped appearance the date takes the local format (with its UTC offset by default)
+    /// only when it is a local wall-clock time: a date the caller set outright takes the
+    /// other (measured: an explicit 2022-01-01 prints "Date: 2022.01.01 00:00:00", the
+    /// signing moment "... +03:00"). The plain banner keeps the offset on every date - the
+    /// templates of the era it is measured against carry it.</summary>
     internal static List<string> Lines(string? signerName, DateTime signDate,
         string? reason, string? location, string? contact, BannerLabels? labels = null)
     {
         var lines = new List<string>();
         if (!string.IsNullOrEmpty(signerName))
-            lines.Add($"Digitally signed by '{signerName}'");
+            lines.Add($"{labels?.SignedLabel ?? PlainSignedLabel} '{signerName}'");
         if (signDate.Kind == DateTimeKind.Utc) signDate = signDate.ToLocalTime();
-        var bareDate = labels is not null && signDate.Kind != DateTimeKind.Local;
-        var dateFormat = bareDate ? "yyyy.MM.dd HH:mm:ss" : "yyyy.MM.dd HH:mm:ss zzz";
-        lines.Add("Date: " + signDate.ToString(dateFormat, CultureInfo.InvariantCulture));
-        if (!string.IsNullOrEmpty(reason) || labels is { Reason: true }) lines.Add($"Reason: {reason}");
-        if (!string.IsNullOrEmpty(location) || labels is { Location: true }) lines.Add($"Location: {location}");
-        if (!string.IsNullOrEmpty(contact) || labels is { Contact: true }) lines.Add($"Contact: {contact}");
+        if (labels is null)
+        {
+            lines.Add("Date: " + signDate.ToString(PlainDateFormat, CultureInfo.InvariantCulture));
+            if (!string.IsNullOrEmpty(reason)) lines.Add($"Reason: {reason}");
+            if (!string.IsNullOrEmpty(location)) lines.Add($"Location: {location}");
+            if (!string.IsNullOrEmpty(contact)) lines.Add($"Contact: {contact}");
+            return lines;
+        }
+        var dateFormat = signDate.Kind == DateTimeKind.Local ? labels.LocalDateFormat : labels.DateFormat;
+        lines.Add($"{labels.DateLabel}: {signDate.ToString(dateFormat, labels.Culture)}");
+        if (labels.Reason) lines.Add($"{labels.ReasonLabel}: {reason}");
+        if (labels.Location) lines.Add($"{labels.LocationLabel}: {location}");
+        if (labels.Contact) lines.Add($"{labels.ContactLabel}: {contact}");
         return lines;
+    }
+
+    private const string PlainSignedLabel = "Digitally signed by";
+    private const string PlainDateFormat = "yyyy.MM.dd HH:mm:ss zzz";
+
+    /// <summary>A colour as the operands of rg: its RGB components, as the banner writes them.</summary>
+    internal static string Rgb(Color color)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        string C(byte value) => (value / 255.0).ToString("0.###############", inv);
+        return $"{C(color.R)} {C(color.G)} {C(color.B)}";
     }
 
     /// <summary>The face the banner draws in: the CJK script face as soon as one line
@@ -58,15 +86,15 @@ internal static class SignatureBanner
     {
         var all = string.Concat(lines);
         var beyondAnsi = false;
-        foreach (var c in all) if (c > 'ÿ') { beyondAnsi = true; break; }
+        if (all.Any(c => c > 'ÿ')) { beyondAnsi = true; }
         // A custom appearance names its own family, and the /BaseFont written must be
         // that name with its spaces stripped ("Times New Roman" reads back as
         // TimesNewRoman). It only serves while it COVERS the text.
         if (!string.IsNullOrEmpty(requestedFamily))
         {
-            var req = Aspose.Pdf.Text.SystemFontResolver.Resolve(requestedFamily!);
+            var req = Aspose.Pdf.Text.SystemFontResolver.Resolve(requestedFamily);
             if (req is { Length: > 12 } && (!beyondAnsi || CoversAll(req, all)))
-                return (req, requestedFamily!.Replace(" ", ""));
+                return (req, requestedFamily.Replace(" ", ""));
         }
         if (beyondAnsi)
         {
@@ -140,15 +168,21 @@ internal static class SignatureBanner
         return Encoding.ASCII.GetBytes(sb.ToString());
     }
 
-    /// <summary>The /n2 content stream: the banner text, one line per Tj, stepped by the
-    /// leading and seated one font size below the box top — the expected shape,
-    /// colours and matrix.</summary>
+    /// <summary>The /n2 content stream: the box filled with the background colour when the
+    /// appearance names one (opaque: its alpha only says whether there is one), then the
+    /// foreground picture when there is one, then the banner text in its text colour (the
+    /// banner blue by default), one line per Tj, stepped by the leading and seated one font
+    /// size below the box top — the expected shape, colours and matrix.</summary>
     internal static byte[] Content(List<string> hexLines, string fontRes,
-        double fontSize, double height)
+        double fontSize, double width, double height, SignatureAppearance? appearance,
+        string? pictureRes = null)
     {
         var inv = CultureInfo.InvariantCulture;
         var sb = new StringBuilder();
-        sb.Append(BannerFillRgb).Append(" rg\n");
+        if (appearance?.BackgroundColor is { A: > 0 } background)
+            sb.AppendFormat(inv, "0 0 {0:0.##} {1:0.##} re\n", width, height).Append(Rgb(background)).Append(" rg\nf\n");
+        sb.Append(TextRgb(appearance)).Append(" rg\n");
+        if (pictureRes is not null) sb.Append("q\n1 0 0 1 0 0 cm\n/").Append(pictureRes).Append(" Do\nQ\n");
         sb.Append("q\n1 0 0 1 0 0 cm\nBT\n");
         sb.AppendFormat(inv, "1 0 0 1 0 {0:0.##} Tm\n", height - fontSize);
         sb.AppendFormat(inv, "{0:0.##} TL\n", fontSize * 1.2);
@@ -292,5 +326,9 @@ internal static class SignatureBanner
     }
 
     internal const string BannerFillRgb = "0.301960784313725 0.501960784313725 1";
+
+    /// <summary>The fill the banner text is drawn in.</summary>
+    internal static string TextRgb(SignatureAppearance? appearance)
+        => appearance?.TextColor is { } color ? Rgb(color) : BannerFillRgb;
     internal const string BannerStrokeRgb = "0.3 0.5 1";
 }

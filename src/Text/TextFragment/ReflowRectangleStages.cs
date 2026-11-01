@@ -12,7 +12,7 @@ public partial class TextFragment
     // The matched text carries the source line breaks; the replacement has
     // plain spaces — compare whitespace-folded.
     private static string FoldWs(string s) =>
-        System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ").Trim();
+        SafeRegex.Replace(s, @"\s+", " ").Trim();
 
     private TextFragment MakeLine(ReflowRectangleState rr, string text, double x, double y)
     {
@@ -182,7 +182,7 @@ public partial class TextFragment
     }
 
     /// <summary>The original paragraph is removed line by line, then the absorbed region swept for what a fragmented line left behind.</summary>
-    private void RemoveReflowedSource(ReflowRectangleState rr, Rectangle rect, string oldText)
+    private void RemoveReflowedSource(ReflowRectangleState rr, string oldText)
     {
 
         // Remove the original paragraph: delete each source line operator at its
@@ -195,54 +195,52 @@ public partial class TextFragment
         // sub-runs, which text matching cannot delete cleanly. Run it only when the
         // delete actually left the source behind, and even then take whole text
         // blocks only, so a block that also carries neighbouring text survives.
+        double sLLX = double.MaxValue, sLLY = double.MaxValue;
+        double sURX = double.MinValue, sURY = double.MinValue;
+        if (AbsorbedRectangle is { } ab0)
         {
-            double sLLX = double.MaxValue, sLLY = double.MaxValue;
-            double sURX = double.MinValue, sURY = double.MinValue;
-            if (AbsorbedRectangle is { } ab0)
-            {
-                sLLX = ab0.LLX; sLLY = ab0.LLY; sURX = ab0.URX; sURY = ab0.URY;
-            }
-            foreach (var s in _segments)
-            {
-                if (s.Rectangle is not { } sr) continue;
-                if (sr.LLX < sLLX) sLLX = sr.LLX;
-                if (sr.LLY < sLLY) sLLY = sr.LLY;
-                if (sr.URX > sURX) sURX = sr.URX;
-                if (sr.URY > sURY) sURY = sr.URY;
-            }
-            if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_FIT_DEBUG") == "1")
-                Console.Error.WriteLine($"[sweep] abs={(AbsorbedRectangle is null ? "null" : AbsorbedRectangle.ToString())} segs={_segments.Count} rect=({sLLX:F2},{sLLY:F2},{sURX:F2},{sURY:F2})");
-            if (sURX > sLLX && sURY > sLLY)
-            {
-                var sweep = new Rectangle(sLLX - 1, sLLY - 1, sURX + 1, sURY + 1);
-                // The sweep strips whole BT…ET blocks, so it can take neighbouring
-                // text with it. It exists for the paragraph drawn as dozens of
-                // kerned sub-runs that text matching cannot delete cleanly — so run
-                // it only when ink actually SURVIVED inside the region, and never
-                // when a neighbour would be caught in the same block.
-                // A single-segment source was one plain run: the text-matched delete
-                // above removes it whole, so sweeping the region only risks taking a
-                // line-mate drawn in the same text block. Keep the sweep for the
-                // many-sub-run paragraph it exists for.
-                // ★ And only when that delete actually LEFT SOMETHING BEHIND. It reports
-                // how many runs it removed, so a paragraph whose every segment was
-                // matched and deleted has nothing left to sweep, and sweeping it anyway
-                // destroys every line-mate sharing its text block — a six-glyph line
-                // took the whole five-line box around it with it.
-                if (_segments.Count > 1 && _unresolvedSegments > 0)
-                    TableAbsorber.RemoveTableContent(rr.page, sweep, textOnly: true);
+            sLLX = ab0.LLX; sLLY = ab0.LLY; sURX = ab0.URX; sURY = ab0.URY;
+        }
+        foreach (var s in _segments)
+        {
+            if (s.Rectangle is not { } sr) continue;
+            if (sr.LLX < sLLX) sLLX = sr.LLX;
+            if (sr.LLY < sLLY) sLLY = sr.LLY;
+            if (sr.URX > sURX) sURX = sr.URX;
+            if (sr.URY > sURY) sURY = sr.URY;
+        }
+        if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_FIT_DEBUG") == "1")
+            Console.Error.WriteLine($"[sweep] abs={(AbsorbedRectangle is null ? "null" : AbsorbedRectangle.ToString())} segs={_segments.Count} rect=({sLLX:F2},{sLLY:F2},{sURX:F2},{sURY:F2})");
+        if (sURX > sLLX && sURY > sLLY)
+        {
+            var sweep = new Rectangle(sLLX - 1, sLLY - 1, sURX + 1, sURY + 1);
+            // The sweep strips whole BT…ET blocks, so it can take neighbouring
+            // text with it. It exists for the paragraph drawn as dozens of
+            // kerned sub-runs that text matching cannot delete cleanly — so run
+            // it only when ink actually SURVIVED inside the region, and never
+            // when a neighbour would be caught in the same block.
+            // A single-segment source was one plain run: the text-matched delete
+            // above removes it whole, so sweeping the region only risks taking a
+            // line-mate drawn in the same text block. Keep the sweep for the
+            // many-sub-run paragraph it exists for.
+            // ★ And only when that delete actually LEFT SOMETHING BEHIND. It reports
+            // how many runs it removed, so a paragraph whose every segment was
+            // matched and deleted has nothing left to sweep, and sweeping it anyway
+            // destroys every line-mate sharing its text block — a six-glyph line
+            // took the whole five-line box around it with it.
+            if (_segments.Count > 1 && _unresolvedSegments > 0)
+                TableAbsorber.RemoveTableContent(rr.page, sweep, textOnly: true);
 
-                // A rule the source drew UNDER this text belongs to it and goes with it —
-                // left behind, it underscores whatever words now occupy that space, at the
-                // old text's width. The band is the replaced text's OWN extent, and only a
-                // path lying wholly inside it is claimed, so a page rule running beneath
-                // the line (wider than the line) is not mistaken for its underline.
-                var ulBand = new Rectangle(sLLX - 0.5, sLLY - 0.30 * rr.baseFs, sURX + 0.5, sLLY + 0.06 * rr.baseFs);
-                TableAbsorber.RemoveTableContent(rr.page, ulBand, decorationOnly: true);
-            }
+            // A rule the source drew UNDER this text belongs to it and goes with it —
+            // left behind, it underscores whatever words now occupy that space, at the
+            // old text's width. The band is the replaced text's OWN extent, and only a
+            // path lying wholly inside it is claimed, so a page rule running beneath
+            // the line (wider than the line) is not mistaken for its underline.
+            var ulBand = new Rectangle(sLLX - 0.5, sLLY - 0.30 * rr.baseFs, sURX + 0.5, sLLY + 0.06 * rr.baseFs);
+            TableAbsorber.RemoveTableContent(rr.page, ulBand, decorationOnly: true);
         }
 
-        rr.tb = new TextBuilder(rr.page);
+        rr.tb = new TextBuilder(rr.page) { SeatsInPageSpace = true };
         rr.maxW = 0;
     }
 
@@ -282,7 +280,9 @@ public partial class TextFragment
         // baseline and pitch instead of re-derived approximations of them.
         // Read both straight from the block's own positioning operators; fall
         // back to the segment-position reconstruction.
+#pragma warning disable S1244 // fs starts as a copy of baseFs - exact equality means the fit left it alone
         if (rr.fs == rr.baseFs && AbsorbedRectangle is { } abr)
+#pragma warning restore S1244
         {
             var shift = rect.URY - abr.URY;
             var dSrc = SourceDescentUnits(rr.page) * rr.baseFs / 1000.0;
@@ -318,7 +318,7 @@ public partial class TextFragment
         BuildReflowMeasurers(rr, newText);
         if (Environment.GetEnvironmentVariable("ASPOSE_FOSS_FIT_DEBUG") == "1")
         {
-            double mNew = 0; try { mNew = rr.font.MeasureString(newText, rr.baseFs); } catch { }
+            double mNew = 0; try { mNew = rr.font.MeasureString(newText, rr.baseFs); } catch { /* a face that cannot measure the text leaves the estimate in place */ }
             double mSrc = rr.srcMeasure is not null ? rr.srcMeasure(newText, rr.baseFs) : -1;
             Console.Error.WriteLine($"[fit] sx={rr.sx:F6} baseFs={rr.baseFs:F4} rect=({rect.LLX:F2},{rect.LLY:F2},{rect.URX:F2},{rect.URY:F2}) H={rect.Height:F3} wrapWidth={rr.wrapWidth:F3} scale={rr.measureScale:F4} wrapWidthM={rr.wrapWidthM:F3} hmtx={(rr.hmtxMeasure is not null)} measureFont={mNew:F3} measureSrc={mSrc:F3} fit={rr.fit}");
         }
@@ -353,7 +353,7 @@ public partial class TextFragment
     }
 
     /// <summary>Shrink-to-fit and scale-to-fill solve the size the wrapped text needs inside the rectangle.</summary>
-    private void FitReflowFontSize(ReflowRectangleState rr, Rectangle rect, string newText)
+    private static void FitReflowFontSize(ReflowRectangleState rr, Rectangle rect, string newText)
     {
         rr.fs = rr.baseFs;
         if (rr.fit is TextReplaceOptions.FontSizeAdjustment.ShrinkToFit
@@ -384,28 +384,27 @@ public partial class TextFragment
         rr.substWidths = rr.substFace is null || rr.font.Subtype != "Type0" || rr.coveringFace is not null
             ? null
             : SystemFaceWidths(rr.substFace);
-        rr.substMeasure = rr.substFace is null
-            ? null
-            : rr.coveringFace is not null
-            // The covering face is addressed by CHARACTER, not by byte code: the very
-            // glyph that forced the switch lives outside any single-byte encoding.
-            ? (str, size) =>
-            {
-                var upm = rr.coveringGlyphs!.UnitsPerEm > 0 ? rr.coveringGlyphs.UnitsPerEm : 1000;
-                double w = 0;
-                foreach (var ch in str)
-                    w += rr.coveringGlyphs.GetAdvanceWidth(
-                        rr.coveringGlyphs.CMap.TryGetValue(ch, out var g) ? g : 0) * size / upm;
-                return w;
-            }
-            : rr.substWidths is null
-            ? Standard14Measurer(rr.substFace)
-            : (str, size) =>
-            {
-                double w = 0;
-                foreach (var ch in str) w += rr.substWidths[ch < 256 ? ch : '?'] * size / 1000.0;
-                return w;
-            };
+        if (rr.substFace is null) rr.substMeasure = null;
+        // The covering face is addressed by CHARACTER, not by byte code: the very
+        // glyph that forced the switch lives outside any single-byte encoding.
+        else if (rr.coveringFace is not null)
+            rr.substMeasure = (str, size) =>
+                {
+                    var upm = rr.coveringGlyphs!.UnitsPerEm > 0 ? rr.coveringGlyphs.UnitsPerEm : 1000;
+                    double w = 0;
+                    foreach (var ch in str)
+                        w += rr.coveringGlyphs.GetAdvanceWidth(
+                            rr.coveringGlyphs.CMap.TryGetValue(ch, out var g) ? g : 0) * size / upm;
+                    return w;
+                };
+        else if (rr.substWidths is null) rr.substMeasure = Standard14Measurer(rr.substFace);
+        else
+            rr.substMeasure = (str, size) =>
+                {
+                    double w = 0;
+                    foreach (var ch in str) w += rr.substWidths[ch < 256 ? ch : '?'] * size / 1000.0;
+                    return w;
+                };
 
         rr.srcMeasure = BuildSourceMeasurer(rr.page);
         if (rr.substMeasure is not null) rr.srcMeasure = null;
@@ -437,63 +436,59 @@ public partial class TextFragment
     private void ReadReflowSourceMetrics(ReflowRectangleState rr, string newText)
     {
         rr.measureScale = 1.0;
+        double measured = 0, actual = 0;
+        foreach (var s in _segments)
         {
-            double measured = 0, actual = 0;
-            foreach (var s in _segments)
-            {
-                if (s.Rectangle is not { } sr || string.IsNullOrEmpty(s.Text) || s.Text.Length < 4) continue;
-                double m;
-                try { m = rr.font.MeasureString(s.Text, rr.baseFs); } catch { continue; }
-                if (m <= 0 || sr.Width <= 0) continue;
-                measured += m; actual += sr.Width;
-            }
-            if (measured > 1 && actual > 1)
-            {
-                var sc = actual / measured;
-                // The calibration is there to correct a face measuring at about an em
-                // a glyph. A face that already reproduces its own drawn text measures
-                // TRUE, and nudging it by the sample's couple of percent only moves
-                // the wrap off the break the real metrics put it on.
-                if (sc > 0.2 && sc < 5) rr.measureScale = Math.Abs(sc - 1) <= 0.05 ? 1.0 : sc;
-            }
+            if (s.Rectangle is not { } sr || string.IsNullOrEmpty(s.Text) || s.Text.Length < 4) continue;
+            double m;
+            try { m = rr.font.MeasureString(s.Text, rr.baseFs); } catch { continue; }
+            if (m <= 0 || sr.Width <= 0) continue;
+            measured += m; actual += sr.Width;
+        }
+        if (measured > 1 && actual > 1)
+        {
+            var sc = actual / measured;
+            // The calibration is there to correct a face measuring at about an em
+            // a glyph. A face that already reproduces its own drawn text measures
+            // TRUE, and nudging it by the sample's couple of percent only moves
+            // the wrap off the break the real metrics put it on.
+            if (sc > 0.2 && sc < 5) rr.measureScale = Math.Abs(sc - 1) <= 0.05 ? 1.0 : sc;
         }
 
         rr.hmtxMeasure = null;
+        // Only a program the document actually carries: a font that ships none
+        // keeps the calibrated width-table measure, whose scale the surrounding
+        // flow is already tuned against.
+        var ttfData = (TextState.FontData ?? TextState.Font?.SourceFontData)?.TtfData
+            ?? TextState.Font?.GetEmbeddedProgramBytes();
+        if (ttfData is not null)
         {
-            // Only a program the document actually carries: a font that ships none
-            // keeps the calibrated width-table measure, whose scale the surrounding
-            // flow is already tuned against.
-            var ttfData = (TextState.FontData ?? TextState.Font?.SourceFontData)?.TtfData
-                ?? TextState.Font?.GetEmbeddedProgramBytes();
-            if (ttfData is not null)
+            try
             {
-                try
+                var gp = new Aspose.Pdf.Text.GlyphOutlineParser(ttfData);
+                var upm = gp.UnitsPerEm > 0 ? gp.UnitsPerEm : 1000;
+                rr.hmtxMeasure = (str, size) =>
                 {
-                    var gp = new Aspose.Pdf.Text.GlyphOutlineParser(ttfData);
-                    var upm = gp.UnitsPerEm > 0 ? gp.UnitsPerEm : 1000;
-                    rr.hmtxMeasure = (str, size) =>
-                    {
-                        double w = 0;
-                        foreach (var ch in str)
-                            w += gp.GetAdvanceWidth(gp.CMap.TryGetValue(ch, out var g) ? g : 0);
-                        return w * size / upm;
-                    };
-                }
-                catch { /* unparseable program — fall back to the width tables */ }
+                    double w = 0;
+                    foreach (var ch in str)
+                        w += gp.GetAdvanceWidth(gp.CMap.TryGetValue(ch, out var g) ? g : 0);
+                    return w * size / upm;
+                };
             }
-            // A subset program often carries only the glyphs it drew, so a cmap
-            // lookup for the replacement's characters can come back empty and
-            // measure everything at zero. Sanity-check against the width tables
-            // and drop the program measure when it disagrees wildly.
-            if (rr.hmtxMeasure is not null)
-            {
-                var probe = newText.Replace(" ", "");
-                double viaProgram = rr.hmtxMeasure(probe, rr.baseFs), viaTables = 0;
-                try { viaTables = rr.font.MeasureString(probe, rr.baseFs); } catch { }
-                if (viaProgram <= 0
-                    || (viaTables > 0 && (viaProgram / viaTables is < 0.5 or > 2.0)))
-                    rr.hmtxMeasure = null;
-            }
+            catch { /* unparseable program — fall back to the width tables */ }
+        }
+        // A subset program often carries only the glyphs it drew, so a cmap
+        // lookup for the replacement's characters can come back empty and
+        // measure everything at zero. Sanity-check against the width tables
+        // and drop the program measure when it disagrees wildly.
+        if (rr.hmtxMeasure is not null)
+        {
+            var probe = newText.Replace(" ", "");
+            double viaProgram = rr.hmtxMeasure(probe, rr.baseFs), viaTables = 0;
+            try { viaTables = rr.font.MeasureString(probe, rr.baseFs); } catch { /* a face that cannot measure the text leaves the estimate in place */ }
+            if (viaProgram <= 0
+                || (viaTables > 0 && (viaProgram / viaTables is < 0.5 or > 2.0)))
+                rr.hmtxMeasure = null;
         }
     }
 }

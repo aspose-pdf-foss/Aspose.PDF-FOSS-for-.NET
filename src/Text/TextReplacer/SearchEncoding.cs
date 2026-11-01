@@ -101,7 +101,7 @@ public sealed partial class TextReplacer
     }
 
     private static byte[] EncodeString(string text, Dictionary<int, string>? toUnicode,
-        PdfDictionary? fontDict)
+        PdfDictionary? fontDict, PdfReader? reader = null)
     {
         if (toUnicode is not null)
         {
@@ -118,44 +118,43 @@ public sealed partial class TextReplacer
                 text = new string(chars);
             }
 
-            var isCid = fontDict?.GetName("Subtype") == "Type0";
+            // A composite font writes each code in as many bytes as its CMap's codespace gives it.
+            var codespace = ShowCodespace.Of(fontDict, reader);
             var result = new List<byte>();
 
             foreach (var ch in text)
             {
                 var s = ch.ToString();
-                if (reverseMap.TryGetValue(s, out var code))
-                {
-                    if (isCid)
-                    {
-                        result.Add((byte)((code >> 8) & 0xFF));
-                        result.Add((byte)(code & 0xFF));
-                    }
-                    else
-                    {
-                        result.Add((byte)(code & 0xFF));
-                    }
-                }
-                else
-                {
-                    // Fallback: use character value directly
-                    if (isCid)
-                    {
-                        result.Add((byte)((ch >> 8) & 0xFF));
-                        result.Add((byte)(ch & 0xFF));
-                    }
-                    else
-                    {
-                        result.Add((byte)ch);
-                    }
-                }
+                // Fallback: use character value directly
+                int code = reverseMap.TryGetValue(s, out var mapped) ? mapped : ch;
+                for (var k = (codespace?.Width(code) ?? 1) - 1; k >= 0; k--)
+                    result.Add((byte)((code >> (k * 8)) & 0xFF));
             }
 
             return result.ToArray();
         }
 
-        return Compat.Latin1.GetBytes(text);
+        var bytes = new byte[text.Length];
+        for (var i = 0; i < text.Length; i++)
+            bytes[i] = (byte)(SimpleFontCode(text[i], fontDict) ?? '?');
+        return bytes;
     }
+
+    /// <summary>The single-byte code a simple font without a ToUnicode map shows
+    /// <paramref name="ch"/> with: its WinAnsi code under a WinAnsi base encoding - the en
+    /// dash, the curly quotes and the euro sign included - and its Latin-1 value under any
+    /// other; null when the encoding has no code for it.</summary>
+    private static int? SimpleFontCode(char ch, PdfDictionary? fontDict)
+    {
+        if (ch < AsciiLimit) return ch;
+        var encoding = fontDict?.Get("Encoding");
+        var name = encoding is PdfName named ? named.Value : (encoding as PdfDictionary)?.GetName("BaseEncoding");
+        if (name == "WinAnsiEncoding") return Cp1252.TryGetByte(ch);
+        return ch <= Latin1Last ? ch : null;
+    }
+
+    private const char AsciiLimit = '\u0080';
+    private const char Latin1Last = '\u00FF';
 
     /// <summary>
     /// Check if a ToUnicode map contains Arabic presentation form characters,
@@ -239,7 +238,7 @@ public sealed partial class TextReplacer
                     WriteStringOperand(ms, s.Value, s.IsHex);
                     break;
                 case PdfInteger n:
-                    ms.Write(Encoding.ASCII.GetBytes(n.Value.ToString()));
+                    ms.Write(Encoding.ASCII.GetBytes(n.Value.ToString(CultureInfo.InvariantCulture)));
                     break;
                 case PdfReal r:
                     ms.Write(Encoding.ASCII.GetBytes(r.Value.ToString("G", System.Globalization.CultureInfo.InvariantCulture)));

@@ -26,7 +26,7 @@ public sealed partial class TextFragmentAbsorber
             RenderingMode = (Aspose.Pdf.Text.TextRenderingMode)run.RenderingMode,
             LineWidth = run.LineWidth,
             IsBold = run.IsBold,
-            IsItalic = run.IsItalic,
+            IsItalic = IsItalicRun(run),
             Font = run.FontInfoObj ?? FontInfo.DefaultHelvetica,
             TextRise = run.TextRise,
             IsSuperscript = run.TextRise > 0,
@@ -34,6 +34,10 @@ public sealed partial class TextFragmentAbsorber
         };
         bf.textState.SetCapturedForegroundColor(ForegroundColorOf(run));
         bf.textState.StrokingColor = run.StrokingColor;
+        // The run's horizontal scaling, as a search result reports it (Tz is stored as a fraction;
+        // the property is a percentage).
+        bf.textState.HorizontalScaling = (float)(run.HScaling * 100);
+        bf.textState.CharacterSpacing = (float)run.CharSpacing;
         bf.width = (run.Width > 0 ? run.Width : EstimateWidth(run.Text, run.FontSize)) * run.HScaling;
         // The box ends at the last glyph's advance: the character spacing that
         // follows it - and the word spacing too when that glyph is a space - is

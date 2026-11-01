@@ -34,7 +34,7 @@ namespace Aspose.Pdf
 /// Represents an image placement found on a PDF page — the position, size, and resolution
 /// of an image XObject as it appears on the page (after CTM transformation).
 /// </summary>
-public sealed class ImagePlacement
+public sealed partial class ImagePlacement
 {
     /// <summary>The bounding rectangle of the image on the page (in page coordinates).</summary>
     public Rectangle Rectangle { get; }
@@ -101,9 +101,9 @@ public sealed class ImagePlacement
     internal Core.PdfStream? SourcePattern;
     internal IO.PdfReader? SourceReader;
 
-    /// <summary>Hide this image placement by removing its <c>Do</c> invocation from
-    /// the page content. Placements nested inside Form XObjects are left untouched
-    /// (removing them would affect every use of the form).</summary>
+    /// <summary>Hide this image placement by removing the instruction that draws it: its <c>Do</c>, or
+    /// the whole inline image, from the page content - or from the form or annotation appearance that
+    /// draws it, which hides it wherever that form is drawn.</summary>
     public void Hide()
     {
         // A pattern-painted image hides by dropping its Do from the PATTERN's
@@ -116,8 +116,8 @@ public sealed class ImagePlacement
                 var content = SourceReader.DecodeStream(SourcePattern);
                 var text = Compat.Latin1.GetString(content);
                 var pat = new System.Text.RegularExpressions.Regex(
-                    "/" + System.Text.RegularExpressions.Regex.Escape(XObjectName) + "\\s+Do");
-                var replaced = pat.Replace(text, " ", 1);
+                    "/" + System.Text.RegularExpressions.Regex.Escape(XObjectName) + "\\s+Do", System.Text.RegularExpressions.RegexOptions.None, RegexLimits.Timeout);
+                var replaced = SafeRegex.Replace(pat, text, " ", 1);
                 if (!ReferenceEquals(replaced, text))
                 {
                     SourcePattern.ReplaceData(Compat.Latin1.GetBytes(replaced));
@@ -129,6 +129,7 @@ public sealed class ImagePlacement
             catch { /* undecodable pattern: leave the placement visible */ }
             return;
         }
+        if (HideInSourceStream() || EditPageInlineImage(null)) return;
         if (Page is null || XObjectName is null || PageLevelOrdinal < 0) return;
         var ops = Page.Contents;
         var matches = new List<int>();
@@ -147,7 +148,8 @@ public sealed class ImagePlacement
 
     /// <summary>Replace this image placement's underlying image XObject with
     /// <paramref name="image"/>. The resource name is kept, so every invocation
-    /// of the XObject (and subsequent reads) sees the new pixels.</summary>
+    /// of the XObject (and subsequent reads) sees the new pixels. An inline image
+    /// becomes an image XObject drawn in its place.</summary>
     public void Replace(Stream image)
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
@@ -155,7 +157,8 @@ public sealed class ImagePlacement
         using var ms = new MemoryStream();
         if (image.CanSeek) image.Seek(0, SeekOrigin.Begin);
         image.CopyTo(ms);
-        Image.ReplaceImageData(ms.ToArray());
+        if (XObjectName is null) ReplaceInlineImage(ms.ToArray());
+        else Image.ReplaceImageData(ms.ToArray());
     }
 
     /// <summary>Write the decoded image bytes to <paramref name="stream"/>.</summary>
@@ -172,6 +175,14 @@ public sealed class ImagePlacement
         Image.Save(stream);
     }
 
+    /// <summary>Write the decoded image bytes to <paramref name="stream"/> as <paramref name="format"/>.</summary>
+    public void Save(Stream stream, System.Drawing.Imaging.ImageFormat format)
+    {
+        if (stream is null) throw new ArgumentNullException(nameof(stream));
+        if (Image is null) return;
+        Image.Save(stream, format);
+    }
+
     /// <summary>
     /// Number of 90° clockwise turns to apply when extracting the image so it keeps
     /// the orientation it appears in on the displayed page. A page with a quarter-turn
@@ -183,14 +194,6 @@ public sealed class ImagePlacement
     {
         var degrees = ((Page?.RotateDegrees ?? 0) % 360 + 360) % 360;
         return degrees % 90 == 0 ? degrees / 90 : 0;
-    }
-
-    /// <summary>Write the decoded image bytes to <paramref name="stream"/> as <paramref name="format"/>.</summary>
-    public void Save(Stream stream, System.Drawing.Imaging.ImageFormat format)
-    {
-        if (stream is null) throw new ArgumentNullException(nameof(stream));
-        if (Image is null) return;
-        Image.Save(stream, format);
     }
 }
 
@@ -207,8 +210,12 @@ public sealed class ImagePlacementCollection : IReadOnlyList<ImagePlacement>
     /// <summary>Number of image placements.</summary>
     public int Count => _items.Count;
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => false;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>Get an image placement by 1-based index.</summary>
@@ -281,9 +288,11 @@ public sealed class ImagePlacementAbsorber
         // Track how many page-level Do invocations of each XObject name were seen,
         // so each placement can locate its own operator later (Hide()).
         var pageLevelSeen = new Dictionary<string, int>(StringComparer.Ordinal);
+        _pageInlineSeen = 0;
+        var pageForms = OwnFormUse.PageRoot(pageLevelSeen);
         foreach (var streamBytes in contentStreams)
         {
-            ParseContentStream(streamBytes, resources, reader, page, initialCtm, depth: 0, pageLevelSeen);
+            ParseContentStream(streamBytes, resources, reader, page, initialCtm, depth: 0, pageLevelSeen, formUse: pageForms);
         }
 
         // Tiling patterns paint images too (an image-stamp watermark is often a
@@ -311,7 +320,7 @@ public sealed class ImagePlacementAbsorber
                 byte[] patBytes;
                 try { patBytes = reader.DecodeStream(pat); } catch { continue; }
                 ParseContentStream(patBytes, patRes, reader, page, patCtm, depth: 1,
-                    sourcePattern: pat);
+                    sourcePattern: pat, source: pat);
             }
         }
 
@@ -338,15 +347,24 @@ public sealed class ImagePlacementAbsorber
                 var apCtm = AppearanceCtm(apStream, annotDict, reader);
                 byte[] apBytes;
                 try { apBytes = reader.DecodeStream(apStream); } catch { continue; }
-                ParseContentStream(apBytes, apRes, reader, page, apCtm, depth: 1);
+                ParseContentStream(apBytes, apRes, reader, page, apCtm, depth: 1, source: apStream);
             }
         }
+    }
+
+    /// <summary>
+    /// Visit all pages in a document and absorb image placements from each.
+    /// </summary>
+    public void Visit(Document pdf)
+    {
+        foreach (var page in pdf.Pages)
+            Visit(page);
     }
 
     /// <summary>CTM mapping an appearance stream's form space onto the annotation's
     /// /Rect: the /BBox (transformed by the form /Matrix) scales/translates to fit
     /// the rectangle (PDF 32000 §12.5.5 appearance-stream algorithm, sans rotation).</summary>
-    private static double[] AppearanceCtm(PdfStream apStream, PdfDictionary annotDict, PdfReader reader)
+    internal static double[] AppearanceCtm(PdfStream apStream, PdfDictionary annotDict, PdfReader reader)
     {
         var identity = new double[] { 1, 0, 0, 1, 0, 0 };
         var rectArr = reader.Resolve(annotDict.Get("Rect")) as PdfArray;
@@ -369,21 +387,12 @@ public sealed class ImagePlacementAbsorber
     public bool IsReadOnlyMode { get; set; }
 
     /// <summary>
-    /// Visit all pages in a document and absorb image placements from each.
-    /// </summary>
-    public void Visit(Document pdf)
-    {
-        foreach (var page in pdf.Pages)
-            Visit(page);
-    }
-
-    /// <summary>
     /// Parse a content stream, tracking graphics state and processing Do operators.
     /// When a Form XObject is encountered, recursively parse its content stream.
     /// </summary>
     private void ParseContentStream(byte[] streamBytes, PdfDictionary? resources, PdfReader reader,
         Page page, double[] parentCtm, int depth, Dictionary<string, int>? pageLevelSeen = null,
-        PdfStream? sourcePattern = null)
+        PdfStream? sourcePattern = null, PdfStream? source = null, OwnFormUse? formUse = null)
     {
         if (depth > 10) return; // Guard against infinite recursion
 
@@ -404,6 +413,8 @@ public sealed class ImagePlacementAbsorber
         }
 
         var parser = new ContentStreamParser(reader);
+        long previousEnd = 0;
+        ImagePlacement? inlinePlacement = null;
 
         // We need to capture Form XObject invocations too (not just images).
         // The OnImageDrawn event fires for all Do operators (with any XObject name).
@@ -421,8 +432,9 @@ public sealed class ImagePlacementAbsorber
                 var localCtm = state.Ctm;
                 var ctm = MultiplyMatrices(localCtm, parentCtm);
 
-                AddImagePlacement(ctm, xobjStream, page, xobjName, reader, depth == 0 ? pageLevelSeen : null,
-                    sourcePattern);
+                var placement = AddImagePlacement(ctm, xobjStream, page, xobjName, reader,
+                    depth == 0 ? pageLevelSeen : null, sourcePattern);
+                SetSource(placement, source, resources, previousEnd, parser.OperatorEnd, formUse);
             }
             else if (subtype == "Form")
             {
@@ -447,7 +459,9 @@ public sealed class ImagePlacementAbsorber
                 var formBytes = reader.DecodeStream(xobjStream);
                 var formResources = reader.ResolveDict(xobjStream.Dict.Get("Resources")) ?? resources;
 
-                ParseContentStream(formBytes, formResources, reader, page, formCtm, depth + 1);
+                var ordinal = FormDrawingOrdinal(formUse, depth, pageLevelSeen, xobjName);
+                ParseContentStream(formBytes, formResources, reader, page, formCtm, depth + 1, pageLevelSeen,
+                    source: xobjStream, formUse: formUse?.Inside(xobjName, ordinal));
             }
         };
 
@@ -460,14 +474,49 @@ public sealed class ImagePlacementAbsorber
             if (dict.Get("Subtype") is not PdfName)
                 dict.Set("Subtype", new PdfName("Image"));
             var ctm = MultiplyMatrices(parser.State.Ctm, parentCtm);
-            AddImagePlacement(ctm, new PdfStream(dict, data), page, null, reader);
+            inlinePlacement = AddImagePlacement(ctm, new PdfStream(dict, data), page, null, reader);
+            if (source is null && depth == 0) inlinePlacement.PageLevelInlineOrdinal = _pageInlineSeen++;
         };
+        parser.OnInlineImageEnd += () =>
+        {
+            if (inlinePlacement is not null) SetSource(inlinePlacement, source, resources, previousEnd, parser.OperatorEnd, formUse);
+            inlinePlacement = null;
+            previousEnd = parser.OperatorEnd;
+        };
+        // Where each instruction's bytes start: just past the one before it.
+        parser.OnOperator += (_, _, _) => previousEnd = parser.OperatorEnd;
 
         var extGStates = BuildExtGStates(resources, reader);
         parser.Parse(streamBytes, extGStates: extGStates);
     }
 
-    private void AddImagePlacement(double[] ctm, PdfStream xobjStream, Page page,
+    // Inline images met on the page's own content so far: each one's ordinal among them.
+    private int _pageInlineSeen;
+
+    /// <summary>Which of the page's same-named Do operators draws this form: a Hide inside the form re-points that
+    /// one when the page draws the form more than once. A form inside a form keeps the ordinal of the outermost.</summary>
+    private static int FormDrawingOrdinal(OwnFormUse? formUse, int depth, Dictionary<string, int>? pageLevelSeen, string name)
+    {
+        if (depth != 0 || pageLevelSeen is null) return formUse?.Ordinal ?? -1;
+        pageLevelSeen.TryGetValue(name, out var ordinal);
+        pageLevelSeen[name] = ordinal + 1;
+        return ordinal;
+    }
+
+    /// <summary>Record where a placement drawn by a form, appearance or pattern stream is drawn from, and for a
+    /// form the page's content reaches, the way down to it from the page's resources.</summary>
+    private static void SetSource(ImagePlacement placement, PdfStream? source, PdfDictionary? resources, long start, long end,
+        OwnFormUse? formUse)
+    {
+        if (source is null) return;
+        placement.SourceStream = source;
+        placement.SourceResources = resources;
+        placement.SpanStart = (int)start;
+        placement.SpanEnd = (int)end;
+        placement.FormUse = formUse is { Path.Count: > 0 } ? formUse : null;
+    }
+
+    private ImagePlacement AddImagePlacement(double[] ctm, PdfStream xobjStream, Page page,
         string? xobjName = null, PdfReader? reader = null, Dictionary<string, int>? pageLevelSeen = null,
         PdfStream? sourcePattern = null)
     {
@@ -524,6 +573,7 @@ public sealed class ImagePlacementAbsorber
             placement.PageLevelOrdinal = ord;
         }
         ImagePlacements.Add(placement);
+        return placement;
     }
 
     private static double Num(PdfObject obj) => obj switch

@@ -9,7 +9,7 @@ internal static partial class HtmlToPdfConverter
 {
 // The stages of the ember-chart render: the pixel read, the card collection, one card and one series.
     private static double EmberPx(EmberChartRenderState ec, string st, string key, double dflt = 0)
-            => Regex.Match(st, key + @"\s*:\s*(-?[\d.]+)px", RegexOptions.IgnoreCase)
+            => SafeRegex.Match(st, key + @"\s*:\s*(-?[\d.]+)px", RegexOptions.IgnoreCase)
                 is { Success: true } m
                 ? double.Parse(m.Groups[1].Value, ec.invc) : dflt;
 
@@ -56,7 +56,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static void CollectEmberCards(EmberChartRenderState ec)
     {
-        foreach (Match nm in Regex.Matches(ec.html,
+        foreach (Match nm in SafeRegex.Matches(ec.html,
             @"<div\b[^>]*class\s*=\s*[""']ember-view node[^""']*[""'][^>]*style\s*=\s*[""'](?<st>[^""']*)[""'][^>]*>",
             RegexOptions.IgnoreCase))
         {
@@ -64,11 +64,11 @@ internal static partial class HtmlToPdfConverter
             var end = FindDivClose(ec.html, nm.Index + nm.Length);
             var body = ec.html[(nm.Index + nm.Length)..end];
             var fields = new List<string>();
-            foreach (Match fmM in Regex.Matches(body,
+            foreach (Match fmM in SafeRegex.Matches(body,
                 @"<div\b[^>]*class\s*=\s*[""']ember-view[""'][^>]*>(?<t>[\s\S]*?)</div>",
                 RegexOptions.IgnoreCase))
             {
-                var t = Regex.Replace(DecodeEntities(Regex.Replace(
+                var t = SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(
                     fmM.Groups["t"].Value, @"<[^>]+>", " ")), @"\s+", " ").Trim();
                 if (t.Length > 0) fields.Add(t);
             }

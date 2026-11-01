@@ -36,7 +36,7 @@ internal static class LabColor
 
     private static double Gamma(double c)
     {
-        c = c < 0 ? 0 : (c > 1 ? 1 : c);
+        c = c switch { < 0 => 0, > 1 => 1, _ => c };
         return c <= 0.0031308 ? 12.92 * c : 1.055 * System.Math.Pow(c, 1.0 / 2.4) - 0.055;
     }
 }

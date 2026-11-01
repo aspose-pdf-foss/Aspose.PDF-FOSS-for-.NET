@@ -110,7 +110,9 @@ public partial class Field
                     }
         }
 
+#pragma warning disable S2696 // [ThreadStatic] flag, set and reset around the call
         _recalculating = true;
+#pragma warning restore S2696
         try
         {
             foreach (var entry in co)
@@ -156,12 +158,12 @@ public partial class Field
     /// </summary>
     internal static PdfString EncodePdfTextString(string value)
     {
-        // Check if all characters fit in Latin1 (0x00–0xFF)
+        // One byte per character only where that byte reads back as the character: the
+        // codes PDFDocEncoding assigns differently from Latin-1 (0xA0 is its euro sign, not
+        // a no-break space) need the Unicode form as much as anything past 0xFF.
         bool needsUnicode = false;
-        foreach (char c in value)
-        {
-            if (c > 0xFF) { needsUnicode = true; break; }
-        }
+        foreach (var c in value)
+            if (!PdfString.IsPdfDocEncodingByte(c)) { needsUnicode = true; break; }
 
         if (!needsUnicode)
             return new PdfString(Compat.Latin1.GetBytes(value));
@@ -191,9 +193,9 @@ public partial class Field
         return ft switch
         {
             "Tx" => Aspose.Pdf.Forms.FieldType.Text,
-            "Btn" => (flags & (1 << 16)) != 0 ? Aspose.Pdf.Forms.FieldType.Button      // bit 17: Pushbutton
-                   : (flags & (1 << 15)) != 0 ? Aspose.Pdf.Forms.FieldType.RadioButton // bit 16: Radio
-                   : Aspose.Pdf.Forms.FieldType.CheckBox,
+            "Btn" when (flags & (1 << 16)) != 0 => Aspose.Pdf.Forms.FieldType.Button,      // bit 17: Pushbutton
+            "Btn" when (flags & (1 << 15)) != 0 => Aspose.Pdf.Forms.FieldType.RadioButton, // bit 16: Radio
+            "Btn" => Aspose.Pdf.Forms.FieldType.CheckBox,
             // The /Ff combo bit (bit 18, 0-based 17) splits Ch into combo / list.
             // The form-JSON round-trip and facade callers rely on this so a re-imported
             // combo rebuilds as ComboBoxField, not ListBoxField.

@@ -151,13 +151,13 @@ internal static class PopupAppearance
     private static string FormatDate(string? raw)
     {
         if (string.IsNullOrEmpty(raw)) return "";
-        var s = raw!.StartsWith("D:") ? raw.Substring(2) : raw;
-        if (s.Length < 8) return raw!;
+        var s = raw.StartsWith("D:") ? raw.Substring(2) : raw;
+        if (s.Length < 8) return raw;
         int Get(int off, int len, int def) =>
-            s.Length >= off + len && int.TryParse(s.Substring(off, len), out var v) ? v : def;
+            s.Length >= off + len && int.TryParse(s.Substring(off, len), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : def;
         int year = Get(0, 4, 0), mon = Get(4, 2, 1), day = Get(6, 2, 1);
         int hh = Get(8, 2, 0), mm = Get(10, 2, 0), ss = Get(12, 2, 0);
-        if (year == 0) return raw!;
+        if (year == 0) return raw;
         string ap = hh < 12 ? "AM" : "PM";
         int h12 = hh % 12; if (h12 == 0) h12 = 12;
         return $"{mon}/{day}/{year} {h12}:{mm:00}:{ss:00} {ap}";

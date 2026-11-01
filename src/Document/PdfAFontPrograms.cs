@@ -7,8 +7,10 @@ public sealed partial class Document
 {
     /// <summary>Every resource dictionary a page draws through: its own, and those of the
     /// form XObjects and annotation appearances it reaches, however deeply nested. A font or
-    /// an image inside a form is used by the page that invokes the form.</summary>
-    internal IEnumerable<PdfDictionary> PageResourceDictionaries(Page page)
+    /// an image inside a form is used by the page that invokes the form. With
+    /// <paramref name="throughPatterns"/> the cells of the tiling patterns it paints with are
+    /// followed too: text drawn inside a pattern cell shows through the pattern's fonts.</summary>
+    internal IEnumerable<PdfDictionary> PageResourceDictionaries(Page page, bool throughPatterns = false)
     {
         var seen = new HashSet<PdfDictionary>();
         var pending = new Stack<PdfDictionary>();
@@ -34,6 +36,9 @@ public sealed partial class Document
         {
             var resources = pending.Pop();
             yield return resources;
+            if (throughPatterns && _reader.ResolveDict(resources.Get("Pattern")) is { } patterns)
+                foreach (var key in patterns.Keys)
+                    if (_reader.ResolveStream(patterns.Get(key)) is not null) Push(patterns.Get(key));
             if (_reader.ResolveDict(resources.Get("XObject")) is not { } xObjects) continue;
             foreach (var key in xObjects.Keys)
             {
@@ -48,7 +53,7 @@ public sealed partial class Document
     internal IEnumerable<(int ObjectNumber, PdfDictionary Font)> PageFonts(Page page,
         HashSet<PdfDictionary> visited)
     {
-        foreach (var resources in PageResourceDictionaries(page))
+        foreach (var resources in PageResourceDictionaries(page, throughPatterns: true))
         {
             if (_reader.ResolveDict(resources.Get("Font")) is not { } fonts) continue;
             foreach (var key in fonts.Keys)
@@ -118,16 +123,37 @@ public sealed partial class Document
     /// no longer the one travelling with the file.
     /// </summary>
     /// <remarks>The disagreement is repairable - the conversion keeps the declared widths,
-    /// which is what a reader lays the existing content out with - so the problem is
+    /// which is what a reader lays the existing content out with, and sets the advances of a
+    /// TrueType program the source embeds to them - so the problem is
     /// convertable and does not fail the conversion. Reported once per font, against the
-    /// font dictionary.</remarks>
-    private void ReportInconsistentGlyphWidths(PdfFormatConversionOptions options)
+    /// font dictionary. The same walk over the fonts restates the encoding of a non-symbolic
+    /// TrueType font that names no base PDF/A admits, and gives a composite font's TrueType
+    /// CIDFont the CID-to-glyph map every part requires and a CIDSet that names its program's
+    /// CIDs: part 1 requires the set of a subset, later parts only require a stated set to be
+    /// right, so a wrong one is dropped there.</remarks>
+    private void ApplyFontDictionaryRules(PdfAConvertState pa)
     {
         foreach (var (objectNumber, font, pageNumber) in DocumentFonts())
         {
+            if (font.GetName("Subtype") == "Type0")
+            {
+                StateIdentityCidToGidMap(font);
+                if (pa.part == "1") WriteSubsetCidSet(font, addMissing: true);
+                else DropMisstatedCidSet(font);
+                continue;
+            }
             if (font.GetName("Subtype") is not ("Type1" or "TrueType")) continue;
+            StateTrueTypeBaseEncoding(font);
+            if (pa.part == "1") WriteType1SubsetCharSet(font);
             if (!_reconciledWidths.Contains(font) && !DeclaredWidthsDisagreeWithProgram(font)) continue;
-            options.ConversionLog.Add(new PdfAViolation
+            // A program the source embeds is made to agree with the widths the page was laid
+            // out against. A face this conversion embedded is shared by every font that
+            // stands in for its family; the subset that follows writes its advances instead.
+            if (font.GetName("Subtype") == "TrueType"
+                && _reader.ResolveStream(DescriptorOf(font)?.Get("FontFile2")) is not null)
+                try { RepairSimpleTrueTypeWidths(font); }
+                catch { /* an unreadable program is left as it is */ }
+            pa.options.ConversionLog.Add(new PdfAViolation
             {
                 Rule = "FontWidths",
                 Clause = "6.3.6",
@@ -137,6 +163,123 @@ public sealed partial class Document
                 ObjectId = objectNumber == 0 ? null : objectNumber.ToString(),
             });
         }
+    }
+
+    /// <summary>
+    /// ISO 19005-1 clause 6.3.7 and 19005-2 clause 6.2.11.6: a non-symbolic TrueType font
+    /// states WinAnsiEncoding or MacRomanEncoding, as its encoding or as the base under its
+    /// /Differences. A font whose encoding dictionary names no base is restated over
+    /// WinAnsiEncoding when that changes nothing a reader does: every code it shows is named
+    /// by /Differences, so no code falls back on the base, and the program's Unicode cmap has
+    /// a glyph for each of those names, which is how a reader finds the glyph of a named code.
+    /// A font over StandardEncoding - the built-in encoding of a Type 1 font the conversion
+    /// embedded a face for - names its codes through that table under its /Differences, and
+    /// a code whose glyph the face lacks is left to the new base. A difference WinAnsiEncoding
+    /// already states is left out, and a font left with none states the base alone - part 1
+    /// admits no /Differences at all.
+    /// </summary>
+    private void StateTrueTypeBaseEncoding(PdfDictionary font)
+    {
+        if (font.GetName("Subtype") != "TrueType") return;
+        var encoding = _reader.Resolve(font.Get("Encoding"));
+        var standardBase = encoding is PdfName { Value: "StandardEncoding" }
+            || (encoding as PdfDictionary)?.GetName("BaseEncoding") == "StandardEncoding";
+        var differences = _reader.Resolve((encoding as PdfDictionary)?.Get("Differences")) as PdfArray;
+        if (!standardBase && (encoding is not PdfDictionary dictionary || dictionary.Get("BaseEncoding") is not null
+            || differences is null)) return;
+        var descriptor = _reader.ResolveDict(font.Get("FontDescriptor"));
+        if (((_reader.Resolve(descriptor?.Get("Flags")) as PdfInteger)?.Value & SymbolicFlag) != 0) return;
+
+        var names = new SortedDictionary<int, string>();
+        if (standardBase)
+            for (var code = 0; code < SingleByteCodeCount; code++)
+                if (Text.Type1StandardEncoding.GetName(code) is { } standard) names[code] = standard;
+        var next = 0;
+        foreach (var item in differences ?? [])
+            switch (_reader.Resolve(item))
+            {
+                case PdfInteger start: next = (int)start.Value; break;
+                case PdfName glyph: names[next++] = glyph.Value; break;
+            }
+        var shown = ShownCodes(font, composite: false).Where(code => !standardBase || names.ContainsKey(code)).ToList();
+        if (shown.Count == 0 || !shown.All(names.ContainsKey)) return;
+
+        if (ResolveFontProgramStream(descriptor?.Get("FontFile2")) is not { } program) return;
+        Text.TrueTypeParser face;
+        try
+        {
+            var bytes = _reader.DecodeStream(program);
+            if (!Text.TrueTypeAdvances.CmapSubtables(bytes).Contains(MicrosoftUnicodeCmap)) return;
+            face = new Text.TrueTypeParser(bytes);
+            face.Parse();
+        }
+        catch { return; }
+        bool HasGlyph(int code) => Text.TextAbsorber.GlyphNameToUnicode.TryGetValue(names[code], out var text)
+            && text.Length > 0 && face.CMap.TryGetValue(char.ConvertToUtf32(text, 0), out var glyph) && glyph > 0;
+        if (standardBase) shown.RemoveAll(code => !HasGlyph(code));
+        else if (!shown.All(HasGlyph)) return;
+
+        var restated = new PdfArray();
+        next = -1;
+        foreach (var code in shown.Where(code => names[code] != Text.PdfEncodings.WinAnsiName(code)))
+        {
+            if (code != next) restated.Add(new PdfInteger(code));
+            restated.Add(new PdfName(names[code]));
+            next = code + 1;
+        }
+        if (restated.Count == 0)
+        {
+            font.Set("Encoding", new PdfName("WinAnsiEncoding"));
+            return;
+        }
+        // A dictionary of the font's own: the one it had may be shared with a font that
+        // shows other codes.
+        var stated = new PdfDictionary();
+        stated.Set("Type", new PdfName("Encoding"));
+        stated.Set("BaseEncoding", new PdfName("WinAnsiEncoding"));
+        stated.Set("Differences", restated);
+        font.Set("Encoding", stated);
+    }
+
+    // The codes a simple font's encoding covers.
+    private const int SingleByteCodeCount = 256;
+
+    // The cmap subtable a reader maps a glyph name's character through: platform 3
+    // (Microsoft), encoding 1 (Unicode).
+    private static readonly (int Platform, int Encoding) MicrosoftUnicodeCmap = (3, 1);
+
+    // A subset's /BaseFont opens with a tag of this many capital letters and a plus sign.
+    private const int SubsetTagLength = 6;
+
+    /// <summary>ISO 19005-1 clause 6.3.5: the descriptor of a Type 1 font subset lists, in
+    /// /CharSet, the names of the glyphs the subset defines. A subset that states no list gets
+    /// the one its program gives; a list the file already states is left as it is.</summary>
+    private void WriteType1SubsetCharSet(PdfDictionary font)
+    {
+        if (font.GetName("Subtype") != "Type1" || font.GetName("BaseFont") is not { } name) return;
+        if (name.Length <= SubsetTagLength || name[SubsetTagLength] != '+') return;
+        var descriptor = _reader.ResolveDict(font.Get("FontDescriptor"));
+        if (descriptor is null || descriptor.Get("CharSet") is not null) return;
+
+        // The program is a Type 1 one in /FontFile, or its compact form in /FontFile3.
+        Dictionary<string, int>? glyphs = null;
+        try
+        {
+            if (_reader.ResolveStream(descriptor.Get("FontFile")) is { } program)
+                glyphs = Text.Type1GlyphSource.TryLoad(_reader.DecodeStream(program),
+                    (int)program.Dict.GetInt("Length1"), (int)program.Dict.GetInt("Length2"))?.NameToGid;
+            else if (_reader.ResolveStream(descriptor.Get("FontFile3")) is { } compact
+                && compact.Dict.GetName("Subtype") == "Type1C")
+                glyphs = Text.CffGlyphSource.TryLoad(_reader.DecodeStream(compact))?.NameToGid;
+        }
+        catch { return; }
+        if (glyphs is null) return;
+
+        var listed = new System.Text.StringBuilder();
+        foreach (var glyph in glyphs.OrderBy(pair => pair.Value).Select(pair => pair.Key))
+            if (glyph != ".notdef") listed.Append('/').Append(glyph);
+        if (listed.Length > 0)
+            descriptor.Set("CharSet", new PdfString(Compat.Latin1.GetBytes(listed.ToString())));
     }
 
     /// <summary>While set, a face embedded for a font that states its widths is given those

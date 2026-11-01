@@ -20,6 +20,8 @@ private sealed class CidFontBuildState
     // is drawn as two .notdef glyphs, doubling visible letter-spacing.
     public string? encoding;
     public PdfStream? encStream;
+    // True when the embedded CMap stream declares vertical writing.
+    public bool verticalCMap;
     public bool isTwoByte;
     // If the CMap name didn't identify a known encoding, fall back to parsing
     // the stream's codespace ranges. Custom subset CMaps name themselves after

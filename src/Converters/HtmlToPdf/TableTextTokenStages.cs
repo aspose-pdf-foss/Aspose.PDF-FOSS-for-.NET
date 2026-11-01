@@ -8,6 +8,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Table text token: the token's text appended to the cell's line.</summary>
     private static void AppendTextTokenToLine(TableStyleConfig cfg, TableParseState ps, TableColumnModel colModel, Token tok, string? cssRunFace)
     {
+        if (CaptureGridFieldText(ps, tok)) return;
         if (AppendPreformattedText(cfg, ps, colModel, tok)) return;
         // Under `white-space: pre-wrap` the newline that follows the opening
         // tag is CONTENT, so the box's first line box is empty and the text
@@ -15,21 +16,20 @@ internal static partial class HtmlToPdfConverter
         if (ps.preWrapPending)
         {
             ps.preWrapPending = false;
-            if (tok.Value.StartsWith("\n") || tok.Value.StartsWith("\r"))
+            if (tok.Value.StartsWith('\n') || tok.Value.StartsWith('\r'))
                 PushLine(ps, cfg.redlineCells, cfg.dwFormCells, cfg.widenProbe, keepIfBlank: true);
         }
-        // First visible content of an htmlPage container span (an &nbsp;
-        // counts — it holds a line box) starts on a fresh line.
+        // First visible content of an htmlPage container span (an &nbsp; counts
+        // — it holds a line box) starts on a fresh line.
         if (ps.htmlPageBreakPending)
         {
             var hpVis = false;
-            foreach (var hpC in DecodeEntities(tok.Value))
-                if (!char.IsWhiteSpace(hpC) || hpC == ' ') { hpVis = true; break; }
+            if (DecodeEntities(tok.Value).Any(hpC => !char.IsWhiteSpace(hpC) || hpC == ' ')) { hpVis = true; }
             if (hpVis)
             {
                 ps.htmlPageBreakPending = false;
-                // A pending line that is itself only whitespace/&nbsp;
-                // COLLAPSES at the container boundary instead of pushing —
+                // A pending line that is itself only whitespace/&nbsp; COLLAPSES
+                // at the container boundary instead of pushing —
                 // only an explicit <br> materialises a whitespace box.
                 if (IsAllWhitespace(ps.line)) ps.line.Clear();
                 else if (ps.line.Length > 0) PushLine(ps, cfg.redlineCells, cfg.dwFormCells, cfg.widenProbe);
@@ -101,7 +101,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Table text token: a nested-table marker in the text absorbed into the cell.</summary>
     private static void AbsorbNestedTableMark(TableStyleConfig cfg, TableParseState ps, Table table, Token tok)
     {
-        foreach (Match nm in Regex.Matches(tok.Value, Regex.Escape(NestedMark) + @"(\d+)\]"))
+        foreach (Match nm in SafeRegex.Matches(tok.Value, Regex.Escape(NestedMark) + @"(\d+)\]"))
         {
             var ni = int.Parse(nm.Groups[1].Value);
             if (ni < 0 || ni >= cfg.nestedHtml.Count) continue;
@@ -129,12 +129,13 @@ internal static partial class HtmlToPdfConverter
                 hostBoxW = Math.Max(0, hostContentW - spent);
             }
             var innerAvailW = (ps.cellWidthPt > 0 ? ps.cellWidthPt : hostBoxW) - ps.liStandingIndentPt;
+            // (a UA-boxed nested grid inherits the size running in its host cell - the remittance form's
+            //  `style="font-size: 12px"` container types every grid inside it at 9)
+            var hostRunPt = (ps.curFontPt, ps.cellClassPt) switch { (> 0, _) => ps.curFontPt, (_, > 0) => ps.cellClassPt, _ => cfg.cellFontSize };
             var (inner, innerNatW) = BuildTableFromHtml(cfg.nestedHtml[ni], innerAvailW,
                 cfg.options, cfg.inlineSvgs,
                 cfg.docCss ?? cfg.css, cfg.bandDialect, false, cfg.cellLineHeightPt,
-                // (a UA-boxed nested grid inherits the size running in its host cell - the remittance form's
-                //  `style="font-size: 12px"` container types every grid inside it at 9)
-                cfg.uaCellBoxes ? (ps.curFontPt > 0 ? ps.curFontPt : ps.cellClassPt > 0 ? ps.cellClassPt : cfg.cellFontSize) : cfg.defaultCellFontPt,
+                cfg.uaCellBoxes ? hostRunPt : cfg.defaultCellFontPt,
                 cfg.tightExtras,
                 liftNestedTables: true,
                 ptCellWidths: cfg.ptCellWidths,
@@ -148,11 +149,19 @@ internal static partial class HtmlToPdfConverter
                 // tree-addressed rules keep matching through the nesting.
                 chainRules: cfg.chainRules,
                 // (a UA-boxed grid hands its nested grids the chain through its own table and cell elements)
-                cssAncestors: cfg.uaCellBoxes ? UaCellChain(cfg.cssAncestors, ps) : cfg.chainBase is null ? null : BuildOpenChain(ps, cfg.chainBase),
+                cssAncestors: (cfg.uaCellBoxes, cfg.chainBase) switch
+                {
+                    (true, _) => UaCellChain(cfg.cssAncestors, ps),
+                    (_, { } chainBase) => BuildOpenChain(ps, chainBase),
+                    _ => null,
+                },
+                hostChain: cfg.hostChain,
+                hostBodyFace: ps.bodyFaceCells ? ps.cellFamily : null,
                 makeRadio: cfg.makeRadio,
                 // The DataWorks form dialect survives the nesting: an inner
                 // results grid keeps the serif cell face and control boxes.
                 dwFormCells: cfg.dwFormCells,
+                fieldCells: cfg.fieldCells, makeField: cfg.makeField,
                 wordMailCells: cfg.wordMailCells,
                 // A UA-boxed grid's nested grids inherit its face and its browser line
                 // boxes: the inner rows pitch and dress like the outer ones.

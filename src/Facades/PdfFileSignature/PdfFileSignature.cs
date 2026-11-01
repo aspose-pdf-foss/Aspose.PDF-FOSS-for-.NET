@@ -24,12 +24,18 @@ public sealed partial class PdfFileSignature : IDisposable
     /// <summary>True when the bound document reports version 2.0 (header or
     /// catalog /Version override). Unopenable bytes are treated as non-2.0 so
     /// the signing pipeline surfaces its own error for them.</summary>
-    /// <summary>True when the bound document already carries a DocMDP certification
-    /// signature. Unopenable bytes are treated as uncertified so the signing pipeline
-    /// surfaces its own error for them.</summary>
+    /// <summary>True when the bound document carries a DocMDP certification that permits no
+    /// signature: access level 1 (levels 2 and 3 permit signing), or a certification the file no
+    /// longer matches (its byte range frames nothing here), which states no level that could be
+    /// honoured. Unopenable bytes are treated as uncertified so the signing pipeline surfaces its
+    /// own error for them.</summary>
     private bool BoundDocumentIsCertified()
     {
-        try { return Document.HasCertificationSignature(); }
+        try
+        {
+            return Document.NamesCertification()
+                && Document.CertificationAccessLevel() is 0 or Document.NoChangesAccessLevel;
+        }
         catch { return false; }
     }
 
@@ -44,15 +50,15 @@ public sealed partial class PdfFileSignature : IDisposable
     /// <summary>The bound document, opened from its bytes - for the compromise detector.</summary>
     internal Document OpenBound() => OpenDoc(RequireBound());
 
+    /// <summary>A document over <paramref name="data"/> - the bound bytes or a prefix of
+    /// them - opened with the captured password when there is one.</summary>
+    internal Document OpenBound(byte[] data) => OpenDoc(data);
+
     private Document OpenDoc(byte[] data)
         => _password is not null ? Document.Open(data, _password) : Document.Open(data);
 
     /// <summary>The bytes the facade is bound to.</summary>
     internal byte[] BoundBytes => RequireBound();
-
-    /// <summary>A document over <paramref name="data"/> - the bound bytes or a prefix of
-    /// them - opened with the captured password when there is one.</summary>
-    internal Document OpenBound(byte[] data) => OpenDoc(data);
 
     public void Dispose() { _document?.Dispose(); _document = null; _boundPdf = null; }
     /// <summary>Releases the bound document and its data; same as <c>Dispose</c>.</summary>
@@ -60,12 +66,6 @@ public sealed partial class PdfFileSignature : IDisposable
 
     /// <summary>Creates a signature facade with no document bound; call <c>BindPdf</c> before use.</summary>
     public PdfFileSignature() { }
-
-    // The live document a Document-bound facade wraps (never owned, never
-    // disposed here). Signature REMOVAL mirrors onto it so the caller's
-    // document reflects the change — the facade semantics: remove through
-    // the facade, then Save/Convert the same document as unsigned.
-    private Document? _sourceDocument;
 
     /// <summary>Creates a signature facade bound to the given document. Signatures removed through the facade are also removed from that document.</summary>
     public PdfFileSignature(Document document)
@@ -96,6 +96,12 @@ public sealed partial class PdfFileSignature : IDisposable
     {
         _outputFile = outputFile;
     }
+
+    // The live document a Document-bound facade wraps (never owned, never
+    // disposed here). Signature REMOVAL mirrors onto it so the caller's
+    // document reflects the change — the facade semantics: remove through
+    // the facade, then Save/Convert the same document as unsigned.
+    private Document? _sourceDocument;
 
     /// <summary>Binds the PDF file at the given path.</summary>
     public void BindPdf(string inputFile)
@@ -252,66 +258,6 @@ public sealed partial class PdfFileSignature : IDisposable
         if (signName is not null) RemoveSignature(signName.FullName, removeField);
     }
 
-    public string? GetSignerName(SignatureName signName)
-        => signName is null ? null : GetSignerName(signName.FullName);
-
-    public string? GetReason(SignatureName signName)
-        => signName is null ? null : GetReason(signName.FullName);
-
-    public string? GetLocation(SignatureName signName)
-        => signName is null ? null : GetLocation(signName.FullName);
-
-    public string? GetContactInfo(SignatureName signName)
-        => signName is null ? null : GetContactInfo(signName.FullName);
-
-    public DateTime GetDateTime(SignatureName signName)
-        => signName is null ? DateTime.MinValue : GetDateTime(signName.FullName);
-
-    public string? GetSignerName(string signName)
-    {
-        return FindSignature(signName)?.Authority;
-    }
-
-    public string? GetReason(string signName)
-    {
-        return FindSignature(signName)?.Reason;
-    }
-
-    public string? GetLocation(string signName)
-    {
-        return FindSignature(signName)?.Location;
-    }
-
-    public string? GetContactInfo(string signName)
-    {
-        return FindSignature(signName)?.ContactInfo;
-    }
-
-    public DateTime GetDateTime(string signName)
-    {
-        return FindSignature(signName)?.Date ?? DateTime.MinValue;
-    }
-
-    public bool IsCoversWholeDocument(string signName)
-    {
-        var input = RequireBound();
-        using var doc = OpenDoc(input);
-        var sig = Signature.EnumerateSignatures(doc)
-            .FirstOrDefault(s => s.FieldName == signName);
-        if (sig?.ByteRangeRaw is null || sig.ByteRangeRaw.Length < 4)
-            return false;
-
-        // A signature covers the whole document only when its /ByteRange starts at the
-        // very beginning of the file (offset 0) AND its second segment reaches the end,
-        // excluding just the /Contents hex gap. Content appended after signing leaves
-        // start2+len2 short of the file length; a tampered range crafted with a non-zero
-        // start so that start2+len2 happens to equal the length (e.g. [106 … len 0]) is
-        // likewise rejected here.
-        var br = sig.ByteRangeRaw;
-        var coveredEnd = br[2] + br[3];
-        return br[0] == 0 && coveredEnd == input.Length;
-    }
-
     /// <summary>Removes the value of the named signature, leaving an empty signature field. Throws when the signature certifies the document.</summary>
     public void RemoveSignature(string signName)
     {
@@ -344,6 +290,66 @@ public sealed partial class PdfFileSignature : IDisposable
         }
     }
 
+    public string? GetSignerName(SignatureName signName)
+        => signName is null ? null : GetSignerName(signName.FullName);
+
+    public string? GetSignerName(string signName)
+    {
+        return FindSignature(signName)?.Authority;
+    }
+
+    public string? GetReason(SignatureName signName)
+        => signName is null ? null : GetReason(signName.FullName);
+
+    public string? GetReason(string signName)
+    {
+        return FindSignature(signName)?.Reason;
+    }
+
+    public string? GetLocation(SignatureName signName)
+        => signName is null ? null : GetLocation(signName.FullName);
+
+    public string? GetLocation(string signName)
+    {
+        return FindSignature(signName)?.Location;
+    }
+
+    public string? GetContactInfo(SignatureName signName)
+        => signName is null ? null : GetContactInfo(signName.FullName);
+
+    public string? GetContactInfo(string signName)
+    {
+        return FindSignature(signName)?.ContactInfo;
+    }
+
+    public DateTime GetDateTime(SignatureName signName)
+        => signName is null ? DateTime.MinValue : GetDateTime(signName.FullName);
+
+    public DateTime GetDateTime(string signName)
+    {
+        return FindSignature(signName)?.Date ?? DateTime.MinValue;
+    }
+
+    public bool IsCoversWholeDocument(string signName)
+    {
+        var input = RequireBound();
+        using var doc = OpenDoc(input);
+        var sig = Signature.EnumerateSignatures(doc)
+            .FirstOrDefault(s => s.FieldName == signName);
+        if (sig?.ByteRangeRaw is null || sig.ByteRangeRaw.Length < 4)
+            return false;
+
+        // A signature covers the whole document only when its /ByteRange starts at the
+        // very beginning of the file (offset 0) AND its second segment reaches the end,
+        // excluding just the /Contents hex gap. Content appended after signing leaves
+        // start2+len2 short of the file length; a tampered range crafted with a non-zero
+        // start so that start2+len2 happens to equal the length (e.g. [106 … len 0]) is
+        // likewise rejected here.
+        var br = sig.ByteRangeRaw;
+        var coveredEnd = br[2] + br[3];
+        return br[0] == 0 && coveredEnd == input.Length;
+    }
+
     public void RemoveSignatures()
     {
         var input = RequireBound();
@@ -373,10 +379,10 @@ public sealed partial class PdfFileSignature : IDisposable
             using var doc = OpenDoc(input);
             var form = doc.Form;
             if (form is null) return false;
-            foreach (var field in form.Fields)
+            foreach (var formField in form.Fields)
             {
-                if (field.Type != Forms.FieldType.Signature) continue;
-                var sigDict = doc.Reader.ResolveDict(field.Dict.Get("V"));
+                if (formField.Type != Forms.FieldType.Signature) continue;
+                var sigDict = doc.Reader.ResolveDict(formField.Dict.Get("V"));
                 if (sigDict is null) continue;
                 var refs = doc.Reader.Resolve(sigDict.Get("Reference")) as Aspose.Pdf.Core.PdfArray;
                 if (refs is null) continue;
@@ -445,6 +451,16 @@ public sealed partial class PdfFileSignature : IDisposable
         if (outputStream.CanSeek) outputStream.Position = 0;
     }
 
+    /// <summary>Save the bound (possibly signed) document to the
+    /// <c>outputFile</c> argument from the ctor. Throws
+    /// <see cref="InvalidOperationException"/> when constructed without one.</summary>
+    public void Save()
+    {
+        if (string.IsNullOrEmpty(_outputFile))
+            throw new InvalidOperationException("No output file is set. Use Save(string) or Save(Stream), or construct the facade with an output file path.");
+        Save(_outputFile);
+    }
+
     // ── Sign / Certify / SetCertificate ──────────────────────────────
 
     private Security.PdfCertificate? _certificate;
@@ -462,12 +478,7 @@ public sealed partial class PdfFileSignature : IDisposable
     /// <summary>Stream of bytes for the visible signature appearance
     /// graphic. Takes precedence over <see cref="SignatureAppearance"/>
     /// when both are set.</summary>
-    public Stream? SignatureAppearanceStream
-    {
-        get => _signatureAppearanceStream;
-        set => _signatureAppearanceStream = value;
-    }
-    private Stream? _signatureAppearanceStream;
+    public Stream? SignatureAppearanceStream { get; set; }
 
     /// <summary>True iff the document carries a /DSS (Document Security
     /// Store) entry in the catalog — the marker for LTV (long-term
@@ -480,16 +491,6 @@ public sealed partial class PdfFileSignature : IDisposable
             using var doc = OpenDoc(input);
             return doc.Reader.Catalog.ContainsKey("DSS");
         }
-    }
-
-    /// <summary>Save the bound (possibly signed) document to the
-    /// <c>outputFile</c> argument from the ctor. Throws
-    /// <see cref="InvalidOperationException"/> when constructed without one.</summary>
-    public void Save()
-    {
-        if (string.IsNullOrEmpty(_outputFile))
-            throw new InvalidOperationException("No output file is set. Use Save(string) or Save(Stream), or construct the facade with an output file path.");
-        Save(_outputFile);
     }
 
     private byte[] RequireBound()

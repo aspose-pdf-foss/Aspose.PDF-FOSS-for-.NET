@@ -76,10 +76,10 @@ public sealed partial class GdiPlusPageRenderer
 
     private static readonly bool ShDebug2 = Environment.GetEnvironmentVariable("Q_SH_DEBUG") == "1";
 
-    private GdiColor[]? SampleShading(Functions.PdfFunction? fn, double[] domain, string cs, byte alpha,
+    private static GdiColor[]? SampleShading(Functions.PdfFunction? fn, double[] domain, string cs, byte alpha,
         Functions.PdfFunction? tint = null, string? altName = null)
     {
-        if (fn is null) { if (ShDebug2) Console.WriteLine("[shs] fn null"); return null; }
+        if (fn is null) { if (ShDebug2) { Console.WriteLine("[shs] fn null"); } return null; }
         double lo = domain.Length > 0 ? domain[0] : 0;
         double hi = domain.Length > 1 ? domain[1] : 1;
         var colors = new GdiColor[ShadingStops];
@@ -89,7 +89,7 @@ public sealed partial class GdiPlusPageRenderer
             double t = i / (double)(ShadingStops - 1);
             input[0] = lo + t * (hi - lo);
             var col = fn.Evaluate(input);
-            if (col is null) { if (ShDebug2) Console.WriteLine($"[shs] eval null at t={t}"); return null; }
+            if (col is null) { if (ShDebug2) { Console.WriteLine($"[shs] eval null at t={t}"); } return null; }
             var (r, g, b) = SoftwarePageRenderer.ComponentsToRgb(col, cs, tint, altName);
             colors[i] = GdiColor.FromArgb(alpha, r, g, b);
         }
@@ -124,6 +124,9 @@ public sealed partial class GdiPlusPageRenderer
         var alpha = softMask is null ? (byte)Clamp255(state.FillAlpha) : (byte)255;
         var colors = SampleShading(ax.Function, ax.Domain, ax.ColorSpaceName, alpha, ax.TintTransform, ax.AltSpaceName);
         if (colors is null) return;
+        // Decided before the clip bounds are read: a page is printed as an image for the composite
+        // whatever its clip on the probe surface.
+        if ((softMask is not null || subtractive) && DeferToPageImage()) return;
 
         var saved = _g.Transform;
         using var world = WorldMatrix(state.Ctm);
@@ -147,7 +150,7 @@ public sealed partial class GdiPlusPageRenderer
 
             var bounds = _g.ClipBounds;
             if (ShDebug2) Console.WriteLine($"[axial] ctm=({state.Ctm[0]:0.##},{state.Ctm[3]:0.##},{state.Ctm[4]:0.##},{state.Ctm[5]:0.##}) bounds={bounds} subtractive={subtractive}");
-            if (bounds.Width <= 0 || bounds.Height <= 0 || bounds.Width > 100000 || bounds.Height > 100000) { if (ShDebug2) Console.WriteLine("[axial] bounds reject"); return; }
+            if (bounds.Width <= 0 || bounds.Height <= 0 || bounds.Width > 100000 || bounds.Height > 100000) { if (ShDebug2) { Console.WriteLine("[axial] bounds reject"); } return; }
 
             // Emulate /Extend (hold edge colours beyond the axis). GDI+ LinearGradientBrush
             // has no Clamp wrap mode (setting it throws), so extend the gradient line to
@@ -171,7 +174,9 @@ public sealed partial class GdiPlusPageRenderer
             var bcol = new List<GdiColor>();
             var bpos = new List<float>();
             float prev = -1f;
-            void Add(float pp, GdiColor cc) { pp = Compat.Clamp(pp, 0f, 1f); if (pp <= prev) pp = prev + 1e-4f; if (pp > 1f) pp = 1f; if (pp <= prev) return; bpos.Add(pp); bcol.Add(cc); prev = pp; }
+            void Add(float pp, GdiColor cc) { pp = Compat.Clamp(pp, 0f, 1f); if (pp <= prev) pp = prev + 1e-4f;
+            if (pp > 1f) pp = 1f;
+            if (pp <= prev) { return; } bpos.Add(pp); bcol.Add(cc); prev = pp; }
             // /Extend controls whether the area beyond each axis end is painted: hold the
             // edge colour where true, leave transparent (hard stop) where false.
             var clear = GdiColor.FromArgb(0, 0, 0, 0);
@@ -201,6 +206,7 @@ public sealed partial class GdiPlusPageRenderer
     /// <paramref name="world"/> is the active device transform.</summary>
     private void MultiplyBrushFill(System.Drawing.Brush brush, RectangleF boundsWorld, GdiMatrix world)
     {
+        if (DeferToPageImage()) return;
         int w = _bitmap.Width, h = _bitmap.Height;
         var corners = new[]
         {
@@ -217,7 +223,7 @@ public sealed partial class GdiPlusPageRenderer
         _blendScratch ??= new Bitmap(w, h, PixelFormat.Format32bppArgb);
         using (var sg = Graphics.FromImage(_blendScratch))
         {
-            sg.Clear(GdiColor.Transparent);
+            ClearScratch(sg, x0, y0, x1, y1);
             sg.SmoothingMode = SmoothingMode.AntiAlias;
             sg.PixelOffsetMode = PagePom;
             sg.Transform = world;
@@ -278,7 +284,7 @@ public sealed partial class GdiPlusPageRenderer
     private void MaskedBrushFill(System.Drawing.Brush brush, RectangleF boundsWorld, GdiMatrix world,
         byte[] softMask, double ca)
     {
-        if (ca <= 0.0) return;
+        if (ca <= 0.0 || DeferToPageImage()) return;
         int w = _bitmap.Width, h = _bitmap.Height;
         var corners = new[]
         {
@@ -295,7 +301,7 @@ public sealed partial class GdiPlusPageRenderer
         _blendScratch ??= new Bitmap(w, h, PixelFormat.Format32bppArgb);
         using (var sg = Graphics.FromImage(_blendScratch))
         {
-            sg.Clear(GdiColor.Transparent);
+            ClearScratch(sg, x0, y0, x1, y1);
             sg.SmoothingMode = SmoothingMode.AntiAlias;
             sg.PixelOffsetMode = PagePom;
             sg.Transform = world;
@@ -449,7 +455,7 @@ public sealed partial class GdiPlusPageRenderer
         finally { _g.SmoothingMode = savedSmoothing; _g.Transform = saved; }
     }
 
-    private GdiColor MeshColor(double[]? comp, ShadingBase shading, byte alpha)
+    private static GdiColor MeshColor(double[]? comp, ShadingBase shading, byte alpha)
     {
         if (comp is null || comp.Length == 0) return GdiColor.FromArgb(alpha, 0, 0, 0);
         var (r, g, b) = SoftwarePageRenderer.ComponentsToRgb(comp, shading.ColorSpaceName, shading.TintTransform, shading.AltSpaceName);

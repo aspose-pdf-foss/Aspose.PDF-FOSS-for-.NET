@@ -71,5 +71,12 @@ internal static partial class HtmlToPdfConverter
             foreach (var cb in cc.ps.cellCheckboxes) cc.ps.cell!.Paragraphs.Add(cb);
             cc.ps.cellCheckboxes = null;
         }
+        // …and a field-cell grid's fields, after its text lines too
+        if (cc.ps.cellFields is { Count: > 0 })
+        {
+            foreach (var field in cc.ps.cellFields) cc.ps.cell!.Paragraphs.Add(field);
+            cc.ps.cellFields = null;
+        }
+        cc.ps.fieldCapture = null;
     }
 }

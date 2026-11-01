@@ -11,10 +11,12 @@ public partial class TextBoxField
     /// from the widget's appearance characteristics: /MK/BG fills the whole BBox,
     /// /MK/BC strokes a rect inset by half the /BS border width (dashed when
     /// /BS/S is D, with the /BS/D pattern). Empty when the widget declares
-    /// neither colour — painting nothing then.</summary>
-    private string BuildBorderPrelude(double w, double h)
+    /// neither colour — painting nothing then. The characteristics are read from the
+    /// widget being drawn: a field whose widgets are its kids keeps them on each kid.</summary>
+    private string BuildBorderPrelude(double w, double h, PdfDictionary? widgetDict = null)
     {
-        var mk = Reader.ResolveDict(Dict.Get("MK"));
+        var widget = widgetDict ?? Dict;
+        var mk = Reader.ResolveDict(widget.Get("MK"));
         if (mk is null) return string.Empty;
 
         string RgbOf(PdfArray arr, string op)
@@ -34,12 +36,19 @@ public partial class TextBoxField
         if (Reader.Resolve(mk.Get("BG")) is PdfArray bg && bg.Count > 0)
             sb.Append($"q\n{RgbOf(bg, "rg")}\n0 0 {Format(w)} {Format(h)} re\nf\nQ\n");
 
-        if (Reader.Resolve(mk.Get("BC")) is PdfArray bc && bc.Count > 0)
+        // A beveled, inset or underlined border is drawn by the painter every field shares.
+        if (Reader.Resolve(mk.Get("BC")) is PdfArray styled && styled.Count > 0
+            && Reader.ResolveDict(widget.Get("BS"))?.GetName("S") is "B" or "I" or "U")
+        {
+            var face = Reader.Resolve(mk.Get("BG")) is PdfArray fill && fill.Count > 0 ? MkColor(fill) : System.Drawing.Color.Gray;
+            sb.Append(BuildBsBorder(widget, w, h, RgbOf(styled, "RG"), face));
+        }
+        else if (Reader.Resolve(mk.Get("BC")) is PdfArray bc && bc.Count > 0)
         {
             // Border width from /BS/W (1 when the /BS omits it), dash from /BS/S==D.
             double bw = 1;
             string dash = "";
-            if (Reader.ResolveDict(Dict.Get("BS")) is { } bs)
+            if (Reader.ResolveDict(widget.Get("BS")) is { } bs)
             {
                 if (bs.ContainsKey("W")) bw = Aspose.Pdf.Functions.PdfArrayHelper.GetDoubleFromDict(bs, "W", 1);
                 if (bs.GetName("S") == "D")
@@ -163,21 +172,6 @@ public partial class TextBoxField
     private string BuildCombAppearanceContent(string text, double w, double h, string fontName, double fontSize)
         => BuildCombAppearanceContent(text, w, h, fontName, fontSize, ResolveCombBorderRgb(Dict));
 
-    /// <summary>The widget's /MK /BC border colour as an RGB triple, or null when the field
-    /// has no border characteristic (then the comb appearance draws no border or dividers).</summary>
-    private double[]? ResolveCombBorderRgb(PdfDictionary? dict)
-    {
-        var mk = Reader.ResolveDict(dict?.Get("MK"));
-        if (mk is null || Reader.Resolve(mk.Get("BC")) is not PdfArray bc || bc.Count == 0) return null;
-        var c = new double[3];
-        for (int i = 0; i < 3; i++)
-        {
-            var v = i < bc.Count ? AsNumber(Reader.Resolve(bc[i])) : (i == 0 ? 0 : (double?)null);
-            c[i] = v ?? (bc.Count == 1 ? (AsNumber(Reader.Resolve(bc[0])) ?? 0) : 0);
-        }
-        return c;
-    }
-
     /// <summary>Build a comb-field appearance (Ff bit 25): the value laid out one glyph per
     /// equal-width cell. A white background is
     /// filled first; when <paramref name="borderRgb"/> is set the widget is stroked and divided
@@ -197,10 +191,15 @@ public partial class TextBoxField
         double cellStep = (w - 2) / maxLen;     // inner cells (1-unit inset) → glyph stepping
         double inset = 1;
         bool bordered = borderRgb is not null;
-        string GrayOrRgb(string op) => borderRgb is null ? "" :
-            (borderRgb[0] == borderRgb[1] && borderRgb[1] == borderRgb[2]
-                ? $"{Format(borderRgb[0])} {op.ToUpperInvariant()[0]}"            // gray shortcut
-                : $"{Format(borderRgb[0])} {Format(borderRgb[1])} {Format(borderRgb[2])} {op}");
+        string GrayOrRgb(string op)
+        {
+            if (borderRgb is null) return "";
+#pragma warning disable S1244 // gray test on colour components as given - exact equality picks the gray operator
+            if (borderRgb[0] == borderRgb[1] && borderRgb[1] == borderRgb[2])
+#pragma warning restore S1244
+                return $"{Format(borderRgb[0])} {op.ToUpperInvariant()[0]}";            // gray shortcut
+            return $"{Format(borderRgb[0])} {Format(borderRgb[1])} {Format(borderRgb[2])} {op}";
+        }
 
         var sb = new System.Text.StringBuilder();
         // White background fill (DeviceGray), full widget rect.
@@ -278,6 +277,23 @@ public partial class TextBoxField
         return sb.ToString();
     }
 
+    /// <summary>The widget's /MK /BC border colour as an RGB triple, or null when the field
+    /// has no border characteristic (then the comb appearance draws no border or dividers).</summary>
+    private double[]? ResolveCombBorderRgb(PdfDictionary? dict)
+    {
+        var mk = Reader.ResolveDict(dict?.Get("MK"));
+        if (mk is null || Reader.Resolve(mk.Get("BC")) is not PdfArray bc || bc.Count == 0) return null;
+        var c = new double[3];
+        for (int i = 0; i < 3; i++)
+        {
+            double? v;
+            if (i < bc.Count) v = AsNumber(Reader.Resolve(bc[i]));
+            else v = i == 0 ? 0 : (double?)null;
+            c[i] = v ?? (bc.Count == 1 ? (AsNumber(Reader.Resolve(bc[0])) ?? 0) : 0);
+        }
+        return c;
+    }
+
     private static string EscapePdf(string s)
         => s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
 
@@ -286,22 +302,47 @@ public partial class TextBoxField
     /// referenced from the appearance's own resources; /DR carries it so
     /// document-level font enumeration reports the fill face. No-op without an
     /// AcroForm /DR /Font or when this exact font object is already registered.</summary>
-    private void MirrorFillFontIntoDr(object? fontObj)
+    private string? MirrorFillFontIntoDr(object? fontObj, bool createResources)
     {
-        if (fontObj is not PdfDictionary font) return;
+        if (fontObj is not PdfDictionary font) return null;
         PdfDictionary? acro;
         try { acro = Reader.ResolveDict(Reader.Catalog.Get("AcroForm")); }
-        catch (InvalidOperationException) { return; }
-        var dr = acro is null ? null : Reader.ResolveDict(acro.Get("DR"));
-        var fontDict = dr is null ? null : Reader.ResolveDict(dr.Get("Font"));
-        if (fontDict is null) return;
+        catch (InvalidOperationException) { return null; }
+        if (acro is null) return null;
+        // A form without default resources gets them only when the /DA is about to name
+        // the face: it must then be reachable from the /DA. Otherwise the form is left
+        // as it was.
+        var dr = Reader.ResolveDict(acro.Get("DR"));
+        if (dr is null)
+        {
+            if (!createResources) return null;
+            acro.Set("DR", dr = new PdfDictionary());
+        }
+        var fontDict = Reader.ResolveDict(dr.Get("Font"));
+        if (fontDict is null)
+        {
+            if (!createResources) return null;
+            dr.Set("Font", fontDict = new PdfDictionary());
+        }
         var n = 0;
         foreach (var key in fontDict.Keys)
         {
-            if (ReferenceEquals(Reader.ResolveDict(fontDict.Get(key)), font)) return;
+            if (ReferenceEquals(Reader.ResolveDict(fontDict.Get(key)), font)) return key;
             if (key.Length > 1 && key[0] == 'C' && key.Contains('_')) n++;
         }
-        fontDict.Set($"C{n}_0", font);
+        var resName = $"C{n}_0";
+        fontDict.Set(resName, font);
+        return resName;
+    }
+
+    /// <summary>The /DA string with its font operand replaced by <paramref name="resName"/>;
+    /// size and colour stay as they were.</summary>
+    private static string DaWithFont(string da, string resName)
+    {
+        var parts = da.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 2; i < parts.Length; i++)
+            if (parts[i] == "Tf") parts[i - 2] = "/" + resName;
+        return string.Join(" ", parts);
     }
 
     /// <summary>The colour-set operator (<c>r g b rg</c> / <c>g g</c> / <c>c m y k k</c>) parsed
@@ -341,7 +382,7 @@ public partial class TextBoxField
             wa.fontSize = System.Math.Max(4, System.Math.Min((wa.w - 4) / (System.Math.Max(1, wa.text.Length) * 0.5), wa.h * 0.83));
 
         wa.widgetNeedsUni = false;
-        foreach (var ch in wa.text) if (ch > 'ÿ') { wa.widgetNeedsUni = true; break; }
+        if (wa.text.Any(ch => ch > 'ÿ')) { wa.widgetNeedsUni = true; }
         wa.wuTtf = null;
         wa.wuFam = "";
         wa.wuFonts = null;
@@ -361,6 +402,7 @@ public partial class TextBoxField
         else
         {
             BuildPlainWidgetContent(wa);
+            wa.content = BuildBorderPrelude(wa.w, wa.h, wa.widgetDict) + wa.content;
         }
         _uniAppearanceTtf = null;
         wa.apStream = new PdfStream(new PdfDictionary(), Aspose.Pdf.Text.Cp1252.GetBytes(wa.content));
@@ -380,10 +422,8 @@ public partial class TextBoxField
         {
             // Same rule as RegenerateAppearance: a simple TrueType /DR font is carried
             // verbatim so the widget draws the real face instead of a substituted one.
-            PdfDictionary? widgetApFont = null;
-            if (ResolveDrFontDict(wa.fontName) is { } drTt && drTt.GetName("Subtype") == "TrueType")
-                widgetApFont = drTt;
-            wa.apStream.Dict.Set("Resources", BuildTextAppearanceResources(wa.fontName, null, widgetApFont));
+            wa.apStream.Dict.Set("Resources",
+                BuildTextAppearanceResources(wa.fontName, null, SimpleDrFontAsWritten(wa.fontName)));
         }
 
         wa.apDict = new PdfDictionary();
@@ -400,7 +440,8 @@ public partial class TextBoxField
         // set after Value — Multiline, TextVerticalAlignment, Border, /MK colours —
         // must be reflected when the field is finally added to the form.
         if (!_apAutoGenerated && Reader.ResolveDict(Dict.Get("AP")) is not null) return;
-        var displayValue = FieldFormatScript.Apply(Dict, Reader, Value ?? "");
+        // A NUL is no character a face can show: a value padded with them shows the text they pad.
+        var displayValue = FieldFormatScript.Apply(Dict, Reader, (Value ?? "").Replace("\0", ""));
         RegenerateAppearance(displayValue);
     }
 

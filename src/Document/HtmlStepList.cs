@@ -33,7 +33,7 @@ public sealed partial class Document
         if (hs.flow.HasOverflowed) return false;
         if (!LoadStepListFaces(hs)) return false;
 
-        hs.pageW = hs.flow.CurrentPage.Width;
+        hs.pageW = hs.flow.CurrentPage.LayoutFrameWidth;
         hs.ulMargin = 1.12 * hs.em;                 // ul top/bottom margin
         hs.liLeft = hs.marginLeft + 30.0;           // ul default padding-left: 40px per level
 

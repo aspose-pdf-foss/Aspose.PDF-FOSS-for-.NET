@@ -14,7 +14,7 @@ namespace Aspose.Pdf;
 
 public sealed partial class Document
 {
-    private Document(byte[] data, string? password = null)
+    private Document(byte[] data, string? password = null, bool byCertificate = false)
     {
         // Empty input is not a document: opening zero bytes surfaces a format error like
         // any other unreadable input (the public API contract — see
@@ -29,15 +29,19 @@ public sealed partial class Document
         // silently producing garbled content. When a password was supplied,
         // FromBytes already called InitDecryptor(password).
         if (password is null)
-        {
             _reader.InitDecryptor();
-            // A document carrying a real (non-empty) user password must not open
-            // without one — strings/streams would decode to garbage. Owner-only
-            // encryption (empty user password) authenticates above and opens fine.
-            if (_reader.RequiresPassword)
-                throw new InvalidPasswordException(
-                    "The document is password protected. A password is required to open this document.");
-        }
+        // A document carrying a real (non-empty) user password must not open without it, the
+        // empty password included: strings/streams would decode to garbage. Owner-only
+        // encryption (empty user password) authenticates and opens fine.
+        if (_reader.RequiresPassword)
+            throw new InvalidPasswordException(
+                "The document is password protected. A password is required to open this document.");
+        // An encryption no password opens leaves every string and stream undecrypted: a
+        // public-key one opens through the certificate constructor, any other is not supported.
+        if (!byCertificate && _reader.UndecryptableFilter is { } filter)
+            throw new NotSupportedException(
+                $"Document uses a security handler that cannot be opened with a password (/Filter = {filter}). " +
+                "A certificate-encrypted document opens with CertificateEncryptionOptions.");
         // Eagerly validate the catalog so corrupt PDFs fail at construction time
         // (matches .NET public API behavior)
         _ = _reader.Catalog;
@@ -124,7 +128,7 @@ public sealed partial class Document
     }
 
     private Document(byte[] data, Security.CertificateEncryptionOptions certOptions)
-        : this(data)
+        : this(data, byCertificate: true)
     {
         if (certOptions is null) throw new ArgumentNullException(nameof(certOptions));
         // Public-Key security handler decryption is NOT implemented in this
@@ -207,6 +211,21 @@ public sealed partial class Document
         : this(SvgConvertToPdfBytes(Converters.SvgToPdfConverter.Convert(ReadStreamToBytes(stream), options))) { }
 
     /// <summary>
+    /// Open a PDF document from a stream (constructor, matches public API).
+    /// </summary>
+    public Document(Stream input) : this(ReadStreamToBytes(input))
+    {
+        var stream = input;
+        // Retain any writable+seekable stream as the incremental-save source so the
+        // no-arg Save()/ToArray() write back into the caller's stream — the
+        // contract for `new Document(stream)`. Internal facades that
+        // must not mutate their buffer open via Document.Open()/the byte[] ctor (which
+        // do not set _sourceStream), so they are unaffected.
+        if (stream.CanWrite && stream.CanSeek)
+            _sourceStream = stream;
+    }
+
+    /// <summary>
     /// Open a PDF document from a byte array.
     /// </summary>
     public static Document Open(byte[] data)
@@ -238,21 +257,6 @@ public sealed partial class Document
     {
         var data = File.ReadAllBytes(path);
         return new Document(data, password) { FileName = path };
-    }
-
-    /// <summary>
-    /// Open a PDF document from a stream (constructor, matches public API).
-    /// </summary>
-    public Document(Stream input) : this(ReadStreamToBytes(input))
-    {
-        var stream = input;
-        // Retain any writable+seekable stream as the incremental-save source so the
-        // no-arg Save()/ToArray() write back into the caller's stream — the
-        // contract for `new Document(stream)`. Internal facades that
-        // must not mutate their buffer open via Document.Open()/the byte[] ctor (which
-        // do not set _sourceStream), so they are unaffected.
-        if (stream.CanWrite && stream.CanSeek)
-            _sourceStream = stream;
     }
 
     /// <summary>

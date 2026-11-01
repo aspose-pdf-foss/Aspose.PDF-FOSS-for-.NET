@@ -14,6 +14,8 @@ private sealed class StampBlocksState
 {
     public List<Aspose.Pdf.Facades.PdfContentEditor.QBlock> blocks = null!;
     public List<Aspose.Pdf.Facades.PdfContentEditor.StampBlock> result = null!;
+    // Offsets of the draw operators of marked stamps already reported, innermost block first.
+    public HashSet<int> claimedDraws = new();
     public Aspose.Pdf.Core.PdfDictionary? resources;
     public Aspose.Pdf.Core.PdfDictionary? xobjects;
     public string content = default!;

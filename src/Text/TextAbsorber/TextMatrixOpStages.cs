@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextAbsorber
 {
     /// <summary>The stages of a text-matrix operator: the same-row filter against the last rendered line, and seating the text origin for upright or rotated text.</summary>
-    private void SeatTextMatrixOrigin(TextMatrixOpState mo)
+    private static void SeatTextMatrixOrigin(TextMatrixOpState mo)
     {
         if (mo.xs.tmRotated)
         {
@@ -33,9 +33,9 @@ public sealed partial class TextAbsorber
     /// <summary></summary>
     private void FilterTextMatrixRow(TextMatrixOpState mo)
     {
-        mo.refY = !double.IsNaN(mo.xs.lastRenderedY) ? mo.xs.lastRenderedY
-                 : !double.IsNaN(mo.xs.prevTmY) ? mo.xs.prevTmY
-                 : _currentLineY;
+        if (!double.IsNaN(mo.xs.lastRenderedY)) mo.refY = mo.xs.lastRenderedY;
+        else if (!double.IsNaN(mo.xs.prevTmY)) mo.refY = mo.xs.prevTmY;
+        else mo.refY = _currentLineY;
         // After a ' or " operator, the actual rendered Y is tmY - leading,
         // but a subsequent Tm's newTmY is compared with the refY directly.
         // For same-row column layouts the Tm targets Y ≈ previous Tm's Y

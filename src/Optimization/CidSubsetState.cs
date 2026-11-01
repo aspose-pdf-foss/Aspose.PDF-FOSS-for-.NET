@@ -24,5 +24,12 @@ private sealed class CidSubsetState
     public Dictionary<PdfDictionary, HashSet<int>> directCodes = default!;
     public Func<int, PdfStream?>? resolveNewStream = null;
     public bool newlyEmbeddedOnly = false;
+    // Programs simple fonts draw, with the codes they read each through its cmap.
+    public Dictionary<Aspose.Pdf.Core.PdfStream, (HashSet<int> subsetCodes, List<(Aspose.Pdf.Core.PdfDictionary fontDict, Aspose.Pdf.Core.PdfDictionary descriptor, string baseFont, HashSet<int> ownCodes)> fonts, bool isPending)>? simpleUsers;
+    // Every program a composite font draws, subset or not: its glyph numbering must stay.
+    public HashSet<Aspose.Pdf.Core.PdfStream> drawnPrograms = new();
+    // Programs and CIDToGIDMaps a font draws through codes whose CIDs cannot be told (a predefined
+    // CMap without a table): they stay whole, whichever other font shares them.
+    public HashSet<Aspose.Pdf.Core.PdfStream> unknownUse = new();
 }
 }

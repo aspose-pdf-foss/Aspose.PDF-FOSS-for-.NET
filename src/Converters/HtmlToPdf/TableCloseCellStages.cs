@@ -23,8 +23,9 @@ internal static partial class HtmlToPdfConverter
             if (cc.ps.cellRowSpan > 1) cc.ps.rowspanOcc.Add((cc.colModel.colCursor, cc.span, cc.ps.cellRowSpan));
         }
         cc.padSideExtra = cc.chainBase is not null && cc.ps.cellCssPadPt > 0 ? 0 : 2 * cc.padSide;
-        cc.extra = cc.widenProbe || cc.ptCellWidths ? 0
-            : cc.padSideExtra + (cc.hasBorder ? 2 * cc.borderWidth : 0)
+        if (cc.widenProbe || cc.ptCellWidths) cc.extra = 0;
+        else
+            cc.extra = cc.padSideExtra + (cc.hasBorder ? 2 * cc.borderWidth : 0)
                 // (a UA-boxed cell of a grid that declares its cellpadding attribute has no UA pad pair:
                 //  the legacy 1.5 slack IS that pair, kept where the grid leaves the UA padding on -
                 //  measured: the job list's cellPadding="0" grids close at 450, the twelve-page report's
@@ -43,7 +44,7 @@ internal static partial class HtmlToPdfConverter
         // (a spanning cell's floor sits on its first column: only the SUM of the floors is read)
         // (…and a break-anywhere cell's TEXT sets none: every token in it breaks, so only a nested grid
         //  floors it - the quotation's 525-character string yields to its 650 px grid)
-        var minFloor = (cc.cellMinFloor > 0 ? cc.cellMinFloor : cc.breakAnywhereDoc ? 0 : cc.cellMin) + cc.extra;
+        var minFloor = ((cc.cellMinFloor, cc.breakAnywhereDoc) switch { (> 0, _) => cc.cellMinFloor, (_, true) => 0, _ => cc.cellMin }) + cc.extra;
         if (minFloor > cc.colModel.colMinFloorW[cc.colModel.colCursor]) cc.colModel.colMinFloorW[cc.colModel.colCursor] = minFloor;
         if (cc.span == 1)
         {
@@ -122,6 +123,8 @@ internal static partial class HtmlToPdfConverter
             cc.cellMinBrk = Math.Max(cc.cellMinBrk, cc.ps.cellImgWidthPt);
             cc.cellMax = Math.Max(cc.cellMax, cc.ps.cellImgWidthPt);
         }
+        // (one sized as a fraction of the cell only lets the column grow, up to its own width)
+        if (cc.ps.cellImgMaxPt > 0) cc.cellMax = Math.Max(cc.cellMax, cc.ps.cellImgMaxPt);
         // …and a UA text control's advance floors the cell the same way: the grid seats
         // the control at its box whatever the column was asked.
         if (cc.ps.cellControlBoxPt > 0)
@@ -157,10 +160,10 @@ internal static partial class HtmlToPdfConverter
         if (cc.uaSerifMin)
             foreach (var spec in cc.ps.lines)
                 foreach (var seg1 in spec.Text.Split(''))
-                foreach (var word in cc.ps.cell?.HtmlNoWrap == true ? new[] { seg1.Trim() } : seg1.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                    cc.cellMinSerif = Math.Max(cc.cellMinSerif,
-                        MeasureSerifLine(cc.cellFontSize, word, cc.ps.isHeader || spec.Bold,
-                            spec.FontPt > 0 ? spec.FontPt : 0.0));
+                    foreach (var word in cc.ps.cell?.HtmlNoWrap == true ? new[] { seg1.Trim() } : seg1.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                        cc.cellMinSerif = Math.Max(cc.cellMinSerif,
+                            MeasureSerifLine(cc.cellFontSize, word, cc.ps.isHeader || spec.Bold,
+                                spec.FontPt > 0 ? spec.FontPt : 0.0));
         // (the serif floor holds the cell's text control too - the sheet grows past its box)
         if (cc.uaSerifMin && cc.ps.cellControlBoxPt > 0) cc.cellMinSerif = Math.Max(cc.cellMinSerif, cc.ps.cellControlBoxPt);
     }
@@ -307,9 +310,10 @@ internal static partial class HtmlToPdfConverter
         // A lifted table is measured by the layout pass, which reads the span from
         // the cell; the legacy grid keeps its own calibrated row mapping.
         if (cc.liftNestedTables && cc.ps.cellRowSpan > 1) cc.ps.cell.RowSpan = cc.ps.cellRowSpan;
-        cc.ps.cell.Alignment = cc.ps.alignSet ? cc.ps.cellAlign
-            : cc.ps.rowAlign
-            ?? (cc.ps.isHeader ? cc.ps.headerAlign ?? HorizontalAlignment.Center : HorizontalAlignment.Left);
+        if (cc.ps.alignSet) cc.ps.cell.Alignment = cc.ps.cellAlign;
+        else
+            cc.ps.cell.Alignment = cc.ps.rowAlign
+                ?? (cc.ps.isHeader ? cc.ps.headerAlign ?? HorizontalAlignment.Center : HorizontalAlignment.Left);
         if (cc.ps.isHeader && cc.ps.headerBorder is not null) cc.ps.cell.Border = cc.ps.headerBorder;
         // Declared-zero vertical padding: the cell's box loses the table's
         // cellpadding on the BOTTOM side (over-declared grid dialect). The
@@ -346,7 +350,10 @@ internal static partial class HtmlToPdfConverter
                         cc.ps.lines[k].Color ?? cc.ps.lines[k + 1].Color,
                         (cc.ps.lines[k].Text.Length == 0 || cc.ps.lines[k].Italic) && (cc.ps.lines[k + 1].Text.Length == 0 || cc.ps.lines[k + 1].Italic));
                     cc.ps.lines.RemoveAt(k + 1);
+                    RejoinLineRuns(cc.ps, k, merged);
+#pragma warning disable S127 // two lines just merged - the scan revisits the merged one
                     k--;
+#pragma warning restore S127
                 }
     }
 
@@ -375,9 +382,12 @@ internal static partial class HtmlToPdfConverter
             // declares no size of its own still has one, so the break's line is
             // real space rather than a zero-height line that gets swept away.
             if (cc.ps.lineFontPt <= 0)
-                cc.ps.lineFontPt = cc.ps.curFontPt > 0 ? cc.ps.curFontPt
-                    : cc.ps.rowFontPt > 0 ? cc.ps.rowFontPt
-                    : cc.uaDocGrid ? cc.cellFontSize : 0;
+            {
+                if (cc.ps.curFontPt > 0) cc.ps.lineFontPt = cc.ps.curFontPt;
+                else if (cc.ps.rowFontPt > 0) cc.ps.lineFontPt = cc.ps.rowFontPt;
+                else if (cc.uaDocGrid) cc.ps.lineFontPt = cc.cellFontSize;
+                else cc.ps.lineFontPt = 0;
+            }
             PushLine(cc.ps, cc.redlineCells, cc.dwFormCells, cc.widenProbe, keepIfBlank: cc.ps.lineFontPt > 0);
         }
         else PushLine(cc.ps, cc.redlineCells, cc.dwFormCells, cc.widenProbe);
@@ -448,8 +458,8 @@ internal static partial class HtmlToPdfConverter
         if (cc.ps.cellInlineOptions is { Count: > 0 })
         {
             var nMarks = 0;
-            foreach (var mch in cc.ln)
-                if (mch is Table.InlineRadioChar or Table.InlineRadioCheckedChar) nMarks++;
+            foreach (var mch in cc.ln.Where(mch => mch is Table.InlineRadioChar or Table.InlineRadioCheckedChar))
+                nMarks++;
             if (nMarks > 0)
             {
                 var take = Math.Min(nMarks, cc.ps.cellInlineOptions.Count);
@@ -524,8 +534,10 @@ internal static partial class HtmlToPdfConverter
         if (cc.ps.isHeader || spec.Bold || cc.ps.cellBold) cc.tf.TextState.IsBold = true;
         if (spec.Italic) cc.tf.TextState.IsItalic = true;
         // Mixed bold runs on this line (form-grid): the render draws each
-        // segment in its own face variant.
-        if (cc.ps.lineRunsByIdx is not null
+        // segment in its own face variant. (Any other cell's mixed line flows
+        // as segments when it draws in the built-in face - see FlowMixedWeightRuns.)
+        if ((cc.formGridDialect || cc.ps.wordMailCells || cc.uaCellBoxes || cc.ps.bodyFaceCells)
+            && cc.ps.lineRunsByIdx is not null
             && cc.ps.lineRunsByIdx.TryGetValue(cc.tfLineIdx, out var fgRuns))
             cc.tf.FormGridRuns = fgRuns;
         // Source page's CSS line-height (e.g. body `font: 1em/1.4em …`):
@@ -575,23 +587,23 @@ internal static partial class HtmlToPdfConverter
     private static void PitchFormCellLine(CloseCellState cc, CellLineSpec spec)
     {
         var dwLn = spec.Text;
-        cc.tf.CssLineHeightPt = cc.tf.TextState.FontSize >= DwH1FontPt - 0.1
-            ? DwH1LineBoxPt
-
-            // …and radio/checkmark option lines pitch at the widget
-            // box (14.06 measured between the options).
-            : dwLn.IndexOf(Table.InlineRadioChar) >= 0
-                || dwLn.IndexOf(Table.InlineRadioCheckedChar) >= 0
-                || dwLn.IndexOf(Table.InlineCheckChar) >= 0
-                || dwLn.IndexOf('✓') >= 0 ? DwOptionLinePt
-            : cc.tf.TextState.FontSize * RedlineLineFactor;
+        if (cc.tf.TextState.FontSize >= DwH1FontPt - 0.1) cc.tf.CssLineHeightPt = DwH1LineBoxPt;
+        // …and radio/checkmark option lines pitch at the widget
+        // box (14.06 measured between the options).
+        else if (dwLn.IndexOf(Table.InlineRadioChar) >= 0
+            || dwLn.IndexOf(Table.InlineRadioCheckedChar) >= 0
+            || dwLn.IndexOf(Table.InlineCheckChar) >= 0
+            || dwLn.IndexOf('✓') >= 0)
+            cc.tf.CssLineHeightPt = DwOptionLinePt;
+        else cc.tf.CssLineHeightPt = cc.tf.TextState.FontSize * RedlineLineFactor;
     }
 
     /// <summary>A form-grid line takes the grid's strut pitch and its drop.</summary>
     private static void PitchFormGridLine(CloseCellState cc, CellLineSpec spec)
     {
-        var fgStrut = cc.ps.cellFgStrutPt > 0 ? cc.ps.cellFgStrutPt
-            : cc.formGridStrutPt > 0 ? cc.formGridStrutPt : VerdanaGridMinLinePt;
+        double fgStrut = VerdanaGridMinLinePt;
+        if (cc.ps.cellFgStrutPt > 0) fgStrut = cc.ps.cellFgStrutPt;
+        else if (cc.formGridStrutPt > 0) fgStrut = cc.formGridStrutPt;
         cc.tf.CssLineHeightPt = Math.Max(
             PxLinePt(cc.tf.TextState.FontSize, VerdanaWinLineRatio), fgStrut);
         // The line's baseline seat: the run's own drop within its box,
@@ -613,14 +625,15 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A styled line resolves its face and size from the spec, the cell's CSS run face and the base family.</summary>
     private static void ResolveStyledLineFace(CloseCellState cc, CellLineSpec spec)
     {
-        var pt = spec.FontPt > 0 ? spec.FontPt
-            : cc.ps.cellClassPt > 0 ? cc.ps.cellClassPt
-            : (cc.cssBasePt > 0 ? cc.cssBasePt : cc.cellFontSize);
+        double pt;
+        if (spec.FontPt > 0) pt = spec.FontPt;
+        else if (cc.ps.cellClassPt > 0) pt = cc.ps.cellClassPt;
+        else pt = cc.cssBasePt > 0 ? cc.cssBasePt : cc.cellFontSize;
         cc.tf.TextState.FontSize = (float)pt;
         // The TextFragment ctor's segment carries its own default size which the
         // generator prefers — set it too so the styled size actually applies.
-        foreach (var seg in cc.tf.Segments)
-            if (!string.IsNullOrEmpty(seg.Text)) seg.TextState.FontSize = (float)pt;
+        foreach (var seg in cc.tf.Segments.Where(seg => !string.IsNullOrEmpty(seg.Text)))
+            seg.TextState.FontSize = (float)pt;
         var (asc, desc) = CssFamilyMetrics(spec.Family ?? cc.cssBaseFamily);
         // (a UA-boxed line's `line-height: normal` box is the face's hhea line INCLUDING its line gap:
         //  Arial 9 pt stands on 14 px = 10.5, not the 13 px its win ascent + descent alone give)

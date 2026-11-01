@@ -37,7 +37,7 @@ public partial class TextFragment
                     if (loose == 0) loose = fm.Descent;
                 }
             }
-            catch { }
+            catch { /* a font program that does not parse leaves the fallback metrics in place */ }
         }
         return loose;
     }
@@ -86,7 +86,9 @@ public partial class TextFragment
                 var ok = true;
                 foreach (var c in s)
                 {
-                    var code = cid ? (rev!.TryGetValue(c, out var cc) ? cc : -1) : c;
+                    int code;
+                    if (cid) code = rev!.TryGetValue(c, out var cc) ? cc : -1;
+                    else code = c;
                     if (code < 0) { ok = false; break; }
                     var gw = fm.GetWidth(code);
                     if (gw <= 0 && c != ' ') { ok = false; break; }

@@ -16,11 +16,12 @@ internal static partial class JpegDecoder
             if (_scanComponentIndices.Length == 1)
             {
                 // Non-interleaved scan: one data unit per component block, row-major
-                // over the component's own (unaligned) block grid.
+                // over the component's own (unaligned) block grid. The grid is the
+                // frame's: a reduced-scale decode shrinks the output, not the scan.
                 var ci = _scanComponentIndices[0];
                 var comp = _components[ci];
-                var compWidth = (Width * comp.H + _maxH - 1) / _maxH;
-                var compHeight = (Height * comp.V + _maxV - 1) / _maxV;
+                var compWidth = (_frameWidth * comp.H + _maxH - 1) / _maxH;
+                var compHeight = (_frameHeight * comp.V + _maxV - 1) / _maxV;
                 var bw = (compWidth + 7) / 8;
                 var bh = (compHeight + 7) / 8;
 
@@ -43,8 +44,8 @@ internal static partial class JpegDecoder
             }
             else
             {
-                var mcuCols = (Width + _maxH * 8 - 1) / (_maxH * 8);
-                var mcuRows = (Height + _maxV * 8 - 1) / (_maxV * 8);
+                var mcuCols = (_frameWidth + _maxH * 8 - 1) / (_maxH * 8);
+                var mcuRows = (_frameHeight + _maxV * 8 - 1) / (_maxV * 8);
                 for (var mcuRow = 0; mcuRow < mcuRows; mcuRow++)
                 {
                     for (var mcuCol = 0; mcuCol < mcuCols; mcuCol++)
@@ -167,8 +168,8 @@ internal static partial class JpegDecoder
             {
                 var bw = _blocksPerLine[i];
                 var bh = _blocksPerCol[i];
-                bufWidths[i] = bw * 8;
-                buffers[i] = new byte[bw * 8 * bh * 8];
+                bufWidths[i] = bw * BlockSide;
+                buffers[i] = new byte[bw * BlockSide * bh * BlockSide];
                 var qt = _quantTables[_components[i].QtId] ?? _quantTables[0];
                 var block = new int[64];
                 for (var by = 0; by < bh; by++)
@@ -176,17 +177,9 @@ internal static partial class JpegDecoder
                     for (var bx = 0; bx < bw; bx++)
                     {
                         Array.Copy(_coefs[i], (by * bw + bx) * 64, block, 0, 64);
-                        Dequantize(block, qt!);
-                        IDCT(block);
-                        var px = bx * 8;
-                        var py = by * 8;
-                        for (var y = 0; y < 8; y++)
-                        {
-                            var dst = (py + y) * bufWidths[i] + px;
-                            var src = y * 8;
-                            for (var x = 0; x < 8; x++)
-                                buffers[i][dst + x] = (byte)Clamp(block[src + x] + 128);
-                        }
+                        Dequantize(block, qt);
+                        InverseTransform(block);
+                        PlaceBlock(block, buffers[i], bufWidths[i], bx * BlockSide, by * BlockSide);
                     }
                 }
             }
@@ -198,8 +191,8 @@ internal static partial class JpegDecoder
         {
             var mcuW = _maxH * 8; // MCU width in pixels
             var mcuH = _maxV * 8; // MCU height in pixels
-            var mcuCols = (Width + mcuW - 1) / mcuW;
-            var mcuRows = (Height + mcuH - 1) / mcuH;
+            var mcuCols = (_frameWidth + mcuW - 1) / mcuW;
+            var mcuRows = (_frameHeight + mcuH - 1) / mcuH;
 
             // Allocate component buffers (full MCU-aligned dimensions). Samples are
             // clamped 0..255 — byte[] keeps the LOH spike a quarter of int[]'s.
@@ -208,8 +201,8 @@ internal static partial class JpegDecoder
             var bufHeights = new int[Components];
             for (var i = 0; i < Components; i++)
             {
-                var cw = mcuCols * _components[i].H * 8;
-                var ch = mcuRows * _components[i].V * 8;
+                var cw = mcuCols * _components[i].H * BlockSide;
+                var ch = mcuRows * _components[i].V * BlockSide;
                 buffers[i] = new byte[cw * ch];
                 bufWidths[i] = cw;
                 bufHeights[i] = ch;
@@ -245,6 +238,15 @@ internal static partial class JpegDecoder
             var k = 1;
             while (k < 64)
             {
+                var fast = acTable.FastAc[bits.Peek(LookupBits)];
+                var at = k + ((fast >> 8) & 0xFF);
+                if (fast != 0 && at < 64)
+                {
+                    bits.Skip(fast & 0xFF);
+                    block[ZigZag[at]] = fast >> 16;
+                    k = at + 1;
+                    continue;
+                }
                 var rs = DecodeHuffman(bits, acTable);
                 var r = (rs >> 4) & 0xF; // run length of zeros
                 var s = rs & 0xF;         // category (bit size)

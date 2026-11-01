@@ -118,7 +118,7 @@ public class SvgExtractor
         if (_options.ExtractEverySubPathToSvg)
             return elements.Select(e => new List<GraphicElement> { e }).ToList();
         var parent = Enumerable.Range(0, elements.Count).ToArray();
-        int Root(int k) { while (parent[k] != k) k = parent[k] = parent[parent[k]]; return k; }
+        int Root(int k) { while (parent[k] != k) { k = parent[k] = parent[parent[k]]; } return k; }
         for (var a = 0; a < elements.Count; a++)
             for (var b = a + 1; b < elements.Count; b++)
                 if (Near(elements[a], elements[b])) parent[Root(a)] = Root(b);

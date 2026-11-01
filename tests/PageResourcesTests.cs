@@ -67,7 +67,7 @@ public class PageResourcesTests
             var state = page.AddLuminositySoftMask(ramp, box);
             page.AddContentStream(Encoding.ASCII.GetBytes(
                 $"q /{state} gs 0 0 0 rg " +
-                $"{box.LLX} {box.LLY} {box.URX - box.LLX} {box.URY - box.LLY} re f Q"));
+                FormattableString.Invariant($"{box.LLX} {box.LLY} {box.URX - box.LLX} {box.URY - box.LLY} re f Q")));
 
             using var ms = new MemoryStream();
             doc.Save(ms);

@@ -22,12 +22,12 @@ internal static partial class HtmlToPdfConverter
         xv.html = html;
         xv.pageWidth = pageWidth;
         xv.pageHeight = pageHeight;
-        if (Regex.IsMatch(xv.html, @"<table\b", RegexOptions.IgnoreCase)) return null;
-        xv.styleM = Regex.Match(xv.html, @"<style\b[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase);
+        if (SafeRegex.IsMatch(xv.html, @"<table\b", RegexOptions.IgnoreCase)) return null;
+        xv.styleM = SafeRegex.Match(xv.html, @"<style\b[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase);
         if (!xv.styleM.Success) return null;
         xv.sheet = xv.styleM.Groups[1].Value;
 
-        xv.rootM = Regex.Match(xv.sheet,
+        xv.rootM = SafeRegex.Match(xv.sheet,
             @"\.(\w[\w-]*)\s*\{[^}]*\bfont\s*:\s*(xx-small|x-small|small|medium|large|x-large|xx-large)\s+['""]?([\w ]+)['""]?",
             RegexOptions.IgnoreCase);
         if (!xv.rootM.Success) return null;
@@ -37,7 +37,7 @@ internal static partial class HtmlToPdfConverter
         if (TryParseCssFontSize(xv.rootM.Groups[2].Value) is not { } fs || fs <= 0) return null;
         xv.fs = fs;
 
-        xv.starM = Regex.Match(xv.sheet,
+        xv.starM = SafeRegex.Match(xv.sheet,
             @"\." + Regex.Escape(xv.rootCls) + @"\s+\*\s*\{[^}]*\bdisplay\s*:\s*block[^}]*\bpadding-left\s*:\s*([\d.]+)\s*em",
             RegexOptions.IgnoreCase);
         if (!xv.starM.Success) return null;
@@ -45,17 +45,17 @@ internal static partial class HtmlToPdfConverter
             System.Globalization.CultureInfo.InvariantCulture) * xv.fs;
 
         // html/body margins zeroed — the fingerprint of the full-bleed dump sheet.
-        if (!Regex.IsMatch(xv.sheet, @"(?:html\s*,\s*body|body)\s*(?:[^{}]*)?\{[^}]*\bmargin\s*:\s*0",
+        if (!SafeRegex.IsMatch(xv.sheet, @"(?:html\s*,\s*body|body)\s*(?:[^{}]*)?\{[^}]*\bmargin\s*:\s*0",
                 RegexOptions.IgnoreCase)) return null;
 
-        xv.rootDivM = Regex.Match(xv.html,
+        xv.rootDivM = SafeRegex.Match(xv.html,
             @"<div\b[^>]*class\s*=\s*[""'][^""']*\b" + Regex.Escape(xv.rootCls) + @"\b[^""']*[""'][^>]*>",
             RegexOptions.IgnoreCase);
         if (!xv.rootDivM.Success) return null;
         xv.rootInner = BalancedInner(xv.html, xv.rootDivM.Index + xv.rootDivM.Length, "div");
         if (xv.rootInner is null) return null;
 
-        xv.rootRule = Regex.Match(xv.sheet, @"\." + Regex.Escape(xv.rootCls) + @"\s*\{([^}]*)\}");
+        xv.rootRule = SafeRegex.Match(xv.sheet, @"\." + Regex.Escape(xv.rootCls) + @"\s*\{([^}]*)\}");
         xv.rootDecl = xv.rootRule.Success ? xv.rootRule.Groups[1].Value : "";
         var rootPadLeft = CssEmLen(xv.rootDecl, "padding-left", xv.fs)
             ?? CssEmLen(xv.rootDecl, "padding", xv.fs) ?? 0;

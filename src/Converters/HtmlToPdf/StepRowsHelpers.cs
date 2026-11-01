@@ -39,14 +39,11 @@ internal static partial class HtmlToPdfConverter
         => sw.sb.Append(Compat.Format(sw.invc,
             $"q 0 0 0 RG 0.75 w {x:0.##} {sw.pageHeight - y0Td:0.##} m {x:0.##} {sw.pageHeight - y1Td:0.##} l S Q\n"));
 
-    private static string Flat(StepRowsState sw, string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
-
     // balanced-div close scan (local: the shared helper lives in another arm)
     private static int DivClose(string s, int afterOpen)
     {
         var depth = 1;
-        foreach (Match t in Regex.Matches(s[afterOpen..], @"<div\b|</div\s*>",
+        foreach (Match t in SafeRegex.Matches(s[afterOpen..], @"<div\b|</div\s*>",
             RegexOptions.IgnoreCase))
         {
             depth += t.Value.StartsWith("</") ? -1 : 1;

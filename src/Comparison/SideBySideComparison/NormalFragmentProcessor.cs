@@ -17,9 +17,8 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             var absorber = new TextFragmentAbsorber();
             absorber.Visit(page);
             var fragments = new List<TextFragment>();
-            foreach (var fragment in absorber.TextFragments)
-                if (!string.IsNullOrEmpty(fragment.Text))
-                    fragments.Add(fragment);
+            foreach (var fragment in absorber.TextFragments.Where(fragment => !string.IsNullOrEmpty(fragment.Text)))
+                fragments.Add(fragment);
             return fragments;
         }
 

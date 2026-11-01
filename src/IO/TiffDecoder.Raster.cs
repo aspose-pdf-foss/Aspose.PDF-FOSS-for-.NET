@@ -38,7 +38,9 @@ internal static partial class TiffDecoder
         var le = d[0] == 0x49;
         var seen = new HashSet<long>();
         long ifd = U32(d, 4, le);
+#pragma warning disable S1994 // the loop runs on its own exit condition; the counter only numbers the passes
         for (var index = 0; ifd != 0 && seen.Add(ifd) && seen.Count <= MaxIfdChain; index++)
+#pragma warning restore S1994
         {
             if (ifd + 2 > d.Length) return null;
             int n = U16(d, (int)ifd, le);
@@ -78,7 +80,7 @@ internal static partial class TiffDecoder
         if (tf.planarConfig == 2 && tf.bps != 8) return null;
         tf.w = (int)tf.width;
         tf.h = (int)tf.height;
-        if (!ReadTiffRaster(tf, d, le)) return null;
+        if (!ReadTiffRaster(tf, d)) return null;
         if (tf.bps == 16 && le)
             for (var i = 0; i + 1 < tf.raster.Length; i += 2)
                 (tf.raster[i], tf.raster[i + 1]) = (tf.raster[i + 1], tf.raster[i]);

@@ -17,6 +17,11 @@ private sealed class ShowRunState
     public double effRise;
     public double posX;
     public double posY;
+    // The run's baseline coordinate ACROSS its own direction: the device y of an
+    // unrotated run, the device x (negated) of one running upward. Two runs are on
+    // one line when this agrees, not when their device y does - the vertical lines
+    // of a turned page all share a y and were fused into one block.
+    public double across;
     // Baseline direction in device space. PDF angles are counter-clockwise
     // with y up; CSS rotation is clockwise with y down, so the CSS angle is
     // the negation (e.g. Tm [0 s -s 0 …] — text running upward — is CSS
@@ -90,6 +95,8 @@ private sealed class ShowRunState
     public System.Func<int, bool>? glyphMapped;
     public int baseIdx;
     public int fbIdx;
+    // The line style of each overflow face a code of this run was served from, by family.
+    public Dictionary<string, int>? overflowIdx;
     public double sxRec;
 }
 }

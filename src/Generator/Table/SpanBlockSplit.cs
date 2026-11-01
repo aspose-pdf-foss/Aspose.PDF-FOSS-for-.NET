@@ -44,7 +44,7 @@ public partial class Table
         var count = 0;
         for (var li = from; li < block.Lines.Count; li++)
         {
-            var pitch = SpanLinePitch(block.Lines[li], block.LineHeight);
+            var pitch = SpanLinePitch(block.Lines[li]);
             if (used + pitch > room + 1e-3) break;
             used += pitch;
             count++;
@@ -86,7 +86,7 @@ public partial class Table
         if (last < nextRow || last >= mp.shareFloor.Length) return;
         var demand = SpanBlockFixedHeight(block);
         for (var li = drawn; li < block.Lines.Count; li++)
-            demand += SpanLinePitch(block.Lines[li], block.LineHeight);
+            demand += SpanLinePitch(block.Lines[li]);
         var above = 0.0;
         for (var r = nextRow; r < last; r++) above += RowPlanHeight(mp.rowPlans[r]);
         mp.shareFloor[last] = demand - above;

@@ -55,7 +55,7 @@ internal static partial class HtmlToPdfConverter
     {
         var tokens = new List<Token>();
         int idx = 0;
-        foreach (Match m in TagRx.Matches(html))
+        foreach (Match m in SafeRegex.Matches(TagRx, html))
         {
             if (m.Index > idx)
             {
@@ -68,8 +68,8 @@ internal static partial class HtmlToPdfConverter
             {
                 Kind = TokenKind.Tag,
                 Tag = m.Groups[2].Value,
-                // (an END tag named br is a line break like a start tag - the HTML parser's rule;
-                // measured on the enterprise summary: `<br></br>` between its tables opens two lines)
+                // (an END tag named br is a line break like a start tag - the HTML parser's rule; measured
+                // on the enterprise summary: `<br></br>` between its tables opens two lines)
                 IsClose = m.Groups[1].Value == "/" && !m.Groups[2].Value.Equals("br", StringComparison.OrdinalIgnoreCase),
                 IsSelfClosing = m.Groups[4].Value == "/",
                 Attributes = attrs,
@@ -81,10 +81,24 @@ internal static partial class HtmlToPdfConverter
         if (idx < html.Length)
         {
             var text = html.Substring(idx);
+            // A tag the input ends inside (`</html` without its closing bracket) is dropped, as the
+            // HTML tokenizer drops a tag the end of the file cuts off; the text before it stays.
+            var cut = UnterminatedTagStart(text);
+            if (cut >= 0) text = text.Substring(0, cut);
             if (text.Length > 0)
-                tokens.Add(new Token { Kind = TokenKind.Text, Value = text, SrcIndex = idx, SrcEnd = html.Length });
+                tokens.Add(new Token { Kind = TokenKind.Text, Value = text, SrcIndex = idx, SrcEnd = idx + text.Length });
         }
         return tokens;
+    }
+
+    /// <summary>Where a tag that never closes starts in the text ending the input: its `&lt;` is
+    /// followed by a tag name or a slash and no `&gt;` comes after it. -1 when the text ends no tag.</summary>
+    private static int UnterminatedTagStart(string text)
+    {
+        var lt = text.LastIndexOf('<');
+        if (lt < 0 || lt + 1 >= text.Length || text.IndexOf('>', lt) >= 0) return -1;
+        var next = text[lt + 1];
+        return next == '/' || char.IsLetter(next) ? lt : -1;
     }
 
     private static Dictionary<string, string>? ParseAttributes(string s)
@@ -98,19 +112,18 @@ internal static partial class HtmlToPdfConverter
         if (s.IndexOf("\\\"", StringComparison.Ordinal) >= 0)
         {
             var dictEsc = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (Match m in EscapedAttrRx.Matches(s))
-                if (!dictEsc.ContainsKey(m.Groups[1].Value))
-                    dictEsc[m.Groups[1].Value] = m.Groups[2].Success ? m.Groups[2].Value : "";
+            foreach (var mGroups in SafeRegex.Matches(EscapedAttrRx, s).Where(m => !dictEsc.ContainsKey(m.Groups[1].Value)).Select(m => m.Groups))
+                dictEsc[mGroups[1].Value] = mGroups[2].Success ? mGroups[2].Value : "";
             return dictEsc.Count > 0 ? dictEsc : null;
         }
         var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in AttrRx.Matches(s))
+        foreach (var groups in SafeRegex.Matches(AttrRx, s).Select(m => m.Groups))
         {
-            var name = m.Groups[1].Value;
-            var val = m.Groups[2].Success ? m.Groups[2].Value
-                     : m.Groups[3].Success ? m.Groups[3].Value
-                     : m.Groups[4].Success ? m.Groups[4].Value
-                     : "";
+            var name = groups[1].Value;
+            string val = "";
+            if (groups[2].Success) val = groups[2].Value;
+            else if (groups[3].Success) val = groups[3].Value;
+            else if (groups[4].Success) val = groups[4].Value;
             // A repeated attribute keeps its FIRST value (the HTML parsing rule) —
             // generated markup carries duplicates like a display:none style followed
             // by a second layout style, and the hiding one must win.
@@ -140,16 +153,18 @@ internal static partial class HtmlToPdfConverter
         var result = new List<string>();
         var line = new StringBuilder();
         double lineW = 0;
-        foreach (var word in words)
+        // (a word holding CJK text breaks between its characters too, its pieces joining unspaced)
+        foreach (var (word, spaced) in WrapUnits(words, dashBreaks: false))
         {
             var limit = result.Count < narrowLines ? narrowWidth : fullWidth;
             var w = MeasureFaceText(face, word, sizePt);
-            if (line.Length > 0 && lineW + spaceW + w > limit)
+            var gap = line.Length > 0 && spaced ? spaceW : 0;
+            if (line.Length > 0 && lineW + gap + w > limit)
             {
                 result.Add(line.ToString());
-                line.Clear(); lineW = 0;
+                line.Clear(); lineW = 0; gap = 0;
             }
-            if (line.Length > 0) { line.Append(' '); lineW += spaceW; }
+            if (gap > 0) { line.Append(' '); lineW += gap; }
             line.Append(word); lineW += w;
         }
         if (line.Length > 0) result.Add(line.ToString());
@@ -166,7 +181,13 @@ internal static partial class HtmlToPdfConverter
         var sb = new StringBuilder(s.Length + 8);
         foreach (var ch in s)
         {
-            byte b = Aspose.Pdf.Text.Cp1252.TryGetByte(ch) ?? (byte)'?';
+            if (Aspose.Pdf.Text.Cp1252.TryGetByte(ch) is not { } b)
+            {
+                // A format character outside WinAnsi (a zero-width space, a byte order mark left in
+                // the text) has no glyph anywhere: it draws nothing, not the '?' of an unknown letter.
+                if (char.GetUnicodeCategory(ch) == System.Globalization.UnicodeCategory.Format) continue;
+                b = (byte)'?';
+            }
             switch (b)
             {
                 case (byte)'\\': sb.Append("\\\\"); break;
@@ -225,17 +246,33 @@ internal static partial class HtmlToPdfConverter
             fontDict = new Core.PdfDictionary();
             resources.Set("Font", fontDict);
         }
-        if (!fontDict.ContainsKey(resName))
+        if (fontDict.ContainsKey(resName)) return;
+        // An embedded face is one font object for the whole document: every page that
+        // registers it refers to the same dictionary, so its program is written once.
+        var shared = Text.Standard14Fonts.IsStandard14(baseFontName) ? null : page.Reader?.OwnerDocument?.SharedNamedFaces;
+        if (shared is not null && shared.TryGetValue(baseFontName, out var known))
         {
-            var font = new Core.PdfDictionary();
-            font.Set("Type", new Core.PdfName("Font"));
-            font.Set("Subtype", new Core.PdfName("Type1"));
-            font.Set("BaseFont", new Core.PdfName(baseFontName));
-            font.Set("Encoding", new Core.PdfName("WinAnsiEncoding"));
-            fontDict.Set(resName, font);
-            EmbedNamedFace(page, font, baseFontName);
+            fontDict.Set(resName, known);
+            return;
         }
+        var font = new Core.PdfDictionary();
+        font.Set("Type", new Core.PdfName("Font"));
+        font.Set("Subtype", new Core.PdfName("Type1"));
+        font.Set("BaseFont", new Core.PdfName(baseFontName));
+        font.Set("Encoding", new Core.PdfName("WinAnsiEncoding"));
+        fontDict.Set(resName, font);
+        EmbedNamedFace(page, font, baseFontName);
+        if (shared is not null) shared[baseFontName] = font;
     }
+
+    /// <summary>True when the /Font entry <paramref name="taken"/> already holds the face
+    /// <paramref name="baseFontName"/>: the dictionary the document shares for it - an embedded
+    /// face's BaseFont carries a subset tag and its style-qualified name - or one under the bare name.</summary>
+    private static bool HoldsFace(Page page, Core.PdfObject taken, string baseFontName)
+        => taken is Core.PdfDictionary font
+           && (font.GetName("BaseFont") == baseFontName
+               || (page.Reader?.OwnerDocument?.SharedNamedFaces.TryGetValue(baseFontName, out var shared) == true
+                   && ReferenceEquals(shared, font)));
 
     /// <summary>A named face outside the Standard 14 (a `font face="Verdana"` cell, an "ArialBold" run)
     /// carries its installed program and widths: a bare named Type1 has no widths, and the
@@ -244,7 +281,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (Text.Standard14Fonts.IsStandard14(baseFontName)) return;
         if (page.Reader?.OwnerDocument is not { } doc) return;
-        var spaced = Regex.Replace(baseFontName, "(?<=[a-z])(Bold|Italic)", " $1");
+        var spaced = SafeRegex.Replace(baseFontName, "(?<=[a-z])(Bold|Italic)", " $1");
         var ttf = Text.FontRepository.GetTtfData(baseFontName) ?? Text.FontRepository.GetTtfData(spaced);
         if (ttf is null) return;
         // The face is presented under its style-qualified PostScript name when it has one
@@ -260,7 +297,12 @@ internal static partial class HtmlToPdfConverter
                 presented = ttp.PostScriptName.Replace(" ", "");
         }
         catch { /* keep the requested name */ }
-        try { Text.FontEmbedder.EmbedIntoFontDict(doc, ttf, font, presented, subset: false); }
+        // The program is cut to the glyphs the WinAnsi dictionary can show (the face is shared by
+        // every page, so the cut is made once): a whole system face runs to hundreds of KB. The cut
+        // looks the codes' characters up in the face's cmap, so a symbol face, whose cmap holds byte
+        // codes, travels whole.
+        var subset = Text.TrueTypeParser.HasUnicodeCmap(ttf);
+        try { Text.FontEmbedder.EmbedIntoFontDict(doc, ttf, font, presented, subset: subset); }
         catch { /* the bare name stands */ }
     }
     private enum TokenKind { Text, Tag }
@@ -278,14 +320,14 @@ internal static partial class HtmlToPdfConverter
 
     private static readonly Regex TagRx = new(
         @"<(/?)([A-Za-z][A-Za-z0-9]*)\s*((?:[^>""']|""[^""]*""(?=[\s/>])|'[^']*'(?=[\s/>])|[""'])*?)(/?)>",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex EscapedAttrRx = new(
         @"([A-Za-z_:][-A-Za-z0-9_:.]*)\s*(?:=\s*(\S+))?",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex AttrRx = new(
         "([A-Za-z_:][-A-Za-z0-9_:.]*)\\s*(?:=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s\">]+)))?",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled, RegexLimits.Timeout);
 
 }

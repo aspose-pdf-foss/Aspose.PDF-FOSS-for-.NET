@@ -8,12 +8,14 @@ using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
 
+#pragma warning disable S3881 // public API: the published IDisposable shape
 /// <summary>
 /// Represents a PDF artifact — a marked content sequence tagged as /Artifact
 /// (PDF 32000 §14.8.2.2). Artifacts carry non-content page elements such as
 /// headers, footers, watermarks, and page numbers.
 /// </summary>
 public class Artifact : System.IDisposable
+#pragma warning restore S3881
 {
     /// <summary>Enumerates artifact types as defined by PDF 32000 §14.8.2.2.</summary>
     public enum ArtifactType
@@ -160,7 +162,7 @@ public class Artifact : System.IDisposable
     /// reusable form (e.g. watermark templates). Null until SetImage / SetText
     /// promotes the artifact to a Form-backed representation; the FOSS path
     /// keeps it null and emits inline content.</summary>
-    public XForm? Form { get; private set; }
+    public XForm? Form { get;  }
 
     /// <summary>The Image XObject backing this artifact when its content is a
     /// raster image. Populated by <see cref="SetImage(Stream)"/> /
@@ -191,7 +193,11 @@ public class Artifact : System.IDisposable
 
     /// <summary>Read a custom name/value pair set via <see cref="SetValue(string, string)"/>.</summary>
     public string? GetValue(string name)
-        => name is null ? null : _values.TryGetValue(name, out var v) ? v : null;
+    {
+        if (name is null) return null;
+        if (_values.TryGetValue(name, out var v)) return v;
+        return null;
+    }
 
     /// <summary>Store a custom name/value pair on the artifact (for downstream
     /// metadata access; not emitted into the PDF in this build).</summary>
@@ -220,9 +226,9 @@ public class Artifact : System.IDisposable
     internal string? RawImagePath { get; private set; }
 
     /// <summary>Attach a raster image to the artifact. The stream contents are
-    /// captured into <see cref="RawImageBytes"/>; <see cref="Image"/> remains
-    /// null until the artifact is flushed into a page (the FOSS image-write
-    /// path runs at page-save time).</summary>
+    /// captured into <see cref="RawImageBytes"/>, which a new artifact draws when it
+    /// is added to a page. An artifact that already draws an image (one read from a
+    /// page) has that image replaced by the new picture, where the page draws it.</summary>
     public void SetImage(Stream imageStream)
     {
         if (imageStream is null) throw new ArgumentNullException(nameof(imageStream));
@@ -230,6 +236,7 @@ public class Artifact : System.IDisposable
         if (imageStream.CanSeek) imageStream.Position = 0;
         imageStream.CopyTo(ms);
         RawImageBytes = ms.ToArray();
+        Image?.ReplaceImageData(RawImageBytes);
     }
 
     /// <summary>Attach a raster image by path. The path is captured into
@@ -345,7 +352,9 @@ public class Artifact : System.IDisposable
     internal void RenderToPage(Page page)
     {
         byte[]? imageBytes = RawImageBytes;
+#pragma warning disable S3060 // the type test is the rule itself; moving it into the subclasses would scatter it
         if (imageBytes is null && this is BackgroundArtifact { BackgroundImage: { } bgImg })
+#pragma warning restore S3060
         {
             using var ms = new MemoryStream();
             if (bgImg.CanSeek) bgImg.Position = 0;
@@ -397,8 +406,10 @@ public class Artifact : System.IDisposable
         int iw = stamp.PixelWidth, ih = stamp.PixelHeight;
         var imgName = stamp.RegisterXObject(page);
 
+        // A background artifact's image covers the page; any other image artifact - a watermark drawn
+        // behind the content too - keeps its pixel size at its position or alignment.
         double dw = iw, dh = ih, x, y;
-        if (IsBackground) { dw = page.Width; dh = page.Height; x = 0; y = 0; }
+        if (this is BackgroundArtifact) { dw = page.Width; dh = page.Height; x = 0; y = 0; }
         else (x, y) = ComputePlacement(page, iw, ih);
 
         var bbox = new Rectangle(x, y, x + dw, y + dh);
@@ -436,9 +447,10 @@ public class Artifact : System.IDisposable
                 page.Number.ToString(CultureInfo.InvariantCulture));
         if (string.IsNullOrEmpty(renderText)) return;
 
-        var fontName = Table.RegisterFont(page);
         double fontSize = TextState?.FontSize ?? FormattedText?.FontSize ?? 12;
         var baseFont = TextState?.FontName ?? FormattedText?.FontName ?? "Helvetica";
+        // The text is written in the face its state names when that is a standard one, not always in Helvetica.
+        var fontName = Table.RegisterFont(page, Standard14Fonts.IsStandard14(baseFont) ? baseFont : "Helvetica");
 
         var lines = renderText.Replace("\r\n", "\n").Split('\n');
         double textW = 0;

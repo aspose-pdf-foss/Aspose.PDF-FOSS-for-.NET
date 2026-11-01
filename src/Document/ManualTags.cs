@@ -30,9 +30,9 @@ public sealed partial class Document
     internal Dictionary<PdfDictionary, int> KnownDictionaryNumbers()
     {
         var known = new Dictionary<PdfDictionary, int>(ReferenceEqualityComparer.Instance);
-        foreach (var entry in _reader.XRefTable.Entries.Values)
-            if (_reader.Resolve(new PdfIndirectRef(entry.ObjectNumber, 0)) is PdfDictionary dict)
-                known.TryAdd(dict, entry.ObjectNumber);
+        foreach (var objectNumber in _reader.XRefTable.Entries.Values.Select(entry => entry.ObjectNumber))
+            if (_reader.Resolve(new PdfIndirectRef(objectNumber, 0)) is PdfDictionary dict)
+                known.TryAdd(dict, objectNumber);
         // Objects this save has already numbered (an earlier wiring pass, an annotation made indirect).
         foreach (var (objNum, obj) in _newObjects)
             if (obj is PdfDictionary dict)

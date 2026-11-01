@@ -18,7 +18,7 @@ public sealed partial class Document
 
         // Last non-stroking colour before a fill in this stream.
         double[]? color = null;
-        var m = System.Text.RegularExpressions.Regex.Match(text,
+        var m = SafeRegex.Match(text,
             @"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+rg[\s\S]*?\bf\*?\b");
         if (m.Success)
         {
@@ -96,7 +96,9 @@ public sealed partial class Document
     {
         public static readonly SimMatrix Identity = new(1, 0, 0, 1, 0, 0);
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         public SimMatrix Concat(SimMatrix m) => new(
+#pragma warning restore S3218
             m.A * A + m.B * C, m.A * B + m.B * D,
             m.C * A + m.D * C, m.C * B + m.D * D,
             m.E * A + m.F * C + E, m.E * B + m.F * D + F);
@@ -182,11 +184,12 @@ public sealed partial class Document
                     _ => _reader.Resolve(gs.Get("SMask")) is PdfDictionary or PdfStream ? true : null,
                 };
                 tp.gsInfo[key] = (ca, cA, bm, sm);
-                if ((ca is > 0 and < 1) || (cA is > 0 and < 1) || (bm is not null && bm != "Normal" && bm != "Compatible")
+                // An alpha of 0 counts too: its paints must stay invisible once the alpha is neutralised.
+                if (ca is < 1 || cA is < 1 || (bm is not null && bm != "Normal" && bm != "Compatible")
                     || sm == true)
                     tp.anyTransparent = true;
             }
-        tp.initialTransparent = (fillA0 > 0 && fillA0 < 1) || (strokeA0 > 0 && strokeA0 < 1)
+        tp.initialTransparent = fillA0 < 1 || strokeA0 < 1
             || (blend0 != "Normal" && blend0 != "Compatible");
         // Form-held transparency only matters to the RECOLOUR (Mask) mode — the
         // Default action keeps its historical page-level-only scan, so pages whose

@@ -17,13 +17,11 @@ public partial class Annotation
         af.pageDict = _reader.ResolveDict(_dict.Get("P")) ?? _pageDict;
         if (af.pageDict is null) return;
 
-        af.subtype = _dict.GetName("Subtype");
-
         // Stamp the annotation appearance onto the page content (if it has one).
         // Shape/markup annotations are often stored without an /AP; synthesise one
         // from the geometry so the figure is baked in instead of vanishing.
-        if (ResolveAppearanceStream() is null && CanSynthesiseAppearance(this))
-            UpdateAppearances();
+        if (ResolveAppearanceStream() is null)
+            SynthesiseMissingAppearance();
         af.appearanceStream = ResolveAppearanceStream();
         if (af.appearanceStream is not null)
         {

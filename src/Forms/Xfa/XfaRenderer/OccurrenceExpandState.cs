@@ -42,5 +42,10 @@ private sealed class OccurrenceExpandState
     public List<System.Xml.XmlElement> fInst = null!;
     public bool packetAuthoritative;
     public List<System.Xml.XmlElement> instances = null!;
+    // No saved form state: only a repeatable subform holding several data groups is
+    // instantiated per group; the full merge applies inside such an instance, which
+    // boundDepth counts the nesting of.
+    public bool strict;
+    public int boundDepth;
 }
 }

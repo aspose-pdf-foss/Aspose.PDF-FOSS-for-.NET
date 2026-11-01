@@ -145,7 +145,9 @@ internal static partial class HtmlToPdfConverter
         public List<(string Text, bool Bold, bool Italic)> Runs = new();
         public string? ImgB64;                                // data-URI PNG payload
         public double ImgPct;                                 // img width="N%" attribute
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<List<(string Text, bool Bold, bool Italic)>> Lines = new();
+#pragma warning restore S3218
         public int Col;                                       // first column index
     }
 
@@ -207,7 +209,8 @@ internal static partial class HtmlToPdfConverter
         }
         PaintMetricCaption(mt);
         ComputeRowSpanBands(mt);
-        RenderMetricRows(mt.mps, mt.rows, mt.colW, mt.nCols, mt.availW, mt.s, mt.lineH, mt.face, mt.boldFace, mt.hheaSum, mt.fm, mt.p, mt.pageWidth, mt.pageHeight, mt.marginTop, mt.marginBottom, mt.tableWpt, mt.tablePct, mt.baseFontSize, mt.paragraphCells, mt.tableHtml, mt.symInsetPt, mt.css, mt.doc, mt.docFontDict, mt.loadOptions, mt.invc, mt.flatRes, mt.reportCells, mt.serifReportCells, mt.stdSerif, mt.wrapperStacks, mt.collapseBoxW, mt.rowSpanExtra, mt.tableHasText, mt.tableRuleFace, mt.tableX + mt.frameW, mt.marginLeft, mt.contentWidth, mt.siblingCellRules, mt.cursor);
+        mt.mps.rtlParagraph = mt.rtl;
+        RenderMetricRows(mt.mps, mt.rows, mt.colW, mt.nCols, mt.availW, mt.s, mt.lineH, mt.face, mt.boldFace, mt.fm, mt.p, mt.pageWidth, mt.pageHeight, mt.marginTop, mt.marginBottom, mt.tableWpt, mt.tablePct, mt.baseFontSize, mt.paragraphCells, mt.symInsetPt, mt.css, mt.doc, mt.docFontDict, mt.loadOptions, mt.invc, mt.flatRes, mt.serifReportCells, mt.stdSerif, mt.wrapperStacks, mt.collapseBoxW, mt.rowSpanExtra, mt.tableHasText, mt.tableRuleFace, mt.tableX + mt.frameW, mt.siblingCellRules, mt.cursor);
         mt.cursor.y -= mt.s;   // trailing cellspacing closes the table box
         mt.cursor.y -= mt.mps.tablePadBottomPt;
         // The inline-styled frame closes under the last row's spacing and strokes
@@ -271,10 +274,10 @@ internal static partial class HtmlToPdfConverter
     private static void ReadMetricHrBox(MetricCell cell, Token tok)
     {
         if (tok.Attributes is not { } attrs || !attrs.TryGetValue("style", out var st) || st is null) return;
-        if (Regex.Match(st, @"(?<![-\w])height\s*:\s*([\d.]+\s*(?:px|pt))", RegexOptions.IgnoreCase) is { Success: true } hm
+        if (SafeRegex.Match(st, @"(?<![-\w])height\s*:\s*([\d.]+\s*(?:px|pt))", RegexOptions.IgnoreCase) is { Success: true } hm
             && TryParseLength(hm.Groups[1].Value.Replace(" ", "")) is { } hPt && hPt > 0)
             cell.HrBoxPt = hPt + 2 * HrGrooveW;
-        if (Regex.IsMatch(st, @"(?<![-\w])width\s*:\s*100\s*%", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(st, @"(?<![-\w])width\s*:\s*100\s*%", RegexOptions.IgnoreCase))
             cell.HrOutsetPt = 2 * HrGrooveW;
     }
 
@@ -333,7 +336,7 @@ internal static partial class HtmlToPdfConverter
         // Bordered draw: outer border box, per-cell border boxes on the 2px
         // border-spacing grid, text at border+padding insets. Cell box heights =
         // content + padding + borders; strokes centred half a width inside.
-        if (mt.mps.bordered) { RenderBorderedGrid(mt.mps, mt.rows, mt.colW, mt.nCols, mt.availW, mt.s, mt.bw, mt.lineH, mt.face, mt.boldFace, mt.hheaSum, mt.fm, mt.p, mt.pageWidth, mt.pageHeight, mt.marginTop, mt.marginBottom, mt.tableWpt, mt.tablePct, mt.baseFontSize, mt.paragraphCells, mt.tableHtml, mt.symInsetPt, mt.tableFills, mt.css, mt.doc, mt.docFontDict, mt.loadOptions, mt.invc, mt.stdSerif, mt.wrapperStacks, mt.rmtAnchorColor, mt.marginLeft, mt.contentWidth, mt.tableX, mt.cursor); return false; }
+        if (mt.mps.bordered) { RenderBorderedGrid(mt.mps, mt.rows, mt.colW, mt.nCols, mt.availW, mt.s, mt.bw, mt.lineH, mt.face, mt.boldFace, mt.fm, mt.p, mt.pageWidth, mt.pageHeight, mt.marginTop, mt.marginBottom, mt.tableWpt, mt.tablePct, mt.baseFontSize, mt.tableHtml, mt.tableFills, mt.css, mt.doc, mt.docFontDict, mt.loadOptions, mt.invc, mt.stdSerif, mt.wrapperStacks, mt.rmtAnchorColor, mt.marginLeft, mt.contentWidth, mt.tableX, mt.cursor); return false; }
 
         mt.flatRes = new Dictionary<string, string>(StringComparer.Ordinal);
         // a page-less solve (a nested grid measured for its height) paints nothing
@@ -371,9 +374,9 @@ internal static partial class HtmlToPdfConverter
     private static IReadOnlyDictionary<string, Dictionary<string, string>> ScopedTableCss(
         IReadOnlyDictionary<string, Dictionary<string, string>> css, string tableHtml)
     {
-        var tag = Regex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
         if (!tag.Success) return css;
-        var cm = Regex.Match(tag.Value, @"\bclass\s*=\s*[""']?([^""'>]+)", RegexOptions.IgnoreCase);
+        var cm = SafeRegex.Match(tag.Value, @"\bclass\s*=\s*[""']?([^""'>]+)", RegexOptions.IgnoreCase);
         if (!cm.Success) return css;
         // (the probed shape: a class rule that COLLAPSES the table's borders - `table.list { border-collapse:
         // collapse }` - and dresses its cells; a class-styled grid whose class collapses nothing keeps the
@@ -413,7 +416,9 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Walks the table markup token by token into rows, cells and styled segments.</summary>
     private static void ParseMetricTokens(MetricTableState mt)
     {
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var tok in Tokenize(StripNonContent(mt.tableHtml)))
+#pragma warning restore S3267
         {
             if (!ParseMetricToken(mt, tok)) break;
         }
@@ -427,8 +432,8 @@ internal static partial class HtmlToPdfConverter
         ResolveMetricRowBoxWidth(mt);
         mt.rows = new List<List<MetricCell>>();
         // a CLASS height paces its row EXACTLY (the boleto's h13/h12 grid rows:
-        // label 9.75 + value 9 measured as the pitch, content fitted inside);
-        // a STYLE height keeps the calibrated raise-only behaviour
+        // label 9.75 + value 9 measured as the pitch, content fitted inside); a
+        // STYLE height keeps the calibrated raise-only behaviour
         mt.mps.pendingRowHExact = false;
         // Row-group ordering: thead rows render first and tfoot rows LAST regardless
         // of source order (a tfoot authored before the tbody still closes the table).
@@ -515,7 +520,7 @@ internal static partial class HtmlToPdfConverter
                 {
                     mt.mps.pInlineCells = true;
                     if (mt.css.TryGetValue("p", out var pRule) && pRule.TryGetValue("line-height", out var pLh)
-                        && Regex.Match(pLh.Trim(), @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase) is { Success: true } pLhM)
+                        && SafeRegex.Match(pLh.Trim(), @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase) is { Success: true } pLhM)
                         mt.mps.pInlineLineHeightEm = double.Parse(pLhM.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
                     break;
                 }
@@ -553,7 +558,6 @@ internal static partial class HtmlToPdfConverter
         mt.mps.wtPadH = -1;
         mt.mps.wtPadB = 0;
         mt.mps.wtPMarginDefaulted = false;
-        mt.mps.wtBwBottom = 0;
 
         mt.s = 1.5;
         mt.p = 0.75;
@@ -584,18 +588,18 @@ internal static partial class HtmlToPdfConverter
         mt.frameW = 0;
         mt.frameRadius = 0;
         if (mt.collapseBoxW > 0) return;
-        var tag = Regex.Match(mt.tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(mt.tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
         if (!tag.Success) return;
         // (the attribute may stand unquoted: `style=border-style:Solid;border-collapse:collapse`)
-        var sm = Regex.Match(tag.Value, @"\bstyle\s*=\s*(?:[""'](?<s>[^""']*)[""']|(?<s>[^\s>""']+))", RegexOptions.IgnoreCase);
+        var sm = SafeRegex.Match(tag.Value, @"\bstyle\s*=\s*(?:[""'](?<s>[^""']*)[""']|(?<s>[^\s>""']+))", RegexOptions.IgnoreCase);
         if (!sm.Success) return;
         var decl = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match d in StyleDeclRx.Matches(sm.Groups["s"].Value))
-            decl[d.Groups[1].Value.Trim()] = d.Groups[2].Value.Trim();
+        foreach (var groups in SafeRegex.Matches(StyleDeclRx, sm.Groups["s"].Value).Select(d => d.Groups))
+            decl[groups[1].Value.Trim()] = groups[2].Value.Trim();
         // (the `border: 1px solid rgb(204, 204, 204)` shorthand states the same three longhands)
         if (!decl.ContainsKey("border-style") && decl.TryGetValue("border", out var shorthand))
             ExpandBorderShorthand(shorthand, decl);
-        if (!decl.TryGetValue("border-style", out var bs) || Regex.IsMatch(bs, "none|hidden", RegexOptions.IgnoreCase)) return;
+        if (!decl.TryGetValue("border-style", out var bs) || SafeRegex.IsMatch(bs, "none|hidden", RegexOptions.IgnoreCase)) return;
         // (a collapsed inline frame is the collapse box: one outer rule, no spacing - measured on the
         // enterprise summary's `cellspacing=5 ... border-style:Solid; border-collapse:collapse` grids,
         // framed 0.75 with their rows 10.5 apart)
@@ -636,15 +640,15 @@ internal static partial class HtmlToPdfConverter
     {
         double wS = 1.5, wP = 0.75, wBw = 0;
         Color? wBg = null;
-        var wcs = Regex.Match(wAttrs, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+        var wcs = SafeRegex.Match(wAttrs, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
         if (wcs.Success && PresentationalLengthPt(wcs.Groups[1].Value) is { } wcsPt) wS = wcsPt;
-        var wcp = Regex.Match(wAttrs, @"cellpadding\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+        var wcp = SafeRegex.Match(wAttrs, @"cellpadding\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
         if (wcp.Success && PresentationalLengthPt(wcp.Groups[1].Value) is { } wcpPt) wP = wcpPt;
-        var wbm = Regex.Match(wAttrs, @"\bborder\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+        var wbm = SafeRegex.Match(wAttrs, @"\bborder\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
         if (wbm.Success && double.TryParse(wbm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var wbv) && wbv > 0)
             wBw = 0.75;
-        var wbgm = Regex.Match(wAttrs, @"bgcolor\s*=\s*[""']?([#0-9a-zA-Z]+)", RegexOptions.IgnoreCase);
+        var wbgm = SafeRegex.Match(wAttrs, @"bgcolor\s*=\s*[""']?([#0-9a-zA-Z]+)", RegexOptions.IgnoreCase);
         if (wbgm.Success)
             wBg = ParseCssColor(wbgm.Groups[1].Value.StartsWith('#') ? wbgm.Groups[1].Value : "#" + wbgm.Groups[1].Value);
         return (wS, wP, wBw, wBg);
@@ -683,16 +687,19 @@ internal static partial class HtmlToPdfConverter
         var wPrevBordered = false;
         foreach (var (childHtml, childNewCell) in wChildren)
         {
-            // Each wrapper ROW pads its cell (bottom + top cellpadding);
-            // SAME-CELL siblings sit the measured 1.2 pt apart — and an
+            // Each wrapper ROW pads its cell (bottom + top cellpadding); SAME-CELL
+            // siblings sit the measured 1.2 pt apart — and an
             // EMPTY table (no cells) is fully transparent: no gap of its
             // own, and its neighbours share a single gap across it.
-            var childRenders = Regex.IsMatch(childHtml, @"<td\b", RegexOptions.IgnoreCase);
-            var childBordered = Regex.IsMatch(childHtml,
+            var childRenders = SafeRegex.IsMatch(childHtml, @"<td\b", RegexOptions.IgnoreCase);
+            var childBordered = SafeRegex.IsMatch(childHtml,
                 @"^\s*<table\b[^>]*\bborder\s*=\s*[""']?[1-9]", RegexOptions.IgnoreCase);
             if (!wFirst && childRenders && wPrevRendered)
-                cursor.y -= childNewCell ? 2 * wP
-                    : childBordered || wPrevBordered ? WrapperSiblingGapPt : 0;
+            {
+                if (childNewCell) cursor.y -= 2 * wP;
+                else if (childBordered || wPrevBordered) cursor.y -= WrapperSiblingGapPt;
+                else cursor.y -= 0;
+            }
             wFirst = false;
             if (childRenders) { wPrevRendered = true; wPrevBordered = childBordered; }
             cursor.lastTableX0 = double.NaN;

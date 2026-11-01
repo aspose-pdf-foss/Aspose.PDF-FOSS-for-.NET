@@ -83,8 +83,8 @@ namespace Aspose.Pdf.Comparison
         {
             sb.Append("<div style=\"margin-bottom: 20pt;\">\n");
             if (differences is not null)
-                foreach (var d in differences)
-                    if (d is not null) Append(sb, d);
+                foreach (var d in differences.Where(d => d is not null))
+                    Append(sb, d);
             sb.Append("\n</div>\n");
         }
 
@@ -132,7 +132,7 @@ namespace Aspose.Pdf.Comparison
         private static string CssFor(TextStyle? style, string fallback)
         {
             var css = style?.ToCssStyle();
-            return string.IsNullOrEmpty(css) ? fallback : css!;
+            return string.IsNullOrEmpty(css) ? fallback : css;
         }
 
         /// <summary>Only the three characters HTML cannot carry as text. Everything else -

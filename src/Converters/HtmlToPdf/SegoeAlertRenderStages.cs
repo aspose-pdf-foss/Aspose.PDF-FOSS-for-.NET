@@ -40,26 +40,26 @@ internal static partial class HtmlToPdfConverter
             $"q {c.R / 255.0:0.###} {c.G / 255.0:0.###} {c.B / 255.0:0.###} rg " +
             $"{x:0.##} {sg.pageHeight - yTd - h:0.##} {w:0.##} {h:0.##} re f Q\n")));
 
-    private static string SegoeFlat(SegoeAlertRenderState sg, string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
+    private static string SegoeFlat(string frag)
+        => SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
 
     // ── the two label/value panels ──
     private static void SegoePanel(SegoeAlertRenderState sg, string cls, double labelRight, double valueX)
     {
-        var pm = Regex.Match(sg.html,
+        var pm = SafeRegex.Match(sg.html,
             @"<table\b[^>]*class\s*=\s*[""']" + cls + @"[""'][^>]*>(?<b>[\s\S]*?)</table>",
             RegexOptions.IgnoreCase);
         if (!pm.Success) return;
         var baseline = SaPanelBase0;
-        foreach (Match trM in Regex.Matches(pm.Groups["b"].Value,
-            @"<tr\b[^>]*>(?<r>[\s\S]*?)</tr>", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(pm.Groups["b"].Value,
+            @"<tr\b[^>]*>(?<r>[\s\S]*?)</tr>", RegexOptions.IgnoreCase).Select(trM => trM.Groups))
         {
-            var lblM = Regex.Match(trM.Groups["r"].Value,
+            var lblM = SafeRegex.Match(groups["r"].Value,
                 @"class\s*=\s*[""']top_label[""'][^>]*>(?<t>[\s\S]*?)</span>", RegexOptions.IgnoreCase);
-            var valM = Regex.Match(trM.Groups["r"].Value,
+            var valM = SafeRegex.Match(groups["r"].Value,
                 @"class\s*=\s*[""']top_value[""'][^>]*>(?<t>[\s\S]*?)</span>", RegexOptions.IgnoreCase);
-            var lbl = lblM.Success ? SegoeFlat(sg, lblM.Groups["t"].Value).ToUpperInvariant() : "";
-            var val = valM.Success ? SegoeFlat(sg, valM.Groups["t"].Value) : "";
+            var lbl = lblM.Success ? SegoeFlat(lblM.Groups["t"].Value).ToUpperInvariant() : "";
+            var val = valM.Success ? SegoeFlat(valM.Groups["t"].Value) : "";
             var valLines = MeasuredWordWrap(val, SaValueWrapW, "Segoe UI", 10.5);
             // the label centres on the value block's baselines
             var lblBase = baseline + (valLines.Length - 1) * SaValuePitch / 2;
@@ -78,10 +78,10 @@ internal static partial class HtmlToPdfConverter
         var gbody = sg.gm.Groups["b"].Value;
         // headers: centred grey per column over the per-column underline
         var heads = new List<string>();
-        foreach (Match thM in Regex.Matches(gbody,
+        foreach (Match thM in SafeRegex.Matches(gbody,
             @"class\s*=\s*[""']grid_header[""'][\s\S]*?<span>(?<t>[^<]*)</span>",
             RegexOptions.IgnoreCase))
-            heads.Add(SegoeFlat(sg, thM.Groups["t"].Value));
+            heads.Add(SegoeFlat(thM.Groups["t"].Value));
         for (var ci = 0; ci < heads.Count && ci + 1 < SaColEdges.Length; ci++)
         {
             if (heads[ci].Length == 0) continue;
@@ -98,21 +98,21 @@ internal static partial class HtmlToPdfConverter
         // colspan row carries only the id and its red sensor note
         var rowTop = SaGridRow0Top;
         var redTop = SaRedTop0;
-        foreach (Match tbM in Regex.Matches(gbody,
+        foreach (Match tbM in SafeRegex.Matches(gbody,
             @"<tbody\b[^>]*>(?<r>[\s\S]*?)</tbody>", RegexOptions.IgnoreCase))
         {
             var r = tbM.Groups["r"].Value;
-            if (Regex.IsMatch(r, @"grid_header", RegexOptions.IgnoreCase)) continue;
+            if (SafeRegex.IsMatch(r, @"grid_header", RegexOptions.IgnoreCase)) continue;
             var cells = new List<(string text, bool highlight, bool redText)>();
-            foreach (Match tdM in Regex.Matches(r,
-                @"<td\b(?<a>[^>]*)>(?<c>[\s\S]*?)</td>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(r,
+                @"<td\b(?<a>[^>]*)>(?<c>[\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(tdM => tdM.Groups))
             {
-                var c = tdM.Groups["c"].Value;
-                var hl = Regex.IsMatch(c, @"grid_highlight_value[^>]*background",
+                var c = groups["c"].Value;
+                var hl = SafeRegex.IsMatch(c, @"grid_highlight_value[^>]*background",
                     RegexOptions.IgnoreCase);
-                var rt = Regex.IsMatch(c, @"color:\s*#CF3135", RegexOptions.IgnoreCase);
-                var span = Regex.Match(tdM.Groups["a"].Value, @"colspan\s*=\s*[""']?(\d+)");
-                cells.Add((SegoeFlat(sg, c), hl, rt));
+                var rt = SafeRegex.IsMatch(c, @"color:\s*#CF3135", RegexOptions.IgnoreCase);
+                var span = SafeRegex.Match(groups["a"].Value, @"colspan\s*=\s*[""']?(\d+)");
+                cells.Add((SegoeFlat(c), hl, rt));
                 if (span.Success)
                     for (var k = 1; k < int.Parse(span.Groups[1].Value); k++)
                         cells.Add(("", false, false));
@@ -128,7 +128,7 @@ internal static partial class HtmlToPdfConverter
                 var cw = SegoeMeasure(sg, sg.segoeBold!, "SegoeUIBold", txt, 9);
                 var cx = (SaColEdges[ci] + SaColEdges[ci + 1] - cw) / 2;
                 SegoeRun(sg, true, 9, cx, rowTop + 9 * SegoeAscEm, txt,
-                    hl ? sg.white : rt ? sg.red : sg.black);
+                    (hl, rt) switch { (true, _) => sg.white, (_, true) => sg.red, _ => sg.black });
             }
             var pitch = isFull ? SaGridRowPitch1 : SaGridRowPitch2;
             rowTop += pitch;

@@ -10,7 +10,7 @@ internal static partial class AutoTagger
     // matter); at least this many entries on a page, their page numbers ending within this many points of one another,
     // make a table of contents.
     private static readonly Regex TocTail = new(@"(?:\.\s?){4,}\s*(?:\d{1,4}|[ivxlcdm]{1,7})\s*$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
     private const int MinTocEntries = 3;
     private const double TocEdgeTolerance = 3.0;
 
@@ -19,7 +19,7 @@ internal static partial class AutoTagger
     /// parted into columns or taken as a table's rows.</summary>
     private static void MarkTocLines(List<Line> content)
     {
-        var tails = content.Where(l => l.Frags.Count > 0 && TocTail.IsMatch(string.Concat(l.Frags.Select(f => f.Text)))).ToList();
+        var tails = content.Where(l => l.Frags.Count > 0 && SafeRegex.IsMatch(TocTail, string.Concat(l.Frags.Select(f => f.Text)))).ToList();
         foreach (var edge in tails.GroupBy(l => System.Math.Round(l.Frags[^1].R / TocEdgeTolerance)))
         {
             var entries = tails.Where(l => System.Math.Abs(l.Frags[^1].R - edge.First().Frags[^1].R) <= TocEdgeTolerance).ToList();

@@ -7,13 +7,13 @@ namespace Aspose.Pdf.Text;
 
 internal sealed partial class TextStateModifier
 {
-    private byte[]? ModifyFontSizeInStream(byte[] streamBytes, string text, double oldSize,
+    private static byte[]? ModifyFontSizeInStream(byte[] streamBytes, string text, double oldSize,
         double newSize, PdfDictionary pageDict, PdfReader reader, bool allowCollateral,
         LineReseat? reseat = null, bool splitSubRun = true)
     {
         var fz = new FontSizeStreamState(streamBytes, text, oldSize, newSize, pageDict, reader,
             allowCollateral, reseat, splitSubRun);
-        while (ScanFontSizeToken(fz)) { }
+        while (ScanFontSizeToken(fz)) { /* the scan does its work in the condition - nothing more to do */ }
         if (!BuildShowConcat(fz)) return null;
         if (RewriteScopedFontSize(fz) is { } rewritten) return rewritten;
         return ApplyFontSizePatches(fz);
@@ -50,7 +50,7 @@ internal sealed partial class TextStateModifier
     /// once. A non-null result is the finished stream: the covering Tf governed text outside the
     /// match, so the match was given a Tf of its own instead. Otherwise the collected patches are
     /// left on <paramref name="fz"/> for the in-place rewrite.</summary>
-    private byte[]? RewriteScopedFontSize(FontSizeStreamState fz)
+    private static byte[]? RewriteScopedFontSize(FontSizeStreamState fz)
     {
         fz.patches = new SortedDictionary<int, (int end, double newTf)>();
         for (var idx = fz.concatStr.IndexOf(fz.text, StringComparison.Ordinal); idx >= 0;
@@ -95,7 +95,7 @@ internal sealed partial class TextStateModifier
             sizeMatched = true;
             // Resize only when every show governed by the candidate Tf lies inside the
             // match — otherwise the scoped insertion gives the match its own Tf instead.
-            for (var sj = 0; fz.allowCollateral == false && sj < fz.shows.Count; sj++)
+            for (var sj = 0; !fz.allowCollateral && sj < fz.shows.Count; sj++)
             {
                 if (fz.shows[sj].tfStart != s.tfStart) continue;
                 if (fz.spans[sj].start < idx || fz.spans[sj].end > matchEnd) return (true, true);
@@ -111,7 +111,7 @@ internal sealed partial class TextStateModifier
 
     /// <summary>Rewrites the collected Tf sites in place, re-seating the line first when a whole
     /// show was resized. Null means nothing matched at the expected size.</summary>
-    private byte[]? ApplyFontSizePatches(FontSizeStreamState fz)
+    private static byte[]? ApplyFontSizePatches(FontSizeStreamState fz)
     {
         if (fz.patches.Count == 0) return null;
         fz.result = fz.streamBytes;
@@ -143,10 +143,7 @@ internal sealed partial class TextStateModifier
     /// <summary>Whether the text carries Hebrew or Arabic letters (the scripts the absorber reorders).</summary>
     private static bool HasRightToLeft(string text)
     {
-        foreach (var c in text)
-            if (c is >= '֐' and <= 'ࣿ' or >= 'יִ' and <= '﷿' or >= 'ﹰ' and <= '﻿')
-                return true;
-        return false;
+        return text.Any(c => c is >= '֐' and <= 'ࣿ' or >= 'יִ' and <= '﷿' or >= 'ﹰ' and <= '﻿');
     }
 
     /// <summary>The seat of a show: the last <c>a b c d e f Tm</c> between the previous show
@@ -158,7 +155,7 @@ internal sealed partial class TextStateModifier
         if (to <= from) return null;
         var text = Compat.Latin1.GetString(fz.streamBytes, from, to - from);
         System.Text.RegularExpressions.Match? last = null;
-        foreach (System.Text.RegularExpressions.Match m in GeneralTm.Matches(text)) last = m;
+        foreach (System.Text.RegularExpressions.Match m in SafeRegex.Matches(GeneralTm, text)) last = m;
         if (last is null) return null;
         var v = new double[6];
         for (var i = 0; i < 6; i++)
@@ -167,7 +164,7 @@ internal sealed partial class TextStateModifier
     }
 
     private static readonly System.Text.RegularExpressions.Regex GeneralTm =
-        new(@"(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b");
+        new(@"(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+Tm\b", System.Text.RegularExpressions.RegexOptions.None, RegexLimits.Timeout);
 
     /// <summary>Re-seat the line a whole-show resize sits on, the probed rule of the reference:
     /// the resized show keeps its seat; every contiguous following show on the same baseline

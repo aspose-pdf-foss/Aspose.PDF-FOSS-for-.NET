@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>Graphical link overlays: each becomes a placeholder icon at its absolute seat with its own click surface.</summary>
-    private static void PlacePositionedGraphicalLinks(PositionedSpansState pos, string seg, List<PosSpan> spans, List<PosLink> links, Page iconPage)
+    private static void PlacePositionedGraphicalLinks(PositionedSpansState pos, List<PosSpan> spans, List<PosLink> links, Page iconPage)
     {
         var graphical = new List<PosLink>();
         if (pos.stlDialect)
@@ -82,7 +82,7 @@ internal static partial class HtmlToPdfConverter
             // divs never merge (the number column of a tabbed TOC stacks before
             // its titles, in the order the exporter wrote them).
             foreach (var para in pos.stlPages[p])
-                EmitStlParagraph(pos.doc, para, pos.pendingLinks,
+                EmitStlParagraph(para, pos.pendingLinks,
                     FontSizePt, StlSupFontSizePt, StlSupRisePt, StlSupLineExtraPt,
                     PitchPt, MarginSide, pos.contentW, pos.pageH, BottomMarginPt,
                     pos.docFontDict, pos);
@@ -104,7 +104,8 @@ internal static partial class HtmlToPdfConverter
                 var rowLinks = links.FindAll(l =>
                     s.Baseline >= l.Top && s.Baseline <= l.Top + l.Height + 2);
                 var cx = s.Left;
-                for (var ci = 0; ci < s.Text.Length; ci++)
+                var ci = 0;
+                while (ci < s.Text.Length)
                 {
                     var ch = s.Text[ci];
                     var cpEnd = ci;
@@ -118,6 +119,7 @@ internal static partial class HtmlToPdfConverter
                             sb.Append(' ');
                             urls.Add(null);
                         }
+                        ci++;
                         continue;
                     }
                     var covering = rowLinks.Find(l => mid >= l.Left - 0.5 && mid <= l.Left + l.Width + 0.5);
@@ -126,7 +128,7 @@ internal static partial class HtmlToPdfConverter
                         sb.Append(s.Text[u]);
                         urls.Add(s.Urls is not null ? s.Urls[u] : covering?.Url);
                     }
-                    ci = cpEnd;
+                    ci = cpEnd + 1;
                 }
             }
             // Trim trailing whitespace (trailing space spans widen nothing).
@@ -137,9 +139,9 @@ internal static partial class HtmlToPdfConverter
             text = text[..end];
             urls.RemoveRange(end, urls.Count - end);
 
-            EmitReflowedLine(pos.doc, text, urls, pos.pendingLinks,
-                FontSizePt, PitchPt, MarginSide, pos.contentW, pos.pageW, pos.pageH,
-                BottomMarginPt, FirstBaselinePt, pos.docFontDict, pos);
+            EmitReflowedLine(text, urls, pos.pendingLinks,
+                FontSizePt, PitchPt, MarginSide, pos.contentW, pos.pageH,
+                BottomMarginPt, pos.docFontDict, pos);
         }
         return iconPage;
     }
@@ -150,18 +152,18 @@ internal static partial class HtmlToPdfConverter
         List<PosLink>? links = default;
         List<List<PosSpan>>? lines = default;
         links = new List<PosLink>();
-        foreach (Match m in Regex.Matches(seg,
+        foreach (var groups in SafeRegex.Matches(seg,
             @"<a\s+(?=[^>]*class=""pdf-link"")(?=[^>]*href=""(?<href>[^""]*)"")(?=[^>]*style=""(?<st>[^""]*)"")[^>]*>",
-            RegexOptions.Singleline))
+            RegexOptions.Singleline).Select(m => m.Groups))
         {
-            var st = m.Groups["st"].Value;
+            var st = groups["st"].Value;
             links.Add(new PosLink
             {
                 Left = StylePt(st, "left") ?? 0,
                 Top = StylePt(st, "top") ?? 0,
                 Width = StylePt(st, "width") ?? 0,
                 Height = StylePt(st, "height") ?? 0,
-                Url = DecodeEntities(m.Groups["href"].Value),
+                Url = DecodeEntities(groups["href"].Value),
             });
         }
         if (pos.stlDialect)
@@ -175,17 +177,17 @@ internal static partial class HtmlToPdfConverter
             double NumL(string s) => double.Parse(s,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture);
-            foreach (Match m in Regex.Matches(seg,
+            foreach (var mGroups in SafeRegex.Matches(seg,
                 @"<div style=""position:absolute;left:(?<l>-?[\d.]+)em;top:(?<t>-?[\d.]+)em;width:(?<w>[\d.]+)em;height:(?<h>[\d.]+)em;"">\s*<a\s+[^>]*href=""(?<href>[^""]*)""[^>]*>\s*<img[^>]*class=""stl_grlink""",
-                RegexOptions.Singleline))
+                RegexOptions.Singleline).Select(m => m.Groups))
             {
                 links.Add(new PosLink
                 {
-                    Left = NumL(m.Groups["l"].Value) * StlEmPt,
-                    Top = NumL(m.Groups["t"].Value) * StlEmPt,
-                    Width = NumL(m.Groups["w"].Value) * StlEmPt,
-                    Height = NumL(m.Groups["h"].Value) * StlEmPt,
-                    Url = DecodeEntities(m.Groups["href"].Value),
+                    Left = NumL(mGroups["l"].Value) * StlEmPt,
+                    Top = NumL(mGroups["t"].Value) * StlEmPt,
+                    Width = NumL(mGroups["w"].Value) * StlEmPt,
+                    Height = NumL(mGroups["h"].Value) * StlEmPt,
+                    Url = DecodeEntities(mGroups["href"].Value),
                 });
             }
         }
@@ -194,7 +196,9 @@ internal static partial class HtmlToPdfConverter
         lines = new List<List<PosSpan>>(spans.Count);
         if (!pos.stlImgBg)
         {
+#pragma warning disable S1244 // sort key tie-break - exact equality keeps the comparison consistent
             spans.Sort((a, b) => a.Baseline != b.Baseline
+#pragma warning restore S1244
                 ? a.Baseline.CompareTo(b.Baseline) : a.Left.CompareTo(b.Left));
             foreach (var s in spans)
             {
@@ -208,16 +212,16 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>Every positioned run on the source page, with its seat, face and size.</summary>
-    private static List<PosSpan> ReadPositionedSpans(PositionedSpansState pos, string seg, int p)
+    private static List<PosSpan> ReadPositionedSpans(PositionedSpansState pos, string seg)
     {
         List<PosSpan>? spans = default;
         spans = new List<PosSpan>();
-        foreach (Match m in Regex.Matches(seg,
+        foreach (var groups in SafeRegex.Matches(seg,
             @"<span class=""pdf-text"" style=""(?<st>[^""]*)"">(?<body>.*?)</span>",
-            RegexOptions.Singleline))
+            RegexOptions.Singleline).Select(m => m.Groups))
         {
-            var st = m.Groups["st"].Value;
-            var text = DecodeEntities(Regex.Replace(m.Groups["body"].Value, "<[^>]+>", ""));
+            var st = groups["st"].Value;
+            var text = DecodeEntities(SafeRegex.Replace(groups["body"].Value, "<[^>]+>", ""));
             if (text.Length == 0) continue;
             spans.Add(new PosSpan
             {
@@ -241,9 +245,9 @@ internal static partial class HtmlToPdfConverter
             double Num(string s) => double.Parse(s,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture);
-            foreach (Match dm in Regex.Matches(seg,
+            foreach (var dmGroups in SafeRegex.Matches(seg,
                 @"<div class=""[^""]*"" style=""left:(?<l>-?[\d.]+)em;\s*top:(?<t>-?[\d.]+)em;?"">(?<body>.*?)</div>",
-                RegexOptions.Singleline))
+                RegexOptions.Singleline).Select(dm => dm.Groups))
             {
                 // A line div wraps ONE OR MORE word-anchored spans (a justified or
                 // positioned line is split into a span per word); concatenate them
@@ -251,12 +255,12 @@ internal static partial class HtmlToPdfConverter
                 // first, so such a line re-imported as just its first word. The
                 // first span's font-size class fixes the run's size.
                 // Linked runs are spans wrapped in <a href="\u2026"> INSIDE the div
-                // (there is no positioned overlay rectangle in this dialect);
-                // the wrapped characters keep the URL so the reflow paints them
+                // (there is no positioned overlay rectangle in this dialect); the
+                // wrapped characters keep the URL so the reflow paints them
                 // as links.
-                var body = dm.Groups["body"].Value;
+                var body = dmGroups["body"].Value;
                 var anchors = new List<(int Start, int End, string Url)>();
-                foreach (Match am in Regex.Matches(body,
+                foreach (Match am in SafeRegex.Matches(body,
                     @"<a\s+[^>]*href=""(?<href>[^""]*)""[^>]*>(?<ab>.*?)</a>",
                     RegexOptions.Singleline))
                     anchors.Add((am.Index, am.Index + am.Length,
@@ -264,14 +268,14 @@ internal static partial class HtmlToPdfConverter
                 var sbLine = new StringBuilder();
                 var lineUrls = new List<string?>();
                 double fsEm = 1.0; var fsSet = false;
-                foreach (Match sm in Regex.Matches(body,
+                foreach (Match sm in SafeRegex.Matches(body,
                     @"<span class=""(?<cls>[^""]*)""[^>]*>(?<stext>.*?)</span>",
                     RegexOptions.Singleline))
                 {
                     string? url = null;
                     foreach (var a in anchors)
                         if (sm.Index >= a.Start && sm.Index < a.End) { url = a.Url; break; }
-                    var stext = DecodeEntities(Regex.Replace(sm.Groups["stext"].Value, "<[^>]+>", ""));
+                    var stext = DecodeEntities(SafeRegex.Replace(sm.Groups["stext"].Value, "<[^>]+>", ""));
                     sbLine.Append(stext);
                     for (var k = 0; k < stext.Length; k++) lineUrls.Add(url);
                     if (!fsSet)
@@ -291,11 +295,11 @@ internal static partial class HtmlToPdfConverter
                 lineUrls.RemoveRange(keep, lineUrls.Count - keep);
                 lineUrls.Add(null);
                 var hasUrl = false;
-                foreach (var u in lineUrls) if (u is not null) { hasUrl = true; break; }
+                if (lineUrls.Any(u => u is not null)) { hasUrl = true; }
                 spans.Add(new PosSpan
                 {
-                    Left = Num(dm.Groups["l"].Value) * StlEmPt,
-                    Top = Num(dm.Groups["t"].Value) * StlEmPt,
+                    Left = Num(dmGroups["l"].Value) * StlEmPt,
+                    Top = Num(dmGroups["t"].Value) * StlEmPt,
                     FontSize = fsEm * StlEmPt,
                     Text = text,
                     Urls = hasUrl ? lineUrls.ToArray() : null,

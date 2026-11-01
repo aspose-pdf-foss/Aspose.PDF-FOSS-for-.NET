@@ -30,8 +30,8 @@ internal sealed partial class PdfString : PdfObject
     }
 
     // PDFDocEncoding → Unicode (PDF 32000:2008 Annex D.2). Bytes 0x00-0x17 and
-    // 0x20-0x7E match ASCII; 0x18-0x1F and 0x80-0xA0 are PDFDocEncoding-specific;
-    // 0xA1-0xFF match ISO Latin-1 (with 0xAD undefined, mapped to U+00AD for round-trip safety).
+    // 0x20-0x7E match ASCII; 0x18-0x1F and 0x80-0xA0 are PDFDocEncoding-specific; 0xA1-0xFF
+    // match ISO Latin-1 (with 0xAD undefined, mapped to U+00AD for round-trip safety).
     private static readonly char[] PdfDocEncodingTable = BuildPdfDocEncoding();
 
     private static char[] BuildPdfDocEncoding()
@@ -51,6 +51,11 @@ internal sealed partial class PdfString : PdfObject
         // 0x9F and 0xAD are undefined in PDFDocEncoding; leave as raw byte for round-trip.
         return t;
     }
+
+    /// <summary>True when the character is one PDFDocEncoding byte that also reads back as
+    /// it: a Latin-1 character whose code PDFDocEncoding gives to another character (the
+    /// no-break space's 0xA0 is the euro sign there) is not.</summary>
+    internal static bool IsPdfDocEncodingByte(char c) => c <= 0xFF && PdfDocEncodingTable[c] == c;
 
     private static string DecodePdfDocEncoding(byte[] bytes)
     {

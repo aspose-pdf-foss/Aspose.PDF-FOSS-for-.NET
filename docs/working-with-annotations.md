@@ -110,6 +110,11 @@ page.Annotations.AddLinkAnnotation(
 `HideAction` also takes an `Annotation`, an array of annotations, or an array of
 field names; `IsHidden` reads or flips the direction.
 
+A `LinkAnnotation` can also be given a `Hyperlink`: a `WebHyperlink` is written as a
+URI action, a `FileHyperlink` as a launch action and a `LocalHyperlink` as a go-to
+action to its page, unless the link already has an action of its own. A link read
+from a file reports through `Hyperlink` the target its action stands for.
+
 ### Highlight, underline, strikeout, squiggly
 
 Each helper takes an optional `quadPoints` array (eight numbers per

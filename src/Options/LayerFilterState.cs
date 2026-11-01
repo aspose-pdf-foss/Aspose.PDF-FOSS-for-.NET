@@ -17,8 +17,8 @@ private sealed class LayerFilterState
     public int lastTarget;
     public bool hasDoContribution;
     public List<bool?> ocStack = null!;
-    // A Do-style layer keeps its full trailing context (no tail cut);
-    // Flatten/Delete never cut the tail.
+    // A Do-style layer keeps its full trailing context (no tail cut); Flatten/Delete
+    // never cut the tail.
     public int tailStart;
     public List<(string Operands, string Op)> output = null!;
     public List<(string Operands, string Op)> pathBuffer = null!;

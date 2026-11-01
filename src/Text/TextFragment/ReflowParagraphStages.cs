@@ -50,10 +50,10 @@ public partial class TextFragment
             // The re-absorbed line fragments have ReplaceAdjustment.None (fresh absorber),
             // so this deletes in place via the normal replace machinery without recursing
             // back into paragraph reflow.
-            try { l.f.Text = string.Empty; } catch { }
+            try { l.f.Text = string.Empty; } catch { /* a line that cannot be deleted stays - the reflow carries on */ }
         }
 
-        rp.tb = new TextBuilder(page);
+        rp.tb = new TextBuilder(page) { SeatsInPageSpace = true };
         rp.laidOut = new System.Collections.Generic.List<(string text, double baseline, double width)>();
         rp.maxLineW = 0;
         for (int i = 0; i < rp.wrapped.Count; i++)
@@ -121,7 +121,7 @@ public partial class TextFragment
     private bool WrapInDominantFont(ReflowParagraphState rp, Font myFont)
     {
         rp.domLine = rp.paraLines[0].f;
-        foreach (var l in rp.paraLines) if (l.f.Text.Length > rp.domLine.Text.Length) rp.domLine = l.f;
+        foreach (var lf in rp.paraLines.Select(l => l.f)) if (lf.Text.Length > rp.domLine.Text.Length) rp.domLine = lf;
         rp.domFont = rp.domLine.TextState.Font ?? myFont;
         rp.domName = rp.domLine.TextState.FontName ?? TextState.FontName;
         rp.domSize = rp.domLine.TextState.FontSize > 0 ? rp.domLine.TextState.FontSize : (float)rp.fs;
@@ -185,7 +185,7 @@ public partial class TextFragment
     private bool SolveWrapWidth(Page page, ReflowParagraphState rp, Position myPos)
     {
         rp.rightX = 0;
-        foreach (var l in rp.paraLines) if (l.rx > rp.rightX) rp.rightX = l.rx;
+        foreach (var lrx in rp.paraLines.Select(l => l.rx)) if (lrx > rp.rightX) rp.rightX = lrx;
         // A line drawn as several operators reaches further than any one of its fragments.
         if (rp.bandColumnRight > rp.rightX) rp.rightX = rp.bandColumnRight;
         // ...but never past the sheet (see the cascade's clamp).
@@ -227,7 +227,7 @@ public partial class TextFragment
     {
         // Continuous flow anchors the re-emitted block at the flow's leftmost x.
         if (rp.ignorePara)
-            foreach (var l in rp.paraLines) if (l.lx < rp.leftX) rp.leftX = l.lx;
+            foreach (var llx in rp.paraLines.Select(l => l.lx)) if (llx < rp.leftX) rp.leftX = llx;
         rp.origParts = new System.Collections.Generic.List<string>();
         rp.newParts = new System.Collections.Generic.List<string>();
         foreach (var l in rp.paraLines)
@@ -242,7 +242,7 @@ public partial class TextFragment
         if (rp.replaced == rp.origText)
         {
             static string Squash(string s) =>
-                System.Text.RegularExpressions.Regex.Replace(s, @"\s+", string.Empty);
+                SafeRegex.Replace(s, @"\s+", string.Empty);
             if (Squash(oldText) == Squash(rp.origText)) { rp.replaced = newText; rp.wholePara = true; }
             // An occurrence that STRADDLES one of the paragraph's line breaks is a real
             // match of this paragraph even though no single line carries it: the absorber
@@ -270,7 +270,7 @@ public partial class TextFragment
         rp.bandPara = GrowBandParagraph(rp.bands, LineBaseline(rp.paraLines[rp.myCol - rp.lo]), rp.myLLX,
             rp.paraPitch * rp.stepPitchTol, rp.xtol);
         rp.bandColumnRight = 0;
-        foreach (var b in rp.bandPara) if (b.rx > rp.bandColumnRight) rp.bandColumnRight = b.rx;
+        foreach (var brx in rp.bandPara.Select(b => b.rx)) if (brx > rp.bandColumnRight) rp.bandColumnRight = brx;
         return true;
     }
 
@@ -336,19 +336,33 @@ public partial class TextFragment
     }
 
     /// <summary>Absorb the page's lines and find the one that contains this fragment.</summary>
+    /// <summary>Fragments whose baselines lie within this share of the font size of each other share a line.</summary>
+    private const double SameLineShareOfFontSize = 0.5;
+
+    /// <summary>The number of text lines the fragments lie on.</summary>
+    private static int DistinctLines(TextFragmentCollection fragments, double fontSize)
+    {
+        var baselines = new System.Collections.Generic.List<double>();
+        foreach (TextFragment f in fragments)
+            if (f.PositionOrNull is { } p && !string.IsNullOrWhiteSpace(f.Text)) baselines.Add(p.YIndent);
+        baselines.Sort();
+        var lines = 0;
+        for (var i = 0; i < baselines.Count; i++)
+            if (i == 0 || baselines[i] - baselines[i - 1] > fontSize * SameLineShareOfFontSize) lines++;
+        return lines;
+    }
+
     private bool LocateMatchLine(Page page, ReflowParagraphState rp, Position myPos, string oldText)
     {
         rp.lines0 = new System.Collections.Generic.List<(TextFragment f, double y, double lx, double rx)>();
         rp.spanLx = new System.Collections.Generic.Dictionary<TextFragment, double>();
         rp.absorbers = new System.Collections.Generic.List<TextFragmentAbsorber>();
-        {
-            var rx0 = new TextFragmentAbsorber(".+", new TextSearchOptions(true));
-            // The line fragments absorbed here are deleted in place (see below); pin
-            // ReplaceAdjustment.None so the deletion never shifts other same-line
-            // content, independent of the absorber's ShiftRestOfLine default.
-            rx0.TextReplaceOptions = new TextReplaceOptions(TextReplaceOptions.ReplaceAdjustment.None);
-            rp.absorbers.Add(rx0);
-        }
+        var rx0 = new TextFragmentAbsorber(".+", new TextSearchOptions(true));
+        // The line fragments absorbed here are deleted in place (see below); pin
+        // ReplaceAdjustment.None so the deletion never shifts other same-line
+        // content, independent of the absorber's ShiftRestOfLine default.
+        rx0.TextReplaceOptions = new TextReplaceOptions(TextReplaceOptions.ReplaceAdjustment.None);
+        rp.absorbers.Add(rx0);
         rp.abs = rp.absorbers[0];
         page.Accept(rp.abs);
         if (rp.abs.TextFragments.Count <= 1)
@@ -356,7 +370,9 @@ public partial class TextFragment
             var plain = new TextFragmentAbsorber();
             plain.TextReplaceOptions = new TextReplaceOptions(TextReplaceOptions.ReplaceAdjustment.None);
             plain.Visit(page);
-            if (plain.TextFragments.Count > rp.abs.TextFragments.Count) rp.abs = plain;
+            // The run-by-run read is taken only where it finds more lines: runs that a face set on one word split
+            // out of its line (seated a little higher for their own size) are still that one line.
+            if (DistinctLines(plain.TextFragments, rp.fs) > DistinctLines(rp.abs.TextFragments, rp.fs)) rp.abs = plain;
         }
         rp.bandSource = new System.Collections.Generic.List<(TextFragment f, double y, double lx, double rx)>();
         foreach (TextFragment f in rp.abs.TextFragments)

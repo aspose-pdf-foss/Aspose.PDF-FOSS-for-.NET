@@ -39,8 +39,8 @@ public sealed partial class Page
             foreach (var seg in frag.Segments) IncludeTextSegmentBox(seg, acc);
             ExtendFlippedTextLineBox(frag, acc);
         }
-        foreach (var annotation in Annotations)
-            if (IsDrawnAnnotation(annotation)) acc.Include(annotation.Rect);
+        foreach (var annotation in Annotations.Where(annotation => IsDrawnAnnotation(annotation)))
+            acc.Include(annotation.Rect);
 
         // Vector paths, images, inline images, Form-XObject recursion. A page's
         // content array is ONE content stream split at token boundaries: a q or a cm
@@ -80,8 +80,7 @@ public sealed partial class Page
 
     /// <summary>
     /// Extend the content bbox below a flipped-text-matrix fragment (Tm.d &lt; 0).
-    /// An absorbed fragment's Rectangle.LLY sits at its baseline; for flipped text
-    /// the content box drops a line-box below that baseline. The drop is
+    /// For flipped text the content box drops a line-box below the fragment's baseline. The drop is
     /// an internal line-box heuristic proportional to the effective (page-space)
     /// font size, NOT any font descent metric — the value maps to no
     /// hhea/descriptor/FontBBox descent.
@@ -95,7 +94,9 @@ public sealed partial class Page
             return;
 
         Text.TextSegment? seg0 = null;
+#pragma warning disable S1751 // takes the first segment
         foreach (var s in frag.Segments) { seg0 = s; break; }
+#pragma warning restore S1751
         if (seg0 is null)
             return;
 
@@ -116,9 +117,12 @@ public sealed partial class Page
             return;
 
         // Line-box factor for the content-box drop below a flipped
-        // baseline (empirical constant × effective font size).
+        // baseline (empirical constant × effective font size). The drop starts at the
+        // baseline itself: the fragment's rectangle sits a descent below it when the
+        // face states one, and dropping from there sank the box by that descent.
         const double flippedLineBoxFactor = 0.60;
-        acc.IncludePoint(rect.LLX, rect.LLY - flippedLineBoxFactor * effFs);
+        var baseline = frag.BaselinePosition?.YIndent ?? rect.LLY;
+        acc.IncludePoint(rect.LLX, baseline - flippedLineBoxFactor * effFs);
     }
 
     private readonly record struct Cm(double A, double B, double C, double D, double E, double F)
@@ -350,10 +354,10 @@ public sealed partial class Page
         // for each axis. Add the curve point at each in-range root.
         IncludeAxisRoots(t => CubicValue(x0, x1, x2, x3, t),
                          t => CubicValue(y0, y1, y2, y3, t),
-                         x0, x1, x2, x3, includePoint, isX: true);
+                         x0, x1, x2, x3, includePoint);
         IncludeAxisRoots(t => CubicValue(x0, x1, x2, x3, t),
                          t => CubicValue(y0, y1, y2, y3, t),
-                         y0, y1, y2, y3, includePoint, isX: false);
+                         y0, y1, y2, y3, includePoint);
     }
 
     private static double CubicValue(double p0, double p1, double p2, double p3, double t)
@@ -364,7 +368,7 @@ public sealed partial class Page
 
     private static void IncludeAxisRoots(Func<double, double> xAt, Func<double, double> yAt,
         double p0, double p1, double p2, double p3,
-        Action<double, double> includePoint, bool isX)
+        Action<double, double> includePoint)
     {
         // a t^2 + b t + c = 0
         var a = -p0 + 3 * p1 - 3 * p2 + p3;

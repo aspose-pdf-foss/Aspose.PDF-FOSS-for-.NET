@@ -27,7 +27,7 @@ internal static partial class HtmlToPdfConverter
         ao.marginLeft = marginLeft;
         ao.marginRight = marginRight;
         ao.marginTop = marginTop;
-        if (!Regex.IsMatch(ao.html, @"class\s*=\s*[""']agenda-outline", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(ao.html, @"class\s*=\s*[""']agenda-outline", RegexOptions.IgnoreCase))
             return false;
         ao.face = "Arial";
         if (WinMetricsFor(ao.face) is null) return false;
@@ -42,7 +42,7 @@ internal static partial class HtmlToPdfConverter
 
         ao.y = ao.marginTop;
 
-        ao.hdrM = Regex.Match(ao.html,
+        ao.hdrM = SafeRegex.Match(ao.html,
             @"<div\b[^>]*id\s*=\s*[""']agendaMeetingDetails[""'][^>]*>([\s\S]*?)</div\s*>\s*</div\s*>",
             RegexOptions.IgnoreCase);
         if (ao.hdrM.Success)
@@ -53,7 +53,7 @@ internal static partial class HtmlToPdfConverter
             var detFrac = PercentOf(ao.html, "agendaMeetingDetails", "width", 0.50);
             var centre = ao.marginLeft + ao.contentW * (logoFrac + detFrac / 2.0);
             var size = 11.0;
-            foreach (Match dm in Regex.Matches(ao.hdrM.Groups[1].Value,
+            foreach (Match dm in SafeRegex.Matches(ao.hdrM.Groups[1].Value,
                          @"<div\b[^>]*>([\s\S]*?)</div\s*>", RegexOptions.IgnoreCase))
             {
                 var t = AgTxt(dm.Groups[1].Value);
@@ -71,7 +71,9 @@ internal static partial class HtmlToPdfConverter
         // margin, and levels 0-2 seat their numbering in a fixed box.
         // the presenter's own indent inside its item
         ao.prevLvl = -1;
-        foreach (Match li in Regex.Matches(ao.html,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match li in SafeRegex.Matches(ao.html,
+#pragma warning restore S3267
                      @"<li\b[^>]*class\s*=\s*[""'][^""']*\blevel-(\d)\b[^""']*[""'][^>]*>([\s\S]*?)(?=<li\b|</ol)",
                      RegexOptions.IgnoreCase))
         {
@@ -83,7 +85,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A percent declared on an id's inline rule, as a fraction.</summary>
     private static double PercentOf(string html, string id, string prop, double fallback)
     {
-        var m = Regex.Match(html, @"#" + Regex.Escape(id) + @"\s*\{[^}]*?" + prop
+        var m = SafeRegex.Match(html, @"#" + Regex.Escape(id) + @"\s*\{[^}]*?" + prop
             + @"\s*:\s*([\d.]+)%", RegexOptions.IgnoreCase);
         return m.Success && double.TryParse(m.Groups[1].Value,
             System.Globalization.NumberStyles.Float,

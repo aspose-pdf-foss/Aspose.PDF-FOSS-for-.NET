@@ -42,7 +42,7 @@ public class AutoTagPaintColourTests
     }
 
     private static string Text(double x, double y, string text, double size = 12)
-        => $"BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET\n";
+        => FormattableString.Invariant($"BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET\n");
 
     // Three lines of a paragraph, the first standing 5 pt under the line the paint draws at 684.
     private static readonly string Lines = Text(80, 670, "Special Publication 800-38D") + Text(80, 656, "the second line of the block")

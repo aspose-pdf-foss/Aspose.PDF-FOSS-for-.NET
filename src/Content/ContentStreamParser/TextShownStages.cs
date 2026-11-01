@@ -94,7 +94,9 @@ internal sealed partial class ContentStreamParser
             int w = _currentMetrics?.GetWidth(ts.bytes[i]) ?? 0;
             if (w == 0) w = _currentMetrics?.GetWidth(ch) ?? 500;
             ts.totalWidth += (w / 1000.0 * ts.fontSize + ts.charSpacing) * ts.hScaling;
-            if (ch == ' ' || ts.bytes[i] == 0x20)
+            // Word spacing belongs to the single-byte code 32 (PDF 32000 §9.3.3), not to
+            // whatever code a subset shows its space with.
+            if (ts.bytes[i] == 0x20)
                 ts.totalWidth += ts.wordSpacing * ts.hScaling;
             ts.codeEnds?.Add((i + 1, ts.totalWidth));
         }

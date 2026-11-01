@@ -125,8 +125,8 @@ private sealed class ReflowParagraphState
     // sitting in free space would re-wrap to its own token width. Such a flow
     // takes the page as its column — the left inset mirrored on the right —
     // and stops short of the nearest text to its right on the same line, whose
-    // own size sets the gap. (The MOVER reads the page's own text column instead;
-    // this path re-emits into free space, where there is no column to read.)
+    // own size sets the gap. (The MOVER reads the page's own text column instead; this
+    // path re-emits into free space, where there is no column to read.)
     // A LONE line wraps at ITS OWN right edge when it HAS one. Probed on a synthetic
     // 400 pt sheet whose single line of text ends at 161: every replacement length wraps
     // the tail at 161 - a 5-character one pushes the last word over, a 20-character one

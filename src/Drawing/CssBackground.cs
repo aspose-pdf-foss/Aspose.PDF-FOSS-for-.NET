@@ -42,10 +42,12 @@ public enum CssBackgroundRepeat
 /// <summary>A picture placed in an area: x and y of its bottom-left corner, its width and height.</summary>
 public struct CssBackgroundTile
 {
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
     public float X;
     public float Y;
     public float Width;
     public float Height;
+#pragma warning restore S1104
 }
 
 /// <summary>
@@ -91,8 +93,11 @@ public static class CssBackground
         return [nw, nh];
     }
 
-    private static double? Resolve(double? length, bool isPercent, double of) =>
-        length is { } value ? isPercent ? value * of / 100 : value : null;
+    private static double? Resolve(double? length, bool isPercent, double of)
+    {
+        if (length is { } value) return isPercent ? value * of / 100 : value;
+        return null;
+    }
 
     /// <summary>
     /// Where the picture sits along an axis <paramref name="full"/> long: the offset from

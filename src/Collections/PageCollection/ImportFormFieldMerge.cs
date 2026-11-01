@@ -53,7 +53,7 @@ public sealed partial class PageCollection
             if (im.sourceReader == _reader && im.srcAnnots is not null && i < im.srcAnnots.Count)
             {
                 var srcAnnotDict = im.sourceReader.ResolveDict(im.srcAnnots[i]);
-                if (srcAnnotDict?.Get("Parent") is PdfIndirectRef parentRef)
+                if (srcAnnotDict?.Get("Parent") is PdfIndirectRef)
                 {
                     // This Widget shares a parent field — it's a multi-widget field
                     // within the same document. Skip the duplicate.

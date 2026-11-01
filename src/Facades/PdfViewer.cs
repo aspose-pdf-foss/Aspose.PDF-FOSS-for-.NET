@@ -7,6 +7,7 @@ using Aspose.Pdf.Printing;
 
 namespace Aspose.Pdf.Facades;
 
+#pragma warning disable S3881 // public API: the published IDisposable shape
 /// <summary>
 /// Façade for viewing and printing a PDF document. Wraps a bound
 /// <see cref="Aspose.Pdf.Document"/>. Page rasterisation
@@ -15,7 +16,8 @@ namespace Aspose.Pdf.Facades;
 /// hand those rendered pages to an installed printer - see the printing half of
 /// this class for what a job does with them.
 /// </summary>
-public partial class PdfViewer : IFacade, System.IDisposable
+public partial class PdfViewer : IFacade
+#pragma warning restore S3881
 {
     private Document _document;
     private bool _ownsDocument;
@@ -43,9 +45,12 @@ public partial class PdfViewer : IFacade, System.IDisposable
     public bool AutoRotate
     {
         get => AutoRotateMode != AutoRotateMode.None;
-        set => AutoRotateMode = !value ? AutoRotateMode.None
-            : AutoRotateMode == AutoRotateMode.None ? AutoRotateMode.AntiClockWise
-            : AutoRotateMode;
+        set => AutoRotateMode = (value, AutoRotateMode) switch
+        {
+            (false, _) => AutoRotateMode.None,
+            (_, AutoRotateMode.None) => AutoRotateMode.AntiClockWise,
+            _ => AutoRotateMode,
+        };
     }
 
     /// <summary>Which way a page is turned onto a sheet of the other orientation;
@@ -191,8 +196,8 @@ public partial class PdfViewer : IFacade, System.IDisposable
         // to outlive a Bitmap decoded from it, and callers own the result.
         using var decoded = new Bitmap(ms);
         var result = new Bitmap(decoded);
-        // The Bitmap(Image) copy resets DPI metadata to the screen default;
-        // restore the requested rasterisation resolution.
+        // The Bitmap(Image) copy resets DPI metadata to the screen default; restore
+        // the requested rasterisation resolution.
         result.SetResolution(dpi, dpi);
         return result;
     }

@@ -64,8 +64,9 @@ public sealed partial class Document
         foreach (var (flow, slotStart, slotEnd) in te.pendingFlows)
         {
             if (!flow.TryGetParagraphPosition(h, out var pos)) continue;
-            var hp = pos.slot < 0 ? flow.CurrentPage
-                : slotStart + pos.slot < slotEnd ? te.overflowPageRefs[slotStart + pos.slot] : null;
+            Page? hp = null;
+            if (pos.slot < 0) hp = flow.CurrentPage;
+            else if (slotStart + pos.slot < slotEnd) hp = te.overflowPageRefs[slotStart + pos.slot];
             return hp is not null ? Pages.IndexOf(hp) : 0;
         }
         return 0;
@@ -81,8 +82,9 @@ public sealed partial class Document
         if (te.tocPage.TocInfo?.IsCountTocPages == false)
         {
             var chainEnd = te.tocPageIdxFinal + te.tocContPages.Count;
-            var sub = te.destIdx > chainEnd ? te.tocContPages.Count + 1
-                : te.destIdx >= te.tocPageIdxFinal ? te.destIdx - te.tocPageIdxFinal + 1 : 0;
+            int sub = 0;
+            if (te.destIdx > chainEnd) sub = te.tocContPages.Count + 1;
+            else if (te.destIdx >= te.tocPageIdxFinal) sub = te.destIdx - te.tocPageIdxFinal + 1;
             if (te.destIdx - sub >= 1) displayIdx = te.destIdx - sub;
         }
         return displayIdx.ToString(System.Globalization.CultureInfo.InvariantCulture);

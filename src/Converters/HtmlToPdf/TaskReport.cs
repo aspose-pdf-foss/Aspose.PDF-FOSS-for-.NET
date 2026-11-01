@@ -67,13 +67,17 @@ internal static partial class HtmlToPdfConverter
     {
         public string Label = "";
         public string PillText = "";
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<string> Lines = new();
+#pragma warning restore S3218
     }
 
     private sealed class TrCard
     {
         public string Title = "";
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<List<TrCol>> Rows = new();
+#pragma warning restore S3218
         public List<(string Heading, List<TrCard> Tasks)> Sections = new(); // stages only
     }
 
@@ -94,12 +98,12 @@ internal static partial class HtmlToPdfConverter
             || !tq.html.Contains("g-blockheader", StringComparison.Ordinal))
             return null;
 
-        tq.bodyM = Regex.Match(tq.html, "<body[^>]*>([\\s\\S]*)</body>", RegexOptions.IgnoreCase);
+        tq.bodyM = SafeRegex.Match(tq.html, "<body[^>]*>([\\s\\S]*)</body>", RegexOptions.IgnoreCase);
         if (!tq.bodyM.Success) return null;
-        tq.body = Regex.Replace(tq.bodyM.Groups[1].Value,
+        tq.body = SafeRegex.Replace(tq.bodyM.Groups[1].Value,
             "<div[^>]*style=\"display:none\"[\\s\\S]*?</div>", "", RegexOptions.IgnoreCase);
 
-        tq.tokens = Regex.Matches(tq.body,
+        tq.tokens = SafeRegex.Matches(tq.body,
             "<div class=\"s-workflow__stage\">"
             + "|<div class=\"s-workflow__task\">"
             + "|<h2 class=\"g-heading\">((?:(?!</h2>)[\\s\\S])*)</h2>"

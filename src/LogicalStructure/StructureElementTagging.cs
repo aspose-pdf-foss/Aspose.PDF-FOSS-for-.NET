@@ -81,9 +81,8 @@ public partial class StructureElement
         {
             var contents = page.Contents;
             contents.EnsureMaterialized();
-            foreach (var op in contents)
-                if (ReferenceEquals(op, bdc))
-                    return page;
+            if (contents.Any(op => ReferenceEquals(op, bdc)))
+                return page;
         }
         return null;
     }

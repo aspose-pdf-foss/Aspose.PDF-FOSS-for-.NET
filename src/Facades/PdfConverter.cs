@@ -35,10 +35,10 @@ public sealed partial class PdfConverter : IDisposable
     /// ceiling renders clamped to it (presenter renders are capped
     /// the same way). int.MaxValue = no clamp, so ordinary renders keep their
     /// requested scale.</summary>
-    internal static int SafeMaxResolution = int.MaxValue;
+    internal static int SafeMaxResolution { get; set; } = int.MaxValue;
 
-    private int ResX => Math.Min((int)Resolution.X, SafeMaxResolution);
-    private int ResY => Math.Min((int)Resolution.Y, SafeMaxResolution);
+    private int ResX => Math.Min(Resolution.X, SafeMaxResolution);
+    private int ResY => Math.Min(Resolution.Y, SafeMaxResolution);
 
     /// <summary>Owner password used when binding encrypted PDFs.</summary>
     public string? Password { get; set; }
@@ -145,6 +145,7 @@ public sealed partial class PdfConverter : IDisposable
     public void DoConvert()
     {
         if (_document is null) throw new InvalidOperationException("No document bound. Call BindPdf first.");
+        LayOutBoundXfaForm();
         _currentPage = StartPage;
         _converted = true;
     }
@@ -178,13 +179,6 @@ public sealed partial class PdfConverter : IDisposable
 
         var device = CreateDevice(format);
         return device.Process(page);
-    }
-
-    // The iterator initialises implicitly inside GetNextImage
-    // when BindPdf → GetNextImage is called without an explicit DoConvert.
-    private void EnsureConverted()
-    {
-        if (!_converted && _document is not null) DoConvert();
     }
 
     /// <summary>
@@ -324,61 +318,6 @@ public sealed partial class PdfConverter : IDisposable
         GetNextImage(outputStream, pageSize, MapFormat(format));
     }
 
-    // EMF is a Windows GDI+ vector format; the recorder below exists only there.
-    // PlatformNotSupportedException, not a plain NotSupportedException: the feature is
-    // absent because of the HOST, not because of the arguments. It derives from
-    // NotSupportedException, so a caller catching that still catches this.
-    private static PlatformNotSupportedException EmfUnsupported()
-        => new("PdfConverter: EMF output requires Windows (GDI+ metafiles).");
-
-    /// <summary>EMF output at an explicit pixel size: rasterise the page to that size and
-    /// record the raster into a GDI+ enhanced metafile.</summary>
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private void GetNextImageAsEmf(Stream outputStream, int imageWidth, int imageHeight)
-    {
-        using var png = new MemoryStream();
-        GetNextImage(png, SdiImageFormat.Png, imageWidth, imageHeight, quality: 90);
-        png.Position = 0;
-        RecordPngAsMetafile(png, outputStream);
-    }
-
-    /// <summary>EMF output: rasterise the page and record the raster into a
-    /// GDI+ enhanced metafile (Windows-only, like every EMF consumer).</summary>
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private void GetNextImageAsEmf(Stream outputStream, PageSize? pageSize)
-    {
-        using var png = new MemoryStream();
-        if (pageSize is not null)
-            GetNextImage(png, pageSize, PdfConverterImageFormat.Png);
-        else
-            GetNextImage(png, PdfConverterImageFormat.Png);
-        png.Position = 0;
-        RecordPngAsMetafile(png, outputStream);
-    }
-
-    /// <summary>Play a rendered PNG into a GDI+ enhanced metafile written to
-    /// <paramref name="outputStream"/>.</summary>
-    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static void RecordPngAsMetafile(Stream png, Stream outputStream)
-    {
-        using var bmp = new System.Drawing.Bitmap(png);
-        using var refBmp = new System.Drawing.Bitmap(1, 1);
-        using var refG = System.Drawing.Graphics.FromImage(refBmp);
-        var hdc = refG.GetHdc();
-        try
-        {
-            using var mf = new System.Drawing.Imaging.Metafile(outputStream, hdc,
-                new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height),
-                System.Drawing.Imaging.MetafileFrameUnit.Pixel);
-            using var g = System.Drawing.Graphics.FromImage(mf);
-            g.DrawImage(bmp, 0, 0, bmp.Width, bmp.Height);
-        }
-        finally
-        {
-            refG.ReleaseHdc(hdc);
-        }
-    }
-
     /// <summary>
     /// Render the next page at an explicit <see cref="PageSize"/> with the supplied image format
     /// and a JPEG quality hint, to stream. Quality is ignored for non-JPEG outputs.
@@ -483,6 +422,77 @@ public sealed partial class PdfConverter : IDisposable
         device.Process(page, output);
     }
 
+    // A form a viewer has to build from XFA packets is laid out before its first page is
+    // converted; an end page left at the bound document's last page moves to the form's.
+    private void LayOutBoundXfaForm()
+    {
+        if (_document is null || !_document.AwaitsXfaLayout) return;
+        var endsAtLastPage = EndPage == _document.PageCount;
+        if (_document.LayOutXfaForm() && endsAtLastPage) EndPage = _document.PageCount;
+    }
+
+    // The iterator initialises implicitly inside GetNextImage
+    // when BindPdf → GetNextImage is called without an explicit DoConvert.
+    private void EnsureConverted()
+    {
+        if (!_converted && _document is not null) DoConvert();
+    }
+
+    // EMF is a Windows GDI+ vector format; the recorder below exists only there.
+    // PlatformNotSupportedException, not a plain NotSupportedException: the feature is
+    // absent because of the HOST, not because of the arguments. It derives from
+    // NotSupportedException, so a caller catching that still catches this.
+    private static PlatformNotSupportedException EmfUnsupported()
+        => new("PdfConverter: EMF output requires Windows (GDI+ metafiles).");
+
+    /// <summary>EMF output at an explicit pixel size: rasterise the page to that size and
+    /// record the raster into a GDI+ enhanced metafile.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private void GetNextImageAsEmf(Stream outputStream, int imageWidth, int imageHeight)
+    {
+        using var png = new MemoryStream();
+        GetNextImage(png, SdiImageFormat.Png, imageWidth, imageHeight, quality: 90);
+        png.Position = 0;
+        RecordPngAsMetafile(png, outputStream);
+    }
+
+    /// <summary>EMF output: rasterise the page and record the raster into a
+    /// GDI+ enhanced metafile (Windows-only, like every EMF consumer).</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private void GetNextImageAsEmf(Stream outputStream, PageSize? pageSize)
+    {
+        using var png = new MemoryStream();
+        if (pageSize is not null)
+            GetNextImage(png, pageSize, PdfConverterImageFormat.Png);
+        else
+            GetNextImage(png, PdfConverterImageFormat.Png);
+        png.Position = 0;
+        RecordPngAsMetafile(png, outputStream);
+    }
+
+    /// <summary>Play a rendered PNG into a GDI+ enhanced metafile written to
+    /// <paramref name="outputStream"/>.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void RecordPngAsMetafile(Stream png, Stream outputStream)
+    {
+        using var bmp = new System.Drawing.Bitmap(png);
+        using var refBmp = new System.Drawing.Bitmap(1, 1);
+        using var refG = System.Drawing.Graphics.FromImage(refBmp);
+        var hdc = refG.GetHdc();
+        try
+        {
+            using var mf = new System.Drawing.Imaging.Metafile(outputStream, hdc,
+                new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height),
+                System.Drawing.Imaging.MetafileFrameUnit.Pixel);
+            using var g = System.Drawing.Graphics.FromImage(mf);
+            g.DrawImage(bmp, 0, 0, bmp.Width, bmp.Height);
+        }
+        finally
+        {
+            refG.ReleaseHdc(hdc);
+        }
+    }
+
     // Guid comparison avoids CA1416 (SDC types are marked windows-only, but their
     // static Guid values match across platforms).
     private static readonly Guid _emfGuid  = new("b96b3cac-0728-11d3-9d7b-0000f81ef32e");
@@ -512,7 +522,9 @@ public sealed partial class PdfConverter : IDisposable
         // The page iterator refuses TIFF output (every caller of this mapping is a
         // GetNextImage overload): multi-frame TIFF goes through SaveAsTIFF instead.
         if (g == _tiffGuid)
+#pragma warning disable S112 // public API: the exception type callers catch
             throw new Exception($"Image format {format} is not supported. SaveAsTIFF methods should be used in order to generate Tiff files.");
+#pragma warning restore S112
         if (g == _gifGuid) return PdfConverterImageFormat.Gif;
         throw new NotSupportedException($"PdfConverter: image format {format} is not supported.");
     }
@@ -550,18 +562,6 @@ public sealed partial class PdfConverter : IDisposable
         var devRes = new Resolution(ResX, ResY);
         var device = new TiffDevice(devRes, settings ?? new TiffSettings());
         device.Process(_document, StartPage, EffectiveEndPage, outputStream);
-    }
-
-    /// <summary>EndPage, defaulted to the last page when unset (0) and clamped to it
-    /// otherwise: a range set past the end of the document (EndPage 20 on 16 pages)
-    /// stops at the last page rather than asking the device for a page that is not there.</summary>
-    private int EffectiveEndPage
-    {
-        get
-        {
-            var last = _document?.PageCount ?? 0;
-            return EndPage > 0 ? Math.Min(EndPage, last) : last;
-        }
     }
 
     /// <summary>
@@ -662,6 +662,19 @@ public sealed partial class PdfConverter : IDisposable
         SaveAsTIFF(outputStream, w, h, settings);
     }
 
+    /// <summary>EndPage, defaulted to the last page when unset (0) and clamped to it
+    /// otherwise: a range set past the end of the document (EndPage 20 on 16 pages)
+    /// stops at the last page rather than asking the device for a page that is not there.</summary>
+    private int EffectiveEndPage
+    {
+        get
+        {
+            LayOutBoundXfaForm();
+            var last = _document?.PageCount ?? 0;
+            return EndPage > 0 ? Math.Min(EndPage, last) : last;
+        }
+    }
+
     private (int width, int height) PageSizeToPixels(PageSize pageSize)
     {
         var w = (int)Math.Round(pageSize.Width * ResX / 72.0);
@@ -749,7 +762,7 @@ public sealed partial class PdfConverter : IDisposable
             {
                 case ImageMergeMode.Vertical:
                     outW = 0; outH = 0;
-                    foreach (var i in inputs) { if (i.Width > outW) outW = i.Width; outH += i.Height; }
+                    foreach (var i in inputs) { if (i.Width > outW) { outW = i.Width; } outH += i.Height; }
                     break;
                 case ImageMergeMode.Horizontal:
                     outW = 0; outH = 0;
@@ -757,7 +770,8 @@ public sealed partial class PdfConverter : IDisposable
                     break;
                 case ImageMergeMode.Center:
                     outW = 0; outH = 0;
-                    foreach (var i in inputs) { if (i.Width > outW) outW = i.Width; if (i.Height > outH) outH = i.Height; }
+                    foreach (var i in inputs) { if (i.Width > outW) outW = i.Width;
+                    if (i.Height > outH) outH = i.Height; }
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(mergeMode));

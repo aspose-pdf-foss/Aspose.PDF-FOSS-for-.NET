@@ -13,43 +13,7 @@ public partial class Annotation
         if (rectArr is not null && rectArr.Count >= 4)
         {
             var rect = Rectangle.FromPdfArray(rectArr);
-
-            // Per PDF 32000 §12.5.5 the appearance is placed by mapping the
-            // *transformed* appearance box (BBox corners run through the form's
-            // /Matrix, then their upright bounding box) onto the annotation /Rect —
-            // NOT the raw BBox. Ignoring /Matrix mis-places any appearance whose
-            // Matrix is not the identity (e.g. a Line/callout leader whose Matrix
-            // translates its BBox to the origin), drawing it at the wrong spot.
-            var bboxArr = _reader.Resolve(af.appearanceStream!.Dict!.Get("BBox")) as PdfArray;
-            double bboxX = 0, bboxY = 0, bboxW = rect.Width, bboxH = rect.Height;
-            if (bboxArr is { Count: >= 4 })
-            {
-                var bbox = Rectangle.FromPdfArray(bboxArr);
-                var mtx = _reader.Resolve(af.appearanceStream.Dict.Get("Matrix")) as PdfArray;
-                double ma = 1, mb = 0, mc = 0, md = 1, me = 0, mf = 0;
-                if (mtx is { Count: >= 6 })
-                {
-                    ma = PdfArrayHelper.GetDouble(mtx, 0); mb = PdfArrayHelper.GetDouble(mtx, 1);
-                    mc = PdfArrayHelper.GetDouble(mtx, 2); md = PdfArrayHelper.GetDouble(mtx, 3);
-                    me = PdfArrayHelper.GetDouble(mtx, 4); mf = PdfArrayHelper.GetDouble(mtx, 5);
-                }
-                // Transform the four BBox corners and take their bounding box.
-                double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
-                foreach (var (cx, cy) in new[] { (bbox.LLX, bbox.LLY), (bbox.URX, bbox.LLY), (bbox.URX, bbox.URY), (bbox.LLX, bbox.URY) })
-                {
-                    double px = ma * cx + mc * cy + me;
-                    double py = mb * cx + md * cy + mf;
-                    if (px < minX) minX = px; if (px > maxX) maxX = px;
-                    if (py < minY) minY = py; if (py > maxY) maxY = py;
-                }
-                bboxX = minX; bboxY = minY;
-                bboxW = maxX - minX; bboxH = maxY - minY;
-            }
-
-            var sx = bboxW > 0 ? rect.Width / bboxW : 1.0;
-            var sy = bboxH > 0 ? rect.Height / bboxH : 1.0;
-            var tx = rect.LLX - bboxX * sx;
-            var ty = rect.LLY - bboxY * sy;
+            var (sx, sy, tx, ty) = FitToRect(af.appearanceStream!, rect);
 
             // When the appearance is itself a Form XObject (the typical case for
             // Ink, Stamp, FreeText, ...), preserve it as a named XForm in the
@@ -58,7 +22,7 @@ public partial class Annotation
             // own BBox/Matrix/Resources contracts intact — visual output is
             // unchanged but tests can still inspect the appearance stream's
             // operators via Resources.Forms[name].
-            var isFormXobject = af.appearanceStream.Dict.GetName("Subtype") == "Form";
+            var isFormXobject = af.appearanceStream!.Dict.GetName("Subtype") == "Form";
             // Flatten removes the annotation, and with it the /CA the renderer
             // would have applied — bake the opacity into the stamped content via
             // a page-level ExtGState instead.
@@ -100,5 +64,49 @@ public partial class Annotation
 
             af.pageDict!.Set("Contents", new PdfStream(new PdfDictionary(), combined));
         }
+    }
+
+    /// <summary>The scale and offset that place an appearance form on a rectangle (PDF 32000 §12.5.5).</summary>
+    private protected (double sx, double sy, double tx, double ty) FitToRect(PdfStream appearance, Rectangle rect)
+    {
+        // Per PDF 32000 §12.5.5 the appearance is placed by mapping the
+        // *transformed* appearance box (BBox corners run through the form's
+        // /Matrix, then their upright bounding box) onto the annotation /Rect —
+        // NOT the raw BBox. Ignoring /Matrix mis-places any appearance whose
+        // Matrix is not the identity (e.g. a Line/callout leader whose Matrix
+        // translates its BBox to the origin), drawing it at the wrong spot.
+        var bboxArr = _reader.Resolve(appearance.Dict.Get("BBox")) as PdfArray;
+        double bboxX = 0, bboxY = 0, bboxW = rect.Width, bboxH = rect.Height;
+        if (bboxArr is { Count: >= 4 })
+        {
+            var bbox = Rectangle.FromPdfArray(bboxArr);
+            var mtx = _reader.Resolve(appearance.Dict.Get("Matrix")) as PdfArray;
+            double ma = 1, mb = 0, mc = 0, md = 1, me = 0, mf = 0;
+            if (mtx is { Count: >= 6 })
+            {
+                ma = PdfArrayHelper.GetDouble(mtx, 0); mb = PdfArrayHelper.GetDouble(mtx, 1);
+                mc = PdfArrayHelper.GetDouble(mtx, 2); md = PdfArrayHelper.GetDouble(mtx, 3);
+                me = PdfArrayHelper.GetDouble(mtx, 4); mf = PdfArrayHelper.GetDouble(mtx, 5);
+            }
+            // Transform the four BBox corners and take their bounding box.
+            double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+            foreach (var (cx, cy) in new[] { (bbox.LLX, bbox.LLY), (bbox.URX, bbox.LLY), (bbox.URX, bbox.URY), (bbox.LLX, bbox.URY) })
+            {
+                double px = ma * cx + mc * cy + me;
+                double py = mb * cx + md * cy + mf;
+                if (px < minX) minX = px;
+                if (px > maxX) maxX = px;
+                if (py < minY) minY = py;
+                if (py > maxY) maxY = py;
+            }
+            bboxX = minX; bboxY = minY;
+            bboxW = maxX - minX; bboxH = maxY - minY;
+        }
+
+        var sx = bboxW > 0 ? rect.Width / bboxW : 1.0;
+        var sy = bboxH > 0 ? rect.Height / bboxH : 1.0;
+        var tx = rect.LLX - bboxX * sx;
+        var ty = rect.LLY - bboxY * sy;
+        return (sx, sy, tx, ty);
     }
 }

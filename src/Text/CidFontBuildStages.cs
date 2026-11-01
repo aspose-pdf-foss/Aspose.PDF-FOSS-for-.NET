@@ -27,12 +27,17 @@ internal sealed partial class CidFontInfo
         }
     }
 
+    private const int VerticalWritingMode = 1;
+
     /// <summary>The stages of the CID font build: the embedded CMap read and the descendant font read.</summary>
     private static void ReadEmbeddedCMap(CidFontBuildState cb)
     {
         try
         {
             var cmapBytes = cb.reader.DecodeStream(cb.encStream!);
+            // An embedded CMap says it writes vertically in its stream dictionary (/WMode 1);
+            // only a predefined CMap says it in its name.
+            cb.verticalCMap = cb.encStream!.Dict.GetInt("WMode") == VerticalWritingMode;
             if (!cb.isTwoByte)
                 cb.isTwoByte = CMapHasTwoByteCodespace(cmapBytes);
             cb.singleByteCMap = !cb.isTwoByte && CMapHasOnlySingleByteCodespace(cmapBytes);
@@ -42,6 +47,6 @@ internal sealed partial class CidFontInfo
             // of CID 4 via the CMap's `<0046>4` entry).
             cb.cmapCodeToCid = ParseCMapCodeToCid(cmapBytes);
         }
-        catch { }
+        catch { /* an embedded CMap that does not parse leaves the codes mapped as CIDs */ }
     }
 }

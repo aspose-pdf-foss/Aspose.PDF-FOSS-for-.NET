@@ -20,7 +20,9 @@ internal static partial class Jbig2Encoder
         private uint _c;
         private int _ct = 12;
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         public void Encode(ContextSet contexts, int context, bool bit)
+#pragma warning restore S3218
         {
             var index = contexts.State[context];
             var qe = Jbig2QmStates.QeTable[index];
@@ -117,7 +119,9 @@ internal static partial class Jbig2Encoder
             (int.MaxValue, 0b11111, 5, 4436, 32),
         ];
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         public void Encode(int? value)
+#pragma warning restore S3218
         {
             _previous = 1;
             if (value is not { } v)
@@ -156,7 +160,9 @@ internal static partial class Jbig2Encoder
     {
         private readonly ContextSet _contexts = new(1 << (bits + 1));
 
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         public void Encode(int id)
+#pragma warning restore S3218
         {
             var previous = 1;
             for (var i = bits - 1; i >= 0; i--)

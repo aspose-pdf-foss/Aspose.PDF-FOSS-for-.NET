@@ -60,9 +60,11 @@ public class DateField : TextBoxField
         // A null page dereferences here — the facade contract surfaces the
         // NullReferenceException rather than validating the argument.
         var document = page.Reader.OwnerDocument
+#pragma warning disable S112 // public API: the reference throws this type here
             ?? throw new System.NullReferenceException("The page is not attached to a document.");
+#pragma warning restore S112
 
-        var format = string.IsNullOrEmpty(DateFormat) ? "dd/MM/yyyy" : DateFormat!;
+        var format = string.IsNullOrEmpty(DateFormat) ? "dd/MM/yyyy" : DateFormat;
         // The calendar bootstrap: enough of the Acrobat-side contract to key the
         // script by field and format; viewers with full calendar support replace
         // this body with their own implementation.

@@ -40,6 +40,5 @@ private sealed class FormXObjectDrawState
     public RenderContext ctx = default!;
     public PdfStream formStream = default!;
     public GraphicsState state = default!;
-    public Dictionary<string, PdfDictionary>? extGStates = null;
 }
 }

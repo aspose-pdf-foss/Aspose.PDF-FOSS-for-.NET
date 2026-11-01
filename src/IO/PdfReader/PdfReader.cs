@@ -37,6 +37,8 @@ internal sealed partial class PdfReader
     internal void ReleaseBuffers()
     {
         _data = Array.Empty<byte>();
+        _headerIndex = null;
+        ForgetDecoded();
         _parser.ReleaseBuffers();
         _cache.Clear();
         _objStmCache.Clear();
@@ -93,6 +95,22 @@ internal sealed partial class PdfReader
     }
 
     /// <summary>
+    /// Open an encrypted PDF with a password. Throws if the password is incorrect.
+    /// </summary>
+    public static PdfReader FromBytes(byte[] data, string password)
+    {
+        return FromBytes(data, password, new PdfReaderOptions());
+    }
+
+    public static PdfReader FromBytes(byte[] data, string password, PdfReaderOptions options)
+    {
+        var reader = FromBytes(data, options);
+        reader.InitDecryptor(password);
+        reader.Password = password;
+        return reader;
+    }
+
+    /// <summary>
     /// Opens a file without believing its cross-reference table: every object is
     /// found by sweeping the whole file for its own header instead.
     ///
@@ -107,22 +125,6 @@ internal sealed partial class PdfReader
         options ??= new PdfReaderOptions();
         var reader = new PdfReader(data, RecoverXref(data), options);
         reader._parser.LengthResolver = reader.ResolveLengthIndirectRef;
-        return reader;
-    }
-
-    /// <summary>
-    /// Open an encrypted PDF with a password. Throws if the password is incorrect.
-    /// </summary>
-    public static PdfReader FromBytes(byte[] data, string password)
-    {
-        return FromBytes(data, password, new PdfReaderOptions());
-    }
-
-    public static PdfReader FromBytes(byte[] data, string password, PdfReaderOptions options)
-    {
-        var reader = FromBytes(data, options);
-        reader.InitDecryptor(password);
-        reader.Password = password;
         return reader;
     }
 
@@ -209,7 +211,7 @@ internal sealed partial class PdfReader
         if (!_declaredXrefProbed)
         {
             _declaredXrefProbed = true;
-            try { _declaredXref = XRefTable.ReadLastDeclaredClassic(_data); } catch { }
+            try { _declaredXref = XRefTable.ReadLastDeclaredClassic(_data); } catch { /* a declared xref table that does not read means no declared table to check against */ }
         }
         if (_declaredXref is null) return true;
         if (_declaredXref.GetEntry(objNum) is not { InUse: true, IsCompressed: false } entry)
@@ -271,32 +273,29 @@ internal sealed partial class PdfReader
                 }
                 catch { /* recovery failed — fall through to throw */ }
             }
-            else if (_catalog is not null)
+            // Catalog resolved but may be a garbage dict — validate it has /Type or /Pages
+            else if (_catalog is not null && !_catalog.ContainsKey("Pages") && _catalog.GetName("Type") != "Catalog")
             {
-                // Catalog resolved but may be a garbage dict — validate it has /Type or /Pages
-                if (!_catalog.ContainsKey("Pages") && _catalog.GetName("Type") != "Catalog")
+                // Invalid catalog — clear and retry with recovery
+                _catalog = null;
+                if (_options.RepairXref)
                 {
-                    // Invalid catalog — clear and retry with recovery
-                    _catalog = null;
-                    if (_options.RepairXref)
+                    try
                     {
-                        try
+                        var recovered = RecoverXref(_data);
+                        foreach (var kvp in recovered.Entries)
+                            _xref.SetEntry(kvp.Key, kvp.Value);
+                        _xref.RecoveredByScan = true;
+                        _cache.Clear();
+                        _objStmCache.Clear();
+                        _catalog = ResolveDict(rootRef);
+                        if (_catalog is null)
                         {
-                            var recovered = RecoverXref(_data);
-                            foreach (var kvp in recovered.Entries)
-                                _xref.SetEntry(kvp.Key, kvp.Value);
-                            _xref.RecoveredByScan = true;
-                            _cache.Clear();
-                            _objStmCache.Clear();
-                            _catalog = ResolveDict(rootRef);
-                            if (_catalog is null)
-                            {
-                                var recoveredRoot = recovered.Trailer.Get("Root");
-                                _catalog = ResolveDict(recoveredRoot);
-                            }
+                            var recoveredRoot = recovered.Trailer.Get("Root");
+                            _catalog = ResolveDict(recoveredRoot);
                         }
-                        catch { /* recovery failed */ }
                     }
+                    catch { /* recovery failed */ }
                 }
             }
             // A document whose trailer names no usable /Root is not a readable PDF:

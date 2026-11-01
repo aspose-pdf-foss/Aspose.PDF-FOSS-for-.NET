@@ -83,9 +83,10 @@ public sealed partial class TextReplacer
                         }
                         else
                         {
-                            var encoded = EncodeString(newText, rr.currentToUnicode, rr.currentFontDict);
+                            var encoded = EncodeString(newText, rr.currentToUnicode, rr.currentFontDict, reader);
                             WriteStringOperand(rr.result, encoded, str.IsHex);
                             rr.result.Write(" Tj"u8);
+                            RecordFollowerShift(rr, new PdfArray { str }, new PdfArray { new PdfString(encoded) }, reader);
                         }
                         rr.lastWritePos = endPos;
                     }
@@ -151,7 +152,7 @@ public sealed partial class TextReplacer
                         }
                         else
                         {
-                            var encoded = EncodeString(newText, rr.currentToUnicode, rr.currentFontDict);
+                            var encoded = EncodeString(newText, rr.currentToUnicode, rr.currentFontDict, reader);
                             WriteStringOperand(rr.result, encoded, str2.IsHex);
                             rr.result.Write(" '"u8);
                         }
@@ -164,7 +165,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>The text-object and text-matrix operators the target-position test reads.</summary>
-    private void TrackTextMatrix(ReflowReplaceState rr, string op)
+    private static void TrackTextMatrix(ReflowReplaceState rr, string op)
     {
         switch (op)
         {
@@ -215,7 +216,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary>The font, spacing, render-mode and CTM operators, saved and restored with q/Q.</summary>
-    private void TrackGraphicsState(ReflowReplaceState rr, PdfReader reader, string op)
+    private static void TrackGraphicsState(ReflowReplaceState rr, PdfReader reader, string op)
     {
         switch (op)
         {
@@ -337,8 +338,8 @@ public sealed partial class TextReplacer
                                 xobjStream.Dict.Remove("Filter");
                                 xobjStream.Dict.Remove("DecodeParms");
                                 xobjStream.ReplaceData(xobjReplaced);
-                                // ReplaceData only mutates the in-memory stream;
-                                // Save re-emits an existing object solely when it
+                                // ReplaceData only mutates the in-memory stream; Save
+                                // re-emits an existing object solely when it
                                 // is registered dirty, so an unmarked XObject edit
                                 // silently reverts on save.
                                 if (objNum is int xn)

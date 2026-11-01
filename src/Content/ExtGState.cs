@@ -33,6 +33,29 @@ public sealed class ExtGState
     /// <summary>Line join override (LJ), or null if not set.</summary>
     public int? LineJoin { get; init; }
 
+    /// <summary>Whether ca is written even at 1, so the state can set fill drawing opaque again.</summary>
+    private bool WritesFillAlpha { get; init; }
+
+    /// <summary>Whether CA is written even at 1, so the state can set stroke drawing opaque again.</summary>
+    private bool WritesStrokeAlpha { get; init; }
+
+    /// <summary>
+    /// A state that sets only the fill opacity (ca) - written whatever its value, 1 included, so
+    /// applying it makes later fills and text exactly that opaque and leaves the stroke opacity as it was.
+    /// </summary>
+    public static ExtGState FillOpacity(double alpha) =>
+        new() { FillAlpha = Opacity(alpha), WritesFillAlpha = true };
+
+    /// <summary>
+    /// A state that sets only the stroke opacity (CA) - written whatever its value, 1 included, so
+    /// applying it makes later strokes exactly that opaque and leaves the fill opacity as it was.
+    /// </summary>
+    public static ExtGState StrokeOpacity(double alpha) =>
+        new() { StrokeAlpha = Opacity(alpha), WritesStrokeAlpha = true };
+
+    private static double Opacity(double alpha) =>
+        alpha is >= 0 and <= 1 ? alpha : throw new ArgumentOutOfRangeException(nameof(alpha), alpha, "An opacity runs from 0 to 1.");
+
     /// <summary>
     /// Parse an ExtGState from a PDF dictionary.
     /// </summary>
@@ -140,9 +163,9 @@ public sealed class ExtGState
         var dict = new PdfDictionary();
         dict.Set("Type", new PdfName("ExtGState"));
 
-        if (FillAlpha < 1.0)
+        if (FillAlpha < 1.0 || WritesFillAlpha)
             dict.Set("ca", new PdfReal(FillAlpha));
-        if (StrokeAlpha < 1.0)
+        if (StrokeAlpha < 1.0 || WritesStrokeAlpha)
             dict.Set("CA", new PdfReal(StrokeAlpha));
         if (BlendMode != "Normal")
             dict.Set("BM", new PdfName(BlendMode));

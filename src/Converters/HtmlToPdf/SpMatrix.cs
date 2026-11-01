@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -31,8 +32,8 @@ internal static partial class HtmlToPdfConverter
         tableHtml is not null
         && tableHtml.Contains("diagram-sp-topics", StringComparison.Ordinal);
 
-    private static string SpFlat(string s) => Regex.Replace(DecodeEntities(
-        Regex.Replace(s, @"<[^>]+>", "")), @"[ \t\r\n]+", " ").Trim();
+    private static string SpFlat(string s) => SafeRegex.Replace(DecodeEntities(
+        SafeRegex.Replace(s, @"<[^>]+>", "")), @"[ \t\r\n]+", " ").Trim();
 
     private static bool SpIsCjk(char c) => c >= 0x2E80;
 
@@ -65,7 +66,7 @@ internal static partial class HtmlToPdfConverter
         if (headings.Count > 1)
             SpEmitMixed(page, pageHeight, SpFlat(headings[1]), 9.0, mL, SpH6Base);
 
-        var svgM = Regex.Match(tableHtml, @"inline-svg:(\d+)");
+        var svgM = SafeRegex.Match(tableHtml, @"inline-svg:(\d+)");
         if (svgM.Success && int.TryParse(svgM.Groups[1].Value, out var si)
             && si >= 0 && si < inlineSvgs.Count
             && ImageRasterizer.RasterizeSvg(inlineSvgs[si]) is { } png)
@@ -73,18 +74,18 @@ internal static partial class HtmlToPdfConverter
                 mL + SpChartInset, pageHeight - SpChartTop - SpChartH,
                 mL + SpChartInset + SpChartW, pageHeight - SpChartTop));
 
-        var topicsM = Regex.Match(tableHtml,
+        var topicsM = SafeRegex.Match(tableHtml,
             @"diagram-sp-topics[""'][^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase);
         if (!topicsM.Success) return;
         var listX = mL + SpListOff;
-        var h6M = Regex.Match(topicsM.Groups[1].Value, @"<h6[^>]*>([\s\S]*?)</h6>",
+        var h6M = SafeRegex.Match(topicsM.Groups[1].Value, @"<h6[^>]*>([\s\S]*?)</h6>",
             RegexOptions.IgnoreCase);
         if (h6M.Success)
             SpEmitMixed(page, pageHeight, SpFlat(h6M.Groups[1].Value), 9.0, listX, SpListH6Base);
 
         var y = SpLiFirstBase;
         var first = true;
-        foreach (Match li in Regex.Matches(topicsM.Groups[1].Value,
+        foreach (Match li in SafeRegex.Matches(topicsM.Groups[1].Value,
             @"<li[^>]*>([\s\S]*?)</li>", RegexOptions.IgnoreCase))
         {
             var text = SpFlat(li.Groups[1].Value);
@@ -92,30 +93,29 @@ internal static partial class HtmlToPdfConverter
             if (!first)
             {
                 var hasLatin = false;
-                foreach (var c in text)
-                    if (!SpIsCjk(c)) { hasLatin = true; break; }
+                if (text.Any(c => !SpIsCjk(c))) { hasLatin = true; }
                 y += hasLatin ? SpLiPitchLatin : SpLiPitch;
             }
             first = false;
             EmitPositionedRun(page, "F5", 12.0,
                 listX + SpLiIndent - SpLiMarkerOff, pageHeight - y, "•");
-            var line = "";
+            var line = new StringBuilder();
             double w = 0;
             foreach (var ch in text)
             {
                 var cw = SpMeasure(ch.ToString(), SpIsCjk(ch), 12.0);
                 if (w + cw > SpLiWrapW + 1e-6 && line.Length > 0)
                 {
-                    SpEmitMixed(page, pageHeight, line, 12.0, listX + SpLiIndent, y);
+                    SpEmitMixed(page, pageHeight, line.ToString(), 12.0, listX + SpLiIndent, y);
                     y += SpLiPitch;
-                    line = "";
+                    line.Clear();
                     w = 0;
                 }
-                line += ch;
+                line.Append(ch);
                 w += cw;
             }
             if (line.Length > 0)
-                SpEmitMixed(page, pageHeight, line, 12.0, listX + SpLiIndent, y);
+                SpEmitMixed(page, pageHeight, line.ToString(), 12.0, listX + SpLiIndent, y);
         }
     }
 }

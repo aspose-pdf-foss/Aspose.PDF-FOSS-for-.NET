@@ -108,7 +108,7 @@ public sealed class CellSegmentRunsTests
             IsBordersCollapsed = true,
         };
         if (sized) table.SizesColumnsToContent = true;
-        else table.ColumnWidths = columnWidth > 0 ? columnWidth + " 100" : "200 100";
+        else table.ColumnWidths = columnWidth > 0 ? FormattableString.Invariant($"{columnWidth} 100") : "200 100";
         var row = table.Rows.Add();
         var cell = row.Cells.Add();
         cell.VerticalAlignment = VerticalAlignment.Top;

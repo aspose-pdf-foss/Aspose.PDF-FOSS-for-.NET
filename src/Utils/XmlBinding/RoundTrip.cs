@@ -332,9 +332,9 @@ internal static partial class XmlBinding
         ApplyRoundTripParagraph(table, node);
         ApplyRoundTripMargin(node, m => table.Margin = m);
         if (GetAttr(node, "ColumnWidths") is { } widths) table.ColumnWidths = widths;
-        if (GetAttr(node, "RepeatingRowsCount") is { } rrc && int.TryParse(rrc, out var rows))
+        if (GetAttr(node, "RepeatingRowsCount") is { } rrc && int.TryParse(rrc, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rows))
             table.RepeatingRowsCount = rows;
-        if (GetAttr(node, "RepeatingColumnsCount") is { } rcc && int.TryParse(rcc, out var cols))
+        if (GetAttr(node, "RepeatingColumnsCount") is { } rcc && int.TryParse(rcc, NumberStyles.Integer, CultureInfo.InvariantCulture, out var cols))
             table.RepeatingColumnsCount = cols;
         if (GetAttr(node, "Broken") is { } broken && Enum.TryParse<TableBroken>(broken, out var brokenMode))
             table.Broken = brokenMode;
@@ -404,9 +404,9 @@ internal static partial class XmlBinding
     private static void BuildRoundTripCell(Row row, XmlNode node, List<Image> images)
     {
         var cell = row.Cells.Add();
-        if (GetAttr(node, "ColSpan") is { } cs && int.TryParse(cs, out var span) && span > 0)
+        if (GetAttr(node, "ColSpan") is { } cs && int.TryParse(cs, NumberStyles.Integer, CultureInfo.InvariantCulture, out var span) && span > 0)
             cell.ColSpan = span;
-        if (GetAttr(node, "RowSpan") is { } rs && int.TryParse(rs, out var rowSpan) && rowSpan > 0)
+        if (GetAttr(node, "RowSpan") is { } rs && int.TryParse(rs, NumberStyles.Integer, CultureInfo.InvariantCulture, out var rowSpan) && rowSpan > 0)
             cell.RowSpan = rowSpan;
         if (string.Equals(GetAttr(node, "IsNoBorder"), "true", StringComparison.OrdinalIgnoreCase))
             cell.IsNoBorder = true;

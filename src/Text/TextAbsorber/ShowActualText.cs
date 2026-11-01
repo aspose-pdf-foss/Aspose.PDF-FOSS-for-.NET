@@ -28,7 +28,7 @@ public sealed partial class TextAbsorber
             var t3Adv = Type3Advance(tjStr.Value, xs.currentFontDict!, xs.reader, xs.fontSize);
             if (t3Adv >= 0) atAdvW = t3Adv * xs.horizScale;
             CollectType3SpanRun(xs, 
-                DecodeString(tjStr.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine).Length,
+                DecodeString(tjStr.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader).Length,
                 xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx, xs.tmY + xs.localCmTy,
                 xs.fontSize * Math.Abs(xs.tmA), atAdvW * Math.Abs(xs.tmA));
         }

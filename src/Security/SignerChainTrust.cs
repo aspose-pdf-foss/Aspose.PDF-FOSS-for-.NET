@@ -128,9 +128,7 @@ internal static class SignerChainTrust
 
     private static bool InRootStores(string thumbprint)
     {
-        foreach (var c in RootStoreCertificates())
-            if (string.Equals(c.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
+        return RootStoreCertificates().Any(c => string.Equals(c.Thumbprint, thumbprint, StringComparison.OrdinalIgnoreCase));
     }
 
     private static IEnumerable<X509Certificate2> RootStoreCertificates()

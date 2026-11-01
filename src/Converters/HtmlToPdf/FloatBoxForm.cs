@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -76,13 +76,25 @@ internal static partial class HtmlToPdfConverter
         public bool quirks;                                    // the quirks inline-styled claim (see FloatBoxReplaced.cs)
         public Core.PdfIndirectRef? iconRef;                   // the broken-image icon, built on first use
         public FbSheet? sheet;                                 // the styled-sheet claim's cascade and faces (see FloatBoxSheet.cs)
+        public double marginLeft = FbPageMarginX, marginRight = FbPageMarginX;   // the sheet's margins (the caller's own under the column claim)
+        public double marginTop = FbPageMarginTop, marginBottom = FbPageMarginBottom;
+        public bool columns;                                   // the column-row claim (see FloatBoxColumns.cs)
+        public HtmlLoadOptions? options;                       // …its resource loader, for the pictures
+        public List<byte[]>? inlineSvgs;                       // …the drawings lifted out of the markup, by placeholder index
+        public List<FbBox> pictures = new();                   // …the loaded pictures, stamped over the page ops
+        public Dictionary<string, byte[]?> pictureBytes = new(StringComparer.Ordinal);
+        public Stack<FbBox> positioned = new();                // …the positioned boxes open around the walk
+        public double sheetW;                                  // the sheet width of the running layout pass
     }
 
     /// <summary>Render the float-box document, or null when none of the engine's claims holds:
     /// the float-laid sheet, the quirks inline-styled document, the styled sheet.</summary>
     private static Document? TryRenderFloatBoxDocument(ConvertState cv, HtmlLoadOptions? options)
     {
-        var claim = FbClaims(cv) ? "floats" : FbQuirksClaims(cv) ? "quirks" : FbSheetClaims(cv, options) ? "sheet" : null;
+        string? claim = null;
+        if (FbClaims(cv)) claim = "floats";
+        else if (FbQuirksClaims(cv)) claim = "quirks";
+        else if (FbSheetClaims(cv, options)) claim = "sheet";
         if (claim is null) return null;
         FbSheet? styled = null;
         if (claim == "sheet")
@@ -97,8 +109,8 @@ internal static partial class HtmlToPdfConverter
             }
         }
         var css = cv.css ?? new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
-        var cleaned = Regex.Replace(cv.html, @"<(script|style|head)[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase);
-        cleaned = Regex.Replace(cleaned, @"<!--[\s\S]*?-->", "");
+        var cleaned = SafeRegex.Replace(cv.html, @"<(script|style|head)[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase);
+        cleaned = SafeRegex.Replace(cleaned, @"<!--[\s\S]*?-->", "");
         var dom = ParseDom(cleaned);
         var body = FbFindTag(dom, "body") ?? dom;
         var fb = new FbState
@@ -112,14 +124,27 @@ internal static partial class HtmlToPdfConverter
         fb.sheet = styled;
         fb.bodyMarginPt = FbBodyMarginPt(fb, body);
         FbReadAttrRules(fb, cv.html);
-        fb.bandBottom = fb.pageH - FbPageMarginBottom;
-        fb.laterPageStep = fb.bandBottom - FbPageMarginTop;
-        fb.bandTop = FbPageMarginTop + fb.bodyMarginPt;
-        // pass 1 on A4: the rightmost ink sizes the sheet; pass 2 lays out on it
-        FbLayoutDocument(fb, FbA4WidthPt);
-        var ink = FbInkRight(fb.root);
-        var sheet = Math.Max(FbA4WidthPt, ink + FbPageMarginX);
-        if (sheet > FbA4WidthPt + FbEpsilon) FbLayoutDocument(fb, sheet);
+        FbRenderSheets(fb, FbA4WidthPt, growToInk: true);
+        if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_FB") == "1")
+            Console.Error.WriteLine($"[fb] sheet={fb.pageW:0.###} pages={fb.pageObjs.Count} claim={claim}");
+        if (options?.CreateLogicalStructure == true) BuildLogicalStructure(fb.doc, cv.html);
+        return fb.doc;
+    }
+
+    /// <summary>Lay the body out and paint the sheets: pass 1 on the base width, whose rightmost ink
+    /// sizes the sheet when it may grow; pass 2 lays out on the grown sheet.</summary>
+    private static void FbRenderSheets(FbState fb, double baseW, bool growToInk)
+    {
+        fb.bandBottom = fb.pageH - fb.marginBottom;
+        fb.laterPageStep = fb.bandBottom - fb.marginTop;
+        fb.bandTop = fb.marginTop + fb.bodyMarginPt;
+        FbLayoutDocument(fb, baseW);
+        var sheet = baseW;
+        if (growToInk)
+        {
+            sheet = Math.Max(baseW, FbInkRight(fb.root) + fb.marginRight);
+            if (sheet > baseW + FbEpsilon) FbLayoutDocument(fb, sheet);
+        }
         fb.pageW = sheet;
         var pageCount = FbPageOf(fb, Math.Max(fb.root.Y + fb.root.H, FbDeepBottom(fb.root)) - FbEpsilon).page + 1;
         fb.doc = new Document();
@@ -138,9 +163,7 @@ internal static partial class HtmlToPdfConverter
         FbPaintTree(fb, fb.root);
         for (var i = 0; i < pageCount; i++)
             fb.pageObjs[i].AddContentStream(Encoding.ASCII.GetBytes(fb.pages[i].ToString()));
-        if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_FB") == "1")
-            Console.Error.WriteLine($"[fb] ink={ink:0.###} sheet={sheet:0.###} pages={pageCount} claim={claim}");
-        return fb.doc;
+        foreach (var picture in fb.pictures) FbStampPicture(fb, picture);
     }
 
     /// <summary>The quirks inline-styled claim (FloatBoxReplaced.cs), traced like the float one.</summary>
@@ -175,12 +198,12 @@ internal static partial class HtmlToPdfConverter
         if (cv.marginsExplicit || cv.css is null || cv.css.Count == 0) return "margins or no sheet";
         // (a Transitional doctype that names its system identifier is standards mode - probed)
         if (ReadsInQuirksMode(cv.html) && !ReadsInLimitedQuirks(cv.html)) return "quirks";
-        if (Regex.IsMatch(cv.html, @"<(img|iframe|svg|object|embed)\b", RegexOptions.IgnoreCase)) return "replaced content";
-        if (Regex.IsMatch(cv.html, @"style\s*=\s*[""'][^""']*position\s*:\s*(absolute|fixed)", RegexOptions.IgnoreCase)) return "positioned inline";
+        if (SafeRegex.IsMatch(cv.html, @"<(img|iframe|svg|object|embed)\b", RegexOptions.IgnoreCase)) return "replaced content";
+        if (SafeRegex.IsMatch(cv.html, @"style\s*=\s*[""'][^""']*position\s*:\s*(absolute|fixed)", RegexOptions.IgnoreCase)) return "positioned inline";
         var floatRules = 0;
         foreach (var kv in cv.css)
         {
-            if (kv.Value.TryGetValue("position", out var pos) && Regex.IsMatch(pos, @"absolute|fixed", RegexOptions.IgnoreCase)) return "positioned rule " + kv.Key;
+            if (kv.Value.TryGetValue("position", out var pos) && SafeRegex.IsMatch(pos, @"absolute|fixed", RegexOptions.IgnoreCase)) return "positioned rule " + kv.Key;
             if (!kv.Value.TryGetValue("float", out var fl)) continue;
             var side = fl.Trim().ToLowerInvariant();
             if (side == "left" || side == "right") floatRules++;
@@ -193,18 +216,18 @@ internal static partial class HtmlToPdfConverter
     /// media groups dropped, in source order.</summary>
     private static void FbReadAttrRules(FbState fb, string html)
     {
-        foreach (Match block in Regex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
+        foreach (Match block in SafeRegex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
         {
-            var css = FlattenMediaBlocks(Regex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", ""));
-            foreach (Match rule in Regex.Matches(css, @"([^{}]+)\{([^{}]*)\}"))
+            var css = FlattenMediaBlocks(SafeRegex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", ""));
+            foreach (var groups in SafeRegex.Matches(css, @"([^{}]+)\{([^{}]*)\}").Select(rule => rule.Groups))
             {
                 var decls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (Match d in StyleDeclRx.Matches(rule.Groups[2].Value))
-                    decls[d.Groups[1].Value.Trim().ToLowerInvariant()] = d.Groups[2].Value.Trim();
+                foreach (var dGroups in SafeRegex.Matches(StyleDeclRx, groups[2].Value).Select(d => d.Groups))
+                    decls[dGroups[1].Value.Trim().ToLowerInvariant()] = dGroups[2].Value.Trim();
                 if (decls.Count == 0) continue;
-                foreach (var sel in rule.Groups[1].Value.Split(','))
+                foreach (var sel in groups[1].Value.Split(','))
                 {
-                    var m = FbAttrRuleRx.Match(sel.Trim());
+                    var m = SafeRegex.Match(FbAttrRuleRx, sel.Trim());
                     if (m.Success) fb.attrRules.Add((m.Groups["anc"].Value, m.Groups["tag"].Value, m.Groups["type"].Value, decls));
                 }
             }
@@ -214,8 +237,14 @@ internal static partial class HtmlToPdfConverter
     private static void FbTraceBoxes(FbBox box, int depth)
     {
         var n = box.Node;
-        var name = n is null ? "?" : n.Tag + (n.Attrs is not null && n.Attrs.TryGetValue("id", out var id) ? "#" + id : "") + (n.Attrs is not null && n.Attrs.TryGetValue("class", out var cls) ? "." + cls.Replace(' ', '.') : "");
-        var kind = box.IsFloat ? "float" : box.IsInline ? "inline" : box.IsTable ? "table" : "block";
+        string name;
+        if (n is null) name = "?";
+        else
+            name = n.Tag + (n.Attrs is not null && n.Attrs.TryGetValue("id", out var id) ? "#" + id : "") + (n.Attrs is not null && n.Attrs.TryGetValue("class", out var cls) ? "." + cls.Replace(' ', '.') : "");
+        string kind = "block";
+        if (box.IsFloat) kind = "float";
+        else if (box.IsInline) kind = "inline";
+        else if (box.IsTable) kind = "table";
         Console.Error.WriteLine($"[fb2] {new string(' ', depth * 2)}{name} {kind} x={box.X:0.###} y={box.Y:0.###} w={box.W:0.###} h={box.H:0.###} lines={box.Lines.Count} lh={box.St.LineHeightPx:0.##}px px={box.St.Px:0.##}"
             + (box.Lines.Count > 0 ? $" line0: y={box.Lines[0].Y:0.###} above={box.Lines[0].Above:0.###} below={box.Lines[0].Below:0.###}" : ""));
         foreach (var k in box.Kids) FbTraceBoxes(k, depth + 1);
@@ -248,8 +277,9 @@ internal static partial class HtmlToPdfConverter
     /// (page margin + body margin) with the sheet's content width.</summary>
     private static void FbLayoutDocument(FbState fb, double sheetW)
     {
-        var x = FbPageMarginX + fb.bodyMarginPt;
-        var w = sheetW - 2 * FbPageMarginX - 2 * fb.bodyMarginPt;
+        fb.sheetW = sheetW;
+        var x = fb.marginLeft + fb.bodyMarginPt;
+        var w = sheetW - fb.marginLeft - fb.marginRight - 2 * fb.bodyMarginPt;
         var st = FbStyleOf(fb, fb.body, FbRootStyle());
         var bfc = new FbBfc();
         var box = new FbBox { Node = fb.body, St = st, P = new FbBoxProps(), X = x, Y = fb.bandTop, W = w, IsBfc = true };

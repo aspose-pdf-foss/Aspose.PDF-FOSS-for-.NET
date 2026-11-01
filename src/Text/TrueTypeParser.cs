@@ -151,7 +151,7 @@ internal sealed partial class TrueTypeParser
 
     /// <summary>The 258 standard Macintosh glyph names (post table format 2.0,
     /// OpenType §post). Glyph-name indices below 258 reference this set.</summary>
-    private static readonly string[] MacGlyphNames =
+    internal static readonly string[] MacGlyphNames =
     [
         ".notdef", ".null", "nonmarkingreturn", "space", "exclam", "quotedbl",
         "numbersign", "dollar", "percent", "ampersand", "quotesingle", "parenleft",
@@ -290,11 +290,11 @@ internal sealed partial class TrueTypeParser
         for (var g = 0; g < numGlyphs; g++)
         {
             var idx = indices[g];
-            string? name = idx < 258
-                ? (idx < MacGlyphNames.Length ? MacGlyphNames[idx] : null)
-                : (idx - 258 < pool.Count ? pool[idx - 258] : null);
+            string? name;
+            if (idx < 258) name = idx < MacGlyphNames.Length ? MacGlyphNames[idx] : null;
+            else name = idx - 258 < pool.Count ? pool[idx - 258] : null;
             if (!string.IsNullOrEmpty(name) && name != ".notdef")
-                GlyphNames[g] = name!;
+                GlyphNames[g] = name;
         }
     }
 

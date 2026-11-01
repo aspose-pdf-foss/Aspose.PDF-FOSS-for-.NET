@@ -95,7 +95,7 @@ public class FigureElement : Element
             @"|(?<emc>\bEMC\b)" +
             @"|/(?<doname>[\w.\-]+)\s+(?<do>Do)\b",
             System.Text.RegularExpressions.RegexOptions.Compiled |
-            System.Text.RegularExpressions.RegexOptions.Singleline);
+            System.Text.RegularExpressions.RegexOptions.Singleline, RegexLimits.Timeout);
 
     /// <summary>Resolve the figure's image when its /K is (or contains) an MCID that
     /// points into a page content stream, by finding the image XObject painted inside
@@ -104,7 +104,7 @@ public class FigureElement : Element
     {
         foreach (var (mcid, pgOverride) in CollectMcids(k))
         {
-            var page = _reader!.ResolveDict(pgOverride) ?? _reader!.ResolveDict(_dict.Get("Pg"));
+            var page = _reader!.ResolveDict(pgOverride) ?? _reader.ResolveDict(_dict.Get("Pg"));
             if (page is null) continue;
             var img = FindImageInMarkedContent(page, mcid);
             if (img is not null) return img;
@@ -142,20 +142,20 @@ public class FigureElement : Element
         // Track the open marked-content stack; an image painted while the target MCID is
         // open (anywhere on the stack, to allow nested marked content) is the figure's.
         var stack = new List<int>();
-        foreach (System.Text.RegularExpressions.Match m in MarkedContentScanner.Matches(content))
+        foreach (var groups in SafeRegex.Matches(MarkedContentScanner, content).Select(m => m.Groups))
         {
-            if (m.Groups["bdc"].Success)
-                stack.Add(ResolveBdcMcid(m.Groups["props"].Value, properties));
-            else if (m.Groups["bmc"].Success)
+            if (groups["bdc"].Success)
+                stack.Add(ResolveBdcMcid(groups["props"].Value, properties));
+            else if (groups["bmc"].Success)
                 stack.Add(-1);
-            else if (m.Groups["emc"].Success)
+            else if (groups["emc"].Success)
             {
                 if (stack.Count > 0) stack.RemoveAt(stack.Count - 1);
             }
-            else if (m.Groups["do"].Success)
+            else if (groups["do"].Success)
             {
                 if (!stack.Contains(mcid)) continue;
-                var xobj = ResolveXObject(page, m.Groups["doname"].Value);
+                var xobj = ResolveXObject(page, groups["doname"].Value);
                 if (xobj is not null && xobj.Dict.GetName("Subtype") == "Image")
                     return xobj;
             }
@@ -170,7 +170,7 @@ public class FigureElement : Element
         props = props.Trim();
         if (props.StartsWith("<<", StringComparison.Ordinal))
         {
-            var mm = System.Text.RegularExpressions.Regex.Match(props, @"/MCID\s+(\d+)");
+            var mm = SafeRegex.Match(props, @"/MCID\s+(\d+)");
             return mm.Success ? int.Parse(mm.Groups[1].Value) : -1;
         }
         if (props.StartsWith("/", StringComparison.Ordinal) && properties is not null)
@@ -184,7 +184,7 @@ public class FigureElement : Element
     private PdfStream? ResolveXObject(PdfDictionary page, string name)
     {
         var xobjects = _reader!.ResolveDict(GetInheritedResources(page)?.Get("XObject"));
-        return _reader!.ResolveStream(xobjects?.Get(name));
+        return _reader.ResolveStream(xobjects?.Get(name));
     }
 
     /// <summary>The page's /Resources, walking up the /Pages tree when a page inherits
@@ -196,7 +196,7 @@ public class FigureElement : Element
         {
             var res = _reader!.ResolveDict(node.Get("Resources"));
             if (res is not null) return res;
-            node = _reader!.ResolveDict(node.Get("Parent"));
+            node = _reader.ResolveDict(node.Get("Parent"));
         }
         return null;
     }

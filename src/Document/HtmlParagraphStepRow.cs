@@ -19,7 +19,7 @@ public sealed partial class Document
 
     /// <summary>One procedure-step row, verbatim: the body of LayoutProcedureStepRows' row loop with
     /// the measuring helpers only it uses.</summary>
-    private void LayoutStepRow(int prowIdx, List<Converters.HtmlToPdfConverter.StepRow> psRows, HtmlFragment html, FlowLayout flow, Page page, double marginLeft, double marginRight, double marginTop, double marginBottom, double psWrapRight)
+    private void LayoutStepRow(int prowIdx, List<Converters.HtmlToPdfConverter.StepRow> psRows, FlowLayout flow, Page page, double marginLeft, double marginRight, double psWrapRight)
     {
         // Where the baseline sits in a line box: the box's leading is
         // split above and below the face's own content area, so a line
@@ -31,12 +31,11 @@ public sealed partial class Document
         sr.prow = psRows[prowIdx];
         sr.psContentX = marginLeft + 55.5 + sr.prow.IndentPt;
         sr.psBulletX = marginLeft + 1.5 + sr.prow.IndentPt;
-        sr.psRowRight = sr.prow.ContentWidthPt > 0
-            ? sr.psContentX + sr.prow.ContentWidthPt
-            : sr.prow.AckTable
-                ? sr.prow.Landscape ? sr.psContentX + psLandscapeColumnW
-                    : page.Width - psAckTableRightMargin
-                : psWrapRight;
+        if (sr.prow.ContentWidthPt > 0) sr.psRowRight = sr.psContentX + sr.prow.ContentWidthPt;
+        else if (sr.prow.AckTable)
+            sr.psRowRight = sr.prow.Landscape ? sr.psContentX + psLandscapeColumnW
+                : page.LayoutFrameWidth - psAckTableRightMargin;
+        else sr.psRowRight = psWrapRight;
         sr.psLimit = sr.psRowRight - sr.psContentX;
         OpenStepRow(sr, psRows, prowIdx, flow, page);
         LayoutStepRowItems(sr, flow, page, marginRight, psWrapRight);

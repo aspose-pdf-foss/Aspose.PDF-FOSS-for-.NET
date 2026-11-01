@@ -87,17 +87,14 @@ public sealed class OptionalContentProperties
     /// <summary>Find a layer by name.</summary>
     public OptionalContentGroup? FindByName(string name)
     {
-        foreach (var g in _groups)
-        {
-            if (string.Equals(g.Name, name, StringComparison.Ordinal))
-                return g;
-        }
-        return null;
+        return _groups.FirstOrDefault(g => string.Equals(g.Name, name, StringComparison.Ordinal));
     }
 
     /// <summary>All layer names.</summary>
     public IReadOnlyList<string> Names =>
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
         _groups.Select(g => g.Name).ToArray();
+#pragma warning restore S2365
 
     /// <summary>All groups as an enumerable.</summary>
     public IEnumerable<OptionalContentGroup> Groups => _groups;

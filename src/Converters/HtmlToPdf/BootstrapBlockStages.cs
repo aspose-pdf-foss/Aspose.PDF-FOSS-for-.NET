@@ -8,7 +8,7 @@ internal static partial class HtmlToPdfConverter
 // The stages of the bootstrap block parse: the text flush and one token.
     private static void FlushText(BootstrapBlocksState bb)
     {
-        var t = Regex.Replace(DecodeEntities(bb.text.ToString()), @"\s+", " ");
+        var t = SafeRegex.Replace(DecodeEntities(bb.text.ToString()), @"\s+", " ");
         bb.text.Clear();
         if (bb.textTarget == "h2" && t.Trim().Length > 0)
             bb.blocks.Add(new BsHeading { Text = t.Trim() });
@@ -34,12 +34,11 @@ internal static partial class HtmlToPdfConverter
         {
             switch (tag)
             {
-                case "h2": FlushText(bb); bb.textTarget = null; break;
-                case "p": FlushText(bb); if (bb.p is { Runs.Count: > 0 }) bb.blocks.Add(bb.p); bb.p = null; bb.textTarget = null; break;
-                case "td" or "th": FlushText(bb); bb.textTarget = null; break;
-                case "tr": if (bb.row is { Count: > 0 }) bb.table?.Rows.Add(bb.row); bb.row = null; break;
-                case "table": if (bb.table is { Rows.Count: > 0 }) bb.blocks.Add(bb.table); bb.table = null; break;
-                case "button": FlushText(bb); if (bb.p is not null && bb.btn is not null) bb.p.Runs.Add(new BsRun { Button = bb.btn }); bb.btn = null; bb.textTarget = bb.p is not null ? "p" : null; break;
+                case "h2" or "td" or "th": FlushText(bb); bb.textTarget = null; break;
+                case "p": FlushText(bb); if (bb.p is { Runs.Count: > 0 }) { bb.blocks.Add(bb.p); } bb.p = null; bb.textTarget = null; break;
+                case "tr": if (bb.row is { Count: > 0 }) { bb.table?.Rows.Add(bb.row); } bb.row = null; break;
+                case "table": if (bb.table is { Rows.Count: > 0 }) { bb.blocks.Add(bb.table); } bb.table = null; break;
+                case "button": FlushText(bb); if (bb.p is not null && bb.btn is not null) { bb.p.Runs.Add(new BsRun { Button = bb.btn }); } bb.btn = null; bb.textTarget = bb.p is not null ? "p" : null; break;
                 case "a" when bb.linkDepth > 0:
                     bb.linkDepth--;
                     // a link styled as a button closes like a <button>

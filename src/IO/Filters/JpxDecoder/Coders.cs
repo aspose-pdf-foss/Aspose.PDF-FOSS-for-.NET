@@ -8,7 +8,11 @@ internal static partial class JpxDecoder
     private sealed class Tier1
     {
         private readonly int _w, _h, _orient;
-        public readonly int[] Coeff;     // signed magnitude per sample (row-major, w*h)
+        /// <summary>The decoded coefficients (row-major, w*h) in HALF units: twice the magnitude its decoded bit-planes
+        /// give, plus the midpoint of what the planes left undecoded hold (ISO 15444-1 E.1.1.2, r = 1/2), signed.
+        /// A code-block truncated above its last plane is reconstructed in the middle of its interval rather than
+        /// at its low edge, which lost contrast and detail in every lossy image.</summary>
+        public readonly int[] Coeff;
 
         // bordered state arrays (w+2)*(h+2), index (y+1)*(w+2)+(x+1)
         private readonly int _sw;
@@ -17,6 +21,7 @@ internal static partial class JpxDecoder
         private readonly byte[] _vis;    // visited in significance pass this bitplane
         private readonly byte[] _ref;    // refined at least once
         private readonly int[] _mag;     // accumulating magnitude
+        private readonly byte[] _low;    // the lowest bit-plane decoded for a significant sample
         private readonly bool _segSym;   // SEGMARK: a segmentation symbol ends each cleanup pass
 
         private Mq _mq = null!;
@@ -32,6 +37,7 @@ internal static partial class JpxDecoder
             _vis = new byte[_sw * (h + 2)];
             _ref = new byte[_sw * (h + 2)];
             _mag = new int[w * h];
+            _low = new byte[w * h];
         }
 
         private int Idx(int x, int y) => (y + 1) * _sw + (x + 1);
@@ -60,7 +66,10 @@ internal static partial class JpxDecoder
                 {
                     int m = _mag[y * _w + x];
                     if (m == 0) { Coeff[y * _w + x] = 0; continue; }
-                    Coeff[y * _w + x] = _sgn[Idx(x, y)] != 0 ? -m : m;
+                    // Twice the magnitude plus half of the lowest decoded plane's step, both doubled.
+                    long half = (2L * m) | (1L << _low[y * _w + x]);
+                    int c = (int)Math.Min(int.MaxValue, half);
+                    Coeff[y * _w + x] = _sgn[Idx(x, y)] != 0 ? -c : c;
                 }
         }
 
@@ -76,12 +85,16 @@ internal static partial class JpxDecoder
                 int hv = h + v;
                 if (d >= 3) return 8;
                 if (d == 2) return hv >= 1 ? 7 : 6;
-                if (d == 1) return hv >= 2 ? 5 : (hv == 1 ? 4 : 3);
-                return hv >= 2 ? 2 : (hv == 1 ? 1 : 0);
+                if (d == 1) return hv switch { >= 2 => 5, 1 => 4, _ => 3 };
+                return hv switch { >= 2 => 2, 1 => 1, _ => 0 };
             }
             // LL / LH (and HL after swap)
             if (h == 2) return 8;
-            if (h == 1) return v >= 1 ? 7 : (d >= 1 ? 6 : 5);
+            if (h == 1)
+            {
+                if (v >= 1) return 7;
+                return d >= 1 ? 6 : 5;
+            }
             if (v == 2) return 4;
             if (v == 1) return 3;
             if (d >= 2) return 2;
@@ -100,7 +113,7 @@ internal static partial class JpxDecoder
             return (ctx, xorbit);
         }
 
-        private (int result, int xorbit) ScCtx(int hc, int vc)
+        private static (int result, int xorbit) ScCtx(int hc, int vc)
         {
             int xorbit = default;
             // ISO 15444-1 Table D.2
@@ -115,7 +128,11 @@ internal static partial class JpxDecoder
             xorbit = 1; return (13, xorbit); // (-1,-1)
         }
 
-        private int Contrib(int i) => _sig[i] == 0 ? 0 : (_sgn[i] != 0 ? -1 : 1);
+        private int Contrib(int i)
+        {
+            if (_sig[i] == 0) return 0;
+            return _sgn[i] != 0 ? -1 : 1;
+        }
 
         private int MrContext(int x, int y)
         {
@@ -150,8 +167,11 @@ internal static partial class JpxDecoder
                             DecodeSign(x, y);
                             _sig[i] = 1;
                             _mag[y * _w + x] |= val;
+                            _low[y * _w + x] = (byte)bp;
                         }
+#pragma warning disable S4143 // not a blind overwrite: the slot is seeded first, then raised or finalised
                         _vis[i] = 1;
+#pragma warning restore S4143
                     }
         }
 
@@ -166,6 +186,7 @@ internal static partial class JpxDecoder
                         if (_sig[i] == 0 || _vis[i] != 0) continue;
                         int ctx = MrContext(x, y);
                         if (_mq.Decode(ctx) == 1) _mag[y * _w + x] |= val;
+                        _low[y * _w + x] = (byte)bp;
                         _ref[i] = 1;
                     }
         }
@@ -177,7 +198,7 @@ internal static partial class JpxDecoder
                 for (int x = 0; x < _w; x++)
                 {
                     int rows = Math.Min(4, _h - y0);
-                    int y = y0;
+                    int y;
                     // Run-length: all 4 samples insignificant with zero ZC context.
                     if (rows == 4)
                     {
@@ -196,13 +217,14 @@ internal static partial class JpxDecoder
                             DecodeSign(x, y);
                             _sig[i] = 1;
                             _mag[y * _w + x] |= val;
+                            _low[y * _w + x] = (byte)bp;
                             y++;
                             for (; y < y0 + 4; y++)
                             {
                                 int j = Idx(x, y);
                                 if (_sig[j] != 0 || _vis[j] != 0) continue;
                                 int ctx2 = ZcContext(x, y);
-                                if (_mq.Decode(ctx2) == 1) { DecodeSign(x, y); _sig[j] = 1; _mag[y * _w + x] |= val; }
+                                if (_mq.Decode(ctx2) == 1) { DecodeSign(x, y); _sig[j] = 1; _mag[y * _w + x] |= val; _low[y * _w + x] = (byte)bp; }
                             }
                             continue;
                         }
@@ -212,7 +234,7 @@ internal static partial class JpxDecoder
                         int i = Idx(x, y);
                         if (_sig[i] != 0 || _vis[i] != 0) { _vis[i] = 0; continue; }
                         int ctx = ZcContext(x, y);
-                        if (_mq.Decode(ctx) == 1) { DecodeSign(x, y); _sig[i] = 1; _mag[y * _w + x] |= val; }
+                        if (_mq.Decode(ctx) == 1) { DecodeSign(x, y); _sig[i] = 1; _mag[y * _w + x] |= val; _low[y * _w + x] = (byte)bp; }
                     }
                 }
             // SEGMARK (T.88 §D.5): a 4-bit segmentation symbol (the pattern 1010) coded
@@ -271,7 +293,7 @@ internal static partial class JpxDecoder
             {
                 // LPS exchange
                 if (_a < qe) { _a = qe; d = _mps[cx]; _i[cx] = Nmps[idx]; }
-                else { _a = qe; d = 1 - _mps[cx]; if (Sw[idx] != 0) _mps[cx] = 1 - _mps[cx]; _i[cx] = Nlps[idx]; }
+                else { _a = qe; d = 1 - _mps[cx]; if (Sw[idx] != 0) { _mps[cx] = 1 - _mps[cx]; } _i[cx] = Nlps[idx]; }
                 Renorm();
             }
             else
@@ -280,7 +302,7 @@ internal static partial class JpxDecoder
                 if ((_a & 0x8000) == 0)
                 {
                     // MPS exchange
-                    if (_a < qe) { d = 1 - _mps[cx]; if (Sw[idx] != 0) _mps[cx] = 1 - _mps[cx]; _i[cx] = Nlps[idx]; }
+                    if (_a < qe) { d = 1 - _mps[cx]; if (Sw[idx] != 0) { _mps[cx] = 1 - _mps[cx]; } _i[cx] = Nlps[idx]; }
                     else { d = _mps[cx]; _i[cx] = Nmps[idx]; }
                     Renorm();
                 }
@@ -291,7 +313,7 @@ internal static partial class JpxDecoder
 
         private void Renorm()
         {
-            do { if (_ct == 0) ByteIn(); _a <<= 1; _c <<= 1; _ct--; } while ((_a & 0x8000) == 0);
+            do { if (_ct == 0) { ByteIn(); } _a <<= 1; _c <<= 1; _ct--; } while ((_a & 0x8000) == 0);
         }
 
         private static readonly uint[] Qe =

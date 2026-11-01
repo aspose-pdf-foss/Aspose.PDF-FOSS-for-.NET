@@ -40,6 +40,15 @@ private sealed class AxialShadingState
     public byte alpha;
     public string csName = null!;
     public double[] input = null!;
+    // The function's outputs, evaluated in place once the first evaluation has sized it.
+    public double[] output = [];
+    // The colour of the last t evaluated, and of each column's t on the row before: a
+    // gradient along y keeps one t across a row, one along x keeps each column's t across
+    // rows, so the function and tint transform run once per distinct t, not once per pixel.
+    public double lastT = double.NaN;
+    public (byte r, byte g, byte b)? lastRgb;
+    public double[]? colT;
+    public (byte r, byte g, byte b)?[] colRgb = [];
     // A bare `sh` in a MULTI-SPOT ink space (DeviceN, or another tint space resolving
     // to CMYK) is ink laid over the page - a `sh` vignette painted across a photo, say.
     // Composite it with an overprint Multiply so its no-ink end (which converts to

@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Annotations;
 /// connected vertices (PDF 32000 §12.5.6.9).</summary>
 public abstract partial class PolyAnnotation : MarkupAnnotation
 {
-    internal PolyAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
+    private protected PolyAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
     protected PolyAnnotation(Page page, Rectangle rect) : base(page, rect) { }
     protected PolyAnnotation(Document document, Rectangle rect) : base(document, rect) { }
 
@@ -22,8 +22,8 @@ public abstract partial class PolyAnnotation : MarkupAnnotation
             var pts = new Point[arr.Count / 2];
             for (int i = 0; i + 1 < arr.Count; i += 2)
             {
-                double x = arr[i] is PdfReal rx ? rx.Value : arr[i] is PdfInteger ix ? ix.Value : 0;
-                double y = arr[i + 1] is PdfReal ry ? ry.Value : arr[i + 1] is PdfInteger iy ? iy.Value : 0;
+                double x = arr[i] switch { PdfReal rx => rx.Value, PdfInteger ix => ix.Value, _ => 0 };
+                double y = arr[i + 1] switch { PdfReal ry => ry.Value, PdfInteger iy => iy.Value, _ => 0 };
                 pts[i / 2] = new Point(x, y);
             }
             return pts;
@@ -84,6 +84,14 @@ public abstract partial class PolyAnnotation : MarkupAnnotation
         else b.Stroke();
         b.RestoreState();
         SetNormalAppearance(b.Build(), r);
+    }
+
+    /// <summary>A colour set on a path that already has an appearance is drawn: the appearance is
+    /// painted again with it. A path painted for the first time at the save takes every property
+    /// set by then.</summary>
+    private protected override void OnColorChanged()
+    {
+        if (NormalAppearance is not null) UpdateAppearances();
     }
 
     private protected static Rectangle BoundingRect(Point[] vertices)

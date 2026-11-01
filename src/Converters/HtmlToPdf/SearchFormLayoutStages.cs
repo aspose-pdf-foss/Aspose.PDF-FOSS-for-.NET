@@ -62,6 +62,6 @@ internal static partial class HtmlToPdfConverter
         if (!string.IsNullOrEmpty(sm.sf.LinkUrl))
             sm.cv.pendingLinks.Add((sm.cv.flow.page, new Rectangle(lx, lbase - 3,
                 Math.Min(lx + MeasureFaceText("Arial", sm.sf.LinkText!, lf), sm.cv.marginLeft + sm.cv.flow.contentWidth),
-                lbase + lf), sm.sf.LinkUrl!, sm.sf.LinkText));
+                lbase + lf), sm.sf.LinkUrl, sm.sf.LinkText));
     }
 }

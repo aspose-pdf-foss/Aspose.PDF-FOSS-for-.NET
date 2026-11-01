@@ -50,8 +50,8 @@ internal static partial class HtmlToPdfConverter
 
     private static void EmitStepText(StepWalkState ws, string raw)
     {
-        var text = Regex.Replace(DecodeEntities(raw).Replace(' ', ' '), @"\s+", " ");
-        foreach (var piece in Regex.Split(text, "([⃝☐◯⬤])"))
+        var text = SafeRegex.Replace(DecodeEntities(raw).Replace(' ', ' '), @"\s+", " ");
+        foreach (var piece in SafeRegex.Split(text, "([⃝☐◯⬤])"))
         {
             if (piece.Length == 0) continue;
             if (piece is "⃝" or "◯")
@@ -87,13 +87,13 @@ internal static partial class HtmlToPdfConverter
         ws.end = html.IndexOf('>', ws.i);
         if (ws.end < 0) return false;
         ws.tagStr = html[ws.i..(ws.end + 1)];
-        ws.nm = Regex.Match(ws.tagStr, @"^</?\s*([A-Za-z][A-Za-z0-9]*)");
+        ws.nm = SafeRegex.Match(ws.tagStr, @"^</?\s*([A-Za-z][A-Za-z0-9]*)");
         if (!ws.nm.Success) { ws.i = ws.end + 1; return true; }
         ws.tag = ws.nm.Groups[1].Value.ToLowerInvariant();
         ws.isClose = ws.tagStr[1] == '/';
         ws.selfClosed = ws.tagStr.EndsWith("/>", StringComparison.Ordinal);
-        ws.cls = Regex.Match(ws.tagStr, @"class\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase).Groups[2].Value;
-        ws.style = Regex.Match(ws.tagStr, @"style\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase).Groups[2].Value;
+        ws.cls = SafeRegex.Match(ws.tagStr, @"class\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase).Groups[2].Value;
+        ws.style = SafeRegex.Match(ws.tagStr, @"style\s*=\s*(['""])([^'""]*)\1", RegexOptions.IgnoreCase).Groups[2].Value;
 
         // An author's own table in the step content — no widget wrapper around it —
         // still lays out as a grid rather than dissolving into the line stream.

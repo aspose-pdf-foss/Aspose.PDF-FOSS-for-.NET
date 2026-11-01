@@ -731,7 +731,7 @@ internal static class PdfBuilder
         Write("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n");
 
         var encryptOffset = ms.Position;
-        Write($"4 0 obj\n<< /Filter /Standard /V {v} /R {r} /Length {length} /P {permissions} /O <00> /U <00> >>\nendobj\n");
+        Write(FormattableString.Invariant($"4 0 obj\n<< /Filter /Standard /V {v} /R {r} /Length {length} /P {permissions} /O <00> /U <00> >>\nendobj\n"));
 
         var xrefOffset = ms.Position;
         Write("xref\n0 5\n");
@@ -910,7 +910,7 @@ internal static class PdfBuilder
         Write("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
 
         var pageOffset = ms.Position;
-        Write($"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotate} >>\nendobj\n");
+        Write(FormattableString.Invariant($"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotate} >>\nendobj\n"));
 
         var xrefOffset = ms.Position;
         Write("xref\n0 4\n");
@@ -1051,7 +1051,7 @@ internal static class PdfBuilder
         Write($"7 0 obj\n<< /S /URI /URI ({uri}) >>\nendobj\n");
 
         var annotOffset = ms.Position;
-        Write($"6 0 obj\n<< /Type /Annot /Subtype /Link /Rect [{linkLlx} {linkLly} {linkUrx} {linkUry}] /A 7 0 R >>\nendobj\n");
+        Write(FormattableString.Invariant($"6 0 obj\n<< /Type /Annot /Subtype /Link /Rect [{linkLlx} {linkLly} {linkUrx} {linkUry}] /A 7 0 R >>\nendobj\n"));
 
         var pageOffset = ms.Position;
         Write($"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>\nendobj\n");
@@ -1415,7 +1415,7 @@ internal static class PdfBuilder
         return table;
     }
 
-    private static byte[] AssembleTrueTypeFont(Dictionary<string, byte[]> tables)
+    internal static byte[] AssembleTrueTypeFont(Dictionary<string, byte[]> tables)
     {
         var numTables = tables.Count;
         var entrySelector = (int)Math.Floor(Compat.Log2(numTables));

@@ -26,7 +26,7 @@ public sealed partial class PdfSigner
         Array.Copy(sa.fileBytes, (int)sa.byteRange[2], sa.hashInput, (int)sa.byteRange[1], (int)sa.byteRange[3]);
         sa.hash = HashByteRange(sa.hashInput, sa.digest);
 
-        sa.signatureBytes = CreatePkcs7Signature(sa.hash, sa.certificate, sa.digest, sa.options.CustomSignHash);
+        sa.signatureBytes = CreateSignatureContents(sa.hashInput, sa.hash, sa.certificate, sa.digest, sa.options);
 
         if (sa.signatureBytes.Length > sa.contentsSize)
             throw sa.options.AvoidEstimating
@@ -115,6 +115,7 @@ public sealed partial class PdfSigner
             // and the visible appearance content. The field dict's /T is left as-is
             // because signature-name lookup reads it structurally during verify.
             EncryptAppendedDict(sa.appendDecryptor, sa.sigValObjNum, sa.sigValDict);
+            EncryptAppendedDict(sa.appendDecryptor, sa.acroFormObjNum, sa.acroFormDict);
             if (sa.appearanceStreamDict is not null)
                 EncryptAppendedStream(sa.appendDecryptor, sa.appearanceStreamObjNum, sa.appearanceStreamDict);
             if (sa.visBanner is { } encBanner)
@@ -159,8 +160,8 @@ public sealed partial class PdfSigner
         sa.fieldName = ResolveSignatureFieldName(sa.doc, sa.options.FieldName);
 
         sa.maxObj = 0;
-        foreach (var entry in sa.xref.Entries.Values)
-            if (entry.ObjectNumber > sa.maxObj) sa.maxObj = entry.ObjectNumber;
+        foreach (var objectNumber in sa.xref.Entries.Values.Select(entry => entry.ObjectNumber))
+            if (objectNumber > sa.maxObj) sa.maxObj = objectNumber;
         sa.nextObj = sa.maxObj + 1;
 
         sa.sigValObjNum = sa.nextObj++;

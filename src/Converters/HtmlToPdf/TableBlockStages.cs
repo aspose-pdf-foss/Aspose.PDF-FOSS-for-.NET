@@ -14,32 +14,40 @@ internal static partial class HtmlToPdfConverter
         SettleFlowBelowTable(tb, table, flow, profile, marginBottom);
     }
 
+    /// <summary>The top margin a table's continuation slices resume below (0: the sheet edge).</summary>
+    private static double ContinuationTopMargin(Table table, HtmlDocProfile profile, string? bodyCssFace, double marginTop, double pageHeight)
+    {
+        if (bodyCssFace is not null) return marginTop;
+        // Escaped-attr dialect: continuation slices resume at the
+        // page's real top margin (the flow's fresh-page top), not at
+        // the sheet edge.
+        if (profile.escapedAttrDoc) return pageHeight - FreshPageTopY(profile, pageHeight, marginTop);
+        // Chain-dialect documents likewise resume below the top
+        // margin — a spilled report row must not draw at the sheet
+        // edge (the y≈9 artefact).
+        if (profile.docChainRules is not null) return marginTop;
+        // …and the over-declared grid document's continuation
+        // slices resume at the page's top margin too.
+        if (profile.overDeclaredGridDoc) return marginTop;
+        // …and an inline-styled grid's do as well (the Verdana
+        // report resumes 50 pt below the sheet edge).
+        return table.InlineFaceGridRatio > 0 ? marginTop : 0;
+    }
+
     /// <summary>Build the table's page slices, then draw each slice with its graphs and images on its page, clipping a float-band column to one page.</summary>
     private static void PlaceTableSlices(TableBlockState tb, Table table, Block block, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, List<(Page page, byte[] ops)> floatFirstOps, Stack<(double SavedML, double SavedCW, double TopY, double MinEndY, Page StartPage)> bandStack, string? bodyCssFace, double marginBottom, double marginTop, double pageHeight, double pageWidth)
     {
         tb.slices = table.BuildMultiPage(flow.page, flow.y, marginBottom,
-            bodyCssFace is not null ? marginTop
-            // Escaped-attr dialect: continuation slices resume at the
-            // page's real top margin (the flow's fresh-page top), not at
-            // the sheet edge.
-            : profile.escapedAttrDoc ? pageHeight - FreshPageTopY(profile, pageHeight, marginTop)
-            // Chain-dialect documents likewise resume below the top
-            // margin — a spilled report row must not draw at the sheet
-            // edge (the y≈9 artefact).
-            : profile.docChainRules is not null ? marginTop
-            // …and the over-declared grid document's continuation
-            // slices resume at the page's top margin too.
-            : profile.overDeclaredGridDoc ? marginTop
-            // …and an inline-styled grid's do as well (the Verdana
-            // report resumes 50 pt below the sheet edge).
-            : table.InlineFaceGridRatio > 0 ? marginTop
-            : 0);
+            ContinuationTopMargin(table, profile, bodyCssFace, marginTop, pageHeight));
         tb.graphs = table.LastGraphDraws;
         tb.imageDraws = table.LastImageDraws;
         tb.bandClipped = false;
+        var startPage = flow.page;
         if (bandStack.Count > 0 && tb.slices.Count > 1)
         {
             tb.bandClipped = true;
+            // (the controls of the rows the band clips are not drawn either)
+            for (var si = 1; si < table.LastCheckboxDraws.Count; si++) ReseatSpilledCellWidgets(doc, startPage, null, table.LastCheckboxDraws[si], table.LastOptionDraws[si]);
             tb.slices = new List<byte[]> { tb.slices[0] };
             if (tb.graphs.Count > 1) tb.graphs = new List<List<byte[]>> { tb.graphs[0] };
             if (tb.imageDraws.Count > 1)
@@ -51,6 +59,8 @@ internal static partial class HtmlToPdfConverter
             {
                 flow.page = doc.Pages.Add(pageWidth, pageHeight);
                 EnsureFonts(flow.page, docFontDict);
+                // (the controls of the rows a spill page carries stand on it)
+                if (si < table.LastCheckboxDraws.Count) ReseatSpilledCellWidgets(doc, startPage, flow.page, table.LastCheckboxDraws[si], table.LastOptionDraws[si]);
             }
             // A floated table's ops are collected and PREPENDED to its page's
             // content after the flow pass — floats paint first,
@@ -67,8 +77,8 @@ internal static partial class HtmlToPdfConverter
                     foreach (var g in tb.graphs[si]) flow.page.AddContentStream(g);
                 flow.page.AddContentStream(tb.slices[si]);
             }
-            // Cell images (logos, SVG diagrams) recorded by the layout pass;
-            // blit them onto the slice's page at their resolved rectangles.
+            // Cell images (logos, SVG diagrams) recorded by the layout pass; blit
+            // them onto the slice's page at their resolved rectangles.
             if (si < tb.imageDraws.Count)
                 foreach (var (imgData, imgRect) in tb.imageDraws[si])
                     try { flow.page.AddImage(imgData, imgRect); }
@@ -123,6 +133,12 @@ internal static partial class HtmlToPdfConverter
         if ((profile.sectionedReport || (profile.uaGridBoxes)) && uaGridNatW > flow.contentWidth
             && pageWidth - marginLeft - UaPageMarginPt >= uaGridNatW - 1e-3)
             table.UsableWidthOverride = pageWidth - marginLeft - UaPageMarginPt;
+        // A relative offset moves the laid-out box: the width it was given stays.
+        if (TableRelativeShiftPt(tb.fhTableHtml) is not 0 and var relShift)
+        {
+            if (table.UsableWidthOverride <= 0) table.UsableWidthOverride = flow.contentWidth;
+            table.FlowLeftOffset += relShift;
+        }
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_TABLEW") == "1")
             Console.Error.WriteLine($"[tablebox] usable={table.UsableWidthOverride:0.##} left={table.FlowLeftOffset:0.##} natW={tb.renderNatW:0.##} avail={tb.tableAvailW:0.##} cw={flow.contentWidth:0.##} frame={flow.frameContentW:0.##} pref={table.HtmlPreferredWidthPt:0.##}");
         // A form-horizontal row keeps its natural cell widths even when
@@ -131,7 +147,7 @@ internal static partial class HtmlToPdfConverter
         // one line).
         if (tb.fhRow)
         {
-            var fhw = Regex.Match(tb.fhTableHtml, @"data-fhw=""([\d.]+)""");
+            var fhw = SafeRegex.Match(tb.fhTableHtml, @"data-fhw=""([\d.]+)""");
             if (fhw.Success && double.TryParse(fhw.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var fhwPx)
@@ -166,8 +182,8 @@ internal static partial class HtmlToPdfConverter
                 // seat (probed against the drawn border positions —
                 // the generic rise leaves every mid-flow table 0.3 low).
                 + (profile.ptStyledFragment ? PtTableBoxRisePt : 0);
-        // Redline: the flow's last line spent a full 1.125 em box;
-        // a table opens at the paragraph's BOTTOM (DescLead below
+        // Redline: the flow's last line spent a full 1.125 em box; a
+        // table opens at the paragraph's BOTTOM (DescLead below
         // the last baseline) — repay the difference.
         else if (profile.redlineDiffDoc && flow.prevFlowFontSize > 0)
             flow.y += (RedlineLineFactor - RedlineDescLeadEm) * flow.prevFlowFontSize;
@@ -185,14 +201,15 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Move the flow below the placed table: the clipped-band bottom, the pinned-body and sectioned-report gaps, the pending drops the next block spends.</summary>
     private static void SettleFlowBelowTable(TableBlockState tb, Table table, HtmlFlowCursor flow, HtmlDocProfile profile, double marginBottom)
     {
-        flow.y = tb.bandClipped ? marginBottom
-            : tb.slices.Count > 1 ? table.LastPageEndY : flow.y - table.LastRenderedHeight;
+        if (tb.bandClipped) flow.y = marginBottom;
+        else if (tb.slices.Count > 1) flow.y = table.LastPageEndY;
+        else flow.y = flow.y - table.LastRenderedHeight;
         // …and an inline margin-bottom is real space below it (the
         // pinned report's `margin-bottom: 5px` summary grid).
         if (profile.bodyPinnedW > 0
-            && Regex.Match(tb.fhTableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase)
+            && SafeRegex.Match(tb.fhTableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase)
                 is { Success: true } pbTag2
-            && Regex.Match(DivStyleOf(pbTag2.Value),
+            && SafeRegex.Match(DivStyleOf(pbTag2.Value),
                 @"(?<![-\w])margin-bottom\s*:\s*([\d.]+)\s*px",
                 RegexOptions.IgnoreCase) is { Success: true } pbMb
             && double.TryParse(pbMb.Groups[1].Value,
@@ -217,7 +234,11 @@ internal static partial class HtmlToPdfConverter
         flow.pendingTableDrop = profile.formDialectTables || profile.docChainRules is not null
             // the pt-styled fragment's paragraphs seat one line box
             // below each grid the same way
-            || profile.ptStyledFragment;
+            || profile.ptStyledFragment
+            // …and so does a stylesheet form's control grid, the last row's labels and fields standing
+            // where the links after it would have drawn
+            || tb.fieldGrid;
+        flow.pendingTableDropFieldGrid = tb.fieldGrid;
         if (profile.redlineDiffDoc)
         {
             // the cursor sits on the table's bottom edge; the next
@@ -242,8 +263,8 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The `margin-left: N pt` of a table tag, 0 when it states none.</summary>
     private static double WordMailTableMarginLeftPt(string tableHtml)
     {
-        var tag = Regex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value;
-        return Regex.Match(tag, @"margin-left\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase) is { Success: true } m
+        var tag = SafeRegex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value;
+        return SafeRegex.Match(tag, @"margin-left\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase) is { Success: true } m
             && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
     }

@@ -17,6 +17,11 @@ private sealed class RegionTableDetectState
     public double rulesLeft;
     public double rulesTop;
     public double rulesBottom;
+    // The sides the rules leave open, closed by a synthesised boundary.
+    public bool openLeft;
+    public bool openRight;
+    public bool openTop;
+    public bool openBottom;
     // The EDGE-derived boundaries, before any text-cluster inference below.
     // Cell-side validation snaps to these: a text-inferred boundary has no
     // border of its own, so a sub-cell it creates borrows the sides of the

@@ -44,7 +44,9 @@ internal static partial class HtmlToPdfConverter
         bt.pageHeight = pageHeight;
         bt.pageWidth = pageWidth;
         bt.lineIdx = -1;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
     foreach (var line in bt.metrics.lines)
+#pragma warning restore S3267
     {
         if (!WriteBlockTextLine(bt, line)) break;
     }
@@ -54,6 +56,7 @@ internal static partial class HtmlToPdfConverter
     private static bool WriteBlockTextLine(BlockTextState bt, string line)
     {
         bt.lineIdx++;
+        if (DrawsRtlVisually(bt)) line = RtlBlockVisualLine(bt.block, line);
         bt.lineNeedBelow = bt.profile.escapedAttrDoc && bt.block.InlineIconAfter ? SerifDescentRoomPt : bt.metrics.lineHeight;
         // The Word export keeps a paragraph's lines together at the page edge (mso-pagination:
         // widow-orphan on every style): the first line needs room for a second, and the line before
@@ -100,6 +103,25 @@ internal static partial class HtmlToPdfConverter
         // ascent below it. A centered block (text-align:center class) centers its
         // measured line in the content box. Legacy: baseline at the cursor.
         AlignLine(bt, line);
+        if (bt.block.CtlSeat is { } ctlSeat) RecordControlLineSeat(ctlSeat, bt, line);
+        if (!bt.block.CtlStrut && !PaintLine(bt, line)) return false;
+        bt.metrics.cumChar += line.Length + 1;   // +1 for the space consumed at the wrap point
+        // A size-run block steps by the CSS line boxes: this line's descent side and the
+        // next line's ascent side (a plain line's after the last).
+        if (bt.lineExtents is { } stepExt && bt.lineIdx < stepExt.Length)
+            bt.flow.y -= stepExt[bt.lineIdx].below
+                + (bt.lineIdx + 1 < stepExt.Length ? stepExt[bt.lineIdx + 1].above : bt.plainAbove);
+        else
+            bt.flow.y -= bt.metrics.lineHeight;
+        if (bt.metrics.ptLeadExtraPt > 0) { bt.flow.y -= bt.metrics.ptLeadExtraPt; bt.metrics.ptLeadExtraPt = 0; }
+        if (line.Length > 0) bt.flow.contentPage = bt.flow.page;
+        return true;
+    }
+
+    /// <summary>Paints one seated line: its background and ink colour, its font runs, then its
+    /// decorations and link rectangles; false when the block stops early.</summary>
+    private static bool PaintLine(BlockTextState bt, string line)
+    {
         PrepareLinePaint(bt, line);
         bt.cjkFont = NeedsUnicode(line)
             && !(bt.profile.redlineDiffDoc && HasSymbolPua(line))
@@ -116,6 +138,12 @@ internal static partial class HtmlToPdfConverter
         if (bt.profile.uaStdSerif && bt.cjkFont is not null
             && UaSerifFaceCovering(bt.uniSource, bt.block.FontRes == "F2", string.IsNullOrEmpty(bt.block.FontFamily) ? "Times New Roman" : bt.block.FontFamily) is { } uaSerif)
             bt.cjkFont = uaSerif;
+        // A CJK line that also carries Latin words draws face by face: the Latin in the block's own
+        // face, each CJK run in the fallback that covers it - and on a CSS-box page every CJK line
+        // does, its punctuation in the face the reference picks for that mark.
+        if (bt.cjkFont is not null && !bt.profile.rtlDoc
+            && (bt.profile.cssBoxBody ? HasIdeograph(line) : MixesLatinWithIdeographs(line)))
+            bt.cjkFont = null;
         bt.cjkTtf = bt.cjkFont?.SourceFontData?.TtfData;
         bt.cjkName = bt.cjkFont?.FontName ?? "Unicode";
         // RTL documents draw with the same face the right-align measurement
@@ -136,17 +164,18 @@ internal static partial class HtmlToPdfConverter
         // Inline <a href> ranges overlapping this line get a link rect over
         // their run; resolved to a GoTo/URI action after layout.
         RegisterLineAnchors(bt, line);
-        bt.metrics.cumChar += line.Length + 1;   // +1 for the space consumed at the wrap point
-        // A size-run block steps by the CSS line boxes: this line's descent side and the
-        // next line's ascent side (a plain line's after the last).
-        if (bt.lineExtents is { } stepExt && bt.lineIdx < stepExt.Length)
-            bt.flow.y -= stepExt[bt.lineIdx].below
-                + (bt.lineIdx + 1 < stepExt.Length ? stepExt[bt.lineIdx + 1].above : bt.plainAbove);
-        else
-            bt.flow.y -= bt.metrics.lineHeight;
-        if (bt.metrics.ptLeadExtraPt > 0) { bt.flow.y -= bt.metrics.ptLeadExtraPt; bt.metrics.ptLeadExtraPt = 0; }
-        if (line.Length > 0) bt.flow.contentPage = bt.flow.page;
         return true;
+    }
+
+    private static bool MixesLatinWithIdeographs(string line)
+    {
+        bool latin = false, ideo = false;
+        foreach (var ch in line)
+        {
+            if (ch is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9')) latin = true;
+            else if (StlIdeograph(ch)) ideo = true;
+        }
+        return latin && ideo;
     }
 
     /// <summary>The face a line's text is measured in: the metric flow's measure face, else the
@@ -178,12 +207,15 @@ internal static partial class HtmlToPdfConverter
             var baseline = bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y;
             // ... from where the line starts to the anchor, measured as drawn: a block whose
             // emphasis runs put parts of the line in bold or italic measures each run in its own variant.
-            double XAt(int p) => bt.lineXPos + (p <= 0 ? 0
-                : bt.block.SmallCaps
-                ? MeasureSmallCapsText(face, line[..Math.Min(p, line.Length)], bt.metrics.blockFontSize)
-                : bt.block.BoldRuns is { Count: > 0 } || bt.block.ItalicRuns is { Count: > 0 }
-                ? RunsMeasuredWidth(bt.block, lineStart, line[..Math.Min(p, line.Length)], LineMeasureFace(bt, plain: true), bt.metrics.blockFontSize)
-                : MeasureFaceText(face, line[..Math.Min(p, line.Length)], bt.metrics.blockFontSize));
+            double XAt(int p)
+            {
+                if (p <= 0) return bt.lineXPos;
+                var head = line[..Math.Min(p, line.Length)];
+                if (bt.block.SmallCaps) return bt.lineXPos + MeasureSmallCapsText(face, head, bt.metrics.blockFontSize);
+                if (bt.block.BoldRuns is { Count: > 0 } || bt.block.ItalicRuns is { Count: > 0 })
+                    return bt.lineXPos + RunsMeasuredWidth(bt.block, lineStart, head, LineMeasureFace(bt, plain: true), bt.metrics.blockFontSize);
+                return bt.lineXPos + MeasureFaceText(face, head, bt.metrics.blockFontSize);
+            }
             foreach (var (aStart, aLen, url) in bt.block.Anchors)
             {
                 int ov0 = Math.Max(aStart, lineStart), ov1 = Math.Min(aStart + aLen, lineEnd);
@@ -212,10 +244,13 @@ internal static partial class HtmlToPdfConverter
             var decFace = (bt.block.FontFamily ?? "Times New Roman")
                 + (bt.block.FontRes == "F2" || bt.block.EmBold ? " Bold" : "");
             var dsb = new StringBuilder();
-            double XAt(int p) => bt.lineXPos + (p <= bt.metrics.cumChar ? 0
-                : bt.block.SmallCaps
-                ? MeasureSmallCapsText(decFace, line[..Math.Min(p - bt.metrics.cumChar, line.Length)], bt.metrics.blockFontSize)
-                : MeasureFaceText(decFace, line[..Math.Min(p - bt.metrics.cumChar, line.Length)], bt.metrics.blockFontSize));
+            double XAt(int p)
+            {
+                if (p <= bt.metrics.cumChar) return bt.lineXPos;
+                var head = line[..Math.Min(p - bt.metrics.cumChar, line.Length)];
+                if (bt.block.SmallCaps) return bt.lineXPos + MeasureSmallCapsText(decFace, head, bt.metrics.blockFontSize);
+                return bt.lineXPos + MeasureFaceText(decFace, head, bt.metrics.blockFontSize);
+            }
             Color DecColorAt(int p)
             {
                 if (bt.block.ColorRuns is not null)
@@ -238,8 +273,9 @@ internal static partial class HtmlToPdfConverter
                     2 => bt.flow.y + RedlineStrikeRiseEm * bt.metrics.blockFontSize,
                     _ => bt.flow.y - RedlineBorderDropEm * bt.metrics.blockFontSize,
                 };
-                var dw = dKind == 1 && bt.profile.dwFormDoc ? DwUnderWidthPt
-                    : dKind <= 2 ? RedlineDecorWidthEm * bt.metrics.blockFontSize : 0.75;
+                double dw = 0.75;
+                if (dKind == 1 && bt.profile.dwFormDoc) dw = DwUnderWidthPt;
+                else if (dKind <= 2) dw = RedlineDecorWidthEm * bt.metrics.blockFontSize;
                 var dcol = dKind <= 2 ? DecColorAt(a0) : dC ?? Color.FromArgb(0, 0, 0);
                 dsb.Append(Compat.Format(bt.invc,
                     $"q {dcol.R / 255.0:0.###} {dcol.G / 255.0:0.###} {dcol.B / 255.0:0.###} RG {dw:0.##} w "));
@@ -282,40 +318,39 @@ internal static partial class HtmlToPdfConverter
     /// <paramref name="riseFromBaseline"/> over the baseline, spanning each run's measured extent.</summary>
     private static void DrawUaDecorationRuns(BlockTextState bt, string line, List<(int Start, int Length)> uaURuns, double riseFromBaseline)
     {
+        int uLineStart = bt.metrics.cumChar, uLineEnd = bt.metrics.cumChar + line.Length;
+        // The run's extent is measured on the face the line is DRAWN in: a block with its
+        // own family (a `h2 { font-family: 'Courier new' }` heading) underlines its whole
+        // text, not the shorter width the flow face would give it.
+        string uFace;
+        if (!string.IsNullOrEmpty(bt.block.FontFamily) && WinMetricsFor(bt.block.FontFamily) is not null)
+            uFace = bt.block.FontFamily + (bt.block.FontRes == "F2" ? " Bold" : "");
+        else uFace = bt.metrics.metricMeasureFace;
+        foreach (var (us0, ul0) in uaURuns)
         {
-            int uLineStart = bt.metrics.cumChar, uLineEnd = bt.metrics.cumChar + line.Length;
-            // The run's extent is measured on the face the line is DRAWN in: a block with its
-            // own family (a `h2 { font-family: 'Courier new' }` heading) underlines its whole
-            // text, not the shorter width the flow face would give it.
-            var uFace = !string.IsNullOrEmpty(bt.block.FontFamily) && WinMetricsFor(bt.block.FontFamily) is not null
-                ? bt.block.FontFamily + (bt.block.FontRes == "F2" ? " Bold" : "")
-                : bt.metrics.metricMeasureFace;
-            foreach (var (us0, ul0) in uaURuns)
-            {
-                var us1 = Math.Max(us0, uLineStart);
-                var ue1 = Math.Min(us0 + ul0, uLineEnd);
-                if (ue1 <= us1) continue;
-                var uPre = MeasureFaceText(uFace,
-                    line[..(us1 - uLineStart)], bt.metrics.blockFontSize);
-                var uSeg = MeasureFaceText(uFace,
-                    line[(us1 - uLineStart)..(ue1 - uLineStart)], bt.metrics.blockFontSize);
-                var uy = (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y)
-                    + riseFromBaseline;
-                // The stroke takes the block's own ink (a linked line's
-                // underline draws in the link colour).
-                // ...in the run's own ink when the line colours per run (a link's underline is blue).
-                var uRunCol = bt.block.ForeColor;
-                if (bt.block.ColorRuns is { } uCols)
-                    foreach (var (ucs, ucl, ucc) in uCols)
-                        if (us1 >= ucs && us1 < ucs + ucl) { uRunCol = ucc; break; }
-                var uInk = uRunCol is { } uCol
-                    ? Compat.Format(System.Globalization.CultureInfo.InvariantCulture,
-                        $"{uCol.R / 255.0:0.###} {uCol.G / 255.0:0.###} {uCol.B / 255.0:0.###}")
-                    : "0 0 0";
-                bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    $"q {uInk} RG {bt.metrics.blockFontSize / 10.0:0.##} w {bt.lineXPos + uPre:F2} {uy:F2} m {bt.lineXPos + uPre + uSeg:F2} {uy:F2} l S Q\n")));
-            }
+            var us1 = Math.Max(us0, uLineStart);
+            var ue1 = Math.Min(us0 + ul0, uLineEnd);
+            if (ue1 <= us1) continue;
+            var uPre = MeasureFaceText(uFace,
+                line[..(us1 - uLineStart)], bt.metrics.blockFontSize);
+            var uSeg = MeasureFaceText(uFace,
+                line[(us1 - uLineStart)..(ue1 - uLineStart)], bt.metrics.blockFontSize);
+            var uy = (bt.profile.metricFlow && bt.metrics.metricDrop > 0 ? bt.flow.y - bt.metrics.metricDrop : bt.flow.y)
+                + riseFromBaseline;
+            // The stroke takes the block's own ink (a linked line's
+            // underline draws in the link colour).
+            // ...in the run's own ink when the line colours per run (a link's underline is blue).
+            var uRunCol = bt.block.ForeColor;
+            if (bt.block.ColorRuns is { } uCols)
+                foreach (var (ucs, ucl, ucc) in uCols)
+                    if (us1 >= ucs && us1 < ucs + ucl) { uRunCol = ucc; break; }
+            var uInk = uRunCol is { } uCol
+                ? Compat.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    $"{uCol.R / 255.0:0.###} {uCol.G / 255.0:0.###} {uCol.B / 255.0:0.###}")
+                : "0 0 0";
+            bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"q {uInk} RG {bt.metrics.blockFontSize / 10.0:0.##} w {bt.lineXPos + uPre:F2} {uy:F2} m {bt.lineXPos + uPre + uSeg:F2} {uy:F2} l S Q\n")));
         }
     }
 
@@ -333,7 +368,7 @@ internal static partial class HtmlToPdfConverter
         var sansStd = bt.profile.printGrid || bt.profile.floatBothSidesDoc || bt.profile.sheetTypographyDoc;
         var regRes = sansStd ? "F1" : "F5";
         var boldRes = sansStd ? "F2" : "F6";
-        var stdRes = bt.block.FontRes == "F2" ? boldRes : bt.block.FontRes == "F3" ? (sansStd ? "F3" : "F7") : regRes;
+        var stdRes = bt.block.FontRes switch { "F2" => boldRes, "F3" => sansStd ? "F3" : "F7", _ => regRes };
         // A <font face> block carries a RESOLVED family: its runs draw
         // in that face (embedded Type0), bold variant for bold blocks —
         // the std-serif override serves only family-free text.
@@ -373,8 +408,8 @@ internal static partial class HtmlToPdfConverter
         // text lands on top). The rect covers the baseline origin of every fragment on
         // the line so text extraction recovers it as TextState.BackgroundColor. Fill
         // components are emitted at F5 so Color.FromRgb's Round(c*255) round-trips exactly.
-        // A UA-grid heading box with rules but no fill (`h4 { border-top: 2px solid #000; padding-top: 10px;
-        // height: 30px; border-bottom: 1px solid #333; width: 650px }`): its top rule stands the padding
+        // A UA-grid heading box with rules but no fill (`h4 { border-top: 2px solid #000; padding-top: 10px; height:
+        // 30px; border-bottom: 1px solid #333; width: 650px }`): its top rule stands the padding
         // above the line box, its bottom rule the declared height below the line top, both the declared
         // width wide (measured on the quotation: 242.38 / 273.51, 96..583.5).
         if (bt.block.BackgroundColor is null && bt.profile.uaGridSheet && bt.block.SheetBox
@@ -409,10 +444,10 @@ internal static partial class HtmlToPdfConverter
             bt.flow.page.AddContentStream(Encoding.ASCII.GetBytes(
                 $"{(fc.R / 255.0).ToString("F5", bt.invc)} {(fc.G / 255.0).ToString("F5", bt.invc)} {(fc.B / 255.0).ToString("F5", bt.invc)} rg"));
         bt.isRtlLine = IsPureRtl(line);
-        bt.uniSource = bt.isRtlLine ? ToVisualRtl(line)
-            : Text.BidiReorderer.ContainsRtl(line)
-                ? (bt.profile.rtlDoc ? VisualizeRtlParagraph(line) : VisualizeMixedRtl(line))
-                : line;
+        if (bt.isRtlLine) bt.uniSource = ToVisualRtl(line);
+        else if (DrawsRtlVisually(bt)) bt.uniSource = line;
+        else if (Text.BidiReorderer.ContainsRtl(line)) bt.uniSource = bt.profile.rtlDoc ? VisualizeRtlParagraph(line) : VisualizeMixedRtl(line);
+        else bt.uniSource = line;
     }
 
     /// <summary>The family an RTL document's lines are measured and drawn in: the UA serif in the
@@ -454,9 +489,17 @@ internal static partial class HtmlToPdfConverter
         return any ? segs : null;
     }
 
+    /// <summary>The box a block given a width of its own (its style's width, in any unit) sets its lines in, from where they
+    /// start: a right-aligned, centred or right-to-left line stands in that box, not in the page's (probed: a paragraph
+    /// styled width:300pt and set right ends at 96 + 300, centred it centres on 246); null for a block without one, or
+    /// one whose box an auto left margin moves.</summary>
+    private static (double Left, double Right)? DeclaredWidthBox(BlockTextState bt)
+        => bt.block.WidthPx > 0 && !bt.block.WidthBoxAuto ? (bt.lineXPos, bt.lineXPos + bt.block.WidthPx * PxPt) : null;
+
     /// <summary>Centred, right-aligned and indented lines take their x from the document class's rule.</summary>
     private static void AlignLine(BlockTextState bt, string line)
     {
+        var declared = bt.profile.uaStdSerif ? DeclaredWidthBox(bt) : null;
         if (bt.profile.metricFlow && bt.metrics.metricDrop > 0 && bt.block.AlignCenter && line.Length > 0)
         {
             var mw = MeasureFaceText(bt.metrics.metricMeasureFace, line, bt.metrics.blockFontSize);
@@ -477,13 +520,13 @@ internal static partial class HtmlToPdfConverter
                  && (bt.block.AlignCenterCss || (bt.profile.uaBareDoc && bt.block.AlignCenterAttr)) && line.Length > 0)
         {
             var mw = MeasureFaceText(bt.metrics.metricMeasureFace, line, bt.metrics.blockFontSize);
-            var boxLeft = bt.marginLeft + bt.block.LeftIndent;
-            var boxRight = bt.pageWidth - bt.marginLeft;
+            var (boxLeft, boxRight) = declared ?? (bt.marginLeft + bt.block.LeftIndent, bt.pageWidth - bt.marginLeft);
             bt.lineXPos = Math.Max(bt.marginLeft, boxLeft + (boxRight - boxLeft - mw) / 2);
         }
         // UA-default serif flow honours an inline text-align:right the
         // same way: the line pins to the body box's right edge (the
-        // rating-date div ends at 96 + content = 517, measured).
+        // rating-date div ends at 96 + content = 517, measured) - or to the
+        // right edge of the box its own declared width makes.
         // A right-floated inline run's lines pin to the content box's right edge.
         else if (bt.profile.uaStdSerif && bt.block.FloatRight && !bt.block.FloatLeft && line.Length > 0)
         {
@@ -493,7 +536,7 @@ internal static partial class HtmlToPdfConverter
         else if (bt.profile.uaStdSerif && bt.metrics.metricDrop > 0 && bt.block.AlignRight && line.Length > 0)
         {
             var mw = MeasureFaceText(bt.metrics.metricMeasureFace, line, bt.metrics.blockFontSize);
-            bt.lineXPos = Math.Max(bt.marginLeft, bt.marginLeft + bt.flow.contentWidth - mw);
+            bt.lineXPos = Math.Max(bt.marginLeft, (declared?.Right ?? bt.marginLeft + bt.flow.contentWidth) - mw);
         }
         // Redline diff document: inline text-align centres/right-pins the
         // measured line (real face advances) in the content box.
@@ -521,13 +564,15 @@ internal static partial class HtmlToPdfConverter
         // Print grid: text-align:right pins the measured line to the wrap
         // box's right edge.
         else if (bt.profile.printGrid && bt.block.AlignRight && line.Length > 0)
+#pragma warning disable S1871 // separate dialect arms: the branches between them take precedence
         {
+#pragma warning restore S1871
             var mw = MeasureFaceText(bt.metrics.metricMeasureFace, line, bt.metrics.blockFontSize);
             bt.lineXPos = Math.Max(bt.marginLeft, bt.marginLeft + bt.flow.contentWidth - mw);
         }
         // The inline-body-margin dialect honours ALIGN="center" with the
-        // metric face's real advances (its title divs centre on the sheet);
-        // the pt-report flow centres its aligned paragraphs the same way.
+        // metric face's real advances (its title divs centre on the sheet); the
+        // pt-report flow centres its aligned paragraphs the same way.
         else if ((bt.profile.bodyBoxGridDoc || (bt.profile.metricFlow && bt.profile.emailNewsletterDoc))
                  && bt.block.AlignCenterAttr && line.Length > 0)
         {
@@ -540,7 +585,7 @@ internal static partial class HtmlToPdfConverter
         {
             // (the sheet-typography flow centres a BOLD heading by its bold advance - the face
             // it draws in; measured: the 22 px Verdana title centres at 303 on the 606 sheet)
-            var centreFace = bt.metrics.bandFace ?? (string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily!);
+            var centreFace = bt.metrics.bandFace ?? (string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily);
             if (_quirksChainSheet && bt.metrics.bandFace is null
                 && (bt.block.FontRes == "F2" || bt.block.EmBold) && !centreFace.EndsWith(" Bold", StringComparison.OrdinalIgnoreCase))
                 centreFace += " Bold";
@@ -548,10 +593,23 @@ internal static partial class HtmlToPdfConverter
             bt.lineXPos = Math.Max(bt.marginLeft + bt.block.LeftIndent,
                 bt.marginLeft + bt.block.LeftIndent + (bt.flow.contentWidth - bt.block.LeftIndent - mw) / 2);
         }
+        // A right-to-left block in a left-to-right page sets its lines against the right edge of the body box,
+        // as a right-to-left page does.
+        else if (bt.block.Rtl && !bt.profile.rtlDoc && line.Length > 0)
+        {
+            var rtlFace = bt.metrics.bandFace ?? (string.IsNullOrEmpty(bt.block.FontFamily) ? "Times New Roman" : bt.block.FontFamily);
+            if ((bt.block.FontRes == "F2" || bt.block.EmBold) && !rtlFace.EndsWith(" Bold", StringComparison.OrdinalIgnoreCase)) rtlFace += " Bold";
+            var rtlW = MeasureFaceText(rtlFace, line.Trim(), bt.metrics.blockFontSize);
+            bt.lineXPos = Math.Max(bt.marginLeft + bt.block.LeftIndent, (declared?.Right ?? bt.pageWidth - bt.marginRight - UaBodyMarginPt) - rtlW);
+        }
         if (bt.profile.redlineDiffDoc && bt.block.TextIndentPt > 0 && bt.lineIdx == 0)
             bt.lineXPos += bt.block.TextIndentPt;
         // Word mail: the hanging label's first line starts the indent to the left, never past the margin
         if (bt.profile.wordMailDoc && bt.block.TextIndentPt != 0 && bt.lineIdx == 0)
+            bt.lineXPos = Math.Max(bt.marginLeft, bt.lineXPos + bt.block.TextIndentPt);
+        // The UA flow: a text-indent moves the block's first line - a hanging block's back over its margin-left,
+        // never past the body edge.
+        if (bt.profile.uaStdSerif && bt.block.TextIndentPt != 0 && bt.lineIdx == 0)
             bt.lineXPos = Math.Max(bt.marginLeft, bt.lineXPos + bt.block.TextIndentPt);
     }
 
@@ -565,7 +623,7 @@ internal static partial class HtmlToPdfConverter
             var lineLeft = bt.metrics.besideLeftFloat
                 ? Math.Max(boxLeft, bt.marginLeft + bt.flow.floatIndentPt) : boxLeft;
             var lineW = MeasureFaceText(
-                string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily!,
+                string.IsNullOrEmpty(bt.block.FontFamily) ? "Arial" : bt.block.FontFamily,
                 line, bt.metrics.blockFontSize);
             if (boxRight - lineLeft > lineW)
                 bt.lineXPos = lineLeft + (boxRight - lineLeft - lineW) / 2;
@@ -589,8 +647,8 @@ internal static partial class HtmlToPdfConverter
                 + Math.Max(0, (bt.block.CenterBandW - cbw) / 2);
         }
         // The UA serif flow draws an RTL document's lines in the UA serif itself (the
-        // reference embeds Times New Roman for the Arabic runs of a dir="rtl" letter);
-        // the calibrated flows keep the sans they were measured on.
+        // reference embeds Times New Roman for the Arabic runs of a dir="rtl" letter); the
+        // calibrated flows keep the sans they were measured on.
         bt.rtlFace = RtlLineFamily(bt) + (bt.block.FontRes == "F2" ? " Bold" : "");
         // An RTL document's lines seat on the BODY box's right edge, which is the
         // UA body margin inside the page's right content edge - not the content
@@ -655,7 +713,7 @@ internal static partial class HtmlToPdfConverter
                 (var boldSeg, segEnd) = InRuns(bt.block.BoldRuns, pos, segEnd);
                 (var italSeg, segEnd) = InRuns(bt.block.ItalicRuns, pos, segEnd);
                 var segText = line.Substring(pos - lineStart, segEnd - pos);
-                bt.sb.Append($"/{(boldSeg ? boldRes : italSeg ? italRes : regRes)} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
+                bt.sb.Append($"/{((boldSeg, italSeg) switch { (true, _) => boldRes, (_, true) => italRes, _ => regRes })} {bt.metrics.blockFontSize.ToString("F1", bt.invc)} Tf ");
                 bt.sb.Append($"({EscapePdfString(segText)}) Tj ");
                 pos = segEnd;
             }

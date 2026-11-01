@@ -38,8 +38,6 @@ private sealed class TjReplaceState
     // Must use the SAME rule as the concatenation loop above — keep in sync.
     public List<int> charMap = null!;
     public char lastMapCh;
-    // Prefix/suffix text (unchanged portions on either side of the match).
-    public string prefixText = null!;
     public int suffixStart;
     public string suffixText = null!;
     // Map match boundaries back to the TJ-array coordinates (arrIdx + byte
@@ -62,6 +60,8 @@ private sealed class TjReplaceState
     // Compute the width change the replacement introduces, in PDF
     // text-space (1/1000 em) units, so we can emit it as a TJ kerning.
     public int kernCompensation;
+    // The next show operator draws from this run's pen (no seat of its own).
+    public bool penCarriesOn;
     // Build the prefix-and-replacement bytes from the matched string's
     // leading slice + the replacement text.
     public byte[] preRepBytes = null!;
@@ -81,6 +81,8 @@ private sealed class TjReplaceState
     public Dictionary<int, string>? toUnicode = null;
     public PdfDictionary? fontDict = null;
     public PdfReader reader = default!;
+    /// <summary>How the strings split into codes; null for a simple font (a byte per code).</summary>
+    public ShowCodespace? codespace;
     public double fontSize = 0;
 }
 }

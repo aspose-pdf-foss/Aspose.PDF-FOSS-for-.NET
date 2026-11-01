@@ -72,6 +72,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
                 Width = source.MediaBox.Width,
                 Height = source.MediaBox.Height,
                 CarryAnnotations = false,
+                KeepsMediaFrame = true,
             };
             stamp.ApplyTo(sheet);
         }

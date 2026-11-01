@@ -215,18 +215,18 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static bool ParseArticle(ArticlePdfState ap)
     {
-        ap.logoM = Regex.Match(ap.html, @"class\s*=\s*[""'][^""']*article-pdf__logo-holder[\s\S]*?<img\b[^>]*alt\s*=\s*[""']([^""']*)",
+        ap.logoM = SafeRegex.Match(ap.html, @"class\s*=\s*[""'][^""']*article-pdf__logo-holder[\s\S]*?<img\b[^>]*alt\s*=\s*[""']([^""']*)",
             RegexOptions.IgnoreCase);
         if (ap.logoM.Success) ap.logoAlt = ap.logoM.Groups[1].Value;
         ap.logoBytes = null;
         ap.logoNatW = 0; ap.logoNatH = 0;
-        ap.logoSrcM = Regex.Match(ap.html,
+        ap.logoSrcM = SafeRegex.Match(ap.html,
             @"class\s*=\s*[""'][^""']*article-pdf__logo-holder[\s\S]*?<img\b[^>]*src\s*=\s*[""']([^""']*)",
             RegexOptions.IgnoreCase);
         if (ap.logoSrcM.Success && !string.IsNullOrEmpty(ap.basePath))
         {
             var data = LoadConverterImage(ap.logoSrcM.Groups[1].Value,
-                new HtmlLoadOptions(ap.basePath!));
+                new HtmlLoadOptions(ap.basePath));
             if (data is not null && TryReadImagePixelSize(data) is (var logoW, var logoH)
                 && logoW > 0 && logoH > 0)
             {
@@ -235,22 +235,22 @@ internal static partial class HtmlToPdfConverter
                 ap.logoBytes = data;
             }
         }
-        ap.leftM = Regex.Match(ap.html,
+        ap.leftM = SafeRegex.Match(ap.html,
             @"class\s*=\s*[""'][^""']*article-pdf__col--left[""'][^>]*>(?<body>[\s\S]*?)<div\b[^>]*article-pdf__col--right",
             RegexOptions.IgnoreCase);
-        if (ap.leftM.Success) ap.descText = Flat(ap, ap.leftM.Groups["body"].Value);
+        if (ap.leftM.Success) ap.descText = Flat(ap.leftM.Groups["body"].Value);
 
-        ap.rightM = Regex.Match(ap.html,
+        ap.rightM = SafeRegex.Match(ap.html,
             @"class\s*=\s*[""'][^""']*article-pdf__col--right[""'][^>]*>(?<body>[\s\S]*?)<div\b[^>]*article-pdf__date",
             RegexOptions.IgnoreCase);
         if (!ap.rightM.Success) return false;
-        ParseBlocksInto(ap, ap.rightM.Groups["body"].Value, ap.content);
-        ap.footM = Regex.Match(ap.html, @"<footer\b[^>]*>(?<body>[\s\S]*)</footer>", RegexOptions.IgnoreCase);
+        ParseBlocksInto(ap.rightM.Groups["body"].Value, ap.content);
+        ap.footM = SafeRegex.Match(ap.html, @"<footer\b[^>]*>(?<body>[\s\S]*)</footer>", RegexOptions.IgnoreCase);
         if (ap.footM.Success)
         {
-            ParseBlocksInto(ap, ap.footM.Groups["body"].Value, ap.footer);
+            ParseBlocksInto(ap.footM.Groups["body"].Value, ap.footer);
             // the footer's loose text after its heading is a paragraph of its own
-            var loose = Flat(ap, Regex.Replace(ap.footM.Groups["body"].Value,
+            var loose = Flat(SafeRegex.Replace(ap.footM.Groups["body"].Value,
                 @"<(p|h2|h3|li)\b[^>]*>[\s\S]*?</\1>", " ", RegexOptions.IgnoreCase));
             if (loose.Length > 0) ap.footer.Add(new ApBlock { Kind = "p", Text = loose });
         }

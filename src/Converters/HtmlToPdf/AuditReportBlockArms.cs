@@ -214,14 +214,14 @@ internal static partial class HtmlToPdfConverter
             var head = cells.Exists(c =>
                 c.Cls.Contains("oplabel", StringComparison.Ordinal)
                 || c.Cls.Contains("Headerlabel", StringComparison.Ordinal));
-            var rowH = nine
-                ? (small && head ? CtNineHeadRowPt : CtNineValueRowPt)
-                : (head ? CtHeadRowPt : CtValueRowPt);
+            double rowH;
+            if (nine) rowH = small && head ? CtNineHeadRowPt : CtNineValueRowPt;
+            else rowH = head ? CtHeadRowPt : CtValueRowPt;
             if (ar.y + rowH > ar.bottom) { ar.sheet++; ar.y = ar.top; ar.sheetHasGrid = false; }
             var cx = tableLeft;
             for (var ci = 0; ci < cells.Count; ci++)
             {
-                var (ccls, scls, txt) = cells[ci];
+                var (ccls, _, txt) = cells[ci];
                 var cw = tableW * CtColFrac(ccls);
                 var size = small && head ? 9.0 : 12.0;
                 var leftCol = ci == 0;
@@ -235,9 +235,9 @@ internal static partial class HtmlToPdfConverter
                 else if (leftCol)
                     ar.fills.Add((ar.sheet, cx, ar.y, cw + CtCellSpacePt,
                         rowH - CtCellSpacePt, CtCellBg));
-                var drop = nine
-                    ? (small && head ? CtNineHeadDropPt : CtNineValueDropPt)
-                    : (head ? CtHeadDropPt : CtValueDropPt);
+                double drop;
+                if (nine) drop = small && head ? CtNineHeadDropPt : CtNineValueDropPt;
+                else drop = head ? CtHeadDropPt : CtValueDropPt;
                 if (txt.Length > 0)
                 {
                     var tw = Measure(ar, ar.reg, txt, size);
@@ -245,14 +245,14 @@ internal static partial class HtmlToPdfConverter
                     // centre their own text, first column included
                     var centred = !leftCol
                         || ccls.Contains("ThreeColumn", StringComparison.Ordinal);
-                    var tx = centred
-                        ? bx + (cw - tw) / 2
-                        : bx + (nine ? CtNineCellPadLeftPt : CtCellPadLeftPt);
+                    double tx;
+                    if (centred) tx = bx + (cw - tw) / 2;
+                    else tx = bx + (nine ? CtNineCellPadLeftPt : CtCellPadLeftPt);
                     ar.items.Add(new CtItem
                     {
                         Sheet = ar.sheet, Y = ar.y + drop, X = tx, Size = size,
                         Text = txt,
-                        Ink = head ? (leftCol && !nine ? CtBlack : CtBlue) : CtBlack,
+                        Ink = head && (!leftCol || nine) ? CtBlue : CtBlack,
                     });
                 }
                 // the cell's own borders: a solid blue pair around a

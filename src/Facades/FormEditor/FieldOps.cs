@@ -93,8 +93,8 @@ public sealed partial class FormEditor
     {
         if (ExportItems is null) return System.Array.Empty<string>();
         var list = new System.Collections.Generic.List<string>(ExportItems.Length);
-        foreach (var e in ExportItems)
-            if (e is { Length: > 0 }) list.Add(e.Length >= 2 ? e[1] : e[0]);
+        foreach (var e in ExportItems.Where(e => e is { Length: > 0 }))
+            list.Add(e.Length >= 2 ? e[1] : e[0]);
         return list.ToArray();
     }
 
@@ -137,8 +137,10 @@ public sealed partial class FormEditor
             _document.Form.AddXfaListItem(fieldName, display, export);
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Remove a single item from a ListBox / ComboBox field. Item removal is not currently implemented; the call is a no-op kept for API compatibility.</summary>
     public void DelListItem(string fieldName, string itemName)
+#pragma warning restore S2325
     {
         _ = fieldName;
         _ = itemName;
@@ -344,7 +346,7 @@ public sealed partial class FormEditor
     public void RenameField(string fieldName, string newFieldName)
     {
         if (_document?.Form is null) return;
-        _document.Form.FindFieldOrNull(fieldName)?.SetPartialName(newFieldName);
+        _document.Form.RenameField(fieldName, newFieldName);
     }
 
     /// <summary>Remove a field by name.</summary>
@@ -367,7 +369,9 @@ public sealed partial class FormEditor
         if (_document?.Form is null) return false;
         var f = _document.Form.FindFieldOrNull(fieldName);
         if (f is null) return false;
-        f.Dict.Set("Q", new PdfInteger(alignment));
+        // The facade numbers its alignments from 1; one that is not horizontal sets no /Q.
+        if (QuaddingFor(alignment) is not { } quadding) return false;
+        f.Dict.Set("Q", new PdfInteger(quadding));
         return true;
     }
 

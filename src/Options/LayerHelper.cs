@@ -130,6 +130,19 @@ internal static partial class LayerHelper
         return false;
     }
 
+    private static bool MatchesOcg(PdfDictionary candidate, PdfDictionary ocgDict, string ocgName)
+    {
+        if (ReferenceEquals(candidate, ocgDict)) return true;
+        // Fallback: compare by /Name for OCG dicts that were inlined during save
+        if (candidate.GetName("Type") == "OCG" && ocgName.Length > 0)
+        {
+            var nameObj = candidate.Get("Name");
+            var candidateName = nameObj is PdfString s ? s.ToText() : "";
+            return candidateName == ocgName;
+        }
+        return false;
+    }
+
     private static string? GetOcgName(PdfDictionary dict)
     {
         var obj = dict.Get("Name");
@@ -148,7 +161,7 @@ internal static partial class LayerHelper
 
         // Find all /OC /{layerId} BDC … EMC blocks
         var pattern = $@"/OC\s+/{Regex.Escape(layerId)}\s+BDC\b";
-        var matches = Regex.Matches(text, pattern);
+        var matches = SafeRegex.Matches(text, pattern);
 
         foreach (Match m in matches)
         {
@@ -300,7 +313,7 @@ internal static partial class LayerHelper
         var mediaBox = page.MediaBox;
         var doc = Document.Create();
         var newPage = doc.Pages.Add(mediaBox.Width, mediaBox.Height);
-        CopyLayerResources(page, newPage, filtered);
+        CopyLayerResources(page, newPage);
         newPage.SetContentStream(filtered);
         return doc.ToArray();
     }
@@ -340,7 +353,9 @@ internal static partial class LayerHelper
         var contentBytes = GetPageContentBytes(page);
         var text = Compat.Latin1.GetString(contentBytes);
 
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
         foreach (var layer in layers)
+#pragma warning restore S3267
         {
             if (layer.Id is not null)
             {
@@ -466,26 +481,13 @@ internal static partial class LayerHelper
         }
     }
 
-    private static bool MatchesOcg(PdfDictionary candidate, PdfDictionary ocgDict, string ocgName)
-    {
-        if (ReferenceEquals(candidate, ocgDict)) return true;
-        // Fallback: compare by /Name for OCG dicts that were inlined during save
-        if (candidate.GetName("Type") == "OCG" && ocgName.Length > 0)
-        {
-            var nameObj = candidate.Get("Name");
-            var candidateName = nameObj is PdfString s ? s.ToText() : "";
-            return candidateName == ocgName;
-        }
-        return false;
-    }
-
     private static string RemoveLayerMarkers(string text, string layerId, bool keepContent)
     {
         var sb = new StringBuilder(text.Length);
         var pattern = $@"/OC\s+/{Regex.Escape(layerId)}\s+BDC\b";
         int lastEnd = 0;
 
-        var matches = Regex.Matches(text, pattern);
+        var matches = SafeRegex.Matches(text, pattern);
         foreach (Match m in matches)
         {
             // Add text before this BDC
@@ -605,7 +607,7 @@ internal static partial class LayerHelper
         }
     }
 
-    private static void CopyLayerResources(Page source, Page target, byte[] contentBytes)
+    private static void CopyLayerResources(Page source, Page target)
     {
         var reader = source.Reader;
         var srcResources = reader.ResolveDict(source.Dict.Get("Resources"));
@@ -683,7 +685,8 @@ internal static partial class LayerHelper
                 sb.AppendLine(op.ToPdf());
         }
         sb.AppendLine("EMC");
-        var layerBytes = System.Text.Encoding.ASCII.GetBytes(sb.ToString());
+        // One byte per character, as the page content is written: a WinAnsi string shows its accents.
+        var layerBytes = Compat.Latin1.GetBytes(sb.ToString());
 
         // 5. Append to page content stream
         var existing = reader.Resolve(pageDict.Get("Contents"));

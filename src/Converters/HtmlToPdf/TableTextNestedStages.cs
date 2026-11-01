@@ -30,19 +30,18 @@ internal static partial class HtmlToPdfConverter
             ps.pendingCellTablesNatW = innerHostW;
         if (inner.HtmlPreferredWidthPt + capOut > ps.pendingCellTablesPrefW)
             ps.pendingCellTablesPrefW = inner.HtmlPreferredWidthPt + capOut;
-        var innerMinW = (inner.HtmlMinContentPt > 0 ? Math.Min(inner.HtmlMinContentPt, innerNatW)
-            // (a UA-boxed host takes an EMPTY percent grid at nothing - its box-filling natural is no content)
-            : cfg.uaCellBoxes && !inner.HtmlDeclaredBoxAbs ? 0 : innerNatW) + capOut;
+        double innerMinW;
+        if (inner.HtmlMinContentPt > 0) innerMinW = Math.Min(inner.HtmlMinContentPt, innerNatW);
+        // (a UA-boxed host takes an EMPTY percent grid at nothing - its box-filling natural is no content)
+        else if (cfg.uaCellBoxes && !inner.HtmlDeclaredBoxAbs) innerMinW = 0;
+        else innerMinW = innerNatW;
+        innerMinW += capOut;
         if (innerMinW > ps.pendingCellTablesMinW) ps.pendingCellTablesMinW = innerMinW;
         // A grid whose host measures on the DECLARED cell box takes the grid's own intrinsic
         // widths: its min-content floors the host and its max-content is what the host prefers,
         // exactly as a UA-boxed host reads them.
-        if (ps.sheetTdBoxRule && !cfg.uaCellBoxes)
-        {
-            innerHostW = inner.HtmlMinContentPt + capOut;
-            if (inner.HtmlMaxContentPt + capOut > ps.pendingCellTablesMaxW)
-                ps.pendingCellTablesMaxW = inner.HtmlMaxContentPt + capOut;
-        }
+        if (ps.sheetTdBoxRule && !cfg.uaCellBoxes && inner.HtmlMaxContentPt + capOut > ps.pendingCellTablesMaxW)
+            ps.pendingCellTablesMaxW = inner.HtmlMaxContentPt + capOut;
         if (cfg.uaCellBoxes)
         {
             // (a nested grid's DECLARED absolute box is its min-content too: a 600 px grid never
@@ -74,9 +73,9 @@ internal static partial class HtmlToPdfConverter
         // the host cell (`<table style="…margin-top:35px">` — the
         // columns section clears its heading by exactly that band).
         if (cfg.liftNestedTables
-            && Regex.Match(cfg.nestedHtml[ni], @"<table\b[^>]*>",
+            && SafeRegex.Match(cfg.nestedHtml[ni], @"<table\b[^>]*>",
                 RegexOptions.IgnoreCase) is { Success: true } inTag
-            && Regex.Match(inTag.Value,
+            && SafeRegex.Match(inTag.Value,
                 @"(?<![-\w])margin-top\s*:\s*([\d.]+)\s*px",
                 RegexOptions.IgnoreCase) is { Success: true } inMt
             && double.TryParse(inMt.Groups[1].Value,
@@ -94,8 +93,8 @@ internal static partial class HtmlToPdfConverter
         }
         // ...and its own bottom margin is space under it in the host cell.
         if (ps.uaCellBoxes
-            && Regex.Match(cfg.nestedHtml[ni], @"<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } inTag2
-            && Regex.Match(inTag2.Value, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase) is { Success: true } inSt2
+            && SafeRegex.Match(cfg.nestedHtml[ni], @"<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } inTag2
+            && SafeRegex.Match(inTag2.Value, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase) is { Success: true } inSt2
             && CssBoxSidePt(inSt2.Groups[1].Value, "margin", "margin-bottom", 2,
                 ps.curFontPt > 0 ? ps.curFontPt : ps.uaBaseFontPt) is { } inMb && inMb > 0)
             inner.HtmlMarginBottomPt = inMb;

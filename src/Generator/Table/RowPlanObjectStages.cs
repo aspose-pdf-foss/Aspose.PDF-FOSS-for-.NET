@@ -63,8 +63,8 @@ public partial class Table
             // The reserve is SPLITTABLE: N lines, each carrying an
             // equal share of the grid's height as its FontSize, give
             // the host row a page-break point every ~line pitch. The
-            // exact-stack total is unchanged (N · innerH/N = innerH);
-            // the draw pass hands the grid's k-th page slice to the
+            // exact-stack total is unchanged (N · innerH/N = innerH); the
+            // draw pass hands the grid's k-th page slice to the
             // k-th host slice covering the reserve.
             var resLines = Math.Max(1,
                 (int)Math.Ceiling(innerH / DefaultLineHeightPt));
@@ -175,14 +175,18 @@ public partial class Table
         var (pictureMarginL, pictureMarginT, pictureMarginB) = CellPictureBoxesAreExact
             ? (cellImg.Margin?.Left ?? 0, cellImg.Margin?.Top ?? 0, cellImg.Margin?.Bottom ?? 0)
             : (0, 0, 0);
+        var ownBox = ri.imgBoxHeight > ri.dispH ? ri.imgBoxHeight : 0;
+        // A picture that sets no alignment of its own takes the cell's, as the cell's text
+        // does; it used to sit at the cell's left edge whatever the cell asked for.
+        var imageAlign = cellImg.HorizontalAlignment == HorizontalAlignment.None ? pc.cellAlign : cellImg.HorizontalAlignment;
         AddCellImage(rp.plan, col, new CellImage
         {
-            Data = ri.imgBytes, Width = ri.dispW, Height = ri.dispH, Align = cellImg.HorizontalAlignment,
+            Data = ri.imgBytes, Width = ri.dispW, Height = ri.dispH, Align = imageAlign,
             XOffset = ri.imgXOffset + pictureMarginL,
             // An exact picture's box is its height plus its margins, priced as such.
             BoxHeight = CellPictureBoxesAreExact && (pictureMarginT > 0 || pictureMarginB > 0)
                 ? ri.dispH + pictureMarginT + pictureMarginB
-                : ri.imgBoxHeight > ri.dispH ? ri.imgBoxHeight : 0,
+                : ownBox,
             LineOffset = pc.lines.Count,
             OwnSeat = CellPictureBoxesAreExact,
             MarginTop = pictureMarginT,
@@ -201,7 +205,9 @@ public partial class Table
         // rounding (measured on the mailing: the 77 px logo row stands 57.75).
         ri.imgLineH = UaCellBoxes ? ri.imgBoxH : pc.defaultFontSize * 1.2;
         ri.imgLines = UaCellBoxes ? 1 : Math.Max(1, (int)Math.Ceiling(ri.imgBoxH / ri.imgLineH));
-        ri.imgLinePt = UaCellBoxes ? ri.imgBoxH : NestedTableRender ? ri.imgBoxH / ri.imgLines : pc.defaultFontSize;
+        if (UaCellBoxes) ri.imgLinePt = ri.imgBoxH;
+        else if (NestedTableRender) ri.imgLinePt = ri.imgBoxH / ri.imgLines;
+        else ri.imgLinePt = pc.defaultFontSize;
         Consider(rp, ri.imgLineH, ri.imgLineH);
         for (var k = 0; k < ri.imgLines; k++)
             pc.lines.Add(new CellLine { Text = "", FontSize = ri.imgLinePt, ImgReserve = true });
@@ -211,13 +217,22 @@ public partial class Table
     private void ResolveImageDisplaySize(RowPlanImageState ri, Image cellImg, RowPlanColumnState pc, double svgFillHeight)
     {
         ri.imgBytes = ri.svgData ? ImageRasterizer.RasterizeSvg(ri.rawBytes!) ?? ri.rawBytes! : ri.rawBytes!;
-        if (cellImg.FixWidth > 0 && cellImg.FixHeight > 0)
+        // A picture sized as a fraction of its cell's text box takes that share of the box the
+        // column solve gave the cell, its height by its own aspect: a `width: 50%` logo in a
+        // two-column letter head draws half its cell wide, not its full bitmap width.
+        if (cellImg.BoxWidthFraction > 0 && pc.availWidth > 0
+            && NaturalCellImageSizePt(ri) is (var fracNatW, var fracNatH) && fracNatW > 0 && fracNatH > 0)
+        {
+            ri.dispW = pc.availWidth * cellImg.BoxWidthFraction;
+            ri.dispH = ri.dispW * fracNatH / fracNatW;
+        }
+        else if (cellImg.FixWidth > 0 && cellImg.FixHeight > 0)
         {
             ri.dispW = cellImg.FixWidth;
             ri.dispH = cellImg.FixHeight;
             // A fixed box wider than its cell shrinks to the cell's inner width and
-            // keeps its height (probed: a 74 x 80 box in a 70 pt column draws 70 x 80;
-            // the same box in a 100 pt column draws 74 x 80).
+            // keeps its height (probed: a 74 x 80 box in a 70 pt column draws 70 x 80; the
+            // same box in a 100 pt column draws 74 x 80).
             var innerW = pc.cellWidth - pc.padLeft - pc.padRight;
             if (GeneratorCellModel && innerW > 0 && ri.dispW > innerW) ri.dispW = innerW;
             // A vector (SVG) source keeps its aspect ratio inside the

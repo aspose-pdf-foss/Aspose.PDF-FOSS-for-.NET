@@ -294,8 +294,8 @@ public sealed class StructureElementBuilder
         // nothing. Named on the element when every piece it owns is on one
         // page, and on each reference separately when they are not.
         var pages = new List<Page>();
-        foreach (var mark in _marked)
-            if (!pages.Contains(mark.Page)) pages.Add(mark.Page);
+        foreach (var mark in _marked.Where(mark => !pages.Contains(mark.Page)))
+            pages.Add(mark.Page);
 
         var onePage = pages.Count == 1 ? pages[0] : null;
         if (onePage is not null && _tree.PageNumber(onePage) is { } only)
@@ -355,6 +355,8 @@ public sealed class MarkedContentInfo
     /// <summary>BDC operator to begin the marked content sequence.</summary>
     public string BeginMarkedContent() => $"/{Tag} <</MCID {Mcid}>> BDC\n";
 
+#pragma warning disable S2325, S3400 // public API: the published instance member
     /// <summary>EMC operator to end the marked content sequence.</summary>
     public string EndMarkedContent() => "EMC\n";
+#pragma warning restore S2325, S3400
 }

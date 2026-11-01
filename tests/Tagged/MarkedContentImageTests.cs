@@ -29,7 +29,7 @@ public class MarkedContentImageTests
             "<< /Type /Pages /Kids [5 0 R] /Count 1 >>",
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
             Image,
-            $"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotate} /Contents 6 0 R " +
+            FormattableString.Invariant($"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotate} /Contents 6 0 R ") +
             "/Resources << /Font << /F1 3 0 R >> /XObject << /Im1 4 0 R >> >> >>",
             $"<< /Length {content.Length} >>\nstream\n{content}\nendstream",
         };

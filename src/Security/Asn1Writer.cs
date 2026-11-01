@@ -70,7 +70,7 @@ internal sealed class Asn1Writer
 
     public void WriteOid(string oid)
     {
-        var parts = oid.Split('.').Select(long.Parse).ToArray();
+        var parts = oid.Split('.').Select(p => long.Parse(p, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
         var encoded = new MemoryStream();
         encoded.WriteByte((byte)(parts[0] * 40 + parts[1]));
         for (var i = 2; i < parts.Length; i++)

@@ -56,7 +56,7 @@ public class AutoTagParagraphTests
     }
 
     private static string Line(double x, double y, string text, string font = "F3", int size = 10)
-        => $"BT /{font} {size} Tf {x} {y} Td ({text}) Tj ET\n";
+        => FormattableString.Invariant($"BT /{font} {size} Tf {x} {y} Td ({text}) Tj ET\n");
 
     private const string Words = "amber meadow lies beyond the northern fjord where willow and juniper grow along the quiet valley floor ";
 
@@ -113,6 +113,163 @@ public class AutoTagParagraphTests
         Assert.DoesNotContain("R0", paragraphs[0]);
         Assert.EndsWith("R03", paragraphs[1]);
         Assert.DoesNotContain("L0", paragraphs[1]);
+    }
+
+    [Fact]
+    public void HeadingLabelsSetApartFromTheirTitlesAtATabStopReadWithTheirTitles()
+    {
+        // Three heading rows at a 24 pt pitch, each a label at the margin and its title at a tab stop 90 pt along (a
+        // law's chapter headings), between paragraphs: the gap after the labels is no gutter, and no label is a block
+        // of its own.
+        var content = Column(42, 740, "P", 3);
+        var headings = new[] { ("2. Titel:", "Penalties and measures"), ("1. Kapitel:", "Powers of the court"), ("1. Abschnitt:", "General provisions") };
+        for (var i = 0; i < headings.Length; i++)
+            content += Line(42, 690 - i * 24, headings[i].Item1, "F2", 12) + Line(132, 690 - i * 24, headings[i].Item2, "F2", 12);
+        content += Column(42, 614, "B", 4);
+        var doc = Tag(Build(content));
+
+        var texts = Blocks(doc, "P", "LI", "H1", "H2", "H3", "H4", "H5", "H6").Select(TextOf).ToList();
+        var shown = string.Join(" || ", texts);
+        Assert.True(texts.Any(t => t.StartsWith("2. Titel:") && t.EndsWith("Penalties and measures")), shown);
+        Assert.True(texts.Any(t => t.StartsWith("1. Kapitel:") && t.EndsWith("Powers of the court")), shown);
+        Assert.True(texts.Any(t => t.StartsWith("1. Abschnitt:") && t.EndsWith("General provisions")), shown);
+        Assert.DoesNotContain(texts, t => t.EndsWith(":"));
+    }
+
+    [Fact]
+    public void AParagraphsShortLastLineOverHeadingLabelsSetApartFromTheirTitlesPartsNoColumn()
+    {
+        // A paragraph ending in a short line, then two heading rows (a label at the margin, the title at a tab stop
+        // 90 pt along) and an article's number alone: the short line keeps the channel after the labels clear, and
+        // tells nothing of it.
+        var content = Column(42, 740, "P", 3) + Line(42, 704, "it ends here.")
+                      + Line(42, 680, "4. Kapitel:", "F2", 14) + Line(132, 680, "Legal counsel", "F2", 14)
+                      + Line(42, 662, "1. Abschnitt:", "F2", 12) + Line(132, 662, "Principles", "F2", 12)
+                      + Line(42, 640, "Art. 127", "F2", 12)
+                      + Column(42, 620, "B", 3);
+        var doc = Tag(Build(content));
+
+        var texts = Blocks(doc, "P", "LI", "H1", "H2", "H3", "H4", "H5", "H6").Select(TextOf).ToList();
+        Assert.True(texts.Any(t => t.StartsWith("4. Kapitel:") && t.EndsWith("Legal counsel")), string.Join(" || ", texts));
+        Assert.True(texts.Any(t => t.StartsWith("1. Abschnitt:") && t.EndsWith("Principles")), string.Join(" || ", texts));
+    }
+
+    [Fact]
+    public void WordsRaisedOverALineInItsOwnSizeEachInAGapOfItsWordsAreTheLinesText()
+    {
+        // A law's article suffixes: "ter" and "bis" set in the line's size and raised 4 pt, each closing up to the
+        // number before it, the line going on after each (Courier: 6 pt a character).
+        var content = Column(42, 740, "P", 3)
+                      + Line(42, 700, "the offences under articles 260") + Line(228, 704, "ter")
+                      + Line(246, 700, ", 305") + Line(276, 704, "bis")
+                      + Line(294, 700, " and 322") + Line(342, 704, "ter") + Line(360, 700, " of the code apply.")
+                      + Column(42, 688, "B", 3);
+        var doc = Tag(Build(content));
+
+        var texts = Blocks(doc, "P").Select(TextOf).ToList();
+        Assert.True(texts.Any(t => t.Contains("articles 260ter, 305bis and 322ter of the code apply.")), string.Join(" || ", texts));
+        Assert.DoesNotContain(texts, t => t is "ter" or "bis" or "ter bis ter");
+    }
+
+    [Fact]
+    public void AWordRaisedOverALineInTheGapOneShowLeftForItStandsInItsPlace()
+    {
+        // The line is one show whose array steps the pen 18 pt past "260" for the raised "ter" shown after it.
+        var content = Column(42, 740, "P", 3)
+                      + "BT /F3 10 Tf 42 700 Td [(the offences under articles 260) -1800 (, 305 and 322 of the code apply.)] TJ ET\n"
+                      + Line(228, 704, "ter")
+                      + Column(42, 688, "B", 3);
+        var doc = Tag(Build(content));
+
+        var texts = Blocks(doc, "P").Select(TextOf).ToList();
+        Assert.True(texts.Any(t => t.Contains("articles 260ter, 305 and 322 of the code apply.")), string.Join(" || ", texts));
+    }
+
+    [Fact]
+    public void AWordRaisedOverALineDrawnBeforeTheNumberItClosesUpToStandsInItsPlace()
+    {
+        // The page draws the line's first words, then the raised "ter", and the rest of the line after it: "260" ends
+        // where "ter" starts, a word space parts "ter" from the "StGB" after it (Courier: 6 pt a character).
+        var content = Column(42, 740, "P", 3)
+                      + Line(42, 700, "the organisation under ") + Line(252, 704, "ter")
+                      + Line(180, 700, "articles 260") + Line(276, 700, "StGB applies.")
+                      + Column(42, 688, "B", 3);
+        var doc = Tag(Build(content));
+
+        var texts = Blocks(doc, "P").Select(TextOf).ToList();
+        Assert.True(texts.Any(t => t.Contains("articles 260ter StGB applies.")), string.Join(" || ", texts));
+    }
+
+    [Fact]
+    public void TheGapAfterAListsLabelsIsNoGutterWhereANoteNumberIsRaisedAfterALabel()
+    {
+        // Three lettered items at a 14 pt pitch, a 7 pt note number raised after the first label ("a.6"), their text
+        // 26 pt past the labels; the next paragraph's line crosses the gap.
+        var content = Column(42, 740, "P", 3);
+        for (var i = 0; i < 3; i++)
+            content += Line(64, 700 - i * 14, $"{(char)('a' + i)}.") + (i == 0 ? Line(76, 704, "6", "F3", 7) : "")
+                       + Line(90, 700 - i * 14, $"item {i} of the lettered list, which goes on");
+        content += Column(42, 650, "B", 3);
+        var doc = Tag(Build(content));
+
+        var items = Blocks(doc, "LI").Select(TextOf).ToList();
+        Assert.True(items.Count == 3, string.Join(" || ", Blocks(doc, "P", "LI").Select(TextOf)));
+        Assert.All(items, t => Assert.Contains("of the lettered list", t));
+        Assert.DoesNotContain(Blocks(doc, "P").Select(TextOf), t => t is "b." or "c.");
+    }
+
+    [Fact]
+    public void ALabelDrawnALittleOverItsItemsFirstLineThatCarriesARaisedSuffixIsTheItems()
+    {
+        // Three lettered items; the second's label stands 3.5 pt over its line, whose text carries an 8 pt "ter" raised
+        // after "172" - the label and the suffix would make a line of their own.
+        var content = Column(42, 740, "P", 3)
+                      + Line(64, 700, "a.") + Line(90, 700, "the offences of the first title, which go on")
+                      + Line(64, 689.5, "b.") + Line(90, 686, "the offences under articles 172") + Line(276, 690, "ter", "F3", 8) + Line(290.4, 686, ", if they go on")
+                      + Line(64, 672, "c.") + Line(90, 672, "the offences of the third title, which go on")
+                      + Column(42, 650, "B", 3);
+        var doc = Tag(Build(content));
+
+        var items = Blocks(doc, "LI").Select(TextOf).ToList();
+        Assert.True(items.Count == 3, string.Join(" || ", Blocks(doc, "P", "LI").Select(TextOf)));
+        Assert.True(items.Any(t => t.StartsWith("b.") && t.Contains("articles 172ter, if they")), string.Join(" || ", items));
+    }
+
+    [Fact]
+    public void ALabelAloneOnTheLastRowOfAPageItsTextOnTheNextIsAListsLabelNoColumn()
+    {
+        // Two lettered items, the second of two lines, then the third's label alone at the foot of the page: with the
+        // second item's lines the rows keep a channel after the labels, which is no gutter.
+        var content = Column(42, 740, "P", 3)
+                      + Line(64, 700, "a.") + Line(90, 700, "the offences of the first title, which go on")
+                      + Line(64, 686, "b.") + Line(90, 686, "the offences under the second title, as far as")
+                      + Line(90, 672, "the page sets them out, which goes on and on")
+                      + Line(64, 658, "c.");
+        var doc = Tag(Build(content));
+
+        // (the lone label reads after the item before it, where it stands)
+        var items = Blocks(doc, "LI").Select(TextOf).ToList();
+        Assert.True(items.Any(t => t.StartsWith("b.") && t.Contains("goes on and on")), string.Join(" || ", Blocks(doc, "P", "LI").Select(TextOf)));
+        Assert.DoesNotContain(Blocks(doc, "P").Select(TextOf), t => t is "b." or "c.");
+    }
+
+    [Fact]
+    public void AParagraphsNumberASuffixAndANoteNumberRaisedOverItsLineUnderATitleAreThatLines()
+    {
+        // An article's title in 14 pt, then its paragraph: the number "1" hanging before its text, "bis" raised in the
+        // line's size after "171" in the 18 pt gap the line's one show leaves for it, a 7 pt note number after "code"
+        // in an 8.4 pt gap - the text closing up to each.
+        var content = Column(42, 740, "P", 3)
+                      + Line(42, 700, "Art. 36 Jurisdiction in undertakings", "F2", 14)
+                      + Line(42, 690, "1", "F3", 7)
+                      + "BT /F3 10 Tf 48 686 Td [(In the case of offences under articles 163-171) -1800 (, of the code) -840 (, the authorities apply.)] TJ ET\n"
+                      + Line(324, 690, "bis") + Line(420, 690, "11", "F3", 7)
+                      + Column(42, 670, "B", 3);
+        var doc = Tag(Build(content));
+
+        var texts = Blocks(doc, "P", "H1", "H2", "H3", "H4", "H5", "H6").Select(TextOf).ToList();
+        Assert.True(texts.Any(t => t.Contains("163-171bis, of the code11, the authorities apply.")), string.Join(" || ", texts));
+        Assert.Contains(texts, t => t == "Art. 36 Jurisdiction in undertakings");
     }
 
     [Fact]
@@ -290,7 +447,7 @@ public class AutoTagParagraphTests
         for (var k = 6; k < 36; k += 7) text[k] = ' ';
         if (opens) text[0] = char.ToUpperInvariant(text[0]);
         var spacing = hung is null ? "-0.07 Tc " : "0 Tc ";
-        return $"BT /F3 10 Tf {spacing}{x} {y} Td ({new string(text)}{hung ?? 's'}) Tj ET\n";
+        return FormattableString.Invariant($"BT /F3 10 Tf {spacing}{x} {y} Td ({new string(text)}{hung ?? 's'}) Tj ET\n");
     }
 
     private static string? AlignOf(StructureElement el)
@@ -1102,7 +1259,7 @@ public class AutoTagParagraphTests
         const string second = "Charitable Contributions";
         var text = left + 6;
         var sb = new StringBuilder(Line(Centred(heading), 688, heading, "F3", 8) + Line(Centred(second), 678, second, "F3", 8)
-                                   + $"0.5 w {Centred(second)} 676.5 m {Centred(second) + second.Length * 4.8} 676.5 l S\n"
+                                   + FormattableString.Invariant($"0.5 w {Centred(second)} 676.5 m {Centred(second) + second.Length * 4.8} 676.5 l S\n")
                                    + Line(text, 662, "Money or property you give to:", "F3", 8));
         var y = top;
         foreach (var entry in entries)

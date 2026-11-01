@@ -38,7 +38,7 @@ public sealed partial class TextAbsorber
             pg.pureCharsPerSize[fsDev] = pg.pureCharsPerSize.GetValueOrDefault(fsDev) + g;
             pg.pureWidthPerSize[fsDev] = pg.pureWidthPerSize.GetValueOrDefault(fsDev)
                 + Math.Min(w1, 0.6 * fsTrue * g);
-            var (nsp, wsp) = DrawnSpaces(s.Value, gs.metrics, fsAdv, gs.preHorizScale);
+            var (nsp, _) = DrawnSpaces(s.Value, gs.metrics, fsAdv, gs.preHorizScale);
             var tcW = (gs.preTc * g + gs.preTw * nsp) * (gs.preRot ? gs.tmScaleX : gs.fsScale) * gs.preHorizScale;
             pg.avgCharsPerSize[fsDev] = pg.avgCharsPerSize.GetValueOrDefault(fsDev) + g;
             pg.avgWidthPerSize[fsDev] = pg.avgWidthPerSize.GetValueOrDefault(fsDev)

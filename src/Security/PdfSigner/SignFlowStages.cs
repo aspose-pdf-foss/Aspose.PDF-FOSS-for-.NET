@@ -28,7 +28,7 @@ public sealed partial class PdfSigner
         Array.Copy(sg.fileBytes, (int)sg.byteRange[2], sg.hashInput, (int)sg.byteRange[1], (int)sg.byteRange[3]);
         sg.hash = HashByteRange(sg.hashInput, sg.digest);
 
-        sg.signatureBytes = CreatePkcs7Signature(sg.hash, sg.certificate, sg.digest, sg.options.CustomSignHash);
+        sg.signatureBytes = CreateSignatureContents(sg.hashInput, sg.hash, sg.certificate, sg.digest, sg.options);
 
         if (sg.signatureBytes.Length > sg.contentsSize)
             throw sg.options.AvoidEstimating
@@ -118,10 +118,14 @@ public sealed partial class PdfSigner
         sg.ms.Write(sg.pdfData);
 
         sg.sigValDict = BuildSignatureValueDict(sg.certificate, sg.options, sg.contentsSize);
+        // An encrypted document's reader decrypts every string but /Contents: the signer's
+        // text and a PKCS#1 /Cert are written encrypted, as the visible path writes them.
+        if (sg.reader.Decryptor is { } decryptor)
+            EncryptAppendedDict(decryptor, sg.sigValObjNum, sg.sigValDict);
 
         sg.sigFieldDict = sg.existingFieldDict is not null
             ? BuildUpdatedSignatureFieldDict(sg.existingFieldDict, sg.sigValObjNum)
-            : BuildSignatureFieldDict(sg.fieldName, sg.sigValObjNum, sg.doc);
+            : BuildSignatureFieldDict(sg.fieldName, sg.sigValObjNum, sg.pageRef);
         if (sg.banner is { } bannerAp)
         {
             var apDict = new PdfDictionary();
@@ -133,6 +137,8 @@ public sealed partial class PdfSigner
             appendField: sg.existingFieldDict is null,
             replaceFieldNamed: sg.adoptDirectField ? sg.fieldName : null,
             reader: sg.doc.Reader);
+        if (sg.reader.Decryptor is { } formDecryptor)
+            EncryptAppendedDict(formDecryptor, sg.acroFormObjNum, sg.acroFormDict);
 
         sg.offsets = new Dictionary<int, long>();
 
@@ -152,6 +158,8 @@ public sealed partial class PdfSigner
         sg.offsets[sg.acroFormObjNum] = sg.ms.Position;
         WriteIndirectObject(sg.ms, sg.acroFormObjNum, sg.acroFormDict);
 
+        if (sg.existingFieldDict is null) LinkInvisibleWidgetToPage(sg);
+
         // The banner's own objects: the face, then the nested forms.
         if (sg.banner is { } bnObjs)
             foreach (var (num, dict, isStream) in bnObjs.Objects)
@@ -162,23 +170,41 @@ public sealed partial class PdfSigner
             }
     }
 
+    /// <summary>A new widget is an annotation of its page (ISO 32000-1 12.5.2, Table 30), invisible or not:
+    /// the page is rewritten with the widget added to its /Annots.</summary>
+    private static void LinkInvisibleWidgetToPage(SignFlowState sg)
+    {
+        if (sg.pageRef is null || sg.reader.ResolveDict(sg.pageRef) is not { } pageDict) return;
+        var page = CloneDict(pageDict);
+        var annots = new PdfArray();
+        if (sg.reader.Resolve(pageDict.Get("Annots")) is PdfArray oldAnnots)
+            foreach (var annot in oldAnnots) annots.Add(annot);
+        annots.Add(new PdfIndirectRef(sg.sigFieldObjNum, 0));
+        page.Set("Annots", annots);
+        if (sg.reader.Decryptor is { } decryptor)
+            EncryptAppendedDict(decryptor, sg.pageRef.ObjectNumber, page);
+        sg.offsets[sg.pageRef.ObjectNumber] = sg.ms.Position;
+        WriteIndirectObject(sg.ms, sg.pageRef.ObjectNumber, page);
+    }
+
     /// <summary>Resolves the field name, allocates the object numbers of the incremental update (value, field, AcroForm, DSS) around an existing field and builds the widget banner.</summary>
     private static void AllocateSignatureObjects(SignFlowState sg)
     {
         sg.fieldName = ResolveSignatureFieldName(sg.doc, sg.options.FieldName);
 
         sg.maxObj = 0;
-        foreach (var entry in sg.xref.Entries.Values)
-            if (entry.ObjectNumber > sg.maxObj) sg.maxObj = entry.ObjectNumber;
+        foreach (var objectNumber in sg.xref.Entries.Values.Select(entry => entry.ObjectNumber))
+            if (objectNumber > sg.maxObj) sg.maxObj = objectNumber;
         sg.nextObj = sg.maxObj + 1;
 
         // If the document already contains a (blank) signature field with this
         // name, reuse it — update its /V in place rather than appending a
         // duplicate field. Otherwise allocate a fresh field object.
-        var existingField = FindTopLevelField(sg.doc, sg.fieldName);
+        var existingField = FindField(sg.doc, sg.fieldName);
         sg.existingFieldRef = existingField.Ref;
         sg.existingFieldDict = existingField.Dict;
         sg.adoptDirectField = sg.existingFieldRef is null && sg.existingFieldDict is not null;
+        sg.pageRef = FindPageRef(sg.reader, Math.Max(0, sg.options.PageNumber - 1)) ?? FindPageRef(sg.reader, 0);
 
         sg.sigValObjNum = sg.nextObj++;
         sg.sigFieldObjNum = sg.existingFieldRef is not null

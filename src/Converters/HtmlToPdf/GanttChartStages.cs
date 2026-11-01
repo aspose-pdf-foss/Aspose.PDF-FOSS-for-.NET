@@ -9,21 +9,21 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Gantt chart: the dependency links drawn between task bars.</summary>
     private static void DrawGanttLinks(GanttChartState gc)
     {
-        gc.linksArea = Regex.Match(gc.html,
+        gc.linksArea = SafeRegex.Match(gc.html,
             @"<div class=""gantt_links_area""[^>]*>(?<b>[\s\S]*)", RegexOptions.IgnoreCase);
         if (gc.linksArea.Success)
         {
-            foreach (Match wrap in Regex.Matches(gc.linksArea.Groups["b"].Value,
+            foreach (var groups in SafeRegex.Matches(gc.linksArea.Groups["b"].Value,
                          @"<div class=""gantt_line_wrapper""[^>]*style=""(?<s>[^""]*)""[^>]*>\s*<div class=""gantt_link_line_(?<dir>\w+)""[^>]*style=""(?<ls>[^""]*)""",
-                         RegexOptions.IgnoreCase))
+                         RegexOptions.IgnoreCase).Select(wrap => wrap.Groups))
             {
                 double W(string style, string prop)
                 {
-                    var pm = Regex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)px", RegexOptions.IgnoreCase);
+                    var pm = SafeRegex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)px", RegexOptions.IgnoreCase);
                     return pm.Success ? double.Parse(pm.Groups[1].Value, gc.inv) : 0;
                 }
-                var s0 = wrap.Groups["s"].Value;
-                var ls = wrap.Groups["ls"].Value;
+                var s0 = groups["s"].Value;
+                var ls = groups["ls"].Value;
                 var x0 = gc.timelineX + GtPx(W(s0, "left") + W(ls, "margin-left"));
                 var y0 = gc.dataTop + GtPx(W(s0, "top") + W(ls, "margin-top"));
                 var lw = GtPx(W(ls, "width"));
@@ -36,29 +36,27 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Gantt chart: the timeline scale labels drawn, clipped at the viewport.</summary>
     private static void DrawGanttTimelineScale(GanttChartState gc)
     {
-        gc.taskScale = Regex.Match(gc.html,
+        gc.taskScale = SafeRegex.Match(gc.html,
             @"<div class=""gantt_scale_line""[^>]*>(?<b>[\s\S]*?)</div>\s*</div>",
             RegexOptions.IgnoreCase);
+        var cx = gc.timelineX;
+        foreach (var groups in SafeRegex.Matches(gc.taskScale.Success ? gc.taskScale.Groups["b"].Value : "",
+                     @"<div class=""gantt_scale_cell""[^>]*style=""[^""]*width:\s*(?<w>[\d.]+)px[^""]*""[^>]*>(?<t>[^<]*)</div\s*>",
+                     RegexOptions.IgnoreCase).Select(sc => sc.Groups))
         {
-            var cx = gc.timelineX;
-            foreach (Match sc in Regex.Matches(gc.taskScale.Success ? gc.taskScale.Groups["b"].Value : "",
-                         @"<div class=""gantt_scale_cell""[^>]*style=""[^""]*width:\s*(?<w>[\d.]+)px[^""]*""[^>]*>(?<t>[^<]*)</div\s*>",
-                         RegexOptions.IgnoreCase))
+            var wpx = double.Parse(groups["w"].Value, gc.inv);
+            var text = DecodeEntities(groups["t"].Value).Trim();
+            // The scale clips at the timeline viewport, like the bars do — the
+            // last visible label is 21:00, not the declared 22:00.
+            if (cx >= gc.timelineX + GtPx(1044.66674804688)) break;
+            if (text.Length > 0)
             {
-                var wpx = double.Parse(sc.Groups["w"].Value, gc.inv);
-                var text = DecodeEntities(sc.Groups["t"].Value).Trim();
-                // The scale clips at the timeline viewport, like the bars do — the
-                // last visible label is 21:00, not the declared 22:00.
-                if (cx >= gc.timelineX + GtPx(1044.66674804688)) break;
-                if (text.Length > 0)
-                {
-                    var tw = MeasureFaceText("Arial", text, GtHeaderPt);
-                    GcText(gc, GtHeaderPt, cx + (GtPx(wpx) - tw) / 2,
-                        gc.pageHeight - (GtHeaderTopPt + GtHeaderTextDropPt + GtHeaderPt * ArialAscentEm),
-                        text, "Arial", GtHeaderInk);
-                }
-                cx += GtPx(wpx);
+                var tw = MeasureFaceText("Arial", text, GtHeaderPt);
+                GcText(gc, GtHeaderPt, cx + (GtPx(wpx) - tw) / 2,
+                    gc.pageHeight - (GtHeaderTopPt + GtHeaderTextDropPt + GtHeaderPt * ArialAscentEm),
+                    text, "Arial", GtHeaderInk);
             }
+            cx += GtPx(wpx);
         }
     }
 
@@ -94,14 +92,12 @@ internal static partial class HtmlToPdfConverter
         gc.headCells = ParseGanttCells(gc.gridScale.Success ? gc.gridScale.Groups["b"].Value : "");
         gc.colX = new List<double>();
         gc.colW = new List<double>();
+        var cx = gc.gridX;
+        foreach (var (wpx, _, _, _) in gc.headCells)
         {
-            var cx = gc.gridX;
-            foreach (var (wpx, _, _, _) in gc.headCells)
-            {
-                gc.colX.Add(cx);
-                gc.colW.Add(GtPx(wpx));
-                cx += GtPx(wpx);
-            }
+            gc.colX.Add(cx);
+            gc.colW.Add(GtPx(wpx));
+            cx += GtPx(wpx);
         }
         for (var i = 0; i < gc.headCells.Count; i++)
         {

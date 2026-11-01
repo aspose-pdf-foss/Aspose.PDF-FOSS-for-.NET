@@ -14,9 +14,9 @@ internal static partial class HtmlToPdfConverter
             {
                 var leadStr = text.ToString();
                 var leadMarkers = string.Concat(
-                    from Match lm in Regex.Matches(leadStr, "\u0002\\d+\u0003")
+                    from Match lm in SafeRegex.Matches(leadStr, "\u0002\\d+\u0003")
                     select lm.Value);
-                leadStr = Regex.Replace(leadStr, "\u0002\\d+\u0003", " ");
+                leadStr = SafeRegex.Replace(leadStr, "\u0002\\d+\u0003", " ");
                 text.Clear();
                 text.Append(leadMarkers);
                 if (CollapseWs(leadStr).Trim(' ').Length > 0)
@@ -32,11 +32,11 @@ internal static partial class HtmlToPdfConverter
                         Fore = mps.leadSeen ? mps.leadFore : mps.cell.Fore,
                     };
                     mps.divText.Append(leadStr);
-                    CloseSeg(mps, text, reportCells, stdSerif);
+                    CloseSeg(mps, text, stdSerif);
                 }
                 mps.leadSeen = false;
             }
-            CloseSeg(mps, text, reportCells, stdSerif);
+            CloseSeg(mps, text, stdSerif);
             FlushUaBlockGridMarkers(mps, text);
             mps.curSeg = new MetricDivSeg();
             if (mps.uaBlockCells) ReadUaBlockStyle(mps.curSeg, tok, mps.cell.FontSize ?? mps.fontSize);

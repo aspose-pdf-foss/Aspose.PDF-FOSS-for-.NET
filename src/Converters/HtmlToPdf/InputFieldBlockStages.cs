@@ -20,7 +20,9 @@ internal static partial class HtmlToPdfConverter
         ib.curHasText = false;
         ib.curMaxAdv = 0;
         ib.curMaxAbove = 0;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var it in runItems)
+#pragma warning restore S3267
         {
             if (!PlaceInlineFieldItem(ib, it)) break;
         }
@@ -29,9 +31,9 @@ internal static partial class HtmlToPdfConverter
         for (var rl = 0; rl < ib.runLines.Count; rl++)
         {
             var (_, rlHasText, rlMaxAdv, rlMaxAbove) = ib.runLines[rl];
-            var rlAdv = rlMaxAdv > 0
-                ? rlMaxAdv + (rlHasText ? InlineMixedExtraPt : 0)
-                : NormalLineHeightPt(ib.blockFontSize > 0 ? ib.blockFontSize : EscapedBodyFontPt);
+            double rlAdv;
+            if (rlMaxAdv > 0) rlAdv = rlMaxAdv + (rlHasText ? InlineMixedExtraPt : 0);
+            else rlAdv = NormalLineHeightPt(ib.blockFontSize > 0 ? ib.blockFontSize : EscapedBodyFontPt);
             ib.runTotalAdv += System.Math.Max(0, rlMaxAbove - InputBoxAboveBaselinePt)
                 + (rl == ib.runLines.Count - 1 && rlMaxAbove > InputBoxAboveBaselinePt
                     ? SerifDescentRoomPt : rlAdv);

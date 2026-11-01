@@ -123,6 +123,15 @@ private sealed class ParseBlocksState
     public int inlineRunId;
     public int nextInlineRunId;
     public bool runPrevWasControl;
+    // The base flows' control line: the id every control and text block of one markup line
+    // takes - opened by the line's first control, closed by any block boundary or break.
+    public bool controlLines;
+    public int ctlLineId;
+    public int nextCtlLineId = 1;
+    // …and the attributes of the button element whose caption is being collected.
+    public Dictionary<string, string>? buttonAttrs;
+    // …and the width the open select's own style declares, in CSS px (0 = none).
+    public double selectWidthPx;
     // Control-box dialect: an <i>/<em> that closes without enclosing any text (an
     // icon placeholder) must not leave the whole rest of its block italic.
     public int italicOpenTextLen;
@@ -177,8 +186,8 @@ private sealed class ParseBlocksState
     // A block whose TAG rule declares text-decoration: underline (`h2 { text-decoration:
     // underline }`): the run covers the block's whole text from this raw offset (-1 = none).
     public int blockUnderStart = -1;
-    // Anchors that pushed a font-style frame for the sheet's `a { color; font-family }` rule;
-    // their close restores it the way a </font> does.
+    // Anchors that pushed a font-style frame for the sheet's `a { color; font-family }` rule; their
+    // close restores it the way a </font> does.
     public int uaAnchorFrames;
     // And for <i>/<em>: an italic run inside the block's line (browser-UA flow).
     public List<(int start, int end)> rawItalics = null!;
@@ -202,6 +211,8 @@ private sealed class ParseBlocksState
     /// <summary>Open sub/sup runs: the raw offset each opened at, closed by its own end tag.
     /// Kept apart from <see cref="openSizeRuns"/>, which a closing SPAN pops by depth.</summary>
     public Stack<int> openSubSupRuns = null!;
+    /// <summary>The open bdo elements: where each one's text starts, and whether it runs right to left.</summary>
+    public Stack<(int start, bool rtl)> openBdoRuns = null!;
     /// <summary>Open container backgrounds: where the container's first child block would go,
     /// its fill, the width it declared, and the style depth that closes it.</summary>
     public Stack<(int idx, Color c, double w, double frac, double padT, double padB, double padL, int depth)> bgSpans = null!;
@@ -274,6 +285,7 @@ private sealed class ParseBlocksState
     public bool bodyBoxRhythm;
     public bool containerBoxIndents;
     public bool coverStyles;
+    public bool cssBoxBody;   // the sheet's body pads its own box (see BodyBoxInsetsPt)
     public bool inlineBlockCols;
     public bool absSpanLedger;
     public bool spanClassTypography;
@@ -325,11 +337,17 @@ private sealed class ParseBlocksState
     // An inline percentage max-width caps the drawn box at that
     // share of the content width and keeps the sheet from widening.
     public double imgMaxWFrac;
+    // A percentage width (`width="100%"` or `width: 50%`) is a share of the
+    // containing block, resolved at layout where that width is known.
+    public double imgWFrac;
     // An image floats by its OWN style attribute as often as by its
     // container's - `<img style="float:left">` is the common form - so
     // read both and take either. Only the container was consulted before,
     // which left such an image in the flow and stacked it.
     public bool imgFloatLeft;
+    /// <summary>The style an inline image was placed under: an inline image placed next under the same style,
+    /// with nothing but spaces between, shares its line.</summary>
+    public BlockStyle? lastInlineImageStyle;
     public bool imgFloatRight;
     // A FLOATED image is inset from the edge it floats to by its own
     // side margin - a logo with margin-left:70px lands at

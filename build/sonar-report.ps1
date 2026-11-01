@@ -42,6 +42,7 @@ foreach ($run in $doc.runs) {
       File     = $file
       Line     = $loc.region.startLine
       Message  = ($res.message.text -replace '\s+', ' ').Trim()
+      Accepted = [bool]$res.suppressions
     })
   }
 }
@@ -51,14 +52,23 @@ foreach ($run in $doc.runs) {
 $sonar = @($findings | Where-Object { $_.Rule -match '^S\d+$' })
 $other = @($findings | Where-Object { $_.Rule -notmatch '^S\d+$' })
 
+# A finding suppressed in source (#pragma warning disable, [SuppressMessage]) still lands in
+# the SARIF, marked with a 'suppressions' entry: it was read and accepted, with the reason
+# beside it. It is counted apart, so every table below lists the OPEN findings only.
+$sonarAccepted = @($sonar | Where-Object { $_.Accepted })
+$otherAccepted = @($other | Where-Object { $_.Accepted })
+$sonar = @($sonar | Where-Object { -not $_.Accepted })
+$other = @($other | Where-Object { -not $_.Accepted })
+
 $byRule = $sonar | Group-Object Rule | Sort-Object Count -Descending
 $byFile = $sonar | Group-Object File | Sort-Object Count -Descending
 
 $sb = New-Object System.Text.StringBuilder
 [void]$sb.AppendLine('# Sonar findings by rule')
 [void]$sb.AppendLine()
-[void]$sb.AppendLine(('{0:N0} SonarSource finding(s) across {1:N0} rule(s) and {2:N0} file(s).' -f $sonar.Count, $byRule.Count, $byFile.Count))
-[void]$sb.AppendLine(('{0:N0} further finding(s) came from the compiler and the .NET analyzers - see the tail of this file.' -f $other.Count))
+[void]$sb.AppendLine(('{0:N0} open SonarSource finding(s) across {1:N0} rule(s) and {2:N0} file(s).' -f $sonar.Count, $byRule.Count, $byFile.Count))
+[void]$sb.AppendLine(('{0:N0} more were accepted in source, each suppressed with its reason - see the accepted table.' -f $sonarAccepted.Count))
+[void]$sb.AppendLine(('{0:N0} further open finding(s) came from the compiler and the .NET analyzers - see the tail of this file.' -f $other.Count))
 [void]$sb.AppendLine()
 [void]$sb.AppendLine('| Rule | Count | What it reports | Worst files |')
 [void]$sb.AppendLine('| --- | ---: | --- | --- |')
@@ -76,6 +86,16 @@ foreach ($g in $byRule) {
 [void]$sb.AppendLine('| Rule | Count |')
 [void]$sb.AppendLine('| --- | ---: |')
 foreach ($g in ($other | Group-Object Rule | Sort-Object Count -Descending)) {
+  [void]$sb.AppendLine(('| {0} | {1} |' -f $g.Name, $g.Count))
+}
+[void]$sb.AppendLine()
+[void]$sb.AppendLine('## Accepted in source (suppressed with a reason)')
+[void]$sb.AppendLine()
+[void]$sb.AppendLine(('{0:N0} SonarSource and {1:N0} other finding(s).' -f $sonarAccepted.Count, $otherAccepted.Count))
+[void]$sb.AppendLine()
+[void]$sb.AppendLine('| Rule | Count |')
+[void]$sb.AppendLine('| --- | ---: |')
+foreach ($g in (@($sonarAccepted) + @($otherAccepted) | Group-Object Rule | Sort-Object Count -Descending)) {
   [void]$sb.AppendLine(('| {0} | {1} |' -f $g.Name, $g.Count))
 }
 Set-Content (Join-Path $OutDir 'issues-by-rule.md') -Value $sb.ToString() -Encoding utf8
@@ -99,8 +119,10 @@ $sonar | Sort-Object Rule, File, Line |
   Select-Object Rule, Severity, File, Line, Message |
   Export-Csv (Join-Path $OutDir 'issues.csv') -NoTypeInformation -Encoding utf8
 
-Write-Host ('sonar findings : {0}' -f $sonar.Count)
-Write-Host ('other findings : {0}' -f $other.Count)
+Write-Host ('sonar open     : {0}' -f $sonar.Count)
+Write-Host ('sonar accepted : {0}' -f $sonarAccepted.Count)
+Write-Host ('other open     : {0}' -f $other.Count)
+Write-Host ('other accepted : {0}' -f $otherAccepted.Count)
 Write-Host ('rules firing   : {0}' -f $byRule.Count)
 Write-Host ('files affected : {0}' -f $byFile.Count)
 Write-Host ''

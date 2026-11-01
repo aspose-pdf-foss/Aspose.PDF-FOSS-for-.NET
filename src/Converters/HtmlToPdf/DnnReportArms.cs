@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>Bands, field rows, paragraph lines and gaps.</summary>
-    private static void RenderDnnTextBlocks(DnnReportState dn, DnnBlock b)
+    private static void RenderDnnTextBlocks(DnnReportState dn, IDnnBlock b)
     {
         switch (b)
         {
@@ -76,7 +76,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>Grid headers, rows and fills.</summary>
-    private static void RenderDnnGridBlocks(DnnReportState dn, DnnBlock b)
+    private static void RenderDnnGridBlocks(DnnReportState dn, IDnnBlock b)
     {
         switch (b)
         {

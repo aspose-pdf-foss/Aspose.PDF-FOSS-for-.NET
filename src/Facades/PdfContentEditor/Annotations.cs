@@ -8,6 +8,7 @@ namespace Aspose.Pdf.Facades;
 
 public sealed partial class PdfContentEditor
 {
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Create a local link annotation that navigates to a page in the same document.
     /// </summary>
@@ -16,6 +17,7 @@ public sealed partial class PdfContentEditor
     /// <param name="pageNumber">The page where the link is placed (1-based).</param>
     /// <param name="destinationPage">The target page number (1-based).</param>
     public byte[] CreateLocalLink(byte[] input, Rectangle rect, int pageNumber, int destinationPage)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (pageNumber < 1 || pageNumber > doc.PageCount)
@@ -27,10 +29,34 @@ public sealed partial class PdfContentEditor
         return doc.ToArray();
     }
 
+    /// <summary>Adds a link on page <c>originalPage</c> that jumps to page <c>desPage</c>. The rectangle is in points from the page's lower-left corner.</summary>
+    public void CreateLocalLink(System.Drawing.Rectangle rect, int desPage, int originalPage)
+    {
+        var dict = BuildLinkAnnotation(DrawingRectToPdfRect(rect), desPage);
+        AddAnnotation(originalPage, dict);
+    }
+
+    /// <summary>Adds a link with the given border color on page <c>originalPage</c> that jumps to page <c>desPage</c>. The rectangle is in points from the page's lower-left corner.</summary>
+    public void CreateLocalLink(System.Drawing.Rectangle rect, int desPage, int originalPage, System.Drawing.Color clr)
+    {
+        var dict = BuildLinkAnnotation(DrawingRectToPdfRect(rect), desPage);
+        dict.Set("C", DrawingColorToPdfArray(clr));
+        AddAnnotation(originalPage, dict);
+    }
+
+    public void CreateLocalLink(System.Drawing.Rectangle rect, int desPage, int originalPage, System.Drawing.Color clr, System.Enum[] actionName)
+    {
+        // actionName carries an "additional action" sequence; we accept it for API compatibility
+        // and apply only the color + destination — additional actions are an advanced feature.
+        CreateLocalLink(rect, desPage, originalPage, clr);
+    }
+
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Create a URI link annotation that opens a URL.
     /// </summary>
     public byte[] CreateWebLink(byte[] input, Rectangle rect, int pageNumber, string url)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (pageNumber < 1 || pageNumber > doc.PageCount)
@@ -42,10 +68,32 @@ public sealed partial class PdfContentEditor
         return doc.ToArray();
     }
 
+    /// <summary>Adds a link on page <c>originalPage</c> that opens the given URL. The rectangle is in points from the page's lower-left corner.</summary>
+    public void CreateWebLink(System.Drawing.Rectangle rect, string url, int originalPage)
+    {
+        var dict = BuildUriAnnotation(DrawingRectToPdfRect(rect), url);
+        AddAnnotation(originalPage, dict);
+    }
+
+    /// <summary>Adds a link with the given border color on page <c>originalPage</c> that opens the given URL. The rectangle is in points from the page's lower-left corner.</summary>
+    public void CreateWebLink(System.Drawing.Rectangle rect, string url, int originalPage, System.Drawing.Color clr)
+    {
+        var dict = BuildUriAnnotation(DrawingRectToPdfRect(rect), url);
+        dict.Set("C", DrawingColorToPdfArray(clr));
+        AddAnnotation(originalPage, dict);
+    }
+
+    public void CreateWebLink(System.Drawing.Rectangle rect, string url, int originalPage, System.Drawing.Color clr, System.Enum[] actionName)
+    {
+        CreateWebLink(rect, url, originalPage, clr);
+    }
+
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Create a free text annotation on a page.
     /// </summary>
     public byte[] CreateFreeText(byte[] input, Rectangle rect, int pageNumber, string text, string? fontName = null, double fontSize = 12)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (pageNumber < 1 || pageNumber > doc.PageCount)
@@ -57,10 +105,19 @@ public sealed partial class PdfContentEditor
         return doc.ToArray();
     }
 
+    /// <summary>Adds a free-text annotation showing the given text in 12-point Helvetica on the given page.</summary>
+    public void CreateFreeText(System.Drawing.Rectangle rect, string contents, int page)
+    {
+        var dict = BuildFreeTextAnnotation(DrawingRectToPdfRect(rect), contents ?? "", "Helvetica", 12);
+        AddAnnotation(page, dict);
+    }
+
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Create a text (sticky note) annotation on a page.
     /// </summary>
     public byte[] CreateText(byte[] input, Rectangle rect, int pageNumber, string title, string contents)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (pageNumber < 1 || pageNumber > doc.PageCount)
@@ -78,10 +135,27 @@ public sealed partial class PdfContentEditor
         return doc.ToArray();
     }
 
+    /// <summary>Adds a text (sticky note) annotation with the given title, contents, initial open state and icon name on the given page.</summary>
+    public void CreateText(System.Drawing.Rectangle rect, string title, string contents, bool open, string icon, int page)
+    {
+        var dict = new PdfDictionary();
+        dict.Set("Type", new PdfName("Annot"));
+        dict.Set("Subtype", new PdfName("Text"));
+        dict.Set("Rect", RectToPdfArray(DrawingRectToPdfRect(rect)));
+        dict.Set("T", Latin1(title ?? ""));
+        dict.Set("Contents", Latin1(contents ?? ""));
+        dict.Set("Open", open ? PdfBoolean.True : PdfBoolean.False);
+        if (!string.IsNullOrEmpty(icon))
+            dict.Set("Name", new PdfName(icon));
+        AddAnnotation(page, dict);
+    }
+
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Delete all annotations on a specific page.
     /// </summary>
     public byte[] DeleteAnnotations(byte[] input, int pageNumber)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (pageNumber < 1 || pageNumber > doc.PageCount)
@@ -92,10 +166,12 @@ public sealed partial class PdfContentEditor
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Delete annotations of a specific subtype from a page.
     /// </summary>
     public byte[] DeleteAnnotations(byte[] input, int pageNumber, string annotationType)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (pageNumber < 1 || pageNumber > doc.PageCount)
@@ -261,48 +337,6 @@ public sealed partial class PdfContentEditor
     private void AddAnnotation(int page, PdfDictionary annotDict)
         => AppendAnnotation(GetPage1Based(page), annotDict);
 
-    /// <summary>Adds a link on page <c>originalPage</c> that jumps to page <c>desPage</c>. The rectangle is in points from the page's lower-left corner.</summary>
-    public void CreateLocalLink(System.Drawing.Rectangle rect, int desPage, int originalPage)
-    {
-        var dict = BuildLinkAnnotation(DrawingRectToPdfRect(rect), desPage);
-        AddAnnotation(originalPage, dict);
-    }
-
-    /// <summary>Adds a link with the given border color on page <c>originalPage</c> that jumps to page <c>desPage</c>. The rectangle is in points from the page's lower-left corner.</summary>
-    public void CreateLocalLink(System.Drawing.Rectangle rect, int desPage, int originalPage, System.Drawing.Color clr)
-    {
-        var dict = BuildLinkAnnotation(DrawingRectToPdfRect(rect), desPage);
-        dict.Set("C", DrawingColorToPdfArray(clr));
-        AddAnnotation(originalPage, dict);
-    }
-
-    public void CreateLocalLink(System.Drawing.Rectangle rect, int desPage, int originalPage, System.Drawing.Color clr, System.Enum[] actionName)
-    {
-        // actionName carries an "additional action" sequence; we accept it for API compatibility
-        // and apply only the color + destination — additional actions are an advanced feature.
-        CreateLocalLink(rect, desPage, originalPage, clr);
-    }
-
-    /// <summary>Adds a link on page <c>originalPage</c> that opens the given URL. The rectangle is in points from the page's lower-left corner.</summary>
-    public void CreateWebLink(System.Drawing.Rectangle rect, string url, int originalPage)
-    {
-        var dict = BuildUriAnnotation(DrawingRectToPdfRect(rect), url);
-        AddAnnotation(originalPage, dict);
-    }
-
-    /// <summary>Adds a link with the given border color on page <c>originalPage</c> that opens the given URL. The rectangle is in points from the page's lower-left corner.</summary>
-    public void CreateWebLink(System.Drawing.Rectangle rect, string url, int originalPage, System.Drawing.Color clr)
-    {
-        var dict = BuildUriAnnotation(DrawingRectToPdfRect(rect), url);
-        dict.Set("C", DrawingColorToPdfArray(clr));
-        AddAnnotation(originalPage, dict);
-    }
-
-    public void CreateWebLink(System.Drawing.Rectangle rect, string url, int originalPage, System.Drawing.Color clr, System.Enum[] actionName)
-    {
-        CreateWebLink(rect, url, originalPage, clr);
-    }
-
     public void CreateApplicationLink(System.Drawing.Rectangle rect, string application, int page)
     {
         var dict = BuildLaunchAnnotation(DrawingRectToPdfRect(rect), application);
@@ -363,28 +397,6 @@ public sealed partial class PdfContentEditor
         dict.Set("Rect", RectToPdfArray(DrawingRectToPdfRect(rect)));
         dict.Set("C", DrawingColorToPdfArray(color));
         AddAnnotation(originalPage, dict);
-    }
-
-    /// <summary>Adds a free-text annotation showing the given text in 12-point Helvetica on the given page.</summary>
-    public void CreateFreeText(System.Drawing.Rectangle rect, string contents, int page)
-    {
-        var dict = BuildFreeTextAnnotation(DrawingRectToPdfRect(rect), contents ?? "", "Helvetica", 12);
-        AddAnnotation(page, dict);
-    }
-
-    /// <summary>Adds a text (sticky note) annotation with the given title, contents, initial open state and icon name on the given page.</summary>
-    public void CreateText(System.Drawing.Rectangle rect, string title, string contents, bool open, string icon, int page)
-    {
-        var dict = new PdfDictionary();
-        dict.Set("Type", new PdfName("Annot"));
-        dict.Set("Subtype", new PdfName("Text"));
-        dict.Set("Rect", RectToPdfArray(DrawingRectToPdfRect(rect)));
-        dict.Set("T", Latin1(title ?? ""));
-        dict.Set("Contents", Latin1(contents ?? ""));
-        dict.Set("Open", open ? PdfBoolean.True : PdfBoolean.False);
-        if (!string.IsNullOrEmpty(icon))
-            dict.Set("Name", new PdfName(icon));
-        AddAnnotation(page, dict);
     }
 
     public void CreateCaret(int page, System.Drawing.Rectangle annotRect, System.Drawing.Rectangle caretRect, string symbol, string annotContents, System.Drawing.Color color)
@@ -605,7 +617,7 @@ public sealed partial class PdfContentEditor
         dict.Set("Rect", RectToPdfArray(DrawingRectToPdfRect(annotRect)));
         dict.Set("Contents", Latin1(annotContents ?? ""));
         dict.Set("C", DrawingColorToPdfArray(color));
-        dict.Set("CreationDate", Latin1("D:" + System.DateTime.Now.ToUniversalTime().ToString("yyyyMMddHHmmss") + "Z"));
+        dict.Set("CreationDate", Latin1(Document.FormatPdfDate(System.DateTime.Now)));
         if (!string.IsNullOrEmpty(icon))
             dict.Set("Name", new PdfName(icon));
         return dict;

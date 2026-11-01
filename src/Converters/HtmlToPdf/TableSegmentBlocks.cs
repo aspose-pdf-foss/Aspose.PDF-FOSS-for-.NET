@@ -13,7 +13,7 @@ internal static partial class HtmlToPdfConverter
         // a LATER segment where the pending-break state cannot reach, so
         // the break attaches to the div's LAST table segment instead.
         HashSet<int>? breakAfterSegs = null;
-        if (fbk.cv.profile.uaStdSerif && Regex.IsMatch(fbk.frag, @"page-break-after\s*:\s*always",
+        if (fbk.cv.profile.uaStdSerif && SafeRegex.IsMatch(fbk.frag, @"page-break-after\s*:\s*always",
                 RegexOptions.IgnoreCase))
         {
             var spans = new (int start, int end)[segs.Count];
@@ -23,14 +23,14 @@ internal static partial class HtmlToPdfConverter
                 spans[si] = (segPos, segPos + segs[si].html.Length);
                 segPos += segs[si].html.Length;
             }
-            var dRx = new Regex(@"<(/?)div\b[^>]*>", RegexOptions.IgnoreCase);
-            foreach (Match bm in Regex.Matches(fbk.frag,
+            var dRx = new Regex(@"<(/?)div\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+            foreach (Match bm in SafeRegex.Matches(fbk.frag,
                 @"<div\b[^>]*page-break-after\s*:\s*always[^>]*>", RegexOptions.IgnoreCase))
             {
                 var depth = 1;
                 var endPos = -1;
-                for (var dm = dRx.Match(fbk.frag, bm.Index + bm.Length); dm.Success;
-                     dm = dRx.Match(fbk.frag, dm.Index + dm.Length))
+                for (var dm = SafeRegex.Match(dRx, fbk.frag, bm.Index + bm.Length); dm.Success;
+                     dm = SafeRegex.Match(dRx, fbk.frag, dm.Index + dm.Length))
                 {
                     depth += dm.Groups[1].Value.Length > 0 ? -1 : 1;
                     if (depth == 0) { endPos = dm.Index; break; }
@@ -83,7 +83,7 @@ internal static partial class HtmlToPdfConverter
         if (!string.IsNullOrEmpty(cv.runHeader)) return 0;
         if (!cv.css.TryGetValue("header", out var rule)
             || !rule.TryGetValue("margin-bottom", out var mv)) return 0;
-        var m = Regex.Match(mv.Trim(), @"^([\d.]+)\s*(em|rem|px|pt)$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(mv.Trim(), @"^([\d.]+)\s*(em|rem|px|pt)$", RegexOptions.IgnoreCase);
         if (!m.Success || !double.TryParse(m.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var n) || n <= 0) return 0;

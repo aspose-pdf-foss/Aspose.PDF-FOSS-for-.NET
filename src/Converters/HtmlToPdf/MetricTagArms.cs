@@ -7,13 +7,13 @@ internal static partial class HtmlToPdfConverter
 {
     /// <summary>One arm of BuildTableFromHtml's token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void HandleMetricImgOpen(MetricParseState mps, Token tok, StringBuilder text, IReadOnlyDictionary<string, Dictionary<string, string>> css, bool stdSerif, bool wrapperStacks, bool reportCells, List<List<MetricCell>> rows, string face, string boldFace, (double asc, double sum) fm, double indent, HtmlLoadOptions? loadOptions, double p, bool rtl, double s, string tableHtml, double tablePct, double tableWpt, string tag)
+    private static void HandleMetricImgOpen(MetricParseState mps, Token tok, StringBuilder text, IReadOnlyDictionary<string, Dictionary<string, string>> css, bool stdSerif, bool wrapperStacks, bool reportCells, HtmlLoadOptions? loadOptions)
     {
         // an image reserves its DECLARED box even when the file is
         // unreadable — the row paces on it (the boleto's 40px logo)
         if (wrapperStacks && mps.cell is not null)
         {
-            OpenMetricImgInCell(mps, tok, text, css, stdSerif, wrapperStacks, reportCells, rows, face, boldFace, fm, indent, loadOptions, p, rtl, s, tableHtml, tablePct, tableWpt, tag);
+            OpenMetricImgInCell(mps, tok, text, css, stdSerif, reportCells, loadOptions);
         }
     }
 
@@ -22,19 +22,19 @@ internal static partial class HtmlToPdfConverter
     private static void ReadUaBlockStyle(MetricDivSeg seg, Token tok, double cellEmPt = 0)
     {
         if (tok.Attributes is not { } a || !a.TryGetValue("style", out var st) || st is null) return;
-        var fsM = Regex.Match(st, @"(?<![-\w])font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var fsM = SafeRegex.Match(st, @"(?<![-\w])font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (fsM.Success && TryParseCssFontSize(fsM.Groups[1].Value.Trim()) is { } fs && fs > 0) seg.FontSize = fs;
         // (a margin in em is of the block's OWN size: its stated size, else the cell's)
         var emPt = seg.FontSize ?? (cellEmPt > 0 ? cellEmPt : UaDefaultFontPt);
-        if (Regex.IsMatch(st, @"(?<![-\w])text-align\s*:\s*right", RegexOptions.IgnoreCase)) seg.AlignRight = true;
-        if (Regex.IsMatch(st, @"(?<![-\w])float\s*:\s*right", RegexOptions.IgnoreCase)) { seg.FloatRight = true; seg.AlignRight = true; }
+        if (SafeRegex.IsMatch(st, @"(?<![-\w])text-align\s*:\s*right", RegexOptions.IgnoreCase)) seg.AlignRight = true;
+        if (SafeRegex.IsMatch(st, @"(?<![-\w])float\s*:\s*right", RegexOptions.IgnoreCase)) { seg.FloatRight = true; seg.AlignRight = true; }
         // The block's own box: `margin-left` indents its lines, and a stated top or bottom
         // margin (or the shorthand) replaces the UA 1.12 em on that side (probed: margin-less
         // paragraphs 13.5 apart where the UA ones stand 13.44 further).
-        if (Regex.Match(st, @"(?<![-\w])margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mlM
+        if (SafeRegex.Match(st, @"(?<![-\w])margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mlM
             && TryParseLength(mlM.Groups[1].Value.Trim()) is { } mlPt && mlPt > 0)
             seg.PadLeft = mlPt;
-        if (Regex.Match(st, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mM)
+        if (SafeRegex.Match(st, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mM)
         {
             var mParts = mM.Groups[1].Value.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (mParts.Length > 0)
@@ -43,9 +43,9 @@ internal static partial class HtmlToPdfConverter
                 seg.MarginBottomStatedPt = StatedMarginPt(mParts[mParts.Length >= 3 ? 2 : 0], emPt);
             }
         }
-        if (Regex.Match(st, @"(?<![-\w])margin-top\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mtM)
+        if (SafeRegex.Match(st, @"(?<![-\w])margin-top\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mtM)
             seg.MarginTopStatedPt = StatedMarginPt(mtM.Groups[1].Value, emPt);
-        if (Regex.Match(st, @"(?<![-\w])margin-bottom\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mbM)
+        if (SafeRegex.Match(st, @"(?<![-\w])margin-bottom\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mbM)
             seg.MarginBottomStatedPt = StatedMarginPt(mbM.Groups[1].Value, emPt);
     }
 
@@ -55,7 +55,7 @@ internal static partial class HtmlToPdfConverter
     {
         var v = value.Trim();
         if (IsZeroLength(v)) return 0.0;
-        if (Regex.Match(v, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*em$", RegexOptions.IgnoreCase) is { Success: true } em)
+        if (SafeRegex.Match(v, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*em$", RegexOptions.IgnoreCase) is { Success: true } em)
             return double.Parse(em.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * emPt;
         // (a NEGATIVE margin is a statement too - the length parser hands back only positive
         // lengths, so the sign is read here: the cheque's `margin-top: -43px` block)
@@ -69,7 +69,7 @@ internal static partial class HtmlToPdfConverter
     {
         double Len(string v) => StatedMarginPt(v, emPt) ?? 0;
         double t = 0, r = 0, b = 0, l = 0;
-        if (Regex.Match(style, @"(?<![-\w])padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } pm)
+        if (SafeRegex.Match(style, @"(?<![-\w])padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } pm)
         {
             var parts = pm.Groups[1].Value.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 1) t = r = b = l = Len(parts[0]);
@@ -77,10 +77,10 @@ internal static partial class HtmlToPdfConverter
             else if (parts.Length == 3) { t = Len(parts[0]); r = l = Len(parts[1]); b = Len(parts[2]); }
             else if (parts.Length >= 4) { t = Len(parts[0]); r = Len(parts[1]); b = Len(parts[2]); l = Len(parts[3]); }
         }
-        if (Regex.Match(style, @"(?<![-\w])padding-top\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } ptM) t = Len(ptM.Groups[1].Value);
-        if (Regex.Match(style, @"(?<![-\w])padding-right\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } prM) r = Len(prM.Groups[1].Value);
-        if (Regex.Match(style, @"(?<![-\w])padding-bottom\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } pbM) b = Len(pbM.Groups[1].Value);
-        if (Regex.Match(style, @"(?<![-\w])padding-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } plM) l = Len(plM.Groups[1].Value);
+        if (SafeRegex.Match(style, @"(?<![-\w])padding-top\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } ptM) t = Len(ptM.Groups[1].Value);
+        if (SafeRegex.Match(style, @"(?<![-\w])padding-right\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } prM) r = Len(prM.Groups[1].Value);
+        if (SafeRegex.Match(style, @"(?<![-\w])padding-bottom\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } pbM) b = Len(pbM.Groups[1].Value);
+        if (SafeRegex.Match(style, @"(?<![-\w])padding-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } plM) l = Len(plM.Groups[1].Value);
         return (t, r, b, l);
     }
 
@@ -108,7 +108,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>One arm of BuildTableFromHtml's token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void HandleMetricParaOpen(MetricParseState mps, Token tok, StringBuilder text, IReadOnlyDictionary<string, Dictionary<string, string>> css, bool stdSerif, bool wrapperStacks, bool reportCells, List<List<MetricCell>> rows, string face, string boldFace, (double asc, double sum) fm, double indent, HtmlLoadOptions? loadOptions, double p, bool rtl, double s, string tableHtml, double tablePct, double tableWpt, string tag)
+    private static void HandleMetricParaOpen(MetricParseState mps, Token tok, StringBuilder text, IReadOnlyDictionary<string, Dictionary<string, string>> css, bool stdSerif, bool reportCells, string tag)
     {
         // `<b><p>…</p></b>` — a BLOCK opening inside an emphasis inline.
         // The HTML parser cannot nest them, so it closes the inline
@@ -122,7 +122,7 @@ internal static partial class HtmlToPdfConverter
         // 14.4pt` label ladder).
         if (stdSerif && mps.cell is not null && tok.Attributes is { } pmAttrs
             && pmAttrs.TryGetValue("style", out var pmSt) && pmSt is not null
-            && Regex.Match(pmSt,
+            && SafeRegex.Match(pmSt,
                 @"margin\s*:\s*[\d.]+pt\s+[\d.]+pt\s+[\d.]+pt\s+([\d.]+)pt",
                 RegexOptions.IgnoreCase) is { Success: true } pmM
             && double.TryParse(pmM.Groups[1].Value,
@@ -150,7 +150,7 @@ internal static partial class HtmlToPdfConverter
             foreach (var pc0 in pCls0.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 if (css.TryGetValue(tag + "." + pc0, out var pRule0)
                     || css.TryGetValue("." + pc0, out pRule0))
-                    ApplyCellClassBag(mps, css, text, reportCells, stdSerif, mps.cell, pRule0);
+                    ApplyCellClassBag(mps, stdSerif, mps.cell, pRule0);
         // Report cells: each paragraph is its own SEGMENT with the
         // typography its spans set. The lead text (a styled heading
         // span) becomes the first segment so a later span cannot

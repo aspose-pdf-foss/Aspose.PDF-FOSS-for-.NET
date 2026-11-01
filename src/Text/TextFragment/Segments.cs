@@ -165,4 +165,47 @@ public partial class TextFragment
             sb.Append(seg.Text);
         _text = sb.ToString();
     }
+
+    /// <summary>Set by the search when the match sits in a right-to-left line: an edit of
+    /// it keeps the match's right edge and the rest of the line lies to its left.</summary>
+    internal bool ReadsRightToLeft { get; set; }
+
+    /// <summary>How far the edit moved the runs after the match that a shift of the rest of the
+    /// line re-seated by their own Tm: a source rule dressing one of them follows it.</summary>
+    internal double FollowersShiftedBy { get; private set; }
+
+    /// <summary>After an in-place edit that re-flows its line, a match on a right-to-left
+    /// line is re-seated against its right edge (see TextReplacer.ReseatRightToLeft), and on
+    /// a left-to-right line shifted by ShiftRestOfLine the runs after it that state their own
+    /// Tm follow it (TextReplacer.ShiftSeatedFollowers); the fragment's new rectangle, or null
+    /// when the line reads left to right or nothing moved.
+    /// A run the edit left as it was measures as wide as before, so nothing moves.</summary>
+    private Rectangle? ReseatLineAfterEdit(bool reflowLine, string value, Rectangle? preRect, double? preBaselineY)
+    {
+        if (!reflowLine || value.Length == 0
+            || SourcePage is null || preRect is null || preBaselineY is not { } baseY)
+            return null;
+        if (!ReadsRightToLeft)
+        {
+            if (_replaceOptions?.ReplaceAdjustmentAction == TextReplaceOptions.ReplaceAdjustment.ShiftRestOfLine)
+                FollowersShiftedBy = TextReplacer.ShiftSeatedFollowers(SourcePage, baseY, preRect.LLX, preRect.Width, value);
+            return null;
+        }
+        if (_replaceOptions?.ReplaceAdjustmentAction == TextReplaceOptions.ReplaceAdjustment.WholeWordsHyphenation
+            && TextReplacer.ReflowRightToLeft(SourcePage, baseY, preRect.LLX, preRect.Width) is { } flowed)
+        {
+            var dy = flowed.baseline - baseY;
+            return new Rectangle(flowed.left, preRect.LLY + dy, flowed.right, preRect.URY + dy);
+        }
+        return TextReplacer.ReseatRightToLeft(SourcePage, baseY, preRect.LLX, preRect.Width) is { } advance
+            ? new Rectangle(preRect.URX - advance, preRect.LLY, preRect.URX, preRect.URY)
+            : null;
+    }
+
+    /// <summary>A replacement as the page draws it: Arabic letters in their joined
+    /// presentation forms and every right-to-left run in visual order, the way the page's
+    /// own right-to-left runs are stored, so extraction reads it back in reading order.
+    /// Left-to-right text is returned unchanged.</summary>
+    internal static string DrawnForm(string text) =>
+        BidiReorderer.ContainsRtl(text) ? BidiReorderer.ToVisualIfRtl(ArabicShaper.Shape(text)) : text;
 }

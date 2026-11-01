@@ -21,7 +21,6 @@ private sealed class LetterTrackedGapsState
     public List<int> line = null!;
     public double prevLineY;
     public int j;
-    public double lineY;
     public double[] gaps = null!;
     public double[] subWord = null!;
     // A gap bordered by a MULTI-WORD run (a real space glyph among other

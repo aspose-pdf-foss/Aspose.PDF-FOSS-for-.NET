@@ -18,7 +18,8 @@ internal static partial class HtmlToPdfConverter
         {
             tok.Attributes.TryGetValue("name", out var rName);
             var rChecked = tok.Attributes.ContainsKey("checked");
-            var rOpt = cfg.makeRadio(rName ?? "", rChecked);
+            tok.Attributes.TryGetValue("value", out var rValue);
+            var rOpt = cfg.makeRadio(rName ?? "", rValue?.Trim() ?? "", rChecked);
             ps.line.Append(rChecked
                 ? Table.InlineRadioCheckedChar : Table.InlineRadioChar);
             (ps.cellInlineOptions ??= new List<Aspose.Pdf.Forms.RadioButtonOptionField>())
@@ -29,6 +30,7 @@ internal static partial class HtmlToPdfConverter
         // the caption (the Print/Close controls); the
         // caption rides the line between PUA markers so the column
         // measures it and the render pass draws the box.
+        else if (OpenGridPushButton(cfg, ps, tok, inType)) { /* a push button field in its cell */ }
         else if (inType is "button" or "submit" && cfg.makeRadio is not null
             && tok.Attributes.TryGetValue("value", out var btnVal)
             && !string.IsNullOrWhiteSpace(btnVal))
@@ -95,6 +97,7 @@ internal static partial class HtmlToPdfConverter
             ps.cellControlBoxPt = Math.Max(ps.cellControlBoxPt, UaTextControlAdvancePt(tok.Attributes));
             ps.lineHadText = true;
         }
+        else if (OpenGridTextInput(cfg, ps, tok, inType)) { /* a text field in its cell */ }
         else if (inType is not ("checkbox" or "radio" or "hidden" or "submit" or "button" or "image")
             && tok.Attributes.TryGetValue("value", out var inVal)
             && !string.IsNullOrWhiteSpace(inVal))

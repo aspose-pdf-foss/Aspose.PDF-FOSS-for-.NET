@@ -77,10 +77,12 @@ public sealed partial class PdfFileEditor
 
     internal void ResetConversionLog() => _conversionLog.Clear();
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>Target PDF/A format for the next Concatenate output. When
     /// set, the result is converted to that format via Document.Convert
     /// after concatenation.</summary>
     public PdfFormat ConvertTo
+#pragma warning restore S2376
     {
         set => _convertToFormat = value;
     }
@@ -170,6 +172,18 @@ public sealed partial class PdfFileEditor
     public bool TryMakeBooklet(string inputFile, string outputFile, PageSize pageSize, int[] leftPages, int[] rightPages) =>
         Try(() => MakeBooklet(inputFile, outputFile, pageSize, leftPages, rightPages));
 
+    public bool TryMakeBooklet(Stream inputStream, Stream outputStream) =>
+        Try(() => MakeBooklet(inputStream, outputStream));
+
+    public bool TryMakeBooklet(Stream inputStream, Stream outputStream, PageSize pageSize) =>
+        Try(() => MakeBooklet(inputStream, outputStream, pageSize));
+
+    public bool TryMakeBooklet(Stream inputStream, Stream outputStream, int[] leftPages, int[] rightPages) =>
+        Try(() => MakeBooklet(inputStream, outputStream, leftPages, rightPages));
+
+    public bool TryMakeBooklet(Stream inputStream, Stream outputStream, PageSize pageSize, int[] leftPages, int[] rightPages) =>
+        Try(() => MakeBooklet(inputStream, outputStream, pageSize, leftPages, rightPages));
+
     public bool TrySplitFromFirst(string inputFile, int location, string outputFile) =>
         Try(() => SplitFromFirst(inputFile, location, outputFile));
 
@@ -190,18 +204,6 @@ public sealed partial class PdfFileEditor
 
     public bool TryResizeContents(Stream source, Stream destination, int[] pages, double newWidth, double newHeight) =>
         Try(() => ResizeContents(source, destination, pages, newWidth, newHeight));
-
-    public bool TryMakeBooklet(Stream inputStream, Stream outputStream) =>
-        Try(() => MakeBooklet(inputStream, outputStream));
-
-    public bool TryMakeBooklet(Stream inputStream, Stream outputStream, PageSize pageSize) =>
-        Try(() => MakeBooklet(inputStream, outputStream, pageSize));
-
-    public bool TryMakeBooklet(Stream inputStream, Stream outputStream, int[] leftPages, int[] rightPages) =>
-        Try(() => MakeBooklet(inputStream, outputStream, leftPages, rightPages));
-
-    public bool TryMakeBooklet(Stream inputStream, Stream outputStream, PageSize pageSize, int[] leftPages, int[] rightPages) =>
-        Try(() => MakeBooklet(inputStream, outputStream, pageSize, leftPages, rightPages));
 
     public bool TryMakeNUp(string firstInputFile, string secondInputFile, string outputFile) =>
         Try(() => MakeNUp(firstInputFile, secondInputFile, outputFile));
@@ -341,36 +343,50 @@ public sealed partial class PdfFileEditor
         return true;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     // ── MakeNUp (real — basic grid imposition + side-by-side) ────────────────
 
     /// <summary>Places the pages of the input file onto sheets of <c>x</c> columns by <c>y</c> rows and saves the result to <c>outputFile</c>. The sheet size is the size of the first source page; returns true.</summary>
     public bool MakeNUp(string inputFile, string outputFile, int x, int y)
+#pragma warning restore S2325
         => WriteFile(outputFile, MakeNUpCore(File.ReadAllBytes(inputFile), x, y, pageSize: null));
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Places the pages of the input file onto sheets of the given size, <c>x</c> columns by <c>y</c> rows, and saves the result to <c>outputFile</c>. Returns true.</summary>
     public bool MakeNUp(string inputFile, string outputFile, int x, int y, PageSize pageSize)
+#pragma warning restore S2325
         => WriteFile(outputFile, MakeNUpCore(File.ReadAllBytes(inputFile), x, y, pageSize));
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Places the pages of the input PDF onto sheets of <c>x</c> columns by <c>y</c> rows and writes the result to the output stream. The sheet size is the size of the first source page; returns true.</summary>
     public bool MakeNUp(Stream inputStream, Stream outputStream, int x, int y)
+#pragma warning restore S2325
         => WriteBytes(outputStream, MakeNUpCore(ReadStream(inputStream), x, y, pageSize: null));
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Places the pages of the input PDF onto sheets of the given size, <c>x</c> columns by <c>y</c> rows, and writes the result to the output stream. Returns true.</summary>
     public bool MakeNUp(Stream inputStream, Stream outputStream, int x, int y, PageSize pageSize)
+#pragma warning restore S2325
         => WriteBytes(outputStream, MakeNUpCore(ReadStream(inputStream), x, y, pageSize));
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Pairs page i of the first file with page i of the second file side by side on one output page and saves the result to <c>outputFile</c>. Returns true.</summary>
     public bool MakeNUp(string firstInputFile, string secondInputFile, string outputFile)
+#pragma warning restore S2325
         => WriteFile(outputFile, MakeNUpTwoFiles(
             File.ReadAllBytes(firstInputFile), File.ReadAllBytes(secondInputFile), isSidewise: true));
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Pairs page i of the first PDF with page i of the second PDF side by side on one output page and writes the result to the output stream. Returns true.</summary>
     public bool MakeNUp(Stream firstInputStream, Stream secondInputStream, Stream outputStream)
+#pragma warning restore S2325
         => WriteBytes(outputStream, MakeNUpTwoFiles(
             ReadStream(firstInputStream), ReadStream(secondInputStream), isSidewise: true));
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Combines page i of every input file onto one output page, side by side when <c>isSidewise</c> is true or stacked vertically otherwise, and saves the result to <c>outputFile</c>. Throws when no files are given.</summary>
     public bool MakeNUp(string[] inputFiles, string outputFile, bool isSidewise)
+#pragma warning restore S2325
     {
         if (inputFiles is null || inputFiles.Length == 0)
             throw new System.ArgumentException("At least one input file required", nameof(inputFiles));
@@ -378,8 +394,10 @@ public sealed partial class PdfFileEditor
         return WriteFile(outputFile, MakeNUpMany(bytes, isSidewise));
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Combines page i of every input PDF onto one output page, side by side when <c>isSidewise</c> is true or stacked vertically otherwise, and writes the result to the output stream. Throws when no streams are given.</summary>
     public bool MakeNUp(Stream[] inputStreams, Stream outputStream, bool isSidewise)
+#pragma warning restore S2325
     {
         if (inputStreams is null || inputStreams.Length == 0)
             throw new System.ArgumentException("At least one input stream required", nameof(inputStreams));
@@ -410,8 +428,11 @@ public sealed partial class PdfFileEditor
         var target = Document.Create();
         var n = src.PageCount;
 
-        var sheetW = pageSize?.Width ?? src.Pages[1].MediaBox.Width;
-        var sheetH = pageSize?.Height ?? src.Pages[1].MediaBox.Height;
+        // Pages are tiled as a viewer shows them: a page turned by its /Rotate is placed turned,
+        // and the sheet takes the first page's shown shape.
+        var (firstW, firstH) = PdfPageStamp.ShownPageSize(src.Pages[1]);
+        var sheetW = pageSize?.Width ?? firstW;
+        var sheetH = pageSize?.Height ?? firstH;
 
         // One clone map shared across the whole build so annotation resources shared
         // between source pages (fonts, colour spaces, appearance forms) import once.
@@ -426,8 +447,7 @@ public sealed partial class PdfFileEditor
                 var row = slot / x;        // top-down
                 var col = slot % x;
                 var page = src.Pages[srcPage + slot];
-                var pw = page.MediaBox.Width;
-                var ph = page.MediaBox.Height;
+                var (pw, ph) = PdfPageStamp.ShownPageSize(page);
                 var cellW = sheetW / x;
                 var cellH = sheetH / y;
                 var scale = System.Math.Min(cellW / pw, cellH / ph);
@@ -470,7 +490,7 @@ public sealed partial class PdfFileEditor
                 if (srcAnnot.Get(key) is { } v) shallow.Set(key, v);
             }
             var imported = target.ImportDict(shallow, srcReader, cloneMap);
-            TransformAnnotationGeometry(imported, target.Reader, scale, dstX, dstY);
+            TransformAnnotationGeometry(imported, target.Reader, PdfPageStamp.ShownTurn(srcPage), scale, dstX, dstY);
             sheetAnnots.Add(Aspose.Pdf.Annotations.Annotation.Create(imported, sheet.Reader));
         }
     }
@@ -478,33 +498,45 @@ public sealed partial class PdfFileEditor
     // Apply x' = x*s + tx, y' = y*s + ty to every coordinate-bearing entry of an
     // annotation dict. Uniform scaling means the /AP appearance auto-maps to the new
     // /Rect (PDF 32000-1 §12.5.5), so only the coordinate arrays need rewriting.
+    // A turned page's coordinates are first turned as its tile is (turn = a b c d e f).
     private static void TransformAnnotationGeometry(PdfDictionary d, IO.PdfReader reader,
-        double s, double tx, double ty)
+        double[]? turn, double s, double tx, double ty)
     {
         foreach (var key in new[] { "Rect", "L", "QuadPoints", "Vertices", "CL" })
         {
             if (reader.Resolve(d.Get(key)) is PdfArray arr)
-                d.Set(key, TransformFlatCoords(arr, s, tx, ty));
+                d.Set(key, TransformFlatCoords(arr, turn, s, tx, ty, normaliseRect: key == "Rect"));
         }
         // /InkList is an array of coordinate paths.
         if (reader.Resolve(d.Get("InkList")) is PdfArray ink)
         {
             var newInk = new PdfArray();
             foreach (var sub in ink)
-                newInk.Add(reader.Resolve(sub) is PdfArray path ? TransformFlatCoords(path, s, tx, ty) : sub);
+                newInk.Add(reader.Resolve(sub) is PdfArray path ? TransformFlatCoords(path, turn, s, tx, ty, normaliseRect: false) : sub);
             d.Set("InkList", newInk);
         }
     }
 
-    // Map a flat [x0 y0 x1 y1 …] coordinate array by (scale, tx, ty).
-    private static PdfArray TransformFlatCoords(PdfArray arr, double s, double tx, double ty)
+    // Map a flat [x0 y0 x1 y1 …] coordinate array by the turn, then (scale, tx, ty); a turned
+    // /Rect is put back in lower-left, upper-right order.
+    private static PdfArray TransformFlatCoords(PdfArray arr, double[]? turn, double s, double tx, double ty, bool normaliseRect)
     {
-        var result = new PdfArray();
-        for (var i = 0; i < arr.Count; i++)
+        static double Num(PdfObject o) => o switch { PdfReal r => r.Value, PdfInteger n => n.Value, _ => 0.0 };
+        var values = new double[arr.Count];
+        for (var i = 0; i + 1 < arr.Count; i += 2)
         {
-            var v = arr[i] switch { PdfReal r => r.Value, PdfInteger n => n.Value, _ => 0.0 };
-            result.Add(new PdfReal(i % 2 == 0 ? v * s + tx : v * s + ty));
+            double x = Num(arr[i]), y = Num(arr[i + 1]);
+            if (turn is not null)
+                (x, y) = (turn[0] * x + turn[2] * y + turn[4], turn[1] * x + turn[3] * y + turn[5]);
+            values[i] = x * s + tx;
+            values[i + 1] = y * s + ty;
         }
+        if (arr.Count % 2 == 1) values[^1] = Num(arr[arr.Count - 1]) * s + tx;
+        if (normaliseRect && turn is not null && values.Length == 4)
+            values = [System.Math.Min(values[0], values[2]), System.Math.Min(values[1], values[3]),
+                System.Math.Max(values[0], values[2]), System.Math.Max(values[1], values[3])];
+        var result = new PdfArray();
+        foreach (var v in values) result.Add(new PdfReal(v));
         return result;
     }
 
@@ -618,12 +650,13 @@ public sealed partial class PdfFileEditor
         // Convert the source page into a Form XObject inserted into the
         // target sheet's resource dictionary, then emit a `cm + Do` content
         // stream snippet placing it at (x, y) scaled by `scale`.
+        var (shownW, shownH) = PdfPageStamp.ShownPageSize(srcPage);
         var sourceStamp = new PdfPageStamp(srcPage)
         {
             XIndent = x,
             YIndent = y,
-            Width = srcPage.MediaBox.Width * scale,
-            Height = srcPage.MediaBox.Height * scale,
+            Width = shownW * scale,
+            Height = shownH * scale,
             // N-up carries annotations itself (transformed to the tile
             // geometry); the stamp must not import them a second time.
             CarryAnnotations = false,
@@ -634,15 +667,19 @@ public sealed partial class PdfFileEditor
 
     // ── SplitToBulks / SplitToPages: file/stream wrappers over real byte[] impls ─
 
+#pragma warning disable S2368 // public API: the published signature
     /// <summary>Splits the PDF file into several documents, one per page range; each range is <c>[start, end]</c> (1-based, inclusive). Returns one read-only stream per part.</summary>
     public MemoryStream[] SplitToBulks(string inputFile, int[][] numberOfPage)
+#pragma warning restore S2368
     {
         var bulks = SplitToBulks(File.ReadAllBytes(inputFile), numberOfPage);
         return bulks.Select(b => new MemoryStream(b, writable: false)).ToArray();
     }
 
+#pragma warning disable S2368 // public API: the published signature
     /// <summary>Splits the PDF in the stream into several documents, one per page range; each range is <c>[start, end]</c> (1-based, inclusive). Returns one read-only stream per part.</summary>
     public MemoryStream[] SplitToBulks(Stream inputStream, int[][] numberOfPage)
+#pragma warning restore S2368
     {
         var bulks = SplitToBulks(ReadStream(inputStream), numberOfPage);
         return bulks.Select(b => new MemoryStream(b, writable: false)).ToArray();
@@ -669,13 +706,14 @@ public sealed partial class PdfFileEditor
         {
             // %NUM% is the placeholder the split-to-file API documents; {0} stays supported,
             // and a template carrying neither gets the index appended before the extension.
-            var path = fileNameTemplate.Contains("%NUM%", System.StringComparison.Ordinal)
-                ? fileNameTemplate.Replace("%NUM%", (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture))
-                : fileNameTemplate.Contains("{0}", System.StringComparison.Ordinal)
-                    ? string.Format(fileNameTemplate, i + 1)
-                    : System.IO.Path.Combine(
-                        System.IO.Path.GetDirectoryName(fileNameTemplate) ?? "",
-                        $"{System.IO.Path.GetFileNameWithoutExtension(fileNameTemplate)}_{i + 1}{System.IO.Path.GetExtension(fileNameTemplate)}");
+            string path;
+            if (fileNameTemplate.Contains("%NUM%", System.StringComparison.Ordinal))
+                path = fileNameTemplate.Replace("%NUM%", (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            else if (fileNameTemplate.Contains("{0}", System.StringComparison.Ordinal)) path = string.Format(fileNameTemplate, i + 1);
+            else
+                path = System.IO.Path.Combine(
+                    System.IO.Path.GetDirectoryName(fileNameTemplate) ?? "",
+                    $"{System.IO.Path.GetFileNameWithoutExtension(fileNameTemplate)}_{i + 1}{System.IO.Path.GetExtension(fileNameTemplate)}");
             File.WriteAllBytes(path, pages[i]);
         }
     }
@@ -683,17 +721,6 @@ public sealed partial class PdfFileEditor
     private bool Try(Func<bool> action)
     {
         try { return action(); }
-        catch (Exception ex)
-        {
-            LastException = ex;
-            if (AllowExceptions) throw;
-            return false;
-        }
-    }
-
-    private bool Try(Action action)
-    {
-        try { action(); return true; }
         catch (Exception ex)
         {
             LastException = ex;

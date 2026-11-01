@@ -30,7 +30,9 @@ public sealed partial class Document
         rl.lpadTop = rl.lt.DefaultCellPadding?.Top ?? 0;
         rl.lpadBottom = rl.lt.DefaultCellPadding?.Bottom ?? 0;
         rl.y = rl.startY;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var lrow in rl.lt.Rows)
+#pragma warning restore S3267
         {
             if (!RenderLayoutTableRow(rl, lrow)) break;
         }
@@ -40,7 +42,7 @@ public sealed partial class Document
     // Render a real HTML <table> as a generator Table at the flow cursor,
     // paginating like a page-level Table paragraph (same logic as the
     // `para is Table` branch below).
-    private void RenderHtmlTable(Table t, FlowLayout flow, Page page, double marginLeft, double marginTop,
+    private void RenderHtmlTable(Table t, FlowLayout flow, double marginLeft, double marginTop,
         List<(byte[] content, double width, double height)> overflowPages,
         Dictionary<int, List<(byte[] data, Rectangle rect)>> overflowImages)
     {
@@ -79,7 +81,7 @@ public sealed partial class Document
         // overflows — overflowed cell images are rare and out of scope here).
         if (!flow.HasOverflowed && tableImages.Count > 0)
             foreach (var (data, rect) in tableImages[0])
-                tablePage.AddImage(data, rect);
+                tablePage.AddLayoutImage(data, rect);
         if (pageContents.Count == 1)
         {
             flow.AdvanceY(t.LastRenderedHeight);
@@ -90,7 +92,7 @@ public sealed partial class Document
             {
                 if (pi < tableImages.Count && tableImages[pi].Count > 0)
                     overflowImages[overflowPages.Count] = tableImages[pi];
-                overflowPages.Add((pageContents[pi], tablePage.Width, tablePage.Height));
+                overflowPages.Add((pageContents[pi], tablePage.LayoutFrameWidth, tablePage.LayoutFrameHeight));
             }
             var lastIdx = pageContents.Count - 1;
             var lastSlot = flow.ContinueOnPrebuiltSpill(pageContents[lastIdx], t.LastPageEndY);
@@ -114,25 +116,25 @@ public sealed partial class Document
         ua.flow = flow;
         ua.page = page;
         ua.marginLeft = marginLeft;
-        ua.twm = System.Text.RegularExpressions.Regex.Match(ua.chunk,
+        ua.twm = SafeRegex.Match(ua.chunk,
             @"<table\b[^>]*\bwidth\s*=\s*[""']?(\d+)(?![\d%])", UaRx);
         ua.tableW = ua.twm.Success
             ? double.Parse(ua.twm.Groups[1].Value,
                 System.Globalization.CultureInfo.InvariantCulture) * 0.75
             : ua.uaBoxPt;
-        ua.zeroPad = System.Text.RegularExpressions.Regex.IsMatch(ua.chunk,
+        ua.zeroPad = SafeRegex.IsMatch(ua.chunk,
             @"<table\b[^>]*\bcellpadding\s*=\s*[""']?0[""']?", UaRx);
         ua.pad = ua.zeroPad ? 0.0 : UaTdPadPt;
 
         ua.colWs = new List<double>();
         foreach (System.Text.RegularExpressions.Match cm in
-            System.Text.RegularExpressions.Regex.Matches(ua.chunk,
+            SafeRegex.Matches(ua.chunk,
                 @"<col\b[^>]*width\s*:\s*([\d.]+)pt", UaRx))
             ua.colWs.Add(double.Parse(cm.Groups[1].Value,
                 System.Globalization.CultureInfo.InvariantCulture));
         if (ua.colWs.Count == 0)
             foreach (System.Text.RegularExpressions.Match cm in
-                System.Text.RegularExpressions.Regex.Matches(ua.chunk,
+                SafeRegex.Matches(ua.chunk,
                     @"<td\b[^>]*width\s*:\s*([\d.]+)%", UaRx))
                 ua.colWs.Add(ua.tableW * double.Parse(cm.Groups[1].Value,
                     System.Globalization.CultureInfo.InvariantCulture) / 100.0);
@@ -148,11 +150,13 @@ public sealed partial class Document
         ua.uaTimes2 = Table.RegisterFont(ua.flow.CurrentPage, "Times-Roman");
         ua.tb = new Content.ContentStreamBuilder();
         ua.tb.SaveState();
-        ua.topD = ua.page.Height - ua.flow.CurrentY;
+        ua.topD = ua.page.LayoutFrameHeight - ua.flow.CurrentY;
         ua.totalH = 0.0;
 
         foreach (System.Text.RegularExpressions.Match rm in
-            System.Text.RegularExpressions.Regex.Matches(ua.chunk,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+            SafeRegex.Matches(ua.chunk,
+#pragma warning restore S3267
                 @"<tr(?<a>[^>]*)>(?<in>.*?)</tr>", UaRx))
         {
             if (!RenderUaRow(ua, rm)) break;

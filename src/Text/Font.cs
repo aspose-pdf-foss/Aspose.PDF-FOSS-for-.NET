@@ -44,7 +44,7 @@ public class Font : FontInfo
     public void Save(System.IO.Stream stream)
     {
         if (stream is null) throw new ArgumentNullException(nameof(stream));
-        var data = SourceFontData?.TtfData ?? GetEmbeddedProgramBytes();
+        var data = SourceFontData?.FileBytes ?? GetEmbeddedProgramBytes();
         if (data is null || data.Length == 0)
         {
             try { data = FontRepository.GetTtfData(FontName); }
@@ -66,11 +66,17 @@ public class Font : FontInfo
     public static implicit operator Font?(FontData? fontData)
     {
         if (fontData is null) return null;
-        var font = new Font(fontData.FontName,
-            fontData.Type == FontType.TrueType ? "TrueType" : "Type1");
+        var font = new Font(fontData.FontName, SubtypeOf(fontData.Type));
         font.SourceFontData = fontData;
         return font;
     }
+
+    private static string SubtypeOf(FontType type) => type switch
+    {
+        FontType.TrueType => "TrueType",
+        FontType.Type0 => "Type0",
+        _ => "Type1",
+    };
 
     /// <summary>The options ride on the face program (<c>SourceFontData</c>) when
     /// there is one, so the embedding writer — which is handed the program, not this

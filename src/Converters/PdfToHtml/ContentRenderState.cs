@@ -17,16 +17,12 @@ private sealed class ContentRenderState
     // becomes CSS letter-spacing: Tc per character, plus the TJ kerning residual
     // (positive TJ numbers move left, so subtract). Accumulated per group.
     public double charSpacing;
+    // The horizontal scaling (Tz) as a factor: it scales every advance of the text, glyphs, spacing and kerns.
+    public double horizScale = 1.0;
     public double wordSpacing;
     public double pendingTjNum;
     public double groupTjNum;
     public int groupChars;
-    // Text state. The text matrix (Tm) and text line matrix (Tlm) are tracked in
-    // full: a PDF commonly carries the visible glyph scale in Tm (e.g. `Tf /F 1`
-    // then `Tm [12 0 0 12 …]`), so reading the size from Tf alone yields 1pt text
-    // and mis-placed runs. `tx`/`ty` mirror the text position for the `v` path op.
-    public double tx;
-    public double ty;
     public Converters.PdfToHtmlConverter.CtmState tlm = null!;
     public Converters.PdfToHtmlConverter.CtmState tm = null!;
     public double leading;
@@ -55,7 +51,7 @@ private sealed class ContentRenderState
     public Converters.PdfToHtmlConverter.CtmState ctm = null!;
     public Stack<Aspose.Pdf.Converters.PdfToHtmlConverter.CtmState> ctmStack = null!;
     public Stack<(double r, double g, double b, double fr, double fg, double fb, double sr, double sg, double sb)> colorStack = null!;
-    public Stack<(double cs, double ws)> textSpacingStack = null!;
+    public Stack<SavedTextState> textStateStack = null!;
     // Path state
     public Converters.PdfToHtmlConverter.PathState pathState = null!;
     public System.Text.StringBuilder svgPaths = null!;
@@ -75,8 +71,17 @@ private sealed class ContentRenderState
     // with the rest of the graphics state.
     public string? clipD;
     public string? pendingClipD;
-    public Stack<string?> clipStack = null!;
+    // The pending clip was marked with `W*` (even-odd), and the id of the SVG clip path the
+    // clip in force was written as, nested in the clips around it; null while nothing
+    // narrower than the page clips. The id rides the stack with the clip.
+    public bool pendingClipEvenOdd;
+    public string? clipId;
+    public Stack<(string? D, string? Id)> clipStack = null!;
+    // The clip a form's box imposes on its content, handed in by the invoking state.
+    public string? initialClipD;
+    public string? initialClipId;
     public int shadingSeq;
+    public int clipSeq;
     // An open SVG soft-mask group: everything painted between the gs that set a
     // luminosity /SMask and the gs (or Q) that clears it renders inside a
     // <g mask="…">. The depth records the q-nesting at open time so a Q that
@@ -93,7 +98,7 @@ private sealed class ContentRenderState
     // candidates; FlushGroup matches them against each text run (same colour,
     // under/through the baseline, horizontally covering the run start).
     // (Y = rule centre line, Thick in device units.)
-    public List<(double Y, double X0, double X1, double Thick, double R, double G, double B)>? rules;
+    public List<(double Y, double X0, double X1, double Thick, double R, double G, double B, int SvgStart, int SvgEnd)>? rules;
     public List<(double X0, double Y0, double X1, double Y1)> pathSegs = null!;
     public double curDevX;
     public double curDevY;
@@ -114,6 +119,8 @@ private sealed class ContentRenderState
     // Per-line glyph records feeding the stl_ line solver; lineOk drops to
     // false (legacy emission) when a show lacks aligned per-char advances.
     public List<Aspose.Pdf.Converters.PdfToHtmlConverter.StlLineGlyph>? lineGlyphs;
+    // The shows recorded on the solver's lines, counted: each glyph carries its show's number.
+    public int lineShowSeq;
     public List<Aspose.Pdf.Converters.PdfToHtmlConverter.StlRunStyle>? lineStyles;
     public bool lineOk;
     public int lineStyleIdx;
@@ -128,8 +135,14 @@ private sealed class ContentRenderState
     // forward-gap div-split measures from (whitespace shows are transparent).
     public double groupPenX;
     public double groupTextPenX;
+    // The advance of the space glyph that closed the group's last show, device points (0
+    // when that show ended with no space): a show starting inside it continues the line.
+    public double groupTailSpacePt;
     public double groupX;
     public double groupY;
+    // The group's baseline coordinate across its run direction (equal to groupY for
+    // an unrotated line); see ShowRunState.across.
+    public double groupAcross;
     public double groupFontSize;
     public double groupRise;
     public double groupAngle;
@@ -148,6 +161,7 @@ private sealed class ContentRenderState
     // The slant the group's faux-bold declaration states (face italic or shear).
     public string groupDeclStyle = null!;
     public double groupR;
+    public double groupAlpha = 1.0;
     public double groupG;
     public double groupB;
     // The group was opened by a run drawn in an invisible rendering mode.
@@ -179,6 +193,29 @@ private sealed class ContentRenderState
     // line writes back to its OWN slot, never to whatever else shares its
     // baseline, so a second line started at the same height cannot displace it.
     public StlLinePark? activePark;
+    // The page's text-layer model (null outside the fixed-layout export): the paint
+    // ordinal of the operator being rendered, and the ordinal of the first show of
+    // the line being built — carried with the line when it is parked and resumed, so
+    // a fill painted later can be told from one painted before it.
+    public TextLayerModel? model;
+    public int paintSeq;
+    public int groupSeq;
+    // The path under construction was built by one `re` alone (its data length then
+    // equals this; -1 otherwise): the only shape whose device-space footprint is known
+    // exactly, kept as the box of its four corners.
+    public int singleRectPathLength = -1;
+    public (double X0, double Y0, double X1, double Y1) singleRectBox;
+    // Blend mode (/BM) of the fill: under Normal a fill paints over what lies beneath (a
+    // Multiply white fill hides nothing), and any other mode rides the painted element into
+    // the SVG; saved and restored with q/Q.
+    public string blendMode = NormalBlend;
+    public Stack<string> blendStack = null!;
+    // The constant fill alpha (/ca) text is painted with, saved and restored with the graphics state.
+    public double fillAlpha = 1.0;
+    // The width of the frame the content is laid out in: the page's width, or its unrotated width when the
+    // page is turned a quarter and its text is laid out unrotated.
+    public double frameWidth;
+    public Stack<double> alphaStack = new();
     // The render inputs, captured from the method parameters.
     public byte[] streamBytes = null!;
     public Dictionary<string, HtmlFontRecord> fonts = null!;
@@ -189,6 +226,8 @@ private sealed class ContentRenderState
     public double pageWidth;
     public bool saveTransparentTexts;
     public bool emCompensation;
+    // PreventGlyphsGrouping: every glyph of a solved line is its own positioned div.
+    public bool perGlyphDivs;
     public bool textOnly;
     public StringBuilder? externalSvgPaths;
     public ExternalImageSink? imageSink;
@@ -198,6 +237,9 @@ private sealed class ContentRenderState
     public PdfDictionary? resources;
     public bool preferFontCmap;
     public Dictionary<int, LigatureSubstitutor>? substitutors;
+
+    /// <summary>True when a font's substitutor minted <paramref name="ch"/> for a glyph: no text of its own.</summary>
+    public bool IsMintedStandIn(char ch) => substitutors is not null && substitutors.Values.Any(s => s.IsMinted(ch));
     public CtmState? initialCtm;
     public HashSet<PdfStream>? visitedForms;
     public RotationRegistry? rotReg;

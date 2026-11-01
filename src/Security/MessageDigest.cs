@@ -52,7 +52,9 @@ internal abstract class MessageDigest
         private readonly MemoryStream data = new();
         public override string Name => name;
         public override int Length => length;
+#pragma warning disable S927 // "data" names the buffer field here
         public override void Update(byte[] bytes, int offset, int count) => data.Write(bytes, offset, count);
+#pragma warning restore S927
 
         public override byte[] Finish()
         {
@@ -82,7 +84,9 @@ internal abstract class MessageDigest
         private readonly MemoryStream data = new();
         public override string Name => "MD2";
         public override int Length => BlockSize;
+#pragma warning disable S927 // "data" names the buffer field here
         public override void Update(byte[] bytes, int offset, int count) => data.Write(bytes, offset, count);
+#pragma warning restore S927
         public override void Reset() => data.SetLength(0);
 
         public override byte[] Finish()

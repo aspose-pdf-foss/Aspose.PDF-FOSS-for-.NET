@@ -39,17 +39,17 @@ public sealed partial class Document
                 continue;
             }
             if (cur.Length > 0) { res.Add(cur); cur = ""; }
-            var piece = "";
+            var piece = new StringBuilder();
             foreach (var ch in word)
             {
-                if (piece.Length > 0 && PsMeasure(piece + ch, bold, fs) > maxW)
+                if (piece.Length > 0 && PsMeasure(piece.ToString() + ch, bold, fs) > maxW)
                 {
-                    res.Add(piece);
-                    piece = "";
+                    res.Add(piece.ToString());
+                    piece.Clear();
                 }
-                piece += ch;
+                piece.Append(ch);
             }
-            cur = piece;
+            cur = piece.ToString();
         }
         if (cur.Length > 0) res.Add(cur);
         if (res.Count == 0) res.Add("");
@@ -81,12 +81,12 @@ public sealed partial class Document
         return k;
     }
 
-    private static double PsGlyph(Content.ContentStreamBuilder pb, bool checkbox, double gx, double gBase)
+    private static void PsGlyph(Content.ContentStreamBuilder pb, bool checkbox, double gx, double gBase)
     {
         if (checkbox)
         {
             pb.SetLineWidth(0.9).Rectangle(gx + 0.4, gBase, 7.7, 7.7).Stroke();
-            return gx + 8.5 + 3.0;
+            return;
         }
         const double rr = 4.1, rk = 0.5523;
         var ccx = gx + rr + 0.4;
@@ -98,6 +98,5 @@ public sealed partial class Document
           .CurveTo(ccx - rr, ccy - rk * rr, ccx - rk * rr, ccy - rr, ccx, ccy - rr)
           .CurveTo(ccx + rk * rr, ccy - rr, ccx + rr, ccy - rk * rr, ccx + rr, ccy)
           .Stroke();
-        return gx + 2 * rr + 0.8 + 3.75;
     }
 }

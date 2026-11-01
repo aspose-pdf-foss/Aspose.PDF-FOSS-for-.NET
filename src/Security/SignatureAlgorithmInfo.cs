@@ -70,9 +70,11 @@ namespace Aspose.Pdf.Security
             AlgorithmType = algorithmType;
         }
 
+#pragma warning disable S1104 // public API: a field of the published surface, kept a field for binary compatibility
         public SignatureAlgorithmType AlgorithmType;
         public CryptographicStandard CryptographicStandard;
         public DigestHashAlgorithm DigestHashAlgorithm;
+#pragma warning restore S1104
 
         public override string ToString() =>
             $"{SignatureName}: {AlgorithmType} / {DigestHashAlgorithm} ({CryptographicStandard})";

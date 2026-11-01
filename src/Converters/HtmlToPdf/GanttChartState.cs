@@ -30,7 +30,7 @@ private sealed class GanttChartState
     public List<double> colW = null!;
     public List<List<(double WidthPx, string Align, string Text, double IndentPx)>> rows = null!;
     // The widget chrome (all measured):
-    //  - the outer frame and the grid/timeline separator in the darker rule gray;
+    //  - the outer frame and the grid/timeline separator in the darker rule gray,
     //  - an hour line at every scale-cell boundary and a row line under every row
     //    band, in the light #ebebeb — the timeline lines run the full declared
     //    1190 px area, the row lines both panes.
@@ -48,10 +48,8 @@ private sealed class GanttChartState
     public System.Text.RegularExpressions.Match barsArea = null!;
     public string barsHtml = null!;
     public string html = default!;
-    public HtmlLoadOptions? options = null;
     public double pageWidth = 0;
     public double pageHeight = 0;
     public double marginLeft = 0;
-    public double marginTop = 0;
 }
 }

@@ -44,8 +44,6 @@ namespace Aspose.Pdf.Comparison
         private const double ResultPageWidth = 595;
         private const double ResultPageHeight = 842;
 
-        private double _threshold;
-
         /// <summary>Rendering resolution used to rasterise the pages. Defaults to 150 DPI.</summary>
         public Resolution Resolution { get; set; } = new Resolution(DefaultDpi);
 
@@ -56,11 +54,7 @@ namespace Aspose.Pdf.Comparison
         /// Tolerance, as a percentage (0..100), of per-channel colour difference below which two
         /// pixels are considered identical. 0 (the default) treats any colour difference as a change.
         /// </summary>
-        public double Threshold
-        {
-            get { return _threshold; }
-            set { _threshold = value; }
-        }
+        public double Threshold { get; set; }
 
         /// <summary>Creates a comparer with default settings (150 DPI, red highlight, exact threshold).</summary>
         public GraphicalPdfComparer()
@@ -78,7 +72,7 @@ namespace Aspose.Pdf.Comparison
             var (s1, w, h) = RenderPage(page1);
             var (s2, w2, h2) = RenderPage(page2);
             var diff = new int[w * h];
-            int tol = (int)Math.Round(_threshold / PercentScale * ChannelMax);
+            int tol = (int)Math.Round(Threshold / PercentScale * ChannelMax);
             int stride1 = ImagesDifference.StrideFor(w), stride2 = ImagesDifference.StrideFor(w2);
             for (int y = 0; y < h; y++)
             {

@@ -29,9 +29,7 @@ public sealed class Path : Shape
     /// <summary>True when every child fits the container.</summary>
     public override bool CheckBounds(double containerWidth, double containerHeight)
     {
-        foreach (var s in Shapes)
-            if (!s.CheckBounds(containerWidth, containerHeight)) return false;
-        return true;
+        return !Shapes.Any(s => !s.CheckBounds(containerWidth, containerHeight));
     }
 
     internal override bool TryAppendGeometry(ContentStreamBuilder builder)

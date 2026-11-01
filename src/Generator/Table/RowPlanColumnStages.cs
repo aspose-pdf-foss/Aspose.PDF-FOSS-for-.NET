@@ -34,15 +34,15 @@ public partial class Table
             if (cl.OwnPitch > 0)
             {
                 pc.cellHasReserve = true;
-                // (a generator cell's picture RESERVE is priced from CellImages below;
-                // a line that seated itself -- runs a picture raised -- is its own pitch)
+                // (a generator cell's picture RESERVE is priced from CellImages below; a
+                // line that seated itself -- runs a picture raised -- is its own pitch)
                 if (!GeneratorCellModel || !cl.ImgReserve) pc.cellOwnStack += cl.OwnPitch;
                 continue;
             }
-            if (cl.Checkbox is { } cb)
+            if (cl.HasControlBox)
             {
                 pc.cellHasBox = true;
-                pc.cellOwnStack += cb.Height > 0 ? cb.Height : cl.FontSize;
+                pc.cellOwnStack += cl.ControlBoxHeight > 0 ? cl.ControlBoxHeight : cl.FontSize;
             }
             // Nested-table reserve line: its FontSize IS the grid's full height,
             // and a boxed line's own height is its BoxH — the exact stack must
@@ -57,9 +57,11 @@ public partial class Table
                 // lines run past the row band and draw over the row below.
                 if (cl.ImgReserve || cl.Text.Length > 0 || cl.Boxes is { Count: > 0 } || cl.BoxH > 0
                     || cl.HtmlEngine)
-                    pc.cellOwnStack += cl.BoxH > 0 ? cl.BoxH
-                        : cl.ImgReserve ? cl.FontSize
-                        : CssLineBoxPt(cl.FontSize);
+                {
+                    if (cl.BoxH > 0) pc.cellOwnStack += cl.BoxH;
+                    else if (cl.ImgReserve) pc.cellOwnStack += cl.FontSize;
+                    else pc.cellOwnStack += CssLineBoxPt(cl.FontSize);
+                }
             }
             else if (GeneratorCellModel && cl.ImgReserve)
             {
@@ -178,7 +180,7 @@ public partial class Table
             var anyForce = false;
             foreach (var l in pc.lines)
             {
-                if (l.Option is not null || l.Checkbox is not null
+                if (l.Option is not null || l.HasControlBox
                     || l.InlineOptions is not null
                     || l.Text.IndexOf(InlineButtonChar) >= 0
                     || l.InputBoxes is not null
@@ -209,7 +211,7 @@ public partial class Table
     }
 
     /// <summary>Row plan column: the cell's paragraphs turned into plan lines.</summary>
-    private void BuildColumnLines(int col, RowPlanState rp, RowPlanColumnState pc, Row row, double[] colWidths, int[] cellMap, int[]? gridToCell, int[]? effRowSpan, double svgFillHeight)
+    private void BuildColumnLines(int col, RowPlanState rp, RowPlanColumnState pc, Row row, double[] colWidths, double svgFillHeight)
     {
         pc.cellNeedsInline = false;
         pc.cellInlineExact = false;
@@ -223,7 +225,7 @@ public partial class Table
         if (pc.cellNeedsInline)
         {
             // Cells mixing Graph paragraphs with inline text (e.g. a colour-swatch
-            // legend or a horizontal bar graph) get a left-to-right inline layout;
+            // legend or a horizontal bar graph) get a left-to-right inline layout.
             (var inlineRows, var inlineH) = BuildInlineCellLayout(pc.cell, pc.availWidth, pc.defaultFontSize, pc.textState, pc.cellAlign);
             (rp.plan.CellInline ??= new())[col] = inlineRows;
             if (GeneratorCellModel)
@@ -246,8 +248,10 @@ public partial class Table
         pc.paraLineStart = 0;
         pc.paraLeading = 0.0;
         pc.paraLineBox = (0, 0);
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var paragraph in pc.cell.Paragraphs)
-            if (!BuildRowPlanParagraph(paragraph, pc, rp, col, row, colWidths, cellMap, gridToCell, effRowSpan, svgFillHeight)) break;
+#pragma warning restore S3267
+            if (!BuildRowPlanParagraph(paragraph, pc, rp, col, row, colWidths, svgFillHeight)) break;
         StampLeading(pc.lines, pc.paraLineStart, pc.paraLeading);
         StampDeclaredLineBox(pc.lines, pc.paraLineStart, pc.paraLineBox);
         if (pc.genPendingBottom > 0)
@@ -256,7 +260,7 @@ public partial class Table
     }
 
     /// <summary>Row plan column: the grid column mapped to its cell; a span-covered column plans blank.</summary>
-    private bool ResolveColumnCell(int col, RowPlanState rp, RowPlanColumnState pc, Row row, int[] cellMap, int[]? gridToCell, int[]? effRowSpan)
+    private static bool ResolveColumnCell(int col, RowPlanState rp, RowPlanColumnState pc, Row row, int[] cellMap, int[]? gridToCell, int[]? effRowSpan)
     {
         if (gridToCell is not null)
         {

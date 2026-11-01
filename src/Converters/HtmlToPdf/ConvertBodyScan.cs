@@ -25,10 +25,10 @@ internal static partial class HtmlToPdfConverter
         // body{margin:0}: the default 90pt side margins / 72pt content top
         // apply verbatim — the usual defaults (96/89) bake in the browser's 8px body
         // margin and the default first-baseline drop, which this page has switched off.
-        ResolveBodyMargin(cv, options);
-        ResolveBodyWidthAndMetricFace(cv, options);
-        ResolveMetricFlowAndUaMshtml(cv, options);
-        ScanStylesheetForLayoutFreedom(cv, options);
+        ResolveBodyMargin(cv);
+        ResolveBodyWidthAndMetricFace(cv);
+        ResolveMetricFlowAndUaMshtml(cv);
+        ScanStylesheetForLayoutFreedom(cv);
         // Unresolved external stylesheets (InlineLinkedStylesheets leaves the <link>
         // tags of stylesheets it could not fetch): the converter falls back to
         // pure UA defaults for such documents — tables included, they lay out through
@@ -36,14 +36,14 @@ internal static partial class HtmlToPdfConverter
         // unreachable at render time by design, whereas an unresolved RELATIVE
         // link is a packaging gap — the sheet was present when the document
         // was authored, so the document must keep the legacy calibrated flow.
-        DetectDeadCssAndRealFamily(cv, options);
-        ResolveUaBodyFace(cv, options);
-        ResolveLayoutFreeAndFieldsetFlow(cv, options);
+        DetectDeadCssAndRealFamily(cv);
+        ResolveUaBodyFace(cv);
+        ResolveLayoutFreeAndFieldsetFlow(cv);
         // Word-filtered TEXT pages (meta Generator "Microsoft Word N (filtered)",
         // no tables — the tabled forms take the MsoForm dialect): their styling is
         // all inline (pt sizes, % line-heights, span faces), which the UA flow
         // renders directly, so the inline-face disqualifier below does not apply.
-        DetectDocumentDialects(cv, options);
+        DetectDocumentDialects(cv);
         ClassifyUaNoFontDocument(cv, options);
         return null;
     }

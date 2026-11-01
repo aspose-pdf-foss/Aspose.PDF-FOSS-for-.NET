@@ -22,7 +22,7 @@ internal static partial class HtmlToPdfConverter
                 options.BasePath = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(htmlPath));
                 options.BasePathAutoDerived = true;
             }
-            catch { }
+            catch { /* a path with no resolvable directory keeps the empty base path */ }
         var html = DecodeHtmlBytes(File.ReadAllBytes(htmlPath), options);
         return ConvertFromHtml(html, options);
     }
@@ -36,7 +36,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>One rendered block: a run of text with uniform style and
     /// vertical spacing on either side. One Block becomes N wrapped lines
     /// at layout time.</summary>
-    internal sealed class Block
+    internal sealed partial class Block
     {
         public string Text = "";
         public double FontSize;
@@ -85,6 +85,8 @@ internal static partial class HtmlToPdfConverter
         public double WidthFrac;
         // Absolute enclosing-div width in CSS px (form-document dialect wrap box).
         public double WidthPx;
+        // That box's left margin is auto: it is no frame for the block's aligned lines.
+        public bool WidthBoxAuto;
         // Report label/span rows: right-align each wrapped line inside a box of
         // this width (the label column), cap the wrap box in points (the span
         // column), and let a label share its row with the span that follows —
@@ -123,6 +125,7 @@ internal static partial class HtmlToPdfConverter
         // Emitted as a separate text run to the left of the first content line, so it
         // surfaces as its own TextFragment. Null = not a list item / no marker.
         public string? Marker;
+        public Color? MarkerColor;    // a ::marker rule's colour (null = the item's own)
         // Emit the marker AFTER the first content line (not before) so it surfaces as the
         // LATER TextFragment on that line. Set for CSS ::before generated markers on RTL
         // lists, where the item text reads first and the marker sits to its right.
@@ -143,8 +146,8 @@ internal static partial class HtmlToPdfConverter
         // header band, containerBoxIndents mode): the band spans from the line-box
         // top, so the baseline-anchored flow bills one line less below it.
         public bool BandBoxHeight;
-        // Unitless CSS line-height factor from a class rule (coverStyles mode);
-        // 0 = the flow's own default pitch.
+        // Unitless CSS line-height factor from a class rule (coverStyles mode); 0
+        // = the flow's own default pitch.
         public double LineFactor;
         public bool DeclaredLineFactor;
         // A percent line-height's factor on the UA flow, inherited as a factor and resolved per block (0 = none)
@@ -236,6 +239,7 @@ internal static partial class HtmlToPdfConverter
         /// <summary>The `margin:` shorthand's TOP value, recorded for every document and
         /// read only by the float flow.</summary>
         public double ShorthandTopPt;
+        public double ShorthandBottomPt;
 
         /// <summary>See StyledDoc.MarginRightPt - the float flow's block right inset.</summary>
         public double MarginRightPt;
@@ -328,10 +332,14 @@ internal static partial class HtmlToPdfConverter
         public bool IsInputField;
         public string InputValue = "";
         public string? InputName;     // AcroForm field name from the <input> name/id attribute
-        public double InputWidth;     // CSS px (0 = fill content width)
+        public Color? InputColor;     // the control's own `color`: the ink of the value typed into the field
+        // A picture element without a source that declares its own size and background: the box it paints, in points.
+        public (double W, double H, Color Fill)? SizedFillBox;
+        public string? InputChrome;   // the control's own CSS border/background declarations (null = the UA frame)
+        public double InputWidth;     // pt (0 = fill content width)
         public double InputWidthFrac; // a class width in percent of the content width, resolved at layout
         public bool InputInColumn;    // seated beside a title column: the UA input box on the label's line
-        public double InputHeight;    // CSS px (0 = one text line)
+        public double InputHeight;    // pt (0 = one text line)
         public bool InputMultiline;
         public bool InputReadOnly;    // HTML disabled / readonly attribute
         public bool InputDrawValue;   // typeset the value inside the drawn box
@@ -365,6 +373,8 @@ internal static partial class HtmlToPdfConverter
         // RadioButtonOptionField on Form.Fields.
         public bool IsRadio;
         public string RadioGroup = "";
+        // The button's value attribute: the name of its option in the group.
+        public string RadioValue = "";
 
         // <img>: draw the referenced image in-flow at layout time. Src is resolved via the
         // load options' custom resource loader (for remote/opaque URIs), a data: URI, or a
@@ -373,11 +383,16 @@ internal static partial class HtmlToPdfConverter
         // the image is INLINE (no display:block, not floated): a <br> right after it ends the
         // image's own line and spends no line box
         public bool ImageInline;
+        // …and it follows an inline image of the same inline run: it sits beside it on that image's line
+        public bool ImageJoinsRow;
         public string ImageSrc = "";
         public double ImageWidth;
         // An inline `max-width: N%`: the drawn box caps at this share of the
         // content width, and the image never widens the sheet. Zero = none.
         public double ImageMaxWFrac;
+        // A percentage width: the drawn box is this share of the content width
+        // (the height follows the declared one or the picture's aspect). Zero = none.
+        public double ImageWidthFrac;
         public double ImageHeight;
         // position:absolute image: it leaves the flow entirely (the cursor never advances
         // for it) and seats at these offsets, in points, from the page's content origin -
@@ -389,10 +404,13 @@ internal static partial class HtmlToPdfConverter
         // fills no such band). The raster page export gives every source page one container of
         // a declared em height holding one PNG, and the flow advances by that BAND, not by the
         // image - see AbsoluteImageSeat.cs.
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double PageBandHeightPt;
+#pragma warning restore S3218
         // <img alt="…"> — alternate description, surfaced as a Figure structure
         // element's /Alt when CreateLogicalStructure builds the tag tree.
         public string? ImageAlt;
+        public string? ImageLinkUrl;  // the href of the anchor the image stands in: a link over its box
         // In-flow image alignment/spacing: centered in the content box (inside
         // <center> / text-align:center), with CSS vertical padding (px).
         public bool ImageCentered;
@@ -436,6 +454,8 @@ internal static partial class HtmlToPdfConverter
         // their ids and classes): the chain a stylesheet addresses its cells through
         // (`#right_column TABLE TD`, `.datagrid table th`). Null = no hooked ancestor.
         public List<CssElem>? CssAncestors;
+        // The containers open above the grid whatever the dialect (CssAncestors is only the quirks sheet's).
+        public List<CssElem>? HostChain;
         // The typography a wrapper's id/class rule declares over the table (`#divGeral { font-family:
         // Verdana; font-size: 14px }`): the UA grid draws its cells in it (null / 0 = the flow's).
         public string? HostFace;
@@ -446,6 +466,8 @@ internal static partial class HtmlToPdfConverter
         // content paints FIRST in the page's content stream (before the normal flow), so its
         // text surfaces as the leading TextFragments. Layout position is unchanged.
         public bool FloatFirst;
+        // A stylesheet form's control table (see FieldGridTable): its controls are fields in its cells.
+        public bool FieldGrid;
 
         // Float-band structural markers (the SEC-filing two-column card pattern:
         // consecutive <div style="float:left; width:N%"> siblings). A band lays its
@@ -520,6 +542,8 @@ internal static partial class HtmlToPdfConverter
         public InlineRow? InlineRow;
         // A preformatted block of verbatim lines (see PreBlock).
         public PreBlock? Pre;
+        // The markup a prebuilt row replaced, for a grid whose cell holds its placeholder.
+        public string? RowSourceHtml;
 
         // A styled inline row (site nav bar, centered footer-link line): runs laid out
         // horizontally on one line, optionally over a full-content-width background bar.
@@ -666,7 +690,9 @@ internal static partial class HtmlToPdfConverter
     internal sealed class FlexGrid
     {
         public string Title = "";
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<FlexGridRow> Rows = new();
+#pragma warning restore S3218
         // A positioned page wrapper's physical content width (width: 8in) —
         // drives the page-widen; 0 = the authored page is kept.
         public double PageContentPt;
@@ -682,7 +708,9 @@ internal static partial class HtmlToPdfConverter
 
     internal sealed class FlexGridRow
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<FlexGridCell> Cells = new();
+#pragma warning restore S3218
     }
 
     internal sealed class FlexGridCell
@@ -704,8 +732,8 @@ internal static partial class HtmlToPdfConverter
     }
 
     // Flex-grid line metrics, measured on the waybill's expected render:
-    // in-cell line band 10.5 pt (14px), row height = bands + 0.75 border share;
-    // title band = container border to first row top; dd right inset = the 2px
+    // in-cell line band 10.5 pt (14px), row height = bands + 0.75 border share; title
+    // band = container border to first row top; dd right inset = the 2px
     // margin-right + half the border.
     private const double FlexLineBandPt = 10.5;
     private const double FlexRowBorderPt = 0.75;
@@ -758,7 +786,7 @@ internal static partial class HtmlToPdfConverter
     /// paragraphs, headings, tables) that needs vertical/indented block layout
     /// rather than a single flat run of stripped text.</summary>
     internal static bool HasBlockStructure(string html) =>
-        Regex.IsMatch(html ?? "", @"<\s*(ul|ol|li|p|div|h[1-6]|table|tr|blockquote|hr|form|input|textarea)\b",
+        SafeRegex.IsMatch(html ?? "", @"<\s*(ul|ol|li|p|div|h[1-6]|table|tr|blockquote|hr|form|input|textarea)\b",
             RegexOptions.IgnoreCase);
 
     /// <summary>Parse the single-font inline-emphasis dialect: the whole fragment
@@ -770,31 +798,30 @@ internal static partial class HtmlToPdfConverter
         string? face = default;
         double sizePt = default;
         List<(string text, bool bold, bool underline, bool italic)>? runs = default;
-        face = string.Empty;
-        sizePt = 0;
         runs = new List<(string, bool, bool, bool)>();
         var s = (html ?? "").Trim();
-        var m = Regex.Match(s, @"^<font\s+([^>]*)>(.*)</font>$",
+        var m = SafeRegex.Match(s, @"^<font\s+([^>]*)>(.*)</font>$",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (!m.Success) return null;
         var attrs = m.Groups[1].Value;
         var body = m.Groups[2].Value;
 
-        var fm = Regex.Match(attrs, "face\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|(\\S+))",
+        var fm = SafeRegex.Match(attrs, "face\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|(\\S+))",
             RegexOptions.IgnoreCase);
         if (!fm.Success) return null;
-        face = fm.Groups[1].Success ? fm.Groups[1].Value
-             : fm.Groups[2].Success ? fm.Groups[2].Value : fm.Groups[3].Value;
+        if (fm.Groups[1].Success) face = fm.Groups[1].Value;
+        else if (fm.Groups[2].Success) face = fm.Groups[2].Value;
+        else face = fm.Groups[3].Value;
 
-        var sm = Regex.Match(attrs, "size\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|(\\S+))",
+        var sm = SafeRegex.Match(attrs, "size\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|(\\S+))",
             RegexOptions.IgnoreCase);
         if (!sm.Success) return null;
-        var sizeStr = (sm.Groups[1].Success ? sm.Groups[1].Value
-                    : sm.Groups[2].Success ? sm.Groups[2].Value : sm.Groups[3].Value).Trim();
+        var sizeStr = AlternativeValue(sm).Trim();
         var dEnd = 0;
         while (dEnd < sizeStr.Length && (char.IsDigit(sizeStr[dEnd])
                || (dEnd == 0 && (sizeStr[0] == '+' || sizeStr[0] == '-')))) dEnd++;
-        if (dEnd == 0 || !int.TryParse(sizeStr[..dEnd], out var scale)) return null;
+        if (dEnd == 0 || !int.TryParse(sizeStr[..dEnd], System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var scale)) return null;
         if (sizeStr[0] is '+' or '-') scale = 3 + scale;
         sizePt = HtmlFontSizeToPt(Compat.Clamp(scale, 1, 7));
 
@@ -844,7 +871,7 @@ internal static partial class HtmlToPdfConverter
         style ??= "";
         // Width from the first pixel length in a border declaration, else the
         // legacy SIZE attribute (rule thickness in px).
-        var wm = Regex.Match(style, @"border[^:]*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+        var wm = SafeRegex.Match(style, @"border[^:]*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
         if (wm.Success && double.TryParse(wm.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var w) && w > 0)
@@ -926,24 +953,22 @@ internal static partial class HtmlToPdfConverter
     {
         double sizePt = default;
         List<List<(string text, bool bold)>>? lines = default;
-        sizePt = 0;
         lines = new List<List<(string text, bool bold)>>();
         var s = (html ?? "").Trim();
-        var m = Regex.Match(s, @"^<font\s+style\s*=\s*(['""])(?<st>[^'""]*)\1\s*>(?<body>[\s\S]*)</font>$",
+        var m = SafeRegex.Match(s, @"^<font\s+style\s*=\s*(['""])(?<st>[^'""]*)\1\s*>(?<body>[\s\S]*)</font>$",
             RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         var st = m.Groups["st"].Value;
-        if (!Regex.IsMatch(st, @"font-family\s*:\s*['""]?\s*courier", RegexOptions.IgnoreCase)) return null;
-        var fsM = Regex.Match(st, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+        if (!SafeRegex.IsMatch(st, @"font-family\s*:\s*['""]?\s*courier", RegexOptions.IgnoreCase)) return null;
+        var fsM = SafeRegex.Match(st, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
         sizePt = fsM.Success
             ? double.Parse(fsM.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
             : 10;
         var body = m.Groups["body"].Value;
-        foreach (Match tg in Regex.Matches(body, @"<[^>]*>"))
-            if (!Regex.IsMatch(tg.Value, @"^<\s*/?\s*(br|b|strong)\s*/?\s*>$", RegexOptions.IgnoreCase))
-                return null;
+        if (SafeRegex.Matches(body, @"<[^>]*>").Any(tg => !SafeRegex.IsMatch(tg.Value, @"^<\s*/?\s*(br|b|strong)\s*/?\s*>$", RegexOptions.IgnoreCase)))
+            return null;
 
-        var segs = Regex.Split(body, @"<br\s*/?>", RegexOptions.IgnoreCase);
+        var segs = SafeRegex.Split(body, @"<br\s*/?>", RegexOptions.IgnoreCase);
         for (var i = 0; i < segs.Length; i++)
         {
             var runs = new List<(string text, bool bold)>();
@@ -956,11 +981,11 @@ internal static partial class HtmlToPdfConverter
                 var t = DecodeEntities(seg[pos..upTo]).Replace('\u00A0', ' ');
                 if (t.Length > 0) runs.Add((t, boldDepth > 0));
             }
-            foreach (Match tg in Regex.Matches(seg, @"<[^>]*>"))
+            foreach (Match tg in SafeRegex.Matches(seg, @"<[^>]*>"))
             {
                 Flush(tg.Index);
-                if (Regex.IsMatch(tg.Value, @"^<\s*(b|strong)\s*>$", RegexOptions.IgnoreCase)) boldDepth++;
-                else if (Regex.IsMatch(tg.Value, @"^<\s*/\s*(b|strong)\s*>$", RegexOptions.IgnoreCase)) boldDepth--;
+                if (SafeRegex.IsMatch(tg.Value, @"^<\s*(b|strong)\s*>$", RegexOptions.IgnoreCase)) boldDepth++;
+                else if (SafeRegex.IsMatch(tg.Value, @"^<\s*/\s*(b|strong)\s*>$", RegexOptions.IgnoreCase)) boldDepth--;
                 pos = tg.Index + tg.Length;
             }
             Flush(seg.Length);

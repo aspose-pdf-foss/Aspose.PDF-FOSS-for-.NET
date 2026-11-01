@@ -99,7 +99,7 @@ internal sealed partial class ContentStreamParser
             if (components <= 0) return -1;
         }
 
-        long rowBytes = ((long)w * components * bpc + 7) / 8;
+        long rowBytes = (w * components * bpc + 7) / 8;
         long total = rowBytes * h;
         if (total <= 0 || total > int.MaxValue) return -1;
         return (int)total;
@@ -128,7 +128,7 @@ internal sealed partial class ContentStreamParser
         return -1;
     }
 
-    private static string ExpandInlineImageKey(string key) => key switch
+    internal static string ExpandInlineImageKey(string key) => key switch
     {
         "W" => "Width",
         "H" => "Height",
@@ -142,7 +142,7 @@ internal sealed partial class ContentStreamParser
         _ => key,
     };
 
-    private static string ExpandInlineImageValue(string value) => value switch
+    internal static string ExpandInlineImageValue(string value) => value switch
     {
         "G" => "DeviceGray",
         "RGB" => "DeviceRGB",

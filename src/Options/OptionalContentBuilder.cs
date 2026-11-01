@@ -79,10 +79,12 @@ public sealed class OptionalContentBuilder
     public static string BeginLayer(LayerEntry layer) =>
         $"/OC /MC{layer.ObjectNumber} BDC\n";
 
+#pragma warning disable S3400 // public API: the published counterpart of BeginLayer
     /// <summary>
     /// End marker for a layer content sequence.
     /// </summary>
     public static string EndLayer() => "EMC\n";
+#pragma warning restore S3400
 }
 
 /// <summary>

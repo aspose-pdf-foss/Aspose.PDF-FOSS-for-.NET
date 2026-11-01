@@ -11,7 +11,7 @@ internal static partial class HtmlToPdfConverter
         if (mt.stdSerif && mt.css.TryGetValue("table", out var tblFontRule)
             && tblFontRule.TryGetValue("font", out var tblFontV))
         {
-            var tfsh = Regex.Match(tblFontV, @"([\d.]+)\s*(pt|px)\s+(.+)$", RegexOptions.IgnoreCase);
+            var tfsh = SafeRegex.Match(tblFontV, @"([\d.]+)\s*(pt|px)\s+(.+)$", RegexOptions.IgnoreCase);
             if (tfsh.Success && double.TryParse(tfsh.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var tfshV) && tfshV > 0)
@@ -66,10 +66,10 @@ internal static partial class HtmlToPdfConverter
                     && egBc.Contains("collapse", StringComparison.OrdinalIgnoreCase))
                 || (mt.css.TryGetValue("table", out var egTbl) && egTbl.TryGetValue("border-collapse", out var egTbc)
                     && egTbc.Contains("collapse", StringComparison.OrdinalIgnoreCase)
-                    // (the CLASS-scoped shape only - `table.list { border-collapse }` folded by ScopedTableCss;
-                    // a bare `table { border-collapse }` over a `table tr td { border }` chain keeps its
+                    // (the CLASS-scoped shape only - `table.list { border-collapse }` folded by ScopedTableCss; a
+                    // bare `table { border-collapse }` over a `table tr td { border }` chain keeps its
                     // calibrated separate grid: the div-list document draws at the 1.5 spacing)
-                    && Regex.IsMatch(Regex.Match(mt.tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value, @"\bclass\s*=", RegexOptions.IgnoreCase)))
+                    && SafeRegex.IsMatch(SafeRegex.Match(mt.tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value, @"\bclass\s*=", RegexOptions.IgnoreCase)))
             && egTd.TryGetValue("border", out var egB)
             && egB.Contains("solid", StringComparison.OrdinalIgnoreCase))
         {
@@ -86,7 +86,7 @@ internal static partial class HtmlToPdfConverter
             if (ptTblRule.TryGetValue("border-collapse", out var ptBc)
                 && ptBc.Contains("collapse", StringComparison.OrdinalIgnoreCase)) mt.s = 0;
             if (ptTblRule.TryGetValue("padding", out var ptPad)
-                && Regex.IsMatch(ptPad.Trim(), @"^0(px)?$")) mt.p = 0;
+                && SafeRegex.IsMatch(ptPad.Trim(), @"^0(px)?$")) mt.p = 0;
         }
     }
 }

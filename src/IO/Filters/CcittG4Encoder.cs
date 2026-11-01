@@ -40,23 +40,53 @@ internal static class CcittG4Encoder
         return bw.ToArray();
     }
 
+    private const int EndOfLineCode = 0b0000_0000_0001;
+    private const int EndOfLineBits = 12;
+
+    /// <summary>CCITT Group 3 one-dimensional (T.4 modified Huffman) coding of the same input:
+    /// every row is an end-of-line code followed by its runs, white first, with no fill bits.
+    /// Output decodes with <c>/K 0</c>, and is what a TIFF strip of compression 3 without
+    /// T4Options holds.</summary>
+    public static byte[] EncodeGroup3(byte[] packed, int width, int height, int stride)
+    {
+        var bw = new BitWriter();
+        for (var y = 0; y < height; y++)
+        {
+            bw.WriteBits(EndOfLineCode, EndOfLineBits);
+            var rowOff = y * stride;
+            var white = true;
+            var x = 0;
+            while (x < width)
+            {
+                var start = x;
+                while (x < width && ((packed[rowOff + (x >> 3)] & (0x80 >> (x & 7))) == 0) == white) x++;
+                WriteRun(bw, x - start, white);
+                white = !white;
+            }
+        }
+        return bw.ToArray();
+    }
+
     private static void EncodeRow(BitWriter bw, int[] refChanges, int refCount,
         int[] curChanges, int curCount, int width)
     {
         var a0 = -1;
         var a0White = true;
+        // a0 only moves right, so each line's changes at or left of it are passed once.
+        var curFrom = 0;
+        var refFrom = 0;
 
         while (a0 < width)
         {
             // a1: first changing element on the coding line right of a0 whose new
             // colour is opposite a0's colour. Changes alternate starting white→black,
             // so even indices begin black runs, odd indices begin white runs.
-            var a1Idx = FirstChangeAfter(curChanges, curCount, a0, wantBlackStart: a0White);
+            var a1Idx = FirstChangeAfter(curChanges, curCount, a0, wantBlackStart: a0White, ref curFrom);
             var a1 = a1Idx < curCount ? curChanges[a1Idx] : width;
 
             // b1: first changing element on the reference line right of a0 with the
             // same "starts colour opposite a0" property; b2 is the one after it.
-            var b1Idx = FirstChangeAfter(refChanges, refCount, a0, wantBlackStart: a0White);
+            var b1Idx = FirstChangeAfter(refChanges, refCount, a0, wantBlackStart: a0White, ref refFrom);
             var b1 = b1Idx < refCount ? refChanges[b1Idx] : width;
             var b2 = b1Idx + 1 < refCount ? refChanges[b1Idx + 1] : width;
 
@@ -95,11 +125,13 @@ internal static class CcittG4Encoder
 
     /// <summary>Index of the first change &gt; <paramref name="pos"/> that starts a
     /// black run (even index) or a white run (odd index), per
-    /// <paramref name="wantBlackStart"/>. Returns <c>count</c> when none.</summary>
-    private static int FirstChangeAfter(int[] changes, int count, int pos, bool wantBlackStart)
+    /// <paramref name="wantBlackStart"/>. Returns <c>count</c> when none. The search
+    /// starts at <paramref name="from"/>, which is left at the first change past the position.</summary>
+    private static int FirstChangeAfter(int[] changes, int count, int pos, bool wantBlackStart, ref int from)
     {
-        var i = 0;
+        var i = from;
         while (i < count && changes[i] <= pos) i++;
+        from = i;
         if (i < count && (i % 2 == 0) != wantBlackStart) i++;
         return i;
     }

@@ -15,7 +15,12 @@ private sealed class PageStampContentState
     public IO.PdfReader sourceReader = null!;
     // Get source page content
     public byte[] sourceContent = null!;
+    // The source page's VISIBLE box (its crop box inside the media box), its /Rotate quarter
+    // and the box's size as displayed under that rotation: the form shows the page as a viewer does.
     public Rectangle mb = null!;
+    public int srcRot;
+    public double shownWidth;
+    public double shownHeight;
     public IO.PdfReader targetReader = null!;
     public Document? targetDoc;
     // Build (or reuse) the source-page Form XObject. When the same stamp is applied to

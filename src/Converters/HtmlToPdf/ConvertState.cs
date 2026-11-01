@@ -142,7 +142,7 @@ private sealed class ConvertState
     // Radio inputs collected during layout, grouped (after the loop) into one
     // RadioButtonField per HTML `name` so each option surfaces as a
     // RadioButtonOptionField on Form.Fields.
-    public List<(string group, bool chk, Page page, Rectangle rect)> radioOptions = null!;
+    public List<(string group, string value, bool chk, bool locked, Page page, Rectangle rect)> radioOptions = null!;
     public StringBuilder sb = null!;
     // Inline (style="…") families and the UA flow: a family on grid cells
     // always disqualifies (the allowance covers only flow typography); the
@@ -214,6 +214,9 @@ private sealed class ConvertState
     public double bodyMarginLeftPt;
     /// <summary>The body rule AUTHORED its margin (as opposed to keeping the UA default one).</summary>
     public bool bodyMarginAuthored;
+    /// <summary>The body's own box - its margin and padding per side - resolved once from the sheet and the tag;
+    /// every flow opens its content inside the page margins by it (see <see cref="ElementBox"/>).</summary>
+    public ElementBox bodyBox = null!;
     // …its page face (the body rule's first installed family) carries the
     // inter-table <br/> line boxes.
     public string? elementGridFace;
@@ -318,8 +321,8 @@ private sealed class ConvertState
     // A <header>/<footer> becomes a *running* region (repeated on every page) only when it is
     // pinned with position:fixed — the print idiom `@media print { header { position:fixed } }`.
     // A semantic <header>/<footer> that is ordinary flow content (display:block, or
-    // position:absolute/static) is laid out once in document order, so it must stay in the flow;
-    // pulling it out and repeating it per page would duplicate that content on every page.
+    // position:absolute/static) is laid out once in document order, so it must stay in the flow; pulling
+    // it out and repeating it per page would duplicate that content on every page.
     public string? runHeader;
     public string? runFooter;
     public Match hMatch = null!;
@@ -335,6 +338,10 @@ private sealed class ConvertState
     public double page1FooterImgH;
     public Match dfMatch = null!;
     public List<BeforeMarker> beforeMarkers = null!;
+    /// <summary>The colour an unscoped ::marker rule gives every list marker (null = each item's own).</summary>
+    public Color? markerColor;
+    /// <summary>The selectors (chains of tag.class compounds) of the sheet's ::before rules whose content is a counter().</summary>
+    public List<string[]>? counterMarkers;
     // Only VISIBLE form controls keep a table on the flat path — a page whose
     // inputs are all display:none (hidden state carriers in generated reports)
     // renders its tables as real grids.

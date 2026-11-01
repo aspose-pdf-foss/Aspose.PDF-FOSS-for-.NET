@@ -20,7 +20,7 @@ public sealed partial class Document
         private double EmptyHeight(FlowTextFragmentState wtf) => _overflowBuffer is null
                 ? Text.Standard14Fonts.FullSizeEmptyLineEm * wtf.fontSize : wtf.fontSize;
 
-        private Text.Font? LineFallback(FlowTextFragmentState wtf, int i)
+        private static Text.Font? LineFallback(FlowTextFragmentState wtf, int i)
             {
                 if (!wtf.lineFallbackActive || i < 0 || i >= wtf.allLines.Count) return null;
                 if (wtf.fallbackFace.TryGetValue(i, out var cached)) return cached;
@@ -60,8 +60,8 @@ public sealed partial class Document
             // (ascent + descent) instead, which is how a Telugu line drawn in Gautami inside
             // an Arial Unicode MS paragraph clips 1.735 em on a 1.3398 em pitch. Measured
             // 2026-09-07 on 25 face x spacing x line-count cases (Arial, Times, Arial
-            // Unicode MS, Gautami, Mangal, Segoe UI Historic, Helvetica; 1-3 lines;
-            // FullSize and default), the rectangle exact to the printed digits in every
+            // Unicode MS, Gautami, Mangal, Segoe UI Historic, Helvetica; 1-3 lines; FullSize
+            // and default), the rectangle exact to the printed digits in every
             // one - and NOT a max of the two: a default-spaced Arial Unicode MS line clips
             // 1.16 em, under its 1.338 em descriptor extent. An unwrapped line's horizontal
             // overrun is cut by the same rectangle.
@@ -118,7 +118,7 @@ public sealed partial class Document
         /// spacing unless asked to stretch too.</summary>
         private (double Tc, double Tw)[] JustifyingSpacings(FlowTextFragmentState wtf, Text.TextFragment tf, List<string> chunk)
         {
-            var options = tf.TextState.FormattingOptions!;
+            var options = tf.TextState.FormattingOptions;
             var ratio = options.JustifySpacingRatio!.Value;
             var baseTc = (double)tf.TextState.CharacterSpacing;
             var baseTw = (double)tf.TextState.WordSpacing;
@@ -134,7 +134,7 @@ public sealed partial class Document
                 var glyphs = text.Length;
                 if (glyphs < 2) continue;
                 var spaces = 0;
-                foreach (var c in text) if (c == ' ') spaces++;
+                foreach (var c in text.Where(c => c == ' ')) spaces++;
                 var indent = wtf.idx + j == 0 ? wtf.firstLineIndent : wtf.subsequentLinesIndent;
                 var measure = CurWidth - indent - OccupiedExtra(options, wtf.fontSize);
                 // The base spacing rides every glyph, the last one's included; the
@@ -144,7 +144,9 @@ public sealed partial class Document
                 var share = (1 - ratio) * (glyphs - 1) + ratio * spaces;
                 if (slack <= 0 || share <= 0) continue;
                 var unit = slack / share;
+#pragma warning disable S4143 // not a blind overwrite: the slot is seeded first, then raised or finalised
                 result[j] = (baseTc + (1 - ratio) * unit, baseTw + ratio * unit);
+#pragma warning restore S4143
             }
             return result;
         }
@@ -167,9 +169,12 @@ public sealed partial class Document
         /// baseline climbs (or falls) across the band, so the far end of the line
         /// is not cut off.</summary>
         private static Rectangle GrownBySlope(Rectangle clip, double slope, double width) =>
-            slope == 0 ? clip
-                : slope > 0 ? new Rectangle(clip.LLX, clip.LLY, clip.URX, clip.URY + slope * width)
-                : new Rectangle(clip.LLX, clip.LLY + slope * width, clip.URX, clip.URY);
+            slope switch
+            {
+                0 => clip,
+                > 0 => new Rectangle(clip.LLX, clip.LLY, clip.URX, clip.URY + slope * width),
+                _ => new Rectangle(clip.LLX, clip.LLY + slope * width, clip.URX, clip.URY),
+            };
 
         /// <summary>The paragraph's clip, reaching an em past the measure when break
         /// spaces hang there: they paint nothing, but a clip that cuts them makes a
@@ -182,9 +187,12 @@ public sealed partial class Document
         /// <summary>The paragraph's clip, extended by a text rise: raised glyphs
         /// stand above the band, lowered ones hang below it.</summary>
         private static Rectangle GrownByRise(Rectangle clip, double rise) =>
-            rise == 0 ? clip
-                : rise > 0 ? new Rectangle(clip.LLX, clip.LLY, clip.URX, clip.URY + rise)
-                : new Rectangle(clip.LLX, clip.LLY + rise, clip.URX, clip.URY);
+            rise switch
+            {
+                0 => clip,
+                > 0 => new Rectangle(clip.LLX, clip.LLY, clip.URX, clip.URY + rise),
+                _ => new Rectangle(clip.LLX, clip.LLY + rise, clip.URX, clip.URY),
+            };
 
         private double LineAlignOffset(FlowTextFragmentState wtf, Text.TextFragment tf, string line)
             {

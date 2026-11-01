@@ -48,6 +48,7 @@ internal static partial class HtmlToPdfConverter
             blk.InlineRunId = pb.inlineRunId;
             pb.runPrevWasControl = false;
         }
+        if (pb.ctlLineId != 0) JoinControlLine(pb, blk, rawOf);
         if (pb.pendingInlineIcon)
         {
             blk.InlineIconAfter = true;
@@ -139,6 +140,7 @@ internal static partial class HtmlToPdfConverter
             {
                 blk.Marker = pb.pendingMarker;
                 blk.MarkerAfter = pb.pendingMarkerAfter;
+                blk.MarkerColor = pb.cv?.markerColor;
             }
             pb.pendingMarker = null;
             pb.pendingMarkerAfter = false;
@@ -151,7 +153,7 @@ internal static partial class HtmlToPdfConverter
                 int cs = -1;
                 int ce = -1;
                 for (int k = 0; k < rawOf.Count; k++)
-                    if (rawOf[k] >= s && rawOf[k] < e) { if (cs < 0) cs = k; ce = k + 1; }
+                    if (rawOf[k] >= s && rawOf[k] < e) { if (cs < 0) { cs = k; } ce = k + 1; }
                 if (cs >= 0)
                     (blk.Anchors ??= new()).Add((cs, ce - cs, url));
             }
@@ -167,7 +169,7 @@ internal static partial class HtmlToPdfConverter
                 int cs = -1;
                 int ce = -1;
                 for (int k = 0; k < rawOf.Count; k++)
-                    if (rawOf[k] >= s && rawOf[k] < e) { if (cs < 0) cs = k; ce = k + 1; }
+                    if (rawOf[k] >= s && rawOf[k] < e) { if (cs < 0) { cs = k; } ce = k + 1; }
                 if (cs >= 0) target().Add((cs, ce - cs));
             }
         }
@@ -180,7 +182,7 @@ internal static partial class HtmlToPdfConverter
             int cs = -1;
             int ce = -1;
             for (int k = 0; k < rawOf.Count; k++)
-                if (rawOf[k] >= cs0 && rawOf[k] < ce0) { if (cs < 0) cs = k; ce = k + 1; }
+                if (rawOf[k] >= cs0 && rawOf[k] < ce0) { if (cs < 0) { cs = k; } ce = k + 1; }
             if (cs < 0) continue;
             // An INNER span's colour beats the wrapper's over the same
             // range (the runs close inner-first, so the first entry with
@@ -205,7 +207,7 @@ internal static partial class HtmlToPdfConverter
             int ss = -1;
             int se = -1;
             for (int k = 0; k < rawOf.Count; k++)
-                if (rawOf[k] >= ss0 && rawOf[k] < se0) { if (ss < 0) ss = k; se = k + 1; }
+                if (rawOf[k] >= ss0 && rawOf[k] < se0) { if (ss < 0) { ss = k; } se = k + 1; }
             if (ss >= 0) (blk.SizeRuns ??= new()).Add((ss, se - ss, sp0));
         }
         foreach (var (fs0, fe0, ff0) in pb.rawFamilyRuns)
@@ -213,7 +215,7 @@ internal static partial class HtmlToPdfConverter
             int fs = -1;
             int fe = -1;
             for (int k = 0; k < rawOf.Count; k++)
-                if (rawOf[k] >= fs0 && rawOf[k] < fe0) { if (fs < 0) fs = k; fe = k + 1; }
+                if (rawOf[k] >= fs0 && rawOf[k] < fe0) { if (fs < 0) { fs = k; } fe = k + 1; }
             if (fs >= 0) (blk.FamilyRuns ??= new()).Add((fs, fe - fs, ff0));
         }
         if (pb.wordExport) TakeWholeBlockRuns(blk);
@@ -222,7 +224,7 @@ internal static partial class HtmlToPdfConverter
             int ds = -1;
             int de = -1;
             for (int k = 0; k < rawOf.Count; k++)
-                if (rawOf[k] >= ds0 && rawOf[k] < de0) { if (ds < 0) ds = k; de = k + 1; }
+                if (rawOf[k] >= ds0 && rawOf[k] < de0) { if (ds < 0) { ds = k; } de = k + 1; }
             if (ds >= 0) (blk.DecorRuns ??= new()).Add((ds, de - ds, dk0, dc0));
         }
     }
@@ -244,8 +246,8 @@ internal static partial class HtmlToPdfConverter
             blk.MarginTop = Math.Max(blk.MarginTop, pb.pendingEmptyPMarginPt);
             pb.pendingEmptyPMarginPt = 0;
         }
-        // The div's padding-top spaces only its FIRST flushed block;
-        // a heading band draws once, under the first flushed block.
+        // The div's padding-top spaces only its FIRST flushed block; a
+        // heading band draws once, under the first flushed block.
         styleUsed.PadTop = 0;
         styleUsed.BandColor = null;
         // The run following a title column seats at the column's right edge

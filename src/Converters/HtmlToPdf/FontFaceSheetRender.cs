@@ -13,16 +13,16 @@ internal static partial class HtmlToPdfConverter
         ff.options = options;
         ff.defaultPageHeight = defaultPageHeight;
         ff.styleText = new StringBuilder();
-        foreach (Match sm in Regex.Matches(ff.html, @"<style[^>]*>(?<b>[\s\S]*?)</style\s*>", RegexOptions.IgnoreCase))
+        foreach (Match sm in SafeRegex.Matches(ff.html, @"<style[^>]*>(?<b>[\s\S]*?)</style\s*>", RegexOptions.IgnoreCase))
             ff.styleText.Append(sm.Groups["b"].Value).Append('\n');
         ff.css = ff.styleText.ToString();
         if (!ff.css.Contains("@font-face", System.StringComparison.OrdinalIgnoreCase)) return null;
         // data-URI faces belong to the styled-class data-font flow (StyledDoc.cs) —
         // this arm takes only the FILE-sourced variant of the shape.
-        if (Regex.IsMatch(ff.css, @"@font-face[^}]*url\(\s*[""']?data:", RegexOptions.Singleline)) return null;
-        ff.bodyW = Regex.Match(ff.css, @"body\s*\{[^}]*?width:\s*(?<w>[\d.]+)pt", RegexOptions.Singleline);
+        if (SafeRegex.IsMatch(ff.css, @"@font-face[^}]*url\(\s*[""']?data:", RegexOptions.Singleline)) return null;
+        ff.bodyW = SafeRegex.Match(ff.css, @"body\s*\{[^}]*?width:\s*(?<w>[\d.]+)pt", RegexOptions.Singleline);
         if (!ff.bodyW.Success) return null;
-        if (Regex.IsMatch(ff.html, @"<(table|img|input|ul|ol)\b", RegexOptions.IgnoreCase)) return null;
+        if (SafeRegex.IsMatch(ff.html, @"<(table|img|input|ul|ol)\b", RegexOptions.IgnoreCase)) return null;
 
         ff.faces = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<SheetFace>>(
             System.StringComparer.OrdinalIgnoreCase);
@@ -30,25 +30,25 @@ internal static partial class HtmlToPdfConverter
         if (ff.faces.Count == 0) return null;
 
         ff.rules = new System.Collections.Generic.List<(string Selector, string Body)>();
-        foreach (Match m in Regex.Matches(ff.css, @"(?<sel>[^{}@]+)\{(?<body>[^}]*)\}", RegexOptions.Singleline))
-            foreach (var sel in m.Groups["sel"].Value.Split(','))
-                ff.rules.Add((sel.Trim(), m.Groups["body"].Value));
+        foreach (var groups in SafeRegex.Matches(ff.css, @"(?<sel>[^{}@]+)\{(?<body>[^}]*)\}", RegexOptions.Singleline).Select(m => m.Groups))
+            foreach (var sel in groups["sel"].Value.Split(','))
+                ff.rules.Add((sel.Trim(), groups["body"].Value));
 
-        ff.bodyM = Regex.Match(ff.html, @"<body[^>]*>(?<b>[\s\S]*?)</body\s*>", RegexOptions.IgnoreCase);
+        ff.bodyM = SafeRegex.Match(ff.html, @"<body[^>]*>(?<b>[\s\S]*?)</body\s*>", RegexOptions.IgnoreCase);
         if (!ff.bodyM.Success) return null;
         ff.bodyInner = ff.bodyM.Groups["b"].Value;
 
         ff.paras = new System.Collections.Generic.List<(string Text, string PClass, string DivClasses, bool BoldTag)>();
-        foreach (Match dm in Regex.Matches(ff.bodyInner, @"<div(?<dattrs>[^>]*)>(?<dbody>[\s\S]*?)</div\s*>", RegexOptions.IgnoreCase))
+        foreach (var dmGroups in SafeRegex.Matches(ff.bodyInner, @"<div(?<dattrs>[^>]*)>(?<dbody>[\s\S]*?)</div\s*>", RegexOptions.IgnoreCase).Select(dm => dm.Groups))
         {
-            var divCls = Regex.Match(dm.Groups["dattrs"].Value, @"class=""(?<c>[^""]*)""").Groups["c"].Value;
-            foreach (Match pm in Regex.Matches(dm.Groups["dbody"].Value, @"<p(?<pattrs>[^>]*)>(?<pbody>[\s\S]*?)</p\s*>", RegexOptions.IgnoreCase))
+            var divCls = SafeRegex.Match(dmGroups["dattrs"].Value, @"class=""(?<c>[^""]*)""").Groups["c"].Value;
+            foreach (var pmGroups in SafeRegex.Matches(dmGroups["dbody"].Value, @"<p(?<pattrs>[^>]*)>(?<pbody>[\s\S]*?)</p\s*>", RegexOptions.IgnoreCase).Select(pm => pm.Groups))
             {
-                var pCls = Regex.Match(pm.Groups["pattrs"].Value, @"class=""(?<c>[^""]*)""").Groups["c"].Value;
-                var inner = pm.Groups["pbody"].Value;
-                var boldTag = Regex.IsMatch(inner, @"^\s*<(b|strong)\b", RegexOptions.IgnoreCase);
-                var text = Regex.Replace(inner, "<[^>]+>", "");
-                text = Regex.Replace(DecodeEntities(text), @"\s+", " ").Trim();
+                var pCls = SafeRegex.Match(pmGroups["pattrs"].Value, @"class=""(?<c>[^""]*)""").Groups["c"].Value;
+                var inner = pmGroups["pbody"].Value;
+                var boldTag = SafeRegex.IsMatch(inner, @"^\s*<(b|strong)\b", RegexOptions.IgnoreCase);
+                var text = SafeRegex.Replace(inner, "<[^>]+>", "");
+                text = SafeRegex.Replace(DecodeEntities(text), @"\s+", " ").Trim();
                 if (text.Length == 0) continue;
                 ff.paras.Add((text, pCls, divCls, boldTag));
             }
@@ -57,7 +57,7 @@ internal static partial class HtmlToPdfConverter
 
 
         ff.firstChildMt = 0.0;
-        ff.fcm = Regex.Match(ff.css, @"body\s*>\s*:first-child\s*\{[^}]*margin-top:\s*(?<v>[\d.]+)pt", RegexOptions.Singleline);
+        ff.fcm = SafeRegex.Match(ff.css, @"body\s*>\s*:first-child\s*\{[^}]*margin-top:\s*(?<v>[\d.]+)pt", RegexOptions.Singleline);
         if (ff.fcm.Success) ff.firstChildMt = double.Parse(ff.fcm.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture);
 
         ff.contentW = double.Parse(ff.bodyW.Groups["w"].Value, System.Globalization.CultureInfo.InvariantCulture);

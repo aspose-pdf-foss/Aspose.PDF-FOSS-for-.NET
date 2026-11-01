@@ -8,7 +8,7 @@ internal static partial class HtmlToPdfConverter
 // The table parser's working set, lifted out of BuildTableFromHtml: each
 // method takes the parse state, the column model and the settled dialect
 // scalars it reads. Bodies are verbatim.
-    private static void CloseSeg(MetricParseState mps, StringBuilder text, bool reportCells, bool stdSerif)
+    private static void CloseSeg(MetricParseState mps, StringBuilder text, bool stdSerif)
     {
         // Snapshot the typography the segment's first ink saw before clearing it: a
         // plain <div> band inherits the inline <font face>/<span> that dressed it,
@@ -37,9 +37,9 @@ internal static partial class HtmlToPdfConverter
         if (segRaw.IndexOf('\u0002') >= 0)
         {
             var segMarkers = string.Concat(
-                from Match sm in Regex.Matches(segRaw, "\u0002\\d+\u0003")
+                from Match sm in SafeRegex.Matches(segRaw, "\u0002\\d+\u0003")
                 select sm.Value);
-            segRaw = Regex.Replace(segRaw, "\u0002\\d+\u0003", " ");
+            segRaw = SafeRegex.Replace(segRaw, "\u0002\\d+\u0003", " ");
             text.Append(segMarkers);
         }
         // A leading <br> is an empty first line box (the boleto's address band draws
@@ -67,7 +67,7 @@ internal static partial class HtmlToPdfConverter
     private static string PreWrapCellText(string raw)
     {
         var t = raw.Replace("\r\n", "\n").Replace('\r', '\n').Replace('\t', ' ');
-        t = Regex.Replace(t, " {2,}", m => new string('\u00A0', m.Length));
+        t = SafeRegex.Replace(t, " {2,}", m => new string('\u00A0', m.Length));
         return t.Replace('\n', '\u0001');
     }
 
@@ -86,9 +86,9 @@ internal static partial class HtmlToPdfConverter
     private static void SplitUaBlockAtNestedGrids(MetricParseState mps, string segRaw)
     {
         var proto = mps.curSeg!;
-        foreach (var piece in Regex.Split(segRaw, "(\u0002\\d+\u0003)"))
+        foreach (var piece in SafeRegex.Split(segRaw, "(\u0002\\d+\u0003)"))
         {
-            var gm = Regex.Match(piece, "^\u0002(\\d+)\u0003$");
+            var gm = SafeRegex.Match(piece, "^\u0002(\\d+)\u0003$");
             if (gm.Success)
             {
                 (mps.cell!.DivSegs ??= new List<MetricDivSeg>()).Add(new MetricDivSeg { NestedTable = int.Parse(gm.Groups[1].Value) });
@@ -106,15 +106,16 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>A UA block cell's grids that stand BETWEEN its blocks (their markers sit in the
     /// cell text, outside any segment) become grid bands where they stand, so the cell's bands
-    /// keep the source order; stray text between them becomes a band of the cell's typography.</summary>
+    /// keep the source order; the text between and before them - a caption written ahead of its
+    /// value's block - becomes a band of the cell's typography, as the browser's anonymous block.</summary>
     private static void FlushUaBlockGridMarkers(MetricParseState mps, StringBuilder text)
     {
-        if (!mps.uaBlockCells || mps.cell is null || text.Length == 0) return;
-        var raw = text.ToString();
-        if (raw.IndexOf('\u0002') < 0) return;
-        foreach (var piece in Regex.Split(raw, "(\u0002\\d+\u0003)"))
+        if (!mps.uaBlockCells || mps.cell is null || text.Length <= mps.bandedTextLen) return;
+        var raw = text.ToString(mps.bandedTextLen, text.Length - mps.bandedTextLen);
+        var hasMarkers = raw.IndexOf('\u0002') >= 0;
+        foreach (var piece in SafeRegex.Split(raw, "(\u0002\\d+\u0003)"))
         {
-            var gm = Regex.Match(piece, "^\u0002(\\d+)\u0003$");
+            var gm = SafeRegex.Match(piece, "^\u0002(\\d+)\u0003$");
             if (gm.Success)
             {
                 (mps.cell.DivSegs ??= new List<MetricDivSeg>()).Add(new MetricDivSeg { NestedTable = int.Parse(gm.Groups[1].Value) });
@@ -127,7 +128,10 @@ internal static partial class HtmlToPdfConverter
                 Text = t, FontSize = mps.cell.FontSize, Face = mps.cell.Face, Bold = mps.cell.Bold, Fore = mps.cell.Fore,
             });
         }
-        text.Clear();
+        text.Length = mps.bandedTextLen;
+        // A plain lead stays in the buffer as the cell's text: the column solve measures it as it
+        // always did (the bands never draw a cell's text), and the band is made once.
+        if (!hasMarkers) { text.Append(raw); mps.bandedTextLen = text.Length; }
     }
 
     /// <summary>The text a cell holds after its last block becomes a band of its own (grid markers
@@ -152,10 +156,11 @@ internal static partial class HtmlToPdfConverter
 
     private static void CloseCell(MetricParseState mps, StringBuilder text, bool reportCells, bool stdSerif)
     {
-        CloseSeg(mps, text, reportCells, stdSerif);
+        CloseSeg(mps, text, stdSerif);
         FlushCellTailBands(mps, text, reportCells, stdSerif);
-        // report cells: a p-less cell wholly wrapped in b/strong is bold;
-        // mixed-run cells stay in the body face
+        mps.bandedTextLen = 0;
+        // report cells: a p-less cell wholly wrapped in b/strong is bold; mixed-run
+        // cells stay in the body face
         if (reportCells && mps.cell is not null && !mps.cell.Bold
             && mps.cellBoldChars > 0 && mps.cellPlainChars == 0)
             mps.cell.Bold = true;
@@ -179,10 +184,7 @@ internal static partial class HtmlToPdfConverter
         // keeps its source position — the cell draws text runs (bold per
         // run) and grids in order. Cells whose grids all trail the text
         // keep the calibrated stacked draw (text lines, then grids).
-        if (mps.nestedTables is not null && !reportCells)
-        {
-            if (!InterleaveNestedGrids(mps, text, brAfterGridCounts: stdSerif)) return;
-        }
+        if (mps.nestedTables is not null && !reportCells && !InterleaveNestedGrids(mps, text, brAfterGridCounts: stdSerif)) return;
         // Nested-table markers lift out of the text into the cell's grids.
         SplitNestedTableCellSegments(mps, stdSerif);
         // A container cell's whitespace-only paragraph segments (a
@@ -193,9 +195,7 @@ internal static partial class HtmlToPdfConverter
         {
             mps.cell.DivSegs.RemoveAll(sg =>
             {
-                foreach (var ch in sg.Text)
-                    if (ch is not (' ' or '\u00A0' or '\u0001')) return false;
-                return true;
+                return !sg.Text.Any(ch => ch is not (' ' or '\u00A0' or '\u0001'));
             });
             if (mps.cell.DivSegs.Count == 0) mps.cell.DivSegs = null;
         }
@@ -361,9 +361,6 @@ internal static partial class HtmlToPdfConverter
     /// properties always, box properties (alignment, width, padding, borders) only for a
     /// rule matched on the cell itself.</summary>
     /// <param name="mps">The table parse state (supplies the inherited font size and grid mode).</param>
-    /// <param name="css">The document's class rules; not read by this method.</param>
-    /// <param name="text">The cell's text buffer; not read by this method.</param>
-    /// <param name="reportCells">The report-cell mode flag; not read by this method.</param>
     /// <param name="stdSerif">True when the table draws in the standard serif face.</param>
     /// <param name="mc">The cell that receives the properties.</param>
     /// <param name="bag">The rule's property/value declarations.</param>
@@ -372,7 +369,7 @@ internal static partial class HtmlToPdfConverter
     /// alignment or geometry for the block it sits in: a `text-align: right` class on a span
     /// leaves its cell left-aligned (measured on the reference: the checkbox cells' bold
     /// `.label` spans draw from the cell's content edge, not from its right edge).</param>
-    private static void ApplyCellClassBag(MetricParseState mps, IReadOnlyDictionary<string, Dictionary<string, string>> css, StringBuilder text, bool reportCells, bool stdSerif, MetricCell mc, IReadOnlyDictionary<string, string> bag, bool inlineBag = false)
+    private static void ApplyCellClassBag(MetricParseState mps, bool stdSerif, MetricCell mc, IReadOnlyDictionary<string, string> bag, bool inlineBag = false)
     {
         foreach (var (bProp, bVal) in bag)
             switch (bProp.ToLowerInvariant())
@@ -381,7 +378,7 @@ internal static partial class HtmlToPdfConverter
                 //  cell's own size for a span's bag (`.note { font-size: 1em }` in a 9 pt cell is 9),
                 //  the UA 12 pt the table element resets to for a cell rule (`TD { .75em }` is 9))
                 case "font-size" when stdSerif && _quirksRowStrut
-                    && Regex.Match(bVal.Trim(), @"^(\d+(?:\.\d+)?|\.\d+)\s*em$", RegexOptions.IgnoreCase) is { Success: true } bagEm:
+                    && SafeRegex.Match(bVal.Trim(), @"^(\d+(?:\.\d+)?|\.\d+)\s*em$", RegexOptions.IgnoreCase) is { Success: true } bagEm:
                     mc.FontSize = double.Parse(bagEm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
                         * (inlineBag ? (mc.FontSize ?? mps.fontSize) : UaDefaultFontPt);
                     mc.FontFromClass = true;
@@ -404,8 +401,8 @@ internal static partial class HtmlToPdfConverter
                     if (IsZeroLength(bVal.Trim())) mc.BorderLeftW = 0;
                     else if (TryParseLength(bVal.Trim()) is { } blwPt && blwPt > 0) mc.BorderLeftW = blwPt;
                     break;
-                // (the shorthands state every side at once in a COLLAPSED grid: `.tp01 td { padding: 5px;
-                //  border: 1px solid #e4e4e4 }` pads the e-mail cards' cells and rules each of them; the
+                // (the shorthands state every side at once in a COLLAPSED grid: `.tp01 td { padding: 5px; border:
+                //  1px solid #e4e4e4 }` pads the e-mail cards' cells and rules each of them; the
                 //  calibrated separate-border grids keep reading the longhands alone)
                 case "padding":
                     // (…and in the pt form grid: `.Form-table-title { padding: 2px }` pads its band 1.5 a side)
@@ -433,7 +430,7 @@ internal static partial class HtmlToPdfConverter
                 case "white-space":
                     // (`pre-wrap` keeps its breaks and spaces and still wraps; a class nowrap keeps the
                     // calibrated wrap - the keyword must not match by prefix)
-                    if (Regex.IsMatch(bVal, @"^\s*pre-wrap", RegexOptions.IgnoreCase)) mc.PreWrap = true;
+                    if (SafeRegex.IsMatch(bVal, @"^\s*pre-wrap", RegexOptions.IgnoreCase)) mc.PreWrap = true;
                     break;
             }
     }
@@ -447,7 +444,7 @@ internal static partial class HtmlToPdfConverter
             {
                 // (the shorthand's size is any CSS length - probed: `font: 8pt "Courier New"` cells
                 // draw Courier New 8, where a px-only read left them in the flow serif at 12)
-                var fsh = Regex.Match(bVal, @"([\d.]+\s*(?:px|pt|em|rem|%))\s+(.+)$", RegexOptions.IgnoreCase);
+                var fsh = SafeRegex.Match(bVal, @"([\d.]+\s*(?:px|pt|em|rem|%))\s+(.+)$", RegexOptions.IgnoreCase);
                 if (fsh.Success && TryParseCssFontSize(fsh.Groups[1].Value.Trim()) is { } fshPt && fshPt > 0)
                 {
                     mc.FontSize = fshPt;
@@ -491,7 +488,7 @@ internal static partial class HtmlToPdfConverter
                 break;
             case "font-weight":
                 if (bVal.Contains("bold", StringComparison.OrdinalIgnoreCase)
-                    || (int.TryParse(bVal.Trim(), out var bagFw) && bagFw >= 600))
+                    || (int.TryParse(bVal.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var bagFw) && bagFw >= 600))
                     mc.Bold = true;
                 break;
             case "color":

@@ -35,17 +35,16 @@ internal static partial class HtmlToPdfConverter
     private static bool InterleaveNestedGrids(MetricParseState mps, StringBuilder text, bool brAfterGridCounts = false)
     {
         var raw = text.ToString();
-        var mms = Regex.Matches(raw, "\u0002(\\d+)\u0003");
+        var mms = SafeRegex.Matches(raw, "\u0002(\\d+)\u0003");
         var inkAfterMarker = false;
         var brAfterMarker = false;
         if (mms.Count > 0)
         {
             var afterFirst = raw[(mms[0].Index + mms[0].Length)..];
-            afterFirst = Regex.Replace(afterFirst, "\u0002\\d+\u0003", "");
+            afterFirst = SafeRegex.Replace(afterFirst, "\u0002\\d+\u0003", "");
             brAfterMarker = afterFirst.IndexOf('\u0001') >= 0;
-            foreach (var ch in afterFirst)
-                if (!char.IsWhiteSpace(ch) && ch is not ('\u0001' or '\u00A0'))
-                { inkAfterMarker = true; break; }
+            if (afterFirst.Any(ch => !char.IsWhiteSpace(ch) && ch is not ('\u0001' or '\u00A0')))
+            { inkAfterMarker = true; }
         }
         // …and under the UA flow a line break AFTER the grid keeps its place too: each br past
         // a block is a whole line box (probed: two brs after a nested table hold 27 pt under it,
@@ -56,7 +55,7 @@ internal static partial class HtmlToPdfConverter
             {
                 var on = false;
                 foreach (var (mp, mo) in mps.cellBoldMarks)
-                { if (mp > at) break; on = mo; }
+                { if (mp > at) { break; } on = mo; }
                 return on;
             }
             var flow = new List<(string? TableHtml, string Text, bool Bold)>();
@@ -112,7 +111,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (mps.nestedTables is not null && mps.cell!.Text.IndexOf('\u0002') >= 0)
         {
-            foreach (Match nm in Regex.Matches(mps.cell.Text, "\u0002(\\d+)\u0003"))
+            foreach (Match nm in SafeRegex.Matches(mps.cell.Text, "\u0002(\\d+)\u0003"))
                 if (int.TryParse(nm.Groups[1].Value, out var nti) && nti < mps.nestedTables.Count)
                 {
                     (mps.cell.SubTables ??= new List<string>()).Add(mps.nestedTables[nti]);
@@ -124,12 +123,12 @@ internal static partial class HtmlToPdfConverter
             {
                 var afterLast = mps.cell.Text[(mps.cell.Text.LastIndexOf('\u0003') + 1)..];
                 if (afterLast.Trim(' ', '\u0001').Length == 0)
-                    foreach (var ch in afterLast) if (ch == '\u0001') mps.cell.TrailingBreakLines++;
+                    foreach (var ch in afterLast.Where(ch => ch == '\u0001')) mps.cell.TrailingBreakLines++;
             }
             // text that only follows the last grid is a trailing paragraph, not a line above them
             var firstGrid = mps.cell.Text.IndexOf('\u0002');
             mps.cell.TextTrailsGrids = firstGrid >= 0 && mps.cell.Text[..firstGrid].Trim(' ', '\t', '\r', '\n').Length == 0;   // an nbsp AHEAD of a grid is content
-            mps.cell.Text = Regex.Replace(mps.cell.Text, "\u0002\\d+\u0003", " ");
+            mps.cell.Text = SafeRegex.Replace(mps.cell.Text, "\u0002\\d+\u0003", " ");
             mps.cell.Text = CollapseWs(mps.cell.Text);
         }
     }

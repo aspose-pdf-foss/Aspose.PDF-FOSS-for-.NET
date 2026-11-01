@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Text;
 
@@ -24,7 +25,7 @@ internal static partial class HtmlToPdfConverter
             iconTop = flow.y;
         }
         (var phName, flow.flowIconRef) = RegisterPlaceholderIcon(doc, flow.page, flow.flowIconRef, masked: true);
-        flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+        flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
             $"q 32 0 0 32 {marginLeft + 1:0.##} {iconTop - 32:0.##} cm /{phName} Do Q\n")));
         // The browser frames a broken image with a 1 pt INSET border —
         // top/left #555, bottom/right #aaa — half a point outside the icon.
@@ -51,7 +52,7 @@ internal static partial class HtmlToPdfConverter
         flow.msoBrokenImgCount++;
         var mphTop = pageHeight - 72.0 - MsoBrokenImgDropPt;
         (var mphName, flow.flowIconRef) = RegisterPlaceholderIcon(doc, flow.page, flow.flowIconRef, masked: true);
-        flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+        flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
             $"q 32 0 0 32 {mphX:0.##} {mphTop - 32:0.##} cm /{mphName} Do Q\n")));
         var mphDark = ParseCssColor("#555555");
         var mphLite = ParseCssColor("#AAAAAA");
@@ -91,11 +92,14 @@ internal static partial class HtmlToPdfConverter
         DrawBox(flow.page, phX, phTop - phH, 1, phH, null, 0, uaPhDark);
         DrawBox(flow.page, phX + phW - 1, phTop - phH, 1, phH, null, 0, uaPhLite);
         (var uaPhName, flow.flowIconRef) = RegisterPlaceholderIcon(doc, flow.page, flow.flowIconRef, masked: true);
-        flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+        flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
             $"q 32 0 0 32 {phX + 3:0.##} {phTop - 3 - 32:0.##} cm /{uaPhName} Do Q\n")));
         flow.contentPage = flow.page;
         flow.y -= phH;
     }
+
+    // Rounding room a line keeps for one more inline image.
+    private const double ImageRowSlackPt = 0.5;
 
     // The descent of the Word mail's face under its baseline (Calibri's descender, 512/2048 em).
     private const double WordMailDescentEm = 0.25;
@@ -107,9 +111,18 @@ internal static partial class HtmlToPdfConverter
         ib.natW = 0;
         ib.natH = 0;
         if (!ResolveImageBox(ib, bytes, svgNatW, svgNatH, block, flow, profile, marginLeft, marginTop, pageHeight, vectorPage)) return false;
+        // An inline image after another of its run sits on that image's line while the line has room for it.
+        ib.joinsRow = block.ImageJoinsRow && !block.ImageCentered && ReferenceEquals(flow.imageRowPage, flow.page)
+            && flow.imageRowEndX + block.ImageIndentPt + ib.w <= marginLeft + flow.contentWidth + ImageRowSlackPt;
+        if (ib.joinsRow) flow.y = flow.imageRowTopY;
         if (!BreakPageForImage(ib, bytes, block, flow, profile, doc, docFontDict, bandStack, marginBottom, marginLeft, marginTop, pageHeight, pageWidth)) return false;
+        if (!ReferenceEquals(flow.imageRowPage, flow.page)) ib.joinsRow = false;
+        var rowTop = flow.y;
         DrawImageAtFlow(ib, bytes, block, flow, profile, marginLeft, marginTop, pageHeight, vectorPage);
         if (!SettleImageFloat(ib, block, flow, profile, bandStack)) return false;
+        if (ib.joinsRow) flow.y = Math.Min(flow.y, flow.imageRowBottomY);
+        else flow.imageRowTopY = rowTop;
+        (flow.imageRowPage, flow.imageRowEndX, flow.imageRowBottomY) = (flow.page, ib.imgX + ib.w, flow.y);
         return true;
     }
 
@@ -225,11 +238,11 @@ internal static partial class HtmlToPdfConverter
         if (profile.wordMailDoc && flow.prevBlockWasText && flow.prevFlowLineHeight > 0 && flow.prevFlowFontSize > 0)
             flow.y += flow.prevFlowLineHeight - flow.prevFlowFontSize * WordMailDescentEm;
         flow.y -= ib.padTop;
-        ib.imgX = profile.floatImageDoc && block.FloatRight
-            ? marginLeft + flow.contentWidth - ib.w - block.ImageIndentPt
-            : ib.rtlOverflow ? marginLeft + flow.contentWidth - ib.w
-            : block.ImageCentered ? marginLeft + (flow.contentWidth - ib.w) / 2
-            : marginLeft + block.ImageIndentPt;
+        if (profile.floatImageDoc && block.FloatRight) ib.imgX = marginLeft + flow.contentWidth - ib.w - block.ImageIndentPt;
+        else if (ib.rtlOverflow) ib.imgX = marginLeft + flow.contentWidth - ib.w;
+        else if (block.ImageCentered) ib.imgX = marginLeft + (flow.contentWidth - ib.w) / 2;
+        else ib.imgX = marginLeft + block.ImageIndentPt;
+        if (ib.joinsRow) ib.imgX = flow.imageRowEndX + block.ImageIndentPt;
         ib.floatDropY = flow.y;
         if (profile.floatImageDoc && block.FloatRight && flow.floatIndentPt > 0
             && ib.imgX < marginLeft + flow.floatIndentPt
@@ -239,30 +252,39 @@ internal static partial class HtmlToPdfConverter
         flow.y = ib.floatDropY;
         try
         {
-            if (block.ImageRotateDeg != 0)
+            var rotateDeg = block.ImageRotateDeg + ib.exifRotateDeg;
+            if (rotateDeg != 0)
             {
                 // CSS transform: rotate(θ) spins the image about its layout
                 // box centre and leaves the layout box (and the flow advance)
                 // unrotated. CSS angles are clockwise on the page; the stamp
                 // matrix is PDF counter-clockwise, hence the sign flip. The
                 // stamp anchors at the ROTATED bounding box's bottom-left.
-                var rad = block.ImageRotateDeg * Math.PI / 180.0;
-                var bw = Math.Abs(ib.w * Math.Cos(rad)) + Math.Abs(ib.h * Math.Sin(rad));
-                var bh = Math.Abs(ib.w * Math.Sin(rad)) + Math.Abs(ib.h * Math.Cos(rad));
+                // An EXIF quarter turn draws the raster at its stored size, which
+                // is the layout box turned, so the turned raster fills the box.
+                var quarter = ib.exifRotateDeg is 90 or 270;
+                var rasterW = quarter ? ib.h : ib.w;
+                var rasterH = quarter ? ib.w : ib.h;
+                var rad = rotateDeg * Math.PI / 180.0;
+                var bw = Math.Abs(rasterW * Math.Cos(rad)) + Math.Abs(rasterH * Math.Sin(rad));
+                var bh = Math.Abs(rasterW * Math.Sin(rad)) + Math.Abs(rasterH * Math.Cos(rad));
                 var cx = ib.imgX + ib.w / 2;
                 var cy = flow.y - ib.h / 2;
                 var stamp = ImageStamp.FromEncodedBytes(bytes);
                 stamp.XIndent = cx - bw / 2;
                 stamp.YIndent = cy - bh / 2;
-                stamp.DisplayWidth = ib.w;
-                stamp.DisplayHeight = ib.h;
-                stamp.RotateAngle = -block.ImageRotateDeg;
+                stamp.DisplayWidth = rasterW;
+                stamp.DisplayHeight = rasterH;
+                stamp.RotateAngle = -rotateDeg;
                 stamp.ApplyTo(flow.page);
             }
             else
                 PaintImageBox(ib, bytes, block, flow, vectorPage, ib.imgX, flow.y);
         }
         catch { /* undecodable image: skip, keep the flow going */ }
+        // An image inside an anchor is the link: its box is the clickable area.
+        if (block.ImageLinkUrl is { } imgHref)
+            flow.pendingLinks?.Add((flow.page, new Rectangle(ib.imgX, flow.y - ib.h, ib.imgX + ib.w, flow.y), imgHref, block.ImageAlt));
         // box-shadow (2px offset, 2px blur — the only visible chrome, the
         // card's fill and border being white). Approximate the bitmap
         // a browser renders with the offset right/bottom bars plus a hairline
@@ -383,9 +405,15 @@ internal static partial class HtmlToPdfConverter
                 ib.natW = pxW * 0.75;
                 ib.natH = pxH * 0.75;
             }
+            // A photo stored sideways is shown the way its EXIF orientation says: its
+            // natural box is the turned one, and the raster is turned to fill it.
+            ib.exifRotateDeg = ReadJpegExifRotation(bytes);
+            if (ib.exifRotateDeg is 90 or 270) (ib.natW, ib.natH) = (ib.natH, ib.natW);
         }
         ib.w = block.ImageWidth > 0 ? block.ImageWidth * 0.75 : 0;
         ib.h = block.ImageHeight > 0 ? block.ImageHeight * 0.75 : 0;
+        // A percentage width is its share of the containing block, known only here.
+        if (block.ImageWidthFrac > 0 && flow.contentWidth > 0) ib.w = flow.contentWidth * block.ImageWidthFrac;
         if (ib.w <= 0 && ib.h <= 0) { ib.w = ib.natW > 0 ? ib.natW : 72; ib.h = ib.natH > 0 ? ib.natH : 72; }
         else if (ib.h <= 0) ib.h = (ib.natW > 0 && ib.natH > 0) ? ib.w * ib.natH / ib.natW : ib.w;
         else if (ib.w <= 0) ib.w = (ib.natW > 0 && ib.natH > 0) ? ib.h * ib.natW / ib.natH : ib.h;

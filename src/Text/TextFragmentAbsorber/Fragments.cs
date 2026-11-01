@@ -12,6 +12,7 @@ public sealed partial class TextFragmentAbsorber
     public void Visit(Document pdf)
     {
         var document = pdf;
+        document.LayOutXfaForm();
         _fragments.Clear();
         _absorbAllPages.Clear();
         _absorbAllForms.Clear();
@@ -28,7 +29,7 @@ public sealed partial class TextFragmentAbsorber
             // One dedup set for the WHOLE walk: a form shared across pages is
             // absorbed only at its first Do (a per-page visit is its own run
             // and counts it again).
-            var seenForms = new HashSet<object>(ReferenceEqualityComparer.Instance);
+            var seenForms = new FormDedupSet();
             foreach (var page in document.Pages)
                 VisitInternal(page, tolerantFonts: true, seenForms: seenForms);
             return;
@@ -64,7 +65,7 @@ public sealed partial class TextFragmentAbsorber
         ApplySearchRectFilter();
     }
 
-    private (string text, List<int> charToRun, int[] runStartChar, int[]? bidiPerm)
+    private (string text, List<int> charToRun, int[] runStartChar, int[]? bidiPerm, int[]? foldMap)
         BuildConcatenatedText(List<RawTextRun> rawFragments)
     {
         var fullText = new StringBuilder();
@@ -128,17 +129,46 @@ public sealed partial class TextFragmentAbsorber
             }
         }
 
-        var concatenated = NormalizeArabicAndRemap(fullText.ToString(), charToRun, runStartChar);
+        // The char maps stay on the text as drawn; foldMap takes a folded index back to it.
+        var (concatenated, foldMap) = FoldForSearchWithMap(fullText.ToString());
 
-        // Apply bidi reordering for non-regex search — regex patterns expect
-        // logical order. Runs on the normalized text so bidiPerm indices live
-        // in the same space as the (re-projected) char maps.
-        int[]? bidiPerm = null;
+        // Phrases and regular expressions are written in logical order, so right-to-left
+        // text drawn in visual order is reordered for both. A regex keeps the line sentinels,
+        // so each line is its own paragraph there and the sentinels stay in place for ^, $
+        // and \r\n. Runs on the folded text so bidiPerm indices live in its space, ahead of foldMap.
         var isRegex = _isRegex || (_textSearchOptions?.IsRegularExpression ?? false);
-        if (!isRegex)
-            (concatenated, bidiPerm) = BidiReorderer.ReorderWithPermutation(concatenated);
+        int[]? bidiPerm;
+        (concatenated, bidiPerm) = isRegex
+            ? ReorderLinesWithPermutation(concatenated)
+            : BidiReorderer.ReorderWithPermutation(concatenated);
 
-        return (concatenated, charToRun, runStartChar, bidiPerm);
+        return (concatenated, charToRun, runStartChar, bidiPerm, foldMap);
+    }
+
+    /// <summary>Visual-to-logical reorder of each line of the search text on its own (lines end
+    /// in the line sentinel, which keeps its place), with the permutation of the whole text
+    /// (<c>perm[logical] = visual</c>); null when nothing reorders.</summary>
+    private static (string text, int[]? perm) ReorderLinesWithPermutation(string text)
+    {
+        if (!BidiReorderer.ContainsRtl(text)) return (text, null);
+        const string LineSentinel = "\r\n";
+        var sb = new StringBuilder(text.Length);
+        var perm = new int[text.Length];
+        var start = 0;
+        while (true)
+        {
+            var end = text.IndexOf(LineSentinel, start, StringComparison.Ordinal);
+            if (end < 0) end = text.Length;
+            var (line, linePerm) = BidiReorderer.ReorderWithPermutation(text.Substring(start, end - start));
+            for (var k = 0; k < line.Length; k++)
+                perm[start + k] = start + (linePerm is null ? k : linePerm[k]);
+            sb.Append(line);
+            if (end == text.Length) break;
+            for (var k = 0; k < LineSentinel.Length; k++) perm[end + k] = end + k;
+            sb.Append(LineSentinel);
+            start = end + LineSentinel.Length;
+        }
+        return (sb.ToString(), perm);
     }
 
     /// <summary>Whether this run is a drop-shadow copy of the last kept one: the same text drawn
@@ -160,7 +190,7 @@ public sealed partial class TextFragmentAbsorber
     /// "…Registrat⏎onAccountCU…"). Multi-word phrases still match across the break through this
     /// separator space; when the previous run already ends in whitespace nothing is added, so no
     /// double-space can break a single-spaced phrase.</summary>
-    private void AppendLineBreakSeparator(List<RawTextRun> rawFragments, int i,
+    private static void AppendLineBreakSeparator(List<RawTextRun> rawFragments, int i,
         StringBuilder fullText, List<int> charToRun)
     {
         if (fullText.Length == 0) return;
@@ -205,30 +235,6 @@ public sealed partial class TextFragmentAbsorber
         }
     }
 
-    /// <summary>Normalises Arabic presentation forms and re-projects the char-to-run and
-    /// run-to-char maps onto the normalised text, so every index still means the same run.</summary>
-    private static string NormalizeArabicAndRemap(string concatenated, List<int> charToRun,
-        int[] runStartChar)
-    {
-        (concatenated, var newToOld) = NormalizeArabicPresentationFormsWithMap(concatenated);
-        if (newToOld is null) return concatenated;
-
-        var expanded = new List<int>(newToOld.Length);
-        foreach (var o in newToOld) expanded.Add(charToRun[o]);
-        var oldToNew = new int[charToRun.Count + 1];
-        var j = 0;
-        for (var o = 0; o <= charToRun.Count; o++)
-        {
-            while (j < newToOld.Length && newToOld[j] < o) j++;
-            oldToNew[o] = j;
-        }
-        for (var r = 0; r < runStartChar.Length; r++)
-            runStartChar[r] = oldToNew[Math.Min(runStartChar[r], charToRun.Count)];
-        charToRun.Clear();
-        charToRun.AddRange(expanded);
-        return concatenated;
-    }
-
 
     /// <summary>
     /// Computes the descent and ascent offsets used by the phrase-search rect
@@ -264,7 +270,7 @@ public sealed partial class TextFragmentAbsorber
         if (run.Metrics is not null && run.Metrics.Descent != 0)
             effectiveDescent = run.Metrics.Descent;
         else if (coreFaceDescent && !string.IsNullOrEmpty(run.FontName))
-            effectiveDescent = Standard14Fonts.GetDescent(run.FontName!);
+            effectiveDescent = Standard14Fonts.GetDescent(run.FontName);
 
         double descentOff = effectiveDescent * run.FontSize / 1000.0;
         double ascentH = run.FontSize * 1.1 + descentOff;

@@ -5,6 +5,20 @@ namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
+    /// <summary>A disabled or readonly control maps to a read-only AcroForm field.</summary>
+    private static bool ControlLocked(Dictionary<string, string>? attrs) =>
+        attrs is not null && (attrs.ContainsKey("disabled") || attrs.ContainsKey("readonly"));
+
+    /// <summary>The AcroForm field name of a control: its name attribute, else its id; null for neither.</summary>
+    private static string? ControlFieldName(Dictionary<string, string>? attrs)
+    {
+        string? name = null, id = null;
+        attrs?.TryGetValue("name", out name);
+        attrs?.TryGetValue("id", out id);
+        var fieldName = !string.IsNullOrEmpty(name) ? name : id;
+        return string.IsNullOrEmpty(fieldName) ? null : fieldName;
+    }
+
     /// <summary>A JSON-escaped export writes every attribute quote as <c>\"</c>, so a value
     /// arrives still wrapped in them. A value that is READ — a control's type, its size /
     /// cols / rows — must lose the wrappers; a value that is DRAWN keeps them:
@@ -26,21 +40,22 @@ internal static partial class HtmlToPdfConverter
         string? tag, Dictionary<string, string>? attrs)
     {
         if (sheet is null || string.IsNullOrEmpty(tag)) return null;
-        var selectors = new List<string> { tag!.ToLowerInvariant() };
-        if (attrs is not null && attrs.TryGetValue("class", out var classes))
-            foreach (var c in classes.Split(new[] { ' ', '	' }, StringSplitOptions.RemoveEmptyEntries))
-                selectors.Add("." + c);
-        if (attrs is not null && attrs.TryGetValue("id", out var id) && id.Length > 0)
-            selectors.Add("#" + id);
-
         var box = new StringBuilder();
-        foreach (var sel in selectors)
+        foreach (var sel in ControlSelectors(tag!, attrs))
         {
             if (!sheet.TryGetValue(sel, out var rule)) continue;
             foreach (var prop in new[] { "width", "height" })
                 if (rule.TryGetValue(prop, out var v)) box.Append(prop).Append(':').Append(v).Append(';');
         }
         return box.Length > 0 ? box.ToString() : null;
+    }
+
+    /// <summary>The <c>color</c> a style attribute declares, or null when it declares none.</summary>
+    private static Color? OwnInkColor(string? styleAttr)
+    {
+        if (string.IsNullOrEmpty(styleAttr)) return null;
+        var m = SafeRegex.Match(styleAttr!, @"(?<![-\w])color\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        return m.Success ? ParseCssColor(m.Groups[1].Value.Trim()) : null;
     }
 
     /// <summary>Build a Block describing an &lt;input> control: its value and any CSS
@@ -64,6 +79,9 @@ internal static partial class HtmlToPdfConverter
             if (w <= 0) w = sheetW;
             if (h <= 0) h = sheetH;
         }
+        // CSS px to the points the layout draws in (a 100px box is 75 pt wide)
+        w *= PxPt;
+        h *= PxPt;
         double advance = 0;
         if (controlBoxes)
         {
@@ -83,15 +101,15 @@ internal static partial class HtmlToPdfConverter
             if (h <= 0) h = ih;
         }
         if (multiline && !string.IsNullOrEmpty(innerText)) value = innerText;
-        // A disabled or readonly input maps to a ReadOnly AcroForm field.
-        var readOnly = attrs is not null && (attrs.ContainsKey("disabled") || attrs.ContainsKey("readonly"));
-        // AcroForm field name: prefer the HTML name attribute, fall back to id.
-        var fieldName = !string.IsNullOrEmpty(name) ? name : id;
+        var readOnly = ControlLocked(attrs);
+        var fieldName = ControlFieldName(attrs);
         return new Block
         {
             IsInputField = true,
             InputValue = DecodeEntities(value ?? ""),
             InputName = string.IsNullOrEmpty(fieldName) ? null : fieldName,
+            InputColor = OwnInkColor(styleAttr),
+            InputChrome = ControlChromeDecls(sheet, tag, attrs, styleAttr),
             InputWidth = w,
             InputHeight = h,
             InputMultiline = multiline,
@@ -120,7 +138,7 @@ internal static partial class HtmlToPdfConverter
     /// authored font size of their own in these documents.</summary>
     private static double BoxChromeLen(string value)
     {
-        var m = Regex.Match(value, @"([\d.]+)\s*(px|pt|rem|em)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(value, @"([\d.]+)\s*(px|pt|rem|em)", RegexOptions.IgnoreCase);
         if (!m.Success) return 0;
         if (!double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var n)) return 0;

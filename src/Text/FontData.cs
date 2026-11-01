@@ -107,8 +107,15 @@ public sealed class FontData
     /// are immutable font data, so a process-wide by-path cache turns thousands
     /// of independent look-ups of the same face (e.g. every table cell resolving
     /// "Arial") into a single read instead of one full copy per instance.</summary>
-    internal byte[]? TtfData => _ttfData ??= FilePath is not null ? LoadTtf(FilePath) : null;
+    internal byte[]? TtfData => _ttfData ??= FilePath is not null && Type != FontType.Type1 ? SingleFace(LoadTtf(FilePath)) : null;
     private byte[]? _ttfData;
+
+    // A face opened from a TrueType collection (simsun.ttc, msgothic.ttc) is its first face as
+    // a font program of its own: the collection's bytes are no font program, so embedded as
+    // one they neither subset nor conform. The name-table lookup picks its face itself.
+    private static byte[] SingleFace(byte[] data) =>
+        data.Length > 4 && data[0] == 't' && data[1] == 't' && data[2] == 'c' && data[3] == 'f'
+            ? CjkFallbackFont.NormalizeToSfnt(data, 0) : data;
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> _ttfByPath = new();
 
@@ -116,6 +123,36 @@ public sealed class FontData
         => _ttfByPath.GetOrAdd(path, System.IO.File.ReadAllBytes);
 
     internal void SetTtfData(byte[] data) => _ttfData = data;
+
+    /// <summary>The bytes of the file the face was opened from, whatever its kind.</summary>
+    internal byte[]? FileBytes => TtfData ?? (FilePath is not null ? LoadTtf(FilePath) : null);
+
+    /// <summary>The AFM file that goes with a Type 1 program, when one was given or lies
+    /// beside it under the same name.</summary>
+    internal string? MetricsFilePath { get; set; }
+
+    /// <summary>The Type 1 program this face was opened from, with its metrics; null for
+    /// any other face, or a file that is not a readable PFB or PFA. A Type 1 program is
+    /// not TrueType data, and handing it to the TrueType embedder set every glyph as 0.</summary>
+    internal Type1FontFile? Type1
+    {
+        get
+        {
+            if (_type1Read) return _type1;
+            _type1Read = true;
+            if (Type != FontType.Type1 || FilePath is null) return null;
+            var metrics = MetricsFilePath ?? System.IO.Path.ChangeExtension(FilePath, ".afm");
+            _type1 = Type1FontFile.TryRead(LoadTtf(FilePath),
+                System.IO.File.Exists(metrics) ? System.IO.File.ReadAllText(metrics, Compat.Latin1) : null);
+            return _type1;
+        }
+    }
+    private Type1FontFile? _type1;
+    private bool _type1Read;
+
+    /// <summary>The predefined CJK face this font names, declared without a program; null for
+    /// any other face.</summary>
+    internal PredefinedCidFont? PredefinedCid { get; set; }
 
     /// <summary>
     /// Measure the width of a string at the given font size in points.
@@ -135,6 +172,8 @@ public sealed class FontData
             }
             return total * fontSize / _upm;
         }
+        if (Type1 is { } type1) return type1.Measure(text, fontSize);
+        if (PredefinedCid is { } cid) return cid.Measure(text, fontSize);
         // Fallback for Type1/unknown without TTF data
         return text.Length * fontSize * 0.5;
     }

@@ -13,7 +13,9 @@ internal static partial class HtmlToPdfConverter
         // #333 }` + `td { border-width: 1px }`) boxes the cells like the shorthand —
         // form documents commonly split the declaration across document-level rules.
         // A table whose own style says border-style:none opts out.
+        var boxedBeforeElementRules = cfg.hasBorder;
         ResolveElementRuleFrame(cfg);
+        if (!boxedBeforeElementRules && cfg.hasBorder) cfg.cellBoxSpec = ElementCellRuleSpec;
 
         // The pinned-body report's grid lines: the TABLE's own bgcolor shows
         // through a 1-2px cellspacing between white cells — every cell reads
@@ -21,11 +23,12 @@ internal static partial class HtmlToPdfConverter
         // visually is (dialect-gated; the legacy paths never read table bg).
         if (!cfg.hasBorder && cfg.pinnedBodyGrid && cfg.tblTag.Success
             && cfg.tblCellSpacingDeclared && colModel.tblCellSpacingPt is > 0 and <= 1.6
-            && Regex.Match(cfg.tblTag.Value, @"\bbgcolor\s*=\s*[""']?([^""'\s>]+)",
+            && SafeRegex.Match(cfg.tblTag.Value, @"\bbgcolor\s*=\s*[""']?([^""'\s>]+)",
                 RegexOptions.IgnoreCase) is { Success: true } tbgm
             && ParseCssColor(tbgm.Groups[1].Value) is { } tbgc)
         {
             cfg.hasBorder = true;
+            cfg.cellBoxSpec = CellOwnBoxSpec;
             cfg.borderWidth = colModel.tblCellSpacingPt;
             cfg.borderColor = tbgc;
             // The spacing line rides INSIDE the row pitch (a 22px row
@@ -40,30 +43,64 @@ internal static partial class HtmlToPdfConverter
         // inline and have no <style> block at all. Sample the first bordered cell.
         // A Word grid declares every cell's sides on the cell itself (the mail
         // arm reads them one cell at a time), so its sample boxes nothing table-wide.
-        if (!cfg.hasBorder && !cfg.wordMailCells)
-        {
-            // (…sampling this grid's OWN cells: a bordered cell of a grid nested inside one of its cells is that
-            //  grid's - measured on the mailing, whose 600 px content grid boxed every cell for a button deep inside)
-            var cbm = FirstOwnCellStyleBorder(html);
-            if (cbm.Success)
-            {
-                var bd = cbm.Groups[1].Value.Trim();
-                if (!bd.StartsWith("0") && bd.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
-                {
-                    cfg.hasBorder = true;
-                    var wm = Regex.Match(bd, @"(\d+(?:\.\d+)?)\s*px");
-                    if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var bw) && bw > 0)
-                        cfg.borderWidth = bw * PxToPt;
-                    var bc = ParseCssColor(bd); if (bc is not null) cfg.borderColor = bc;
-                }
-            }
-        }
+        if (!cfg.hasBorder && !cfg.wordMailCells) TakeOwnCellStyleBox(cfg, html);
+        // …and whatever box the sheet gave the cells, a chain rule through the grid's ancestors may clear it.
+        ClearCellBordersByChainRule(cfg, html);
     }
+
+    /// <summary>The box the grid's own cells draw through their style, sampled on the first of them that states
+    /// a border, boxes every cell; false when that cell's border is zero or none, or no cell states one.</summary>
+    private static bool TakeOwnCellStyleBox(TableStyleConfig cfg, string html)
+    {
+        // (…sampling this grid's OWN cells: a bordered cell of a grid nested inside one of its cells is that
+        //  grid's - measured on the mailing, whose 600 px content grid boxed every cell for a button deep inside)
+        var cbm = FirstOwnCellStyleBorder(html);
+        if (!cbm.Success) return false;
+        var bd = cbm.Groups[1].Value.Trim();
+        if (bd.StartsWith('0') || bd.IndexOf("none", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+        cfg.hasBorder = true;
+        cfg.cellBoxSpec = CellOwnBoxSpec;
+        var wm = SafeRegex.Match(bd, @"(\d+(?:\.\d+)?)\s*px");
+        if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var bw) && bw > 0)
+            cfg.borderWidth = bw * PxToPt;
+        var bc = ParseCssColor(bd); if (bc is not null) cfg.borderColor = bc;
+        return true;
+    }
+
+    /// <summary>A chain rule that reaches this grid's cells through its ancestors and sets their border to
+    /// zero or none (`div.form .grid td { border: 0 }`) clears the cell box a flat rule no more specific than
+    /// it gave the grid. A box the cells' own style draws stands - over the rule as over a class cell rule that
+    /// boxed the grid first - as does a more specific cell rule's, and what a rule that draws a border leaves to
+    /// the per-cell chain arm. A table whose border attribute boxes its cells takes no part.</summary>
+    private static void ClearCellBordersByChainRule(TableStyleConfig cfg, string html)
+    {
+        cfg.chainClearsCellBorder = false;
+        // (…such a table keeps the cell boxes and the frame its attribute draws: the frame it would keep round cleared
+        //  cells turns on the table's own author styling, which is not resolved here)
+        if (!cfg.hasBorder || cfg.chainBase is null || (cfg.tblBorderAttr is { } attr && !attr.StartsWith('0'))) return;
+        var cellChain = cfg.hostChain is { Count: > 0 } ? new List<CssElem>(cfg.hostChain) : new List<CssElem>();
+        cellChain.AddRange(cfg.chainBase);
+        cellChain.Add(new CssElem { Tag = "td" });
+        if (MatchChainDecl(cfg.chainRules, cellChain, "border") is not { } chainBorder
+            || ChainBorder(chainBorder.value) is not null || chainBorder.spec < cfg.cellBoxSpec) return;
+        // (the cells' own style outranks every rule: where they state a box, it boxes them in place of the one cleared)
+        if (!cfg.wordMailCells && TakeOwnCellStyleBox(cfg, html)) return;
+        cfg.hasBorder = false;
+        cfg.chainClearsCellBorder = true;
+    }
+
+    /// <summary>The specificity of a flat element rule's cell box (`td { border: 1px solid }`).</summary>
+    private const int ElementCellRuleSpec = 1;
+    /// <summary>The specificity of a class-scoped cell rule's box (`.grid td`, `td.grid`: a class and an element).</summary>
+    private const int ClassCellRuleSpec = 11;
+    /// <summary>A box the cells' own style draws (or the table's colour showing through its spacing): no rule clears it.</summary>
+    private const int CellOwnBoxSpec = int.MaxValue;
 
     /// <summary>The grid's border and padding defaults: the tag's own attributes, the sheet's cell rules and the class rules that dress them.</summary>
     private static void ResolveBorderAndPaddingDefaults(TableStyleConfig cfg, TableParseState ps, string? cssRunFace, string html)
     {
         cfg.hasBorder = false;
+        cfg.cellBoxSpec = 0;
         cfg.borderWidth = 1;
         cfg.borderColor = Color.Black;
         cfg.pad = 0;
@@ -71,10 +108,10 @@ internal static partial class HtmlToPdfConverter
         cfg.padSide = -1;
         cfg.padBottom = -1;
         // border="1"/"1px" attribute on the table draws a 1px box on every cell.
-        if (cfg.tblBorderAttr is not null && !cfg.tblBorderAttr.StartsWith("0"))
+        if (cfg.tblBorderAttr is not null && !cfg.tblBorderAttr.StartsWith('0'))
         {
             cfg.hasBorder = true;
-            var wm = Regex.Match(cfg.tblBorderAttr, @"(\d+(?:\.\d+)?)");
+            var wm = SafeRegex.Match(cfg.tblBorderAttr, @"(\d+(?:\.\d+)?)");
             if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var bwa) && bwa > 0)
                 cfg.borderWidth = bwa * PxToPt;
             // The legacy BORDERCOLOR attribute colours the grid (form-grid dialect
@@ -83,7 +120,7 @@ internal static partial class HtmlToPdfConverter
                 && ParseCssColor(cfg.tblBorderColorAttr) is { } bcaCol)
                 cfg.borderColor = bcaCol;
         }
-        if (cfg.tblCellPadAttr is not null && double.TryParse(Regex.Match(cfg.tblCellPadAttr, @"[\d.]+").Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cpa) && cpa > 0)
+        if (cfg.tblCellPadAttr is not null && double.TryParse(SafeRegex.Match(cfg.tblCellPadAttr, @"[\d.]+").Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cpa) && cpa > 0)
             cfg.pad = cpa * PxToPt;
         // The document sheet's cell padding outranks the presentational attribute, as the
         // metric writer already reads it (`th,td { padding: 15px }` over cellpadding=30, measured).
@@ -109,8 +146,9 @@ internal static partial class HtmlToPdfConverter
             if (d.TryGetValue("border", out var cbd))
             {
                 var t = cbd.Trim();
-                cfg.hasBorder = !t.StartsWith("0") && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0;
-                var wm = Regex.Match(cbd, @"(\d+(?:\.\d+)?)\s*px");
+                cfg.hasBorder = !t.StartsWith('0') && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0;
+                cfg.cellBoxSpec = ClassCellRuleSpec;
+                var wm = SafeRegex.Match(cbd, @"(\d+(?:\.\d+)?)\s*px");
                 if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out var cbw))
                     cfg.borderWidth = cbw * PxToPt;
@@ -141,10 +179,10 @@ internal static partial class HtmlToPdfConverter
         if (!cfg.hasBorder && cfg.tblStyle.TryGetValue("border", out var tbstv))
         {
             var tb = tbstv.Trim();
-            if (!tb.StartsWith("0") && tb.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
+            if (!tb.StartsWith('0') && tb.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0)
             {
                 cfg.hasBorder = true;
-                var wm = Regex.Match(tb, @"(\d+(?:\.\d+)?)\s*px");
+                var wm = SafeRegex.Match(tb, @"(\d+(?:\.\d+)?)\s*px");
                 if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var tbw) && tbw > 0)
                     cfg.borderWidth = tbw * PxToPt;
                 var tbc = ParseCssColor(tb); if (tbc is not null) cfg.borderColor = tbc;

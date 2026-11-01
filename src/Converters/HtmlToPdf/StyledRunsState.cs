@@ -14,7 +14,6 @@ private sealed class StyledRunsState
     public List<(double x0, double w, string url)> underlines = null!;
     public int i;
     public double runX;
-    public Document doc = default!;
     public Page page = default!;
     public double x = 0;
     public double y = 0;
@@ -23,8 +22,8 @@ private sealed class StyledRunsState
     public double fontSize = 0;
     public List<(Page page, Aspose.Pdf.Rectangle rect, string url)> pendingLinks = default!;
     public Core.PdfDictionary docFontDict = default!;
-    public ArraySegment<double> extraAdv = default!;
-    public ArraySegment<bool> supFlags = default!;
+    public IReadOnlyList<double> extraAdv = default!;
+    public IReadOnlyList<bool> supFlags = default!;
     public double supFontSize = 0;
     public double supRise = 0;
 }

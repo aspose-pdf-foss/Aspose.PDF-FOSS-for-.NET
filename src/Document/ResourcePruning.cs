@@ -21,6 +21,8 @@ public sealed partial class Document
     public void OptimizeResources(Aspose.Pdf.Optimization.OptimizationOptions strategy)
     {
         var options = strategy ?? Aspose.Pdf.Optimization.OptimizationOptions.Default;
+        if (options.CompressObjects) _packObjectsOnSave = true;
+        BringSessionContentIntoGraph();
 
         // Drop /Resources entries (fonts, XObjects, ...) that no content stream
         // references. Done before the reachability pass below so the now-orphaned
@@ -64,11 +66,13 @@ public sealed partial class Document
         }
 
         // Drop embedded font programs for fonts a viewer can substitute (Standard 14 or
-        // installed system faces). The now-orphaned font streams fall out via the
-        // reachability pass below.
-        if (options.UnembedFonts)
+        // installed system faces). The programs leave the file with them, whatever the other
+        // options: one read from the file falls out through the save's reachability pass, one
+        // this session made (a program a conversion embedded) is not written at all.
+        if (options.UnembedFonts && FontSubsetter.UnembedFonts(_reader) is { Count: > 0 } detached)
         {
-            FontSubsetter.UnembedFonts(_reader);
+            _reader.MayHaveOrphansOnSave = true;
+            foreach (var program in detached) RemoveNewObject(program);
         }
 
         // Remove metadata if requested
@@ -83,26 +87,39 @@ public sealed partial class Document
             LinkDuplicateStreams();
         }
 
-        // Compute reachable objects from the trailer. Done LAST, after the resource prune,
-        // font unembedding, and duplicate-stream linking above, so any object those steps
-        // orphaned (e.g. an unembedded /FontFile2 program or a linked-away duplicate) is
-        // excluded from the saved file rather than written from a stale snapshot.
-        var reachable = new HashSet<int>();
-        if (options.RemoveUnusedObjects)
-        {
-            CollectReachable(_reader.Trailer, reachable);
-            // Cross-document page imports aren't linked into the trailer's /Pages tree
-            // until save (RebuildPagesTree), so walk the pending page dicts explicitly.
-            // Otherwise their still-referenced imported resource objects look unreachable
-            // and a copied page's images would be dropped from the saved file.
-            if (_pages is not null)
-                foreach (var pending in _pages.PendingAdds)
-                    CollectReachable(pending.Dict, reachable);
-        }
+        // Unused objects are left out by the save, which walks from the trailer as the document is
+        // then: what the steps above orphaned (an unembedded /FontFile2 program, a linked-away
+        // duplicate) falls out, and what is added after this call (a page copied in) is kept.
+        _reachableObjects = null;
+        if (options.RemoveUnusedObjects) _reader.MayHaveOrphansOnSave = true;
+    }
 
-        // Mark document as needing optimization on next save
-        _optimizationOptions = options;
-        _reachableObjects = reachable.Count > 0 ? reachable : null;
+    /// <summary>What this session added waits for the save to join the document: paragraphs are laid
+    /// out by the save, and the page tree the passes walk still lists the pages as loaded. Both are
+    /// brought in first, so a page added, imported or filled since the document was opened is
+    /// optimized as it would be after a save and reload, and a deleted page is not walked.</summary>
+    private void BringSessionContentIntoGraph()
+    {
+        if (_pages is null) return;
+        if (_pages.Any(page => page.Paragraphs.Count > 0)) ApplyPageContent();
+        SyncInMemoryPageTree();
+    }
+
+    /// <summary>The objects the document still reaches: from the trailer, through the page tree as the session
+    /// left it (pages deleted since load are no longer listed), from every page as it is held now - a page
+    /// added or copied in waits for the save to join the tree - and from the objects the session made, which
+    /// the save writes whatever happens and so must not lose what they refer to.</summary>
+    private HashSet<int> CollectSessionReachable()
+    {
+        SyncInMemoryPageTree();
+        var reachable = new HashSet<int>();
+        CollectReachable(_reader.Trailer, reachable);
+        if (_pages is not null)
+            foreach (var page in _pages)
+                CollectReachable(page.Dict, reachable);
+        foreach (var (_, obj) in _newObjects)
+            CollectReachable(obj, reachable);
+        return reachable;
     }
 
     private void CollectReachable(PdfObject? root, HashSet<int> visited)
@@ -146,8 +163,8 @@ public sealed partial class Document
 
             if (obj is PdfArray arr)
             {
-                foreach (var item in arr)
-                    if (item is not null) stack.Push(item);
+                foreach (var item in arr.Where(item => item is not null))
+                    stack.Push(item);
             }
         }
     }
@@ -478,97 +495,254 @@ public sealed partial class Document
     /// </summary>
     private void LinkDuplicateStreams()
     {
-        // Phase 1: Hash all stream objects
-        var hashToObjNum = new Dictionary<string, int>(StringComparer.Ordinal);
-        var redirections = new Dictionary<int, int>(); // oldObjNum → canonicalObjNum
-
+        // Phase 1: Hash every stream, once each. The file's own objects come first, so a copy made in
+        // this session is linked to the file's object; then what the session added and no save has
+        // written yet: the objects copied in with another document's pages, and the streams held
+        // inline in page resources (an image placed on a page).
+        var ls = new StreamLinkState();
+        var objects = new List<PdfObject>();
         foreach (var entry in _reader.XRefTable.Entries.Values)
         {
             if (!entry.InUse || entry.ObjectNumber == 0) continue;
-
             var obj = _reader.Resolve(new PdfIndirectRef(entry.ObjectNumber, entry.Generation));
-            if (obj is not PdfStream stream) continue;
+            if (obj is null) continue;
+            objects.Add(obj);
+            if (obj is PdfStream stream) AddLinkCandidate(ls, entry.ObjectNumber, entry.Generation, stream);
+        }
+        if (_pages is not null)
+            foreach (var (objNum, obj) in _pages.ImportedObjects)
+                if (obj is PdfStream stream) AddLinkCandidate(ls, objNum, 0, stream);
+        var visited = new HashSet<PdfObject>(ReferenceEqualityComparer.Instance);
+        foreach (var page in Pages)
+            CollectInlineStreams(ls, page.Dict.Get("Resources"), visited);
 
-            // Decode the stream data for content comparison
-            byte[] decoded;
-            try
+        // The dictionary is part of the identity: a form with the same operators but other
+        // resources, or an image with another mask, paints something else. A reference in it
+        // counts by the object it will point at once duplicates are linked, so two images whose
+        // masks are themselves duplicates are duplicates too: the rounds below link the masks
+        // first and the images on the next pass, until no further link appears.
+        while (true)
+        {
+            var hashToId = new Dictionary<string, int>(StringComparer.Ordinal);
+            var linked = new Dictionary<int, int>();
+            foreach (var (id, _, stream, contentHash) in ls.streams)
             {
-                decoded = StreamFilter.Decode(stream.RawData, stream.Dict);
+                var hash = contentHash + StreamIdentity(stream.Dict, ls);
+                if (hashToId.TryGetValue(hash, out var canonicalId))
+                    linked[id] = canonicalId;
+                else
+                    hashToId[hash] = id;
             }
-            catch
-            {
-                continue; // Skip streams that fail to decode
-            }
-
-            // Build a hash that includes stream properties (width/height/colorspace for images)
-            var hash = Compat.ToHexString(Security.ShaDigest.Sha256(decoded));
-
-            // Append key properties to distinguish structurally different streams
-            var width = stream.Dict.GetInt("Width");
-            var height = stream.Dict.GetInt("Height");
-            if (width > 0) hash += $"_W{width}_H{height}";
-
-            if (hashToObjNum.TryGetValue(hash, out var canonicalObjNum))
-            {
-                redirections[entry.ObjectNumber] = canonicalObjNum;
-            }
-            else
-            {
-                hashToObjNum[hash] = entry.ObjectNumber;
-            }
+            // A pass can only add links (references become equal, never different), so an
+            // unchanged count is the fixed point.
+            var settled = linked.Count == ls.redirections.Count;
+            ls.redirections = linked;
+            if (settled) break;
         }
 
-        if (redirections.Count == 0) return;
-
-        // Phase 2: Replace indirect references throughout the document
-        RedirectReferences(_reader.Catalog, redirections);
-
-        // Also redirect in each page's annotations and resources
-        foreach (var page in Pages)
+        if (ls.redirections.Count == 0) return;
+        var kept = ls.streams.ToDictionary(s => s.id, s => (s.generation, s.stream));
+        foreach (var (duplicate, canonical) in ls.redirections)
         {
-            RedirectReferences(page.Dict, redirections);
+            var (generation, stream) = kept[canonical];
+            ls.targets[duplicate] = canonical < 0 ? stream : new PdfIndirectRef(canonical, generation);
+        }
+
+        // Phase 2: Replace the references throughout the document: the catalog and the pages, every
+        // object of the file - a font program is referenced from a font descriptor, an image from a
+        // resources dictionary or a form of its own - and the objects this session holds for the next save.
+        RedirectReferences(_reader.Catalog, ls);
+        foreach (var page in Pages)
+            RedirectReferences(page.Dict, ls);
+        foreach (var obj in objects)
+            RedirectWithin(obj, ls);
+        if (_pages is not null)
+            foreach (var (_, obj) in _pages.ImportedObjects)
+                RedirectWithin(obj, ls);
+        foreach (var (_, obj) in _newObjects)
+            RedirectWithin(obj, ls);
+    }
+
+    /// <summary>Hash one stream's decoded content for <see cref="LinkDuplicateStreams"/>.</summary>
+    private void AddLinkCandidate(StreamLinkState ls, int id, int generation, PdfStream stream)
+    {
+        // Decode the stream data for content comparison; an image the duplicate-image pass
+        // decoded just before is read from the reader's cache. The streams of an encrypted file
+        // are held encrypted, so they are read through the reader, which decrypts them.
+        byte[] decoded;
+        try
+        {
+            decoded = _reader.DecodedIfCached(stream)
+                ?? (_reader.IsDecrypted ? _reader.DecodeStream(stream) : StreamFilter.Decode(stream.RawData, stream.Dict));
+        }
+        catch
+        {
+            return; // Skip streams that fail to decode
+        }
+
+        // The platform's digest: every stream of the document goes through it, and the
+        // library's own pure-C# one costs most of an optimize on a stream-heavy file.
+        // Data the filters cannot read comes out empty, and compared as empty every such stream
+        // would be one: it is compared by its stored bytes and their encoding instead.
+        var unread = decoded.Length == 0 && stream.RawData.Length > 0;
+        var hash = Compat.ToHexString(Compat.Sha256(unread ? stream.RawData : decoded));
+        if (unread)
+        {
+            var encoding = new System.Text.StringBuilder(" stored ");
+            AppendIdentity(encoding, stream.Dict.Get("Filter"), ls);
+            AppendIdentity(encoding, stream.Dict.Get("DecodeParms"), ls);
+            hash += encoding.ToString();
+        }
+        ls.streams.Add((id, generation, stream, hash));
+    }
+
+    /// <summary>The streams held inline under a page's resources: made in this session, they have no
+    /// object number yet. Each object is looked at once across all pages, and a /Parent is not
+    /// followed up the tree.</summary>
+    private void CollectInlineStreams(StreamLinkState ls, PdfObject? resources, HashSet<PdfObject> visited)
+    {
+        var stack = new Stack<PdfObject>();
+        if (resources is not null) stack.Push(resources);
+        while (stack.Count > 0)
+        {
+            var held = stack.Pop();
+            var obj = held is PdfIndirectRef iref ? _reader.Resolve(iref) : held;
+            if (obj is null || !visited.Add(obj)) continue;
+            if (obj is PdfStream stream)
+            {
+                if (held is PdfStream) AddLinkCandidate(ls, ls.IdOf(stream), 0, stream);
+                obj = stream.Dict;
+            }
+            if (obj is PdfDictionary dict)
+            {
+                foreach (var key in dict.Keys)
+                    if (key != "Parent" && dict.Get(key) is PdfIndirectRef or PdfDictionary or PdfArray or PdfStream)
+                        stack.Push(dict.Get(key)!);
+            }
+            else if (obj is PdfArray array)
+            {
+                foreach (var item in array.Where(item => item is PdfIndirectRef or PdfDictionary or PdfArray or PdfStream))
+                    stack.Push(item);
+            }
+        }
+    }
+
+    /// <summary>The entries of a stream dictionary that must agree for two streams with the same
+    /// decoded content to be one object, in key order. The encoding entries are left out: the
+    /// content is compared decoded.</summary>
+    private static string StreamIdentity(PdfDictionary dict, StreamLinkState ls)
+    {
+        var sb = new System.Text.StringBuilder();
+        // An image's identity is its samples and how to read them; the mask it is drawn through
+        // is not part of it here, as before.
+        var isImage = dict.GetName("Subtype") == "Image";
+        foreach (var key in dict.Keys.OrderBy(k => k, StringComparer.Ordinal))
+        {
+            if (key is "Length" or "Filter" or "DecodeParms" or "DL") continue;
+            if (isImage && key is "SMask" or "Mask") continue;
+            sb.Append('/').Append(key).Append(' ');
+            AppendIdentity(sb, dict.Get(key), ls);
+        }
+        return sb.ToString();
+    }
+
+    private static void AppendIdentity(System.Text.StringBuilder sb, PdfObject? value, StreamLinkState ls)
+    {
+        switch (value)
+        {
+            case PdfIndirectRef iref:
+                var target = ls.redirections.TryGetValue(iref.ObjectNumber, out var canonical) ? canonical : iref.ObjectNumber;
+                sb.Append(target).Append(" R ");
+                break;
+            case PdfStream inline:
+                // An inline stream counts by the stream it will be once duplicates are linked, as a reference does.
+                var id = ls.IdOf(inline);
+                sb.Append(ls.redirections.TryGetValue(id, out var kept) ? kept : id).Append(" S ");
+                break;
+            case PdfDictionary dict:
+                sb.Append("<<");
+                foreach (var key in dict.Keys.OrderBy(k => k, StringComparer.Ordinal))
+                {
+                    sb.Append('/').Append(key).Append(' ');
+                    AppendIdentity(sb, dict.Get(key), ls);
+                }
+                sb.Append(">> ");
+                break;
+            case PdfArray array:
+                sb.Append('[');
+                foreach (var item in array) AppendIdentity(sb, item, ls);
+                sb.Append("] ");
+                break;
+            case PdfString str:
+                sb.Append('(').Append(Compat.ToHexString(str.Value)).Append(") ");
+                break;
+            default:
+                sb.Append(value).Append(' ');
+                break;
+        }
+    }
+
+    /// <summary>Replace the references to duplicates held in an object: in a stream's dictionary, or
+    /// in a dictionary or array and the direct ones nested in it.</summary>
+    private static void RedirectWithin(PdfObject? obj, StreamLinkState ls)
+    {
+        switch (obj)
+        {
+            case PdfStream stream:
+                RedirectReferences(stream.Dict, ls);
+                break;
+            case PdfDictionary dict:
+                RedirectReferences(dict, ls);
+                break;
+            case PdfArray array:
+                RedirectReferencesInArray(array, ls);
+                break;
         }
     }
 
     /// <summary>
-    /// Recursively replace indirect references in a dictionary tree.
+    /// Recursively replace references to duplicates in a dictionary tree.
     /// </summary>
-    private void RedirectReferences(PdfDictionary dict, Dictionary<int, int> redirections)
+    private static void RedirectReferences(PdfDictionary dict, StreamLinkState ls)
     {
-        foreach (var key in dict.Keys.ToList())
+        if (!ls.redirected.Add(dict)) return;
+        // Every object of the document passes here, nearly all with nothing to change: the
+        // replacements are gathered, and set once the keys are no longer enumerated.
+        List<(string key, PdfObject value)>? replacements = null;
+        foreach (var key in dict.Keys)
         {
-            var value = dict.Get(key);
-            switch (value)
-            {
-                case PdfIndirectRef iref when redirections.TryGetValue(iref.ObjectNumber, out var newObjNum):
-                    dict.Set(key, new PdfIndirectRef(newObjNum, 0));
-                    break;
-                case PdfDictionary childDict:
-                    RedirectReferences(childDict, redirections);
-                    break;
-                case PdfArray arr:
-                    RedirectReferencesInArray(arr, redirections);
-                    break;
-            }
+            if (Redirected(dict.Get(key), ls) is { } replacement)
+                (replacements ??= []).Add((key, replacement));
+        }
+        if (replacements is null) return;
+        foreach (var (key, value) in replacements)
+            dict.Set(key, value);
+    }
+
+    private static void RedirectReferencesInArray(PdfArray arr, StreamLinkState ls)
+    {
+        if (!ls.redirected.Add(arr)) return;
+        for (var i = 0; i < arr.Count; i++)
+        {
+            if (Redirected(arr[i], ls) is { } replacement)
+                arr.ReplaceAt(i, replacement);
         }
     }
 
-    private void RedirectReferencesInArray(PdfArray arr, Dictionary<int, int> redirections)
+    /// <summary>What a held value becomes when it names a duplicate, else null after redirecting
+    /// within it.</summary>
+    private static PdfObject? Redirected(PdfObject? value, StreamLinkState ls)
     {
-        for (var i = 0; i < arr.Count; i++)
+        switch (value)
         {
-            switch (arr[i])
-            {
-                case PdfIndirectRef iref when redirections.TryGetValue(iref.ObjectNumber, out var newObjNum):
-                    arr.ReplaceAt(i, new PdfIndirectRef(newObjNum, 0));
-                    break;
-                case PdfDictionary childDict:
-                    RedirectReferences(childDict, redirections);
-                    break;
-                case PdfArray nested:
-                    RedirectReferencesInArray(nested, redirections);
-                    break;
-            }
+            case PdfIndirectRef iref when ls.targets.TryGetValue(iref.ObjectNumber, out var target):
+                return target;
+            case PdfStream inline when ls.inlineIds.TryGetValue(inline, out var id) && ls.targets.TryGetValue(id, out var target):
+                return target;
+            case PdfStream or PdfDictionary or PdfArray:
+                RedirectWithin(value, ls);
+                break;
         }
+        return null;
     }
 }

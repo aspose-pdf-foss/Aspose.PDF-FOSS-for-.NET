@@ -21,10 +21,9 @@ public class Measure
     public class NumberFormatList
     {
         private readonly List<NumberFormat> _items = new();
-        private readonly Measure? _measure;
 
         public NumberFormatList() { }
-        public NumberFormatList(Measure measure) { _measure = measure; }
+        public NumberFormatList(Measure measure) { }
 
         public int Count => _items.Count;
 
@@ -165,23 +164,23 @@ public class Measure
         var m = new Aspose.Pdf.Core.PdfDictionary();
         m.Set("Type", new Aspose.Pdf.Core.PdfName("Measure"));
         if (!string.IsNullOrEmpty(ScaleRatio))
-            m.Set("R", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(ScaleRatio)));
+            m.Set("R", Aspose.Pdf.Forms.Field.EncodePdfTextString(ScaleRatio));
 
         static Aspose.Pdf.Core.PdfDictionary FormatDict(NumberFormat f)
         {
             var d = new Aspose.Pdf.Core.PdfDictionary();
             d.Set("Type", new Aspose.Pdf.Core.PdfName("NumberFormat"));
-            d.Set("U", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.UnitLabel ?? string.Empty)));
+            d.Set("U", Aspose.Pdf.Forms.Field.EncodePdfTextString(f.UnitLabel ?? string.Empty));
             d.Set("C", new Aspose.Pdf.Core.PdfReal(f.ConvresionFactor));
             d.Set("D", new Aspose.Pdf.Core.PdfInteger(f.Denominator));
             if (!string.IsNullOrEmpty(f.FractionSeparator) && f.FractionSeparator != "/")
-                d.Set("RD", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.FractionSeparator)));
+                d.Set("RD", Aspose.Pdf.Forms.Field.EncodePdfTextString(f.FractionSeparator));
             if (!string.IsNullOrEmpty(f.ThousandsSeparator) && f.ThousandsSeparator != ",")
-                d.Set("RT", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.ThousandsSeparator)));
+                d.Set("RT", Aspose.Pdf.Forms.Field.EncodePdfTextString(f.ThousandsSeparator));
             if (!string.IsNullOrEmpty(f.BeforeText))
-                d.Set("PS", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.BeforeText)));
+                d.Set("PS", Aspose.Pdf.Forms.Field.EncodePdfTextString(f.BeforeText));
             if (!string.IsNullOrEmpty(f.AfterText))
-                d.Set("SS", new Aspose.Pdf.Core.PdfString(System.Text.Encoding.UTF8.GetBytes(f.AfterText)));
+                d.Set("SS", Aspose.Pdf.Forms.Field.EncodePdfTextString(f.AfterText));
             var fCode = f.FractionDisplayment switch
             {
                 NumberFormat.FractionStyle.ShowAsFraction => "F",
@@ -377,11 +376,15 @@ public class AppearanceDictionary : IDictionary<string, XForm>
     /// <inheritdoc />
     public bool IsReadOnly => false;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false (the FOSS dict is mutable).</summary>
     public bool IsFixedSize => false;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers serialise their own access.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Sentinel object for ICollection.SyncRoot-style locking.</summary>
     public object SyncRoot { get; } = new();

@@ -34,10 +34,10 @@ internal static partial class HtmlToPdfConverter
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         double Num(string v) => double.Parse(v, System.Globalization.NumberStyles.Float, inv);
-        if (Regex.IsMatch(svg, @"<(?:image|rect)\b")
-            || Regex.IsMatch(svg, @"fill=""(?!none"")"))
+        if (SafeRegex.IsMatch(svg, @"<(?:image|rect)\b")
+            || SafeRegex.IsMatch(svg, @"fill=""(?!none"")"))
             return null;
-        var vb = Regex.Match(svg, @"viewBox=""(?<a>-?[\d.]+)\s+(?<b>-?[\d.]+)\s+(?<c>[\d.]+)\s+(?<d>[\d.]+)""");
+        var vb = SafeRegex.Match(svg, @"viewBox=""(?<a>-?[\d.]+)\s+(?<b>-?[\d.]+)\s+(?<c>[\d.]+)\s+(?<d>[\d.]+)""");
         if (!vb.Success) return null;
         var vbX = Num(vb.Groups["a"].Value);
         var vbW = Num(vb.Groups["c"].Value);
@@ -45,12 +45,12 @@ internal static partial class HtmlToPdfConverter
         var total = new[] { 1.0, 0, 0, 1.0, 0, 0 };
         var stack = new Stack<double[]>();
         double? right = null;
-        foreach (Match tag in Regex.Matches(svg, @"<(?<close>/)?(?<tag>g|path|image|rect|line)\b(?<attrs>[^>]*)>"))
+        foreach (var groups in SafeRegex.Matches(svg, @"<(?<close>/)?(?<tag>g|path|image|rect|line)\b(?<attrs>[^>]*)>").Select(tag => tag.Groups))
         {
-            var attrs = tag.Groups["attrs"].Value;
-            if (tag.Groups["close"].Success)
+            var attrs = groups["attrs"].Value;
+            if (groups["close"].Success)
             {
-                if (tag.Groups["tag"].Value == "g" && stack.Count > 0) total = stack.Pop();
+                if (groups["tag"].Value == "g" && stack.Count > 0) total = stack.Pop();
                 continue;
             }
             void Point(double x, double y)
@@ -58,12 +58,12 @@ internal static partial class HtmlToPdfConverter
                 var tx = x * total[0] + y * total[2] + total[4];
                 right = Math.Max(right ?? double.MinValue, tx);
             }
-            switch (tag.Groups["tag"].Value)
+            switch (groups["tag"].Value)
             {
                 case "g":
                 {
                     stack.Push(total);
-                    var tm = Regex.Match(attrs, @"transform=""matrix\((?<m>[-\d.eE ]+)\)""");
+                    var tm = SafeRegex.Match(attrs, @"transform=""matrix\((?<m>[-\d.eE ]+)\)""");
                     if (tm.Success)
                     {
                         var parts = tm.Groups["m"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -81,18 +81,18 @@ internal static partial class HtmlToPdfConverter
                 }
                 case "path":
                 {
-                    var d = Regex.Match(attrs, @"d=""(?<d>[^""]*)""").Groups["d"].Value;
-                    if (Regex.IsMatch(d, @"[AaHhVv]")) return null;   // axis/arc shorthands: bail
-                    var nums = Regex.Matches(d, @"-?\d*\.?\d+(?:[eE][-+]?\d+)?");
+                    var d = SafeRegex.Match(attrs, @"d=""(?<d>[^""]*)""").Groups["d"].Value;
+                    if (SafeRegex.IsMatch(d, @"[AaHhVv]")) return null;   // axis/arc shorthands: bail
+                    var nums = SafeRegex.Matches(d, @"-?\d*\.?\d+(?:[eE][-+]?\d+)?");
                     for (var k = 0; k + 1 < nums.Count; k += 2)
                         Point(Num(nums[k].Value), Num(nums[k + 1].Value));
                     break;
                 }
                 case "rect" or "image":
                 {
-                    var xm = Regex.Match(attrs, @"\bx=""(?<v>-?[\d.]+)""");
-                    var wm = Regex.Match(attrs, @"\bwidth=""(?<v>[\d.]+)""");
-                    var ym = Regex.Match(attrs, @"\by=""(?<v>-?[\d.]+)""");
+                    var xm = SafeRegex.Match(attrs, @"\bx=""(?<v>-?[\d.]+)""");
+                    var wm = SafeRegex.Match(attrs, @"\bwidth=""(?<v>[\d.]+)""");
+                    var ym = SafeRegex.Match(attrs, @"\by=""(?<v>-?[\d.]+)""");
                     var x1 = (xm.Success ? Num(xm.Groups["v"].Value) : 0)
                         + (wm.Success ? Num(wm.Groups["v"].Value) : 0);
                     Point(x1, ym.Success ? Num(ym.Groups["v"].Value) : 0);
@@ -102,8 +102,8 @@ internal static partial class HtmlToPdfConverter
                 {
                     foreach (var a in new[] { "x1", "x2" })
                     {
-                        var m2 = Regex.Match(attrs, @"\b" + a + @"=""(?<v>-?[\d.]+)""");
-                        var ym2 = Regex.Match(attrs, @"\by" + a[1] + @"=""(?<v>-?[\d.]+)""");
+                        var m2 = SafeRegex.Match(attrs, @"\b" + a + @"=""(?<v>-?[\d.]+)""");
+                        var ym2 = SafeRegex.Match(attrs, @"\by" + a[1] + @"=""(?<v>-?[\d.]+)""");
                         if (m2.Success)
                             Point(Num(m2.Groups["v"].Value), ym2.Success ? Num(ym2.Groups["v"].Value) : 0);
                     }
@@ -202,7 +202,7 @@ internal static partial class HtmlToPdfConverter
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         var sb = new StringBuilder();
-        var tokens = Regex.Matches(d, @"[MLCZmlcz]|-?[\d.]+(?:[eE][-+]?\d+)?");
+        var tokens = SafeRegex.Matches(d, @"[MLCZmlcz]|-?[\d.]+(?:[eE][-+]?\d+)?");
         var nums = new List<double>();
         var cmd = '\0';
         var i = 0;

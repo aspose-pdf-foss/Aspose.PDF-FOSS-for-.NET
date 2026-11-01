@@ -26,6 +26,12 @@ internal static partial class XfaRenderer
         pf.radio = pf.e.LocalName == "exclGroup" || Ui(pf.e) == "radio";
         pf.ui = Ui(pf.e);
 
+        if (pf.ui == "barcode")
+        {
+            ResolveFieldValue(pf);
+            if (PaintBarcodeField(pf)) return;
+        }
+
         if (pf.ui == "imageEdit")
         {
             PaintImageField(pf);
@@ -34,13 +40,22 @@ internal static partial class XfaRenderer
 
         if (pf.ui == "button")
         {
+            int first = pf.ctx.Items.Count;
             PaintButtonField(pf);
+            // A button shown on screen only is drawn by its widget, which does not print: deleting the field
+            // or printing the page leaves nothing of it.
+            if (RecordPlacement(pf) is { } placed && ExcludedFromPrint(pf.e))
+            {
+                placed.ScreenOnly = true;
+                for (int i = first; i < pf.ctx.Items.Count; i++) pf.ctx.Items[i].ValueOf = placed;
+            }
             return;
         }
 
         if (pf.check || pf.radio)
         {
             PaintCheckField(pf);
+            RecordPlacement(pf);
             return;
         }
 
@@ -53,5 +68,6 @@ internal static partial class XfaRenderer
         PaintEditChrome(pf);
 
         PaintFieldText(pf);
+        RecordPlacement(pf);
     }
 }

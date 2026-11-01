@@ -16,9 +16,6 @@ public partial class PopupAnnotation : Annotation
         Dict.Set("Subtype", new PdfName("Popup"));
     }
 
-    /// <summary>Always <see cref="AnnotationType.Popup"/>.</summary>
-    public new AnnotationType AnnotationType => AnnotationType.Popup;
-
     /// <summary>Programmatic ctor — creates a /Popup annotation at
     /// <paramref name="rect"/> on <paramref name="page"/>.</summary>
     public PopupAnnotation(Page page, Rectangle rect) : base(page, rect)
@@ -26,6 +23,9 @@ public partial class PopupAnnotation : Annotation
         Dict.Set("Type", new PdfName("Annot"));
         Dict.Set("Subtype", new PdfName("Popup"));
     }
+
+    /// <summary>Always <see cref="AnnotationType.Popup"/>.</summary>
+    public new AnnotationType AnnotationType => AnnotationType.Popup;
 
     /// <summary>Gets or sets whether the pop-up window is initially shown open (/Open). Defaults to false.</summary>
     public bool Open
@@ -46,7 +46,7 @@ public partial class PopupAnnotation : Annotation
         set
         {
             if (value is null) Dict.Remove("Parent");
-            else Dict.Set("Parent", value.Dict);
+            else Dict.Set("Parent", ReferenceTo(value));
         }
     }
 }

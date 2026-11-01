@@ -135,7 +135,7 @@ public sealed partial class FontEmbedder
     /// descriptor and font-program streams hanging off it. Exposed so a caller that later
     /// cancels the embedding can rewrite the dictionary and free the stranded objects.</summary>
     internal PdfDictionary? FontDict { get; private set; }
-    internal int DescriptorObjNum { get; private set; }
+    internal PdfDictionary? Descriptor { get; private set; }
     internal int FontFileObjNum { get; private set; }
 
     private bool _isSubset;
@@ -165,11 +165,11 @@ public sealed partial class FontEmbedder
         // A caller that explicitly cleared IsSubset wants the full program embedded under
         // the bare name (no subset tag). Skip the WinAnsi reduction then.
         if (fe.subset)
-        try
-        {
-            SubsetEmbeddedFont(fe);
-        }
-        catch { /* keep the full program if subsetting throws */ }
+            try
+            {
+                SubsetEmbeddedFont(fe);
+            }
+            catch { /* keep the full program if subsetting throws */ }
 
         fe.cacheKey = fe.fontFileCache is null
             ? null
@@ -319,8 +319,7 @@ public sealed partial class FontEmbedder
         // kana). Build the national map first, before the Identity fallback.
         var csi = reader.ResolveDict(cidFontDict.Get("CIDSystemInfo"));
         var orderingObj = csi?.Get("Ordering");
-        var ordering = orderingObj is PdfString os ? os.ToText()
-            : (orderingObj is PdfName on ? on.Value : null);
+        var ordering = orderingObj switch { PdfString os => os.ToText(), PdfName on => on.Value, _ => null };
         var map = BuildCidToGidMap(ordering, parser);
         if (map is not null)
         {
@@ -345,11 +344,8 @@ public sealed partial class FontEmbedder
         // Identity ordering (or an unknown one): the CIDs are the original face's glyph
         // ids, so a same-named real face embeds against an Identity CIDToGIDMap.
         var encoding = type0Dict.GetName("Encoding");
-        if (encoding is null or "Identity-H" or "Identity-V")
-        {
-            if (cidFontDict.Get("CIDToGIDMap") is null)
-                cidFontDict.Set("CIDToGIDMap", new PdfName("Identity"));
-        }
+        if (encoding is null or "Identity-H" or "Identity-V" && cidFontDict.Get("CIDToGIDMap") is null)
+            cidFontDict.Set("CIDToGIDMap", new PdfName("Identity"));
     }
 
     /// <summary>Big-endian ushort[] CID→GID map for a predefined Adobe ordering
@@ -451,7 +447,7 @@ public sealed partial class FontEmbedder
         _document.AddNewObject(_fontObjNum, font, registerOverlay: true);
 
         FontDict = font;
-        DescriptorObjNum = descriptorObjNum;
+        Descriptor = descriptor;
         FontFileObjNum = fontFileObjNum;
     }
 

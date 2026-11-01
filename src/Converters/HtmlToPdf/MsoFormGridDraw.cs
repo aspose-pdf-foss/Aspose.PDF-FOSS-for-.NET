@@ -8,13 +8,23 @@ namespace Aspose.Pdf.Converters;
 internal partial class HtmlToPdfConverter
 {
 // Mso form grid: 
-    private static string RunRes(MsoFormGridState mg, MsoRun run) => run.Face == "Arial"
-        ? (run.Bold ? (run.Italic ? "F7" : "F2") : run.Italic ? "F6" : "F1")
-        : run.Bold ? (run.Italic ? "F5" : "F4") : "F3";
+    private static string RunRes(MsoRun run)
+    {
+        if (run.Face == "Arial")
+        {
+            if (run.Bold) return run.Italic ? "F7" : "F2";
+            if (run.Italic) return "F6";
+            return "F1";
+        }
+        if (run.Bold) return run.Italic ? "F5" : "F4";
+        return "F3";
+    }
 
-    private static string RunFace(MsoFormGridState mg, MsoRun run) => run.Face == "Arial"
-        ? "Arial" + (run.Bold ? " Bold" : "")
-        : "Times New Roman" + (run.Bold ? " Bold" : "");
+    private static string RunFace(MsoRun run)
+    {
+        if (run.Face == "Arial") return "Arial" + (run.Bold ? " Bold" : "");
+        return "Times New Roman" + (run.Bold ? " Bold" : "");
+    }
 
     private static void CloseGroup(MsoFormGridState mg, double yNow)
     {

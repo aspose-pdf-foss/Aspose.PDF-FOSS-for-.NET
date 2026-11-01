@@ -21,7 +21,8 @@ internal sealed partial class ContentRedactor
     /// for an image, opaque for a mask of one, unpainted for a stencil. Null when its samples
     /// cannot be read.</summary>
     private (PdfDictionary Dict, byte[] Data)? Painted(PdfDictionary source, byte[] decoded,
-        List<(double X, double Y)> area, ResourceCopy resources, bool isMask, byte[]? encoded = null)
+        List<(double X, double Y)> area, ResourceCopy resources, bool isMask, byte[]? encoded = null,
+        Jbig2Layout? layout = null)
     {
         var dict = Shallow(source);
         foreach (var key in new[] { "Filter", "DecodeParms", "Length" }) dict.Remove(key);
@@ -29,7 +30,7 @@ internal sealed partial class ContentRedactor
         try
         {
             if (filter is "DCTDecode" or "JPXDecode")
-                return PaintedPhoto(dict, decoded, filter, area, isMask);
+                return PaintedPhoto(dict, source, decoded, filter, area, resources, isMask);
         }
         catch (Exception) { return null; }
 
@@ -58,8 +59,8 @@ internal sealed partial class ContentRedactor
         {
             // Bilevel scans stay bilevel: JBIG2 when they were, else CCITT G4. Both encoders take 1
             // for black, where samples hold 0. A JBIG2 scan keeps what lies clear of the painted
-            // pixels as it was coded (its symbol dictionaries - a scanned page is mostly those);
-            // failing that, it is coded whole, a quarter smaller than G4.
+            // pixels as it was coded (its symbol dictionaries - a scanned page is mostly those); failing
+            // that, it is coded whole, a quarter smaller than G4.
             var packed = samples.Select(b => (byte)~b).ToArray();
             if (filter == "JBIG2Decode")
             {
@@ -67,8 +68,8 @@ internal sealed partial class ContentRedactor
                 var jbig2Parms = Jbig2Parms(source);
                 var globals = Jbig2Globals(jbig2Parms);
                 if (encoded is not null && changed.Right >= 0
-                    && Jbig2Decoder.Analyze(encoded, globals) is { } layout
-                    && Jbig2Encoder.Rewrite(layout, globals, packed,
+                    && (layout ?? Jbig2Decoder.Analyze(encoded, globals)) is { } taken
+                    && Jbig2Encoder.Rewrite(taken, globals, packed,
                         (changed.Left, changed.Top, changed.Right - changed.Left + 1, changed.Bottom - changed.Top + 1))
                         is { } rewritten)
                 {
@@ -86,19 +87,25 @@ internal sealed partial class ContentRedactor
             return (dict, CcittG4Encoder.Encode(packed, width, height, stride));
         }
         dict.Set("Filter", new PdfName("FlateDecode"));
-        return (dict, ManagedDeflater.DeflateZlib(samples));
+        return (dict, ManagedDeflater.DeflateSamples(samples));
     }
 
-    /// <summary>A JPEG or JPEG 2000 image decoded, painted and written back as a JPEG (a mask as
-    /// 8-bit gray samples).</summary>
-    private (PdfDictionary Dict, byte[] Data)? PaintedPhoto(PdfDictionary dict, byte[] decoded, string filter,
-        List<(double X, double Y)> area, bool isMask)
+    /// <summary>A JPEG or JPEG 2000 image decoded, painted and written back: a gray or RGB one as a JPEG
+    /// (a mask as 8-bit gray samples), any other in its own colour space (see <see cref="PaintedInOwnSpace"/>).</summary>
+    private (PdfDictionary Dict, byte[] Data)? PaintedPhoto(PdfDictionary dict, PdfDictionary source, byte[] decoded,
+        string filter, List<(double X, double Y)> area, ResourceCopy resources, bool isMask)
     {
-        (byte[], int, int, int)? found = filter == "DCTDecode" ? JpegDecoder.Decode(decoded) : JpxDecoder.TryDecode(decoded);
+        var (spaceComponents, family) = isMask ? (1, Family.Gray) : SpaceOf(source.Get("ColorSpace"), resources);
+        var inks = family == Family.Cmyk;
+        (byte[], int, int, int)? found = filter == "DCTDecode"
+            ? JpegDecoder.Decode(decoded, inks && Devices.SoftwarePageRenderer.CmykDecodeInverts(source), keepCmyk: inks)
+            : JpxDecoder.TryDecode(decoded);
         if (found is not { } decodedPhoto) return null;
         var (pixels, width, height, components) = decodedPhoto;
         if (components is not (1 or 3 or 4)) return null;
         if (pixels.Length < (long)width * height * components) return null;
+        if ((inks && components == 4) || (family == Family.Other && components == spaceComponents))
+            return PaintedInOwnSpace(dict, source, pixels, width, height, components, area, dctInks: inks && filter == "DCTDecode");
 
         var rgba = new byte[(long)width * height * 4];
         for (long i = 0, n = (long)width * height; i < n; i++)
@@ -127,11 +134,35 @@ internal sealed partial class ContentRedactor
             for (long i = 0; i < gray.Length; i++) gray[i] = rgba[i * 4];
             dict.Set("ColorSpace", new PdfName("DeviceGray"));
             dict.Set("Filter", new PdfName("FlateDecode"));
-            return (dict, ManagedDeflater.DeflateZlib(gray));
+            return (dict, ManagedDeflater.DeflateSamples(gray));
         }
         dict.Set("ColorSpace", new PdfName("DeviceRGB"));
         dict.Set("Filter", new PdfName("DCTDecode"));
         return (dict, IO.JpegEncoderImpl.Encode(rgba, width, height, JpegQuality));
+    }
+
+    /// <summary>A photo whose colours are not gray or RGB - CMYK inks, palette indices, Lab - painted and kept,
+    /// losslessly, in its own colour space: converted to an RGB JPEG it drew the inks with the converter's
+    /// colours instead of the viewer's, and palette indices as gray levels. A JPEG's inks come decoded to their
+    /// amounts, so its /Decode goes; any other image's samples are as stored, its /Decode kept.</summary>
+    private (PdfDictionary Dict, byte[] Data) PaintedInOwnSpace(PdfDictionary dict, PdfDictionary source, byte[] pixels,
+        int width, int height, int components, List<(double X, double Y)> area, bool dctInks)
+    {
+        var values = dctInks
+            ? Cmyk(_fill.R, _fill.G, _fill.B).Select(unit => (int)Math.Round(unit * byte.MaxValue)).ToArray()
+            : FillSamples(source, components == 4 ? Family.Cmyk : Family.Other, components, 8, stencil: false, isMask: false);
+        var samples = (byte[])pixels.Clone();
+        foreach (var (row, first, last) in CoveredPixels(width, height, area))
+            for (var column = first; column <= last; column++)
+                for (var c = 0; c < components; c++)
+                    samples[((long)row * width + column) * components + c] = (byte)values[c];
+        if (dctInks) dict.Remove("Decode");
+        dict.Remove("SMaskInData");
+        dict.Set("Width", new PdfInteger(width));
+        dict.Set("Height", new PdfInteger(height));
+        dict.Set("BitsPerComponent", new PdfInteger(8));
+        dict.Set("Filter", new PdfName("FlateDecode"));
+        return (dict, ManagedDeflater.DeflateSamples(samples));
     }
 
     private static (byte R, byte G, byte B) Rgb(byte[] pixels, long at, int components) => components switch

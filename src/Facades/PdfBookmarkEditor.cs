@@ -78,10 +78,27 @@ public sealed class PdfBookmarkEditor : IDisposable
         if (bookmarkName.Length != pageNumber.Length)
             throw new ArgumentException("bookmarkName and pageNumber must have the same length.");
 
-        _builder ??= new OutlineBuilder(_document);
-
         for (int i = 0; i < bookmarkName.Length; i++)
-            _builder.Add(bookmarkName[i], pageNumber[i] - 1); // Convert 1-based to 0-based
+            AddPageBookmark(bookmarkName[i], pageNumber[i] - 1); // Convert 1-based to 0-based
+    }
+
+    /// <summary>Page bookmarks are buffered in a builder, which writes a tree of its own at save.
+    /// Once the document's outline tree has unsaved edits they are added to it instead, so that
+    /// neither replaces the other.</summary>
+    private void AddPageBookmark(string title, int pageIndex, System.Drawing.Color? color = null, bool bold = false, bool italic = false)
+    {
+        if (_builder is null && _document!.Outlines.IsDirty)
+        {
+            var item = new OutlineItemCollection(_document.Outlines) { Title = title, Bold = bold, Italic = italic };
+            if (color is { } c) item.Color = c;
+            if (pageIndex >= 0 && pageIndex < _document.PageCount)
+                item.Destination = new Annotations.FitExplicitDestination(_document.Pages[pageIndex + 1]);
+            _document.Outlines.Add(item);
+            return;
+        }
+        _builder ??= new OutlineBuilder(_document!);
+        var built = _builder.Add(title, pageIndex).SetBold(bold).SetItalic(italic);
+        if (color is { } rgb) built.SetColor(rgb.R / 255.0, rgb.G / 255.0, rgb.B / 255.0);
     }
 
     /// <summary>Create bookmarks for every page (default).</summary>
@@ -89,48 +106,62 @@ public sealed class PdfBookmarkEditor : IDisposable
     {
         if (_document is null)
             throw new InvalidOperationException("No document is bound. Call BindPdf first.");
-        _builder ??= new OutlineBuilder(_document);
         for (int i = 0; i < _document.PageCount; i++)
-            _builder.Add($"Page {i + 1}", i);
+            AddPageBookmark($"Page {i + 1}", i);
     }
 
-    /// <summary>Create per-page bookmarks with explicit colour / bold / italic styling.
-    /// Styling is stored only — outline rendering does not currently honour colour.</summary>
+    /// <summary>Create per-page bookmarks, each titled in the colour and the bold / italic style given.</summary>
     public void CreateBookmarks(System.Drawing.Color color, bool boldFlag, bool italicFlag)
-        => CreateBookmarks();
+    {
+        if (_document is null)
+            throw new InvalidOperationException("No document is bound. Call BindPdf first.");
+        for (int i = 0; i < _document.PageCount; i++)
+            AddPageBookmark($"Page {i + 1}", i, color, boldFlag, italicFlag);
+    }
 
-    /// <summary>Create bookmarks from a Bookmark tree (recursive add of children).</summary>
+    /// <summary>Add a bookmark, with its child items, after the bookmarks the document has.</summary>
     public void CreateBookmarks(Bookmark bookmark)
     {
         if (bookmark is null) throw new ArgumentNullException(nameof(bookmark));
         if (_document is null)
             throw new InvalidOperationException("No document is bound. Call BindPdf first.");
-        _builder ??= new OutlineBuilder(_document);
-        AddBookmarkRecursive(_builder, bookmark);
+        // Page bookmarks still buffered are written first: the builder's tree would replace this one at save.
+        _document.FlushPendingOutlineBuilder();
+        _builder = null;
+        _document.Outlines.Add(ToOutlineItem(bookmark));
     }
 
-    private static void AddBookmarkRecursive(OutlineBuilder builder, Bookmark bm)
+    private OutlineItemCollection ToOutlineItem(Bookmark bm)
     {
-        var item = builder.Add(bm.Title ?? string.Empty, Math.Max(0, bm.PageNumber - 1));
-        ApplyBookmarkStyle(item, bm);
+        var item = new OutlineItemCollection(_document!.Outlines) { Title = bm.Title ?? string.Empty };
+        var pageNumber = Math.Max(1, bm.PageNumber);
+        if (pageNumber <= _document.PageCount)
+            item.Destination = ToDestination(bm, _document.Pages[pageNumber]);
+        if (bm.BoldFlag) item.Bold = true;
+        if (bm.ItalicFlag) item.Italic = true;
+        // Black is the title colour a bookmark is born with, and the one an outline item without /C shows.
+        if (bm.TitleColor.ToArgb() != System.Drawing.Color.Black.ToArgb()) item.Color = bm.TitleColor;
         foreach (var child in bm.ChildItems)
-            AddChildRecursive(item, child);
+            item.Add(ToOutlineItem(child));
+        // After the children: the open state is the sign of their count.
+        item.Open = bm.Open;
+        return item;
     }
 
-    private static void AddChildRecursive(OutlineItemBuilder parent, Bookmark bm)
+    /// <summary>The destination a bookmark's PageDisplay asks for, with the coordinates that
+    /// display takes; a bookmark that names no display fits the page.</summary>
+    private static Annotations.ExplicitDestination ToDestination(Bookmark bm, Page page) => bm.PageDisplay switch
     {
-        var item = parent.AddChild(bm.Title ?? string.Empty, Math.Max(0, bm.PageNumber - 1));
-        ApplyBookmarkStyle(item, bm);
-        foreach (var child in bm.ChildItems)
-            AddChildRecursive(item, child);
-    }
-
-    private static void ApplyBookmarkStyle(OutlineItemBuilder item, Bookmark bm)
-    {
-        item.SetOpen(bm.Open);
-        if (bm.BoldFlag) item.SetBold(true);
-        if (bm.ItalicFlag) item.SetItalic(true);
-    }
+        "XYZ" => new Annotations.XYZExplicitDestination(page, bm.PageDisplay_Left, bm.PageDisplay_Top, bm.PageDisplay_Zoom),
+        "FitH" => new Annotations.FitHExplicitDestination(page, bm.PageDisplay_Top),
+        "FitV" => new Annotations.FitVExplicitDestination(page, bm.PageDisplay_Left),
+        "FitR" => new Annotations.FitRExplicitDestination(page, bm.PageDisplay_Left, bm.PageDisplay_Bottom,
+            bm.PageDisplay_Right, bm.PageDisplay_Top),
+        "FitB" => new Annotations.FitBExplicitDestination(page),
+        "FitBH" => new Annotations.FitBHExplicitDestination(page, bm.PageDisplay_Top),
+        "FitBV" => new Annotations.FitBVExplicitDestination(page, bm.PageDisplay_Left),
+        _ => new Annotations.FitExplicitDestination(page),
+    };
 
     /// <summary>Delete every bookmark in the bound document. The outline tree is
     /// cleared and the change is written into the document so it persists on save.</summary>
@@ -211,10 +242,9 @@ public sealed class PdfBookmarkEditor : IDisposable
     {
         var matches = new Bookmarks();
         if (title is null) return matches;
-        foreach (var bm in ExtractBookmarks(upperLevel: false))
+        foreach (var bm in ExtractBookmarks(upperLevel: false).Where(bm => string.Equals(bm.Title, title, StringComparison.Ordinal)))
         {
-            if (string.Equals(bm.Title, title, StringComparison.Ordinal))
-                matches.Add(bm);
+            matches.Add(bm);
         }
         return matches;
     }
@@ -260,6 +290,13 @@ public sealed class PdfBookmarkEditor : IDisposable
         }
         writer.WriteEndElement();
         writer.WriteEndDocument();
+    }
+
+    /// <summary>Export the outline tree to <paramref name="xmlFile"/>.</summary>
+    public void ExportBookmarksToXML(string xmlFile)
+    {
+        using var fs = File.Create(xmlFile);
+        ExportBookmarksToXML(fs);
     }
 
     private static void WriteTitleElement(System.Xml.XmlWriter writer, OutlineItem item,
@@ -349,13 +386,6 @@ public sealed class PdfBookmarkEditor : IDisposable
         return sb.ToString();
     }
 
-    /// <summary>Export the outline tree to <paramref name="xmlFile"/>.</summary>
-    public void ExportBookmarksToXML(string xmlFile)
-    {
-        using var fs = File.Create(xmlFile);
-        ExportBookmarksToXML(fs);
-    }
-
     /// <summary>Read bookmarks from XML produced by <see cref="ExportBookmarksToXML(System.IO.Stream)"/>
     /// and add them to the bound document.</summary>
     public void ImportBookmarksWithXML(Stream stream)
@@ -379,11 +409,17 @@ public sealed class PdfBookmarkEditor : IDisposable
             }
             return;
         }
-        _builder ??= new OutlineBuilder(_document);
         foreach (System.Xml.XmlNode node in root.ChildNodes)
         {
             if (node is System.Xml.XmlElement el) ImportBookmarkElement(el);
         }
+    }
+
+    /// <summary>Read bookmarks from an XML file and add them to the bound document.</summary>
+    public void ImportBookmarksWithXML(string xmlFile)
+    {
+        using var fs = File.OpenRead(xmlFile);
+        ImportBookmarksWithXML(fs);
     }
 
     private void ImportLegacyTitleElement(System.Xml.XmlElement el, OutlineItem? parent)
@@ -448,19 +484,12 @@ public sealed class PdfBookmarkEditor : IDisposable
         };
     }
 
-    /// <summary>Read bookmarks from an XML file and add them to the bound document.</summary>
-    public void ImportBookmarksWithXML(string xmlFile)
-    {
-        using var fs = File.OpenRead(xmlFile);
-        ImportBookmarksWithXML(fs);
-    }
-
     /// <summary>Export bookmarks to a standalone HTML file. Stored only — no
     /// HTML emission is performed in this build.</summary>
-    public void ExportBookmarksToHtml(string inPdfFile, string outHtmlFile) { }
+    public void ExportBookmarksToHtml(string inPdfFile, string outHtmlFile) { /* stored only: no HTML is emitted */ }
 
     /// <summary>Extract bookmarks to an HTML page with the given CSS. Stored only.</summary>
-    public void ExtractBookmarksToHTML(string pdfFile, string cssFile) { }
+    public void ExtractBookmarksToHTML(string pdfFile, string cssFile) { /* stored only: no HTML is emitted */ }
 
     /// <summary>Rename every bookmark whose title equals <paramref name="sTitle"/>
     /// to <paramref name="dTitle"/>, throughout the outline tree. The change is
@@ -488,7 +517,7 @@ public sealed class PdfBookmarkEditor : IDisposable
         if (int.TryParse(pageAttr, System.Globalization.NumberStyles.Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out var page) && page > 0)
         {
-            _builder!.Add(title ?? string.Empty, page - 1);
+            AddPageBookmark(title ?? string.Empty, page - 1);
         }
         foreach (System.Xml.XmlNode child in el.ChildNodes)
         {
@@ -543,6 +572,9 @@ public sealed class PdfBookmarkEditor : IDisposable
         Annotations.NamedAction => "Named",
         Annotations.JavascriptAction => "JavaScript",
         Annotations.SubmitFormAction => "SubmitForm",
+        Annotations.ImportDataAction => "ImportData",
+        Annotations.HideAction => "Hide",
+        Annotations.RenditionAction => "Rendition",
         not null => "Unknown",
         // A bookmark with a direct /Dest (or no action at all) is semantically a
         // go-to, so report its Action as "GoTo" rather than leaving it empty.
@@ -551,7 +583,8 @@ public sealed class PdfBookmarkEditor : IDisposable
 
     private static Bookmark ToBookmark(OutlineItem item, int level, NamedDestinationCollection namedDests)
     {
-        var actionType = ActionTypeName(item.Action);
+        var action = item.Action;
+        var actionType = ActionTypeName(action);
         var pageNumber = item.DestinationPageNumber;
         string destinationName = string.Empty;
 
@@ -590,11 +623,13 @@ public sealed class PdfBookmarkEditor : IDisposable
             TitleColor = item.Color,
             Action = actionType,
         };
-        bm.Destination = destinationName.Length > 0
-            ? destinationName
-            : (pageNumber > 0
+        if (destinationName.Length > 0) bm.Destination = destinationName;
+        else
+            bm.Destination = pageNumber > 0
                 ? pageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                : string.Empty);
+                : string.Empty;
+        if (action is Annotations.GoToRemoteAction remote)
+            bm.RemoteFile = remote.StoredFile?.Name;
         PopulatePageDisplay(bm, item);
         return bm;
     }

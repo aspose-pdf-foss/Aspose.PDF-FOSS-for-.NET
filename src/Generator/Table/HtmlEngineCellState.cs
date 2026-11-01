@@ -53,6 +53,9 @@ private sealed class HtmlEngineCellState
     public double baseSize = 0;
     public bool breakWords = false;
     public bool plainText = false;
+    /// <summary>The face the fragment's own text state names (null = the UA serif): the
+    /// text no element gives a family of its own is set in it.</summary>
+    public Aspose.Pdf.Text.Font? rootFont;
     /// <summary>Float columns laid out so far (merged by their line tops) and the x the next one opens at.</summary>
     public List<Aspose.Pdf.Table.CellLine>? floatLines;
     public double floatPen;

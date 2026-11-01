@@ -13,8 +13,8 @@ private sealed class TransparencyRegionState
     public byte[]? content;
     public List<double[]> contentRegions = null!;
     // Transparent paints inside Form XObjects (Illustrator/InDesign wrap page art
-    // in forms whose OWN ExtGState carries the alpha) are collected by recursion;
-    // their rewrites are DEFERRED until after the original-appearance render below,
+    // in forms whose OWN ExtGState carries the alpha) are collected by recursion; their
+    // rewrites are DEFERRED until after the original-appearance render below,
     // or the render itself would miss the very paints being preserved.
     public List<(Aspose.Pdf.Core.PdfStream form, byte[] bytes)> formRewrites = null!;
     public byte[]? rewritten;

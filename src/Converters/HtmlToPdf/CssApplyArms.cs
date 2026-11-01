@@ -19,17 +19,17 @@ internal static partial class HtmlToPdfConverter
         // The per-side TRIPLET spelling is explicit about its sides — it
         // marks the top-only rule regardless of declaration order.
         else if (prop == "border-style"
-            && Regex.IsMatch(val.Trim(), @"^solid(\s+none){1,3}$", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(val.Trim(), @"^solid(\s+none){1,3}$", RegexOptions.IgnoreCase))
             s.BorderTopOnly = true;
         else if (prop is "border-bottom" or "border-left" or "border-right"
                  && !val.Contains("none", StringComparison.OrdinalIgnoreCase))
             s.BorderTopOnly = false;
         // …whose colour may carry -moz- debris after the real value.
-        var c = ParseCssColor(val) ?? (Regex.Match(val,
+        var c = ParseCssColor(val) ?? (SafeRegex.Match(val,
                 @"rgb\([^)]*\)|#[0-9a-fA-F]{3,6}") is { Success: true } cm
             ? ParseCssColor(cm.Value) : null);
         if (c is not null) s.BorderColor = c;
-        var wm = Regex.Match(val, @"([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
+        var wm = SafeRegex.Match(val, @"([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
         if (wm.Success && double.TryParse(wm.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var bw) && bw > 0)
@@ -38,7 +38,7 @@ internal static partial class HtmlToPdfConverter
         // An EXPLICIT zero ("border-width: 0px" — or the unit-free "0", which
         // is a valid CSS zero length) authors NO border — it must not fall
         // through to the 1px default.
-        else if (wm.Success || Regex.IsMatch(val.Trim(), @"^0(\.0+)?\s*(!.*)?$"))
+        else if (wm.Success || SafeRegex.IsMatch(val.Trim(), @"^0(\.0+)?\s*(!.*)?$"))
         {
             s.BorderWidth = 0;
             return false;
@@ -57,7 +57,7 @@ internal static partial class HtmlToPdfConverter
         // em heights scale with the element's RESOLVED font size (a 12/11 factor
         // maps our 11pt body default onto the browser's 16px=12pt em base).
         double hPt;
-        var em = Regex.Match(val, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase);
+        var em = SafeRegex.Match(val, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase);
         if (em.Success && double.TryParse(em.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var emv))
@@ -82,7 +82,10 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The MarginLeft declaration applied to the block style.</summary>
     private static void ApplyMarginLeftDecl(string prop, string val, BlockStyle s)
     {
-        if (TryParseLength(val) is { } pts) s.LeftIndent += pts;
+        // The UA flow resolves an em against the element's own size, as the cascade says (the x-small tree
+        // view's `.e { margin-left: 1em }` is 7.5 pt, not the legacy 11); every other flow keeps its calibrated em.
+        if (s.UaSerif && UaEmLengthPt(val, s) is { } uaEm && uaEm > 0) s.LeftIndent += uaEm;
+        else if (TryParseLength(val) is { } pts) s.LeftIndent += pts;
         // The Bootstrap gutter pair: a NEGATIVE margin-left cancels the
         // enclosing column padding (`.row { margin-left:-15px }` inside
         // `.col { padding-left:15px }`). Styled-article dialect only — the
@@ -106,7 +109,7 @@ internal static partial class HtmlToPdfConverter
     {
         // Bottom padding separates a section heading from what follows the same
         // way a bottom margin does in this flow (form dialect only).
-        var em = Regex.Match(val, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase);
+        var em = SafeRegex.Match(val, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase);
         if (em.Success && double.TryParse(em.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var emv))
@@ -188,6 +191,8 @@ internal static partial class HtmlToPdfConverter
         }
         if (hParts.Length >= 1 && TryParseLength(hParts[0]) is { } mTopPt && mTopPt > 0)
             s.ShorthandTopPt = mTopPt;
+        if (hParts.Length >= 1 && TryParseLength(hParts[hParts.Length >= 3 ? 2 : 0]) is { } mBottomPt && mBottomPt > 0)
+            s.ShorthandBottomPt = mBottomPt;
         if (s.FormDialect || s.UaSerif)
         {
         // The `margin:` shorthand (form dialect and UA-serif flows): top and
@@ -200,7 +205,7 @@ internal static partial class HtmlToPdfConverter
             double p = 0;
             if (TryParseLength(v) is { } len) { p = len; return p; }
             // TryParseLength rejects 0 and negatives; a shorthand "0" is valid.
-            if (Regex.IsMatch(v, @"^-?\d+(\.\d+)?\s*(px|pt|em|rem|in|cm|mm)?$")) { p = 0; return p; }
+            if (SafeRegex.IsMatch(v, @"^-?\d+(\.\d+)?\s*(px|pt|em|rem|in|cm|mm)?$")) { p = 0; return p; }
             return null;
         }
         var parts = val.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -223,7 +228,7 @@ internal static partial class HtmlToPdfConverter
     {
         // The `font: bold 8pt Verdana,Arial` SHORTHAND carries weight, size and
         // family in one declaration — the longhand branches never see them.
-        var m = Regex.Match(val, @"([\d.]+)\s*(px|pt)\s*([^/;]*)");
+        var m = SafeRegex.Match(val, @"([\d.]+)\s*(px|pt)\s*([^/;]*)");
         if (m.Success && double.TryParse(m.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var shSize) && shSize > 0)
@@ -233,18 +238,18 @@ internal static partial class HtmlToPdfConverter
             var fam = m.Groups[3].Value.Trim().Length > 0 ? FirstFontFamily(m.Groups[3].Value) : null;
             if (fam is not null) s.FontFamily = fam;
         }
-        if (Regex.IsMatch(val, @"\bbold(er)?\b", RegexOptions.IgnoreCase)) s.FontRes = "F2";
-        if (Regex.IsMatch(val, @"\b(italic|oblique)\b", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(val, @"\bbold(er)?\b", RegexOptions.IgnoreCase)) s.FontRes = "F2";
+        if (SafeRegex.IsMatch(val, @"\b(italic|oblique)\b", RegexOptions.IgnoreCase))
             s.FontRes = s.FontRes == "F2" ? "F2" : "F3";
     }
 
     /// <summary>The FontSize declaration applied to the block style.</summary>
     private static void ApplyFontSizeDecl(string val, BlockStyle s)
     {
-        // Form dialect: an em size is relative to the PARENT's resolved size
+        // Form dialect and the metric flow: an em size is relative to the PARENT's resolved size
         // (1.75em on a 12pt body = 21pt), not the legacy flow's fixed 11pt base.
-        var emRel = s.FormDialect
-            ? Regex.Match(val, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase)
+        var emRel = s.FormDialect || s.MetricFlow
+            ? SafeRegex.Match(val, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase)
             : Match.Empty;
         if (emRel.Success && double.TryParse(emRel.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -252,12 +257,12 @@ internal static partial class HtmlToPdfConverter
             && emRelV > 0 && (s.ParentFontSize > 0 || s.FontSize > 0))
             s.FontSize = emRelV * (s.ParentFontSize > 0 ? s.ParentFontSize : s.FontSize);
         else if (s.InPageFragment
-            && Regex.Match(val.Trim(), @"^(\d+(?:\.\d+)?)$") is { Success: true } bare
+            && SafeRegex.Match(val.Trim(), @"^(\d+(?:\.\d+)?)$") is { Success: true } bare
             && double.TryParse(bare.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var barePt) && barePt > 0)
             s.FontSize = barePt;
         else if (TryParseLength(val) is { } pts) s.FontSize = pts;
-        else if (Regex.IsMatch(val, @"^0+(\.0+)?\s*(px|pt|em|rem)?$"))
+        else if (SafeRegex.IsMatch(val, @"^0+(\.0+)?\s*(px|pt|em|rem)?$"))
             s.ZeroFontSize = true;
         else if (val.EndsWith("%", StringComparison.Ordinal)
                  && double.TryParse(val.TrimEnd('%'), System.Globalization.NumberStyles.Float,
@@ -281,8 +286,8 @@ internal static partial class HtmlToPdfConverter
         }
     }
 
-    /// <summary>The LineHeight2 declaration applied to the block style.</summary>
-    private static void ApplyLineHeight2Decl(string val, BlockStyle s)
+    /// <summary>A percentage LineHeight declaration applied to the block style.</summary>
+    private static void ApplyLineHeightPercentDecl(string val, BlockStyle s)
     {
         // A percentage line-height fixes the LINE BOX against the element's
         // resolved size (Word-filtered pages author 122/123/167 %); the
@@ -302,7 +307,7 @@ internal static partial class HtmlToPdfConverter
         // An `em` margin is a multiple of the element's OWN resolved size
         // (`margin-bottom: 1em` on a 10 pt block is 10 pt); TryParseLength
         // can only assume the document default, so resolve it here.
-        var mbEm = Regex.Match(val, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase);
+        var mbEm = SafeRegex.Match(val, @"^([\d.]+)\s*em$", RegexOptions.IgnoreCase);
         if (mbEm.Success && s.FontSize > 0
             && double.TryParse(mbEm.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -348,8 +353,8 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The TextAlign declaration applied to the block style.</summary>
     private static void ApplyTextAlignDecl(string val, BlockStyle s)
     {
-        // Only justify is handled here (draw-time word-gap stretch, layout-neutral);
-        // center stays metric-flow-only via ApplyCssRules. Right is recorded and
+        // Only justify is handled here (draw-time word-gap stretch, layout-neutral); center
+        // stays metric-flow-only via ApplyCssRules. Right is recorded and
         // honored by the print-grid dialect only.
         if (val.Trim().Equals("justify", StringComparison.OrdinalIgnoreCase))
             s.AlignJustify = true;
@@ -364,12 +369,12 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The FontWeight declaration applied to the block style.</summary>
     private static void ApplyFontWeightDecl(string val, BlockStyle s)
     {
-        if (val is "bold" or "bolder" || (int.TryParse(val, out var n) && n >= 600))
-            s.FontRes = s.FontRes == "F3" ? "F2" : "F2";
+        if (val is "bold" or "bolder" || (int.TryParse(val, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) && n >= 600))
+            s.FontRes = "F2";
         // An explicit normal weight undoes a heading tag's default bold (form
         // dialect only — legacy conversions are calibrated with the bold face).
         else if (s.FormDialect && s.FontRes == "F2"
-                 && (val == "normal" || (int.TryParse(val, out var n2) && n2 < 600)))
+                 && (val == "normal" || (int.TryParse(val, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n2) && n2 < 600)))
             s.FontRes = "F1";
     }
 
@@ -379,7 +384,7 @@ internal static partial class HtmlToPdfConverter
         // A UNITLESS line-height is a factor of the element's own font size
         // (line-height:2 on a 9px paragraph paces 18px lines — measured).
         // Unit lengths keep their dialect-specific handling.
-        if (Regex.IsMatch(val, @"^[\d.]+$") && double.TryParse(val,
+        if (SafeRegex.IsMatch(val, @"^[\d.]+$") && double.TryParse(val,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var lf)
             && lf > 0)
@@ -453,18 +458,42 @@ internal static partial class HtmlToPdfConverter
         // Recorded for every document; only the float flow reads it (see
         // StyledDoc.MarginRightPt).
         if (TryParseLength(val) is { } mrPts && mrPts > 0) s.MarginRightPt = mrPts;
+        // …and in the UA flow it insets the block's box from the right edge (the tree view's `.e { margin-right:
+        // 1em }` ends its lines one em short of the body's right margin).
+        if (s.UaSerif && (UaEmLengthPt(val, s) ?? TryParseLength(val)) is { } uaMr && uaMr > 0) s.RightInsetPt += uaMr;
+    }
+
+    /// <summary>The TextIndent declaration applied to the block style: the UA flow moves the block's first line by
+    /// it - a negative indent hangs that line back over the block's margin-left (the tree view's `.e { margin-left:
+    /// 1em; text-indent: -1em }`); the calibrated flows read it through their own arms.</summary>
+    private static void ApplyTextIndentDecl(string val, BlockStyle s)
+    {
+        if (!s.UaSerif) return;
+        if (UaEmLengthPt(val, s) is { } em) s.TextIndentPt = em;
+        else if (IsZeroLength(val)) s.TextIndentPt = 0;
+        else if (TryParseLength(val.TrimStart().TrimStart('-')) is { } abs) s.TextIndentPt = val.TrimStart().StartsWith('-') ? -abs : abs;
+    }
+
+    /// <summary>An em length against the element's own size, or a rem against the root's, signed; null for any
+    /// other unit.</summary>
+    private static double? UaEmLengthPt(string val, BlockStyle s)
+    {
+        var m = SafeRegex.Match(val.Trim(), @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(em|rem)$", RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+        var n = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        return n * (m.Groups[2].Value.Equals("rem", StringComparison.OrdinalIgnoreCase) ? CssRootFontPt : s.FontSize);
     }
 
     /// <summary>The Width declaration applied to the block style.</summary>
     private static void ApplyWidthDecl(string val, BlockStyle s)
     {
         // A pixel width, recorded for every document; only the float flow reads it.
-        if (Regex.IsMatch(val, @"^\s*[0-9.]+\s*px\s*$", RegexOptions.IgnoreCase)
+        if (SafeRegex.IsMatch(val, @"^\s*[0-9.]+\s*px\s*$", RegexOptions.IgnoreCase)
             && TryParseLength(val) is { } wDeclPt && wDeclPt > 0)
             s.DeclaredWidthPt = wDeclPt;
         // …and a PERCENTAGE width, which cannot be resolved here: the box it is a fraction of
         // depends on the final sheet. Recorded as a fraction and resolved where the sheet is known.
-        else if (Regex.Match(val, @"^\s*([0-9.]+)\s*%\s*$") is { Success: true } wPct
+        else if (SafeRegex.Match(val, @"^\s*([0-9.]+)\s*%\s*$") is { Success: true } wPct
             && double.TryParse(wPct.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var wFrac)
             && wFrac > 0 && wFrac <= 100)

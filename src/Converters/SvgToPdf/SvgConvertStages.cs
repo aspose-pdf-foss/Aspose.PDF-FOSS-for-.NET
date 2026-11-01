@@ -15,28 +15,56 @@ internal static partial class SvgToPdfConverter
     {
         if (sv.hasViewBox)
         {
-            double sx = sv.width / sv.vbW, sy = sv.height / sv.vbH;
-            double tx0 = 0, ty0 = 0;
-            // preserveAspectRatio (default "xMidYMid meet"): a uniform scale with
-            // the leftover space distributed by the alignment; "none" keeps the
-            // independent per-axis stretch.
-            var par = sv.svgRoot!.GetAttribute("preserveAspectRatio").Trim();
-            if (par != "none")
-            {
-                var slice = par.EndsWith("slice", StringComparison.Ordinal);
-                var s = slice ? Math.Max(sx, sy) : Math.Min(sx, sy);
-                var align = par.Length > 0 ? par.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0] : "xMidYMid";
-                double fx = align.StartsWith("xMid", StringComparison.OrdinalIgnoreCase) ? 0.5
-                    : align.StartsWith("xMax", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
-                double fy = align.Contains("YMid", StringComparison.OrdinalIgnoreCase) ? 0.5
-                    : align.Contains("YMax", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
-                tx0 = (sv.width - sv.vbW * s) * fx;
-                ty0 = (sv.height - sv.vbH * s) * fy;
-                sx = sy = s;
-            }
-            sv.sb.Append($"{F(sx)} 0 0 {F(sy)} {F(tx0 - sx * sv.vbMinX)} {F(ty0 - sy * sv.vbMinY)} cm\n");
-            sv.ctm = Mul(new[] { sx, 0, 0, sy, tx0 - sx * sv.vbMinX, ty0 - sy * sv.vbMinY }, sv.ctm);
+            var m = ViewBoxMatrix(sv.width, sv.height, sv.vbMinX, sv.vbMinY, sv.vbW, sv.vbH,
+                sv.svgRoot!.GetAttribute("preserveAspectRatio"));
+            sv.sb.Append($"{F(m[0])} 0 0 {F(m[3])} {F(m[4])} {F(m[5])} cm\n");
+            sv.ctm = Mul(m, sv.ctm);
         }
+    }
+
+    /// <summary>The matrix that maps a viewBox onto a viewport of the given size.</summary>
+    private static double[] ViewBoxMatrix(double width, double height, double vbMinX, double vbMinY,
+        double vbW, double vbH, string preserveAspectRatio)
+    {
+        double sx = width / vbW, sy = height / vbH;
+        double tx0 = 0, ty0 = 0;
+        // preserveAspectRatio (default "xMidYMid meet"): a uniform scale with
+        // the leftover space distributed by the alignment; "none" keeps the
+        // independent per-axis stretch.
+        var par = preserveAspectRatio.Trim();
+        if (par != "none")
+        {
+            var slice = par.EndsWith("slice", StringComparison.Ordinal);
+            var s = slice ? Math.Max(sx, sy) : Math.Min(sx, sy);
+            var align = par.Length > 0 ? par.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0] : "xMidYMid";
+            double fx = 0;
+            if (align.StartsWith("xMid", StringComparison.OrdinalIgnoreCase)) fx = 0.5;
+            else if (align.StartsWith("xMax", StringComparison.OrdinalIgnoreCase)) fx = 1;
+            double fy = 0;
+            if (align.Contains("YMid", StringComparison.OrdinalIgnoreCase)) fy = 0.5;
+            else if (align.Contains("YMax", StringComparison.OrdinalIgnoreCase)) fy = 1;
+            tx0 = (width - vbW * s) * fx;
+            ty0 = (height - vbH * s) * fy;
+            sx = sy = s;
+        }
+        return new[] { sx, 0, 0, sy, tx0 - sx * vbMinX, ty0 - sy * vbMinY };
+    }
+
+    /// <summary>A nested viewport (a nested svg, or a symbol drawn by a use): its viewBox is mapped
+    /// onto the width and height of <paramref name="sized"/>, each defaulting to the enclosing
+    /// viewport's, as the root's is onto the page. Returns the CTM inside the viewport.</summary>
+    private static double[] ApplyNestedViewport(XmlElement viewport, XmlElement sized, Ctx ctx, double[] ctm)
+    {
+        var parts = viewport.GetAttribute("viewBox").Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 4) return ctm;
+        double vbW = ParseLength(parts[2]), vbH = ParseLength(parts[3]);
+        if (vbW <= 0 || vbH <= 0) return ctm;
+        var width = GetLen(sized, "width", ctx.VpW);
+        var height = GetLen(sized, "height", ctx.VpH);
+        var m = ViewBoxMatrix(width > 0 ? width : ctx.VpW, height > 0 ? height : ctx.VpH,
+            ParseLength(parts[0]), ParseLength(parts[1]), vbW, vbH, viewport.GetAttribute("preserveAspectRatio"));
+        ctx.Surface.Sb.Append($"{F(m[0])} 0 0 {F(m[3])} {F(m[4])} {F(m[5])} cm\n");
+        return Mul(m, ctm);
     }
 
     /// <summary></summary>
@@ -53,8 +81,12 @@ internal static partial class SvgToPdfConverter
             double top = m.TopTouched ? m.Top : 0, bottom = m.BottomTouched ? m.Bottom : 0;
             sv.pageW = sv.pi.Width > 0 ? sv.pi.Width * px : sv.width + (left + right) * px;
             sv.pageH = sv.pi.Height > 0 ? sv.pi.Height * px : sv.height + (top + bottom) * px;
-            sv.offX = left > 0 ? left * px : right > 0 ? sv.pageW - sv.width - right * px : 0;
-            sv.offY = top > 0 ? top * px : bottom > 0 ? sv.pageH - sv.height - bottom * px : 0;
+            if (left > 0) sv.offX = left * px;
+            else if (right > 0) sv.offX = sv.pageW - sv.width - right * px;
+            else sv.offX = 0;
+            if (top > 0) sv.offY = top * px;
+            else if (bottom > 0) sv.offY = sv.pageH - sv.height - bottom * px;
+            else sv.offY = 0;
         }
     }
 
@@ -74,8 +106,8 @@ internal static partial class SvgToPdfConverter
             }
         }
 
-        // Image mode falls back to the viewBox extent (natural artwork aspect);
-        // document mode falls back to the 500pt default per dimension.
+        // Image mode falls back to the viewBox extent (natural artwork aspect); document
+        // mode falls back to the 500pt default per dimension.
         if (sv.width <= 0) sv.width = sv.imageMode && sv.hasViewBox ? sv.vbW : 500;
         if (sv.height <= 0) sv.height = sv.imageMode && sv.hasViewBox ? sv.vbH : 500;
 

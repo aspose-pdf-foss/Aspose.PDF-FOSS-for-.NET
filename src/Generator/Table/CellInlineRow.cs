@@ -11,7 +11,7 @@ namespace Aspose.Pdf;
 public partial class Table
 {
     /// <summary>Row column chrome: one inline row of a cell drawn - its graphs, rules and text runs.</summary>
-    private void EmitCellInlineRow(RowColumnState rc, double cellX, List<List<InlineItem>> inlineRows, int ri, double inlineLift)
+    private static void EmitCellInlineRow(RowColumnState rc, double cellX, List<List<InlineItem>> inlineRows, int ri, double inlineLift)
     {
         // Generator cells honour the cell's vertical alignment for
         // inline rows too (a two-line cell centres in its 102 pt row).
@@ -72,9 +72,12 @@ public partial class Table
                 // table's default one.
                 var itemFont = rc.fontName;
                 if ((item.Bold || item.Italic) && rc.page is not null)
-                    itemFont = RegisterFont(rc.page, item.Bold && item.Italic
-                        ? "Helvetica-BoldOblique"
-                        : item.Bold ? "Helvetica-Bold" : "Helvetica-Oblique");
+                    itemFont = RegisterFont(rc.page, (item.Bold, item.Italic) switch
+                    {
+                        (true, true) => "Helvetica-BoldOblique",
+                        (true, _) => "Helvetica-Bold",
+                        _ => "Helvetica-Oblique",
+                    });
                 rc.builder.BeginText();
                 rc.builder.SetFont(itemFont, item.FontSize);
                 ApplyColor(rc.builder, item.Color);

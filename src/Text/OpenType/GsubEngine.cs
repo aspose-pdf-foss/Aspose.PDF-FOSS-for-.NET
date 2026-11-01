@@ -216,7 +216,9 @@ internal sealed class GsubEngine(OtfLayout layout)
     private void ApplyNested(List<ShapedGlyph> buf, int at, int lookupIndex, uint mask)
     {
         var (type, _, subtables) = _l.Lookup("GSUB", lookupIndex);
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
         foreach (var sub in subtables)
+#pragma warning restore S3267
             if (ApplySubtable(buf, at, type, sub, mask) > 0) return;
     }
 }

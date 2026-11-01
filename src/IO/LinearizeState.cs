@@ -1,9 +1,5 @@
-﻿using System;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text;
-using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO;
 
@@ -14,55 +10,69 @@ internal static partial class PdfLinearizer
 private sealed class LinearizeState
 {
     public IO.PdfReader reader = null!;
-    // Drop the linearization infrastructure carried over from a previously-linearized save —
-    // the stale linearization parameter dictionary (its /Linearized key) and the primary hint
-    // stream this linearizer emitted (its private /AsposeHint marker, see below). A fresh pair
-    // is written each time; copying the old ones forward would accumulate one hint stream per
-    // save cycle (a size regression that breaks re-save idempotency).
-    public HashSet<int> skip = null!;
-    public Dictionary<int, Aspose.Pdf.IO.PdfLinearizer.RawObject> objs = null!;
-    public Aspose.Pdf.Core.PdfDictionary catalog = null!;
-    public Aspose.Pdf.Core.PdfDictionary? pagesRoot;
-    public int pageCount;
-    public int firstPageNum;
-    public HashSet<int> firstPageSet = null!;
+    public byte[] src = default!;
+    // Every object of the plainly-saved file by its number there, except the linearization
+    // dictionary and hint stream of an earlier linearized save - a fresh pair is written each
+    // time, and copying the old ones forward would accumulate one hint stream per save cycle.
+    public Dictionary<int, RawObject> objs = null!;
     public int maxNum;
+    public int rootNum;
+    public int infoNum;
+    // The page tree: the pages in document order and the intermediate nodes.
+    public List<int> pages = null!;
+    public HashSet<int> pageSet = null!;
+    public List<int> treeNodes = null!;
+
+    // Which parts of the document use each object (indexed by its number in the saved file),
+    // the way Annex F sorts objects into the first page, other pages and the rest.
+    public int[] visitStamp = null!;
+    public int traversal;
+    public byte[] useFlags = null!;
+    public int[] otherPageUses = null!;
+    public int[] firstOtherPage = null!;
+    public int[] thumbUses = null!;
+    public int[] otherUses = null!;
+    // The objects each page other than the first uses, in the order the page reaches them.
+    public List<int>[] pageObjects = null!;
+
+    // The sections of the linearized file (Annex F parts 4, 6, 7, 8 and 9).
+    public List<RawObject> part4 = null!;
+    public List<RawObject> part6 = null!;
+    public List<RawObject> part7 = null!;
+    public List<RawObject> part8 = null!;
+    public List<RawObject> part9 = null!;
+    // The objects each page's hint entry counts: its own page object first, then the objects
+    // only it uses, numbered consecutively; the first page's entry covers all of part 6.
+    public int[] pageObjectCounts = null!;
+    // The outline hint table: the outline dictionary heads a consecutive run of this many objects.
+    public RawObject? outlinesRoot;
+    public int outlineObjectCount;
+
+    // Whether the save packs objects into object streams, and the objects it packs.
+    public bool packObjects;
+    public List<RawObject> packed = new();
+    // The packed objects of the first page's section, listed by the first-page cross-reference.
+    public List<RawObject> packedFirst = new();
+    public int firstXrefNum;
+    public int mainXrefNum;
     public int linObjNum;
     public int hintObjNum;
     public int size;
-    public List<Aspose.Pdf.IO.PdfLinearizer.RawObject> firstSection = null!;
-    public List<Aspose.Pdf.IO.PdfLinearizer.RawObject> restSection = null!;
-    // The two tables PARTITION the file (PDF 32000-1 Annex F): the first-page table
-    // carries the linearization dictionary, the hint stream and the first-page objects;
-    // the main table carries everything else and opens on object 0's free entry. Listing
-    // every object in BOTH still resolves - a reader finds the first-page entries before
-    // it walks /Prev - but it writes each first-page object twice and puts the main
-    // table's leading subsection at odds with the section it actually describes.
-    public List<int> firstXrefNums = null!;
-    public List<int> allNums = null!;
-    public System.IO.MemoryStream ms = null!;
-    public Dictionary<int, long> offsets = null!;
-    public Dictionary<(int section, int num), long> xrefEntryPos = null!;
-    public Dictionary<string, long> lin = null!;
-    public long prevPos;
-    // 3. First-page cross-reference section + trailer (/Prev patched later).
+    public int secondHalfCount;
+
+    // Layout. Offsets in the hint tables leave the hint stream out (Annex F.4), so part 6 and
+    // everything after it also has a hint-free offset: its file offset less the hint object.
+    public RawObject[] byNewNum = null!;
+    public long linDictPos;
+    public long hintPos;
+    public byte[] hintObject = null!;
+    public long firstSectionEnd;
+    public long mainXrefPos;
     public long firstXrefPos;
     public string? idStr;
-    public long hintPos;
-    public byte[] hintBytes = null!;
-    public long hintStart;
-    public long firstSectionEnd;
-    // 7. Main cross-reference section + trailer. The main trailer carries /Size (and /ID,
-    // /Encrypt where they apply) and nothing else: /Root and /Info belong to the
-    // first-page trailer, which is the one the file-final startxref points at and the one
-    // a reader reads first (PDF 32000-1 Annex F.3.7). Repeating them here is 26 bytes of
-    // the only part of the file a reader is guaranteed to fetch.
-    public long mainXrefPos;
-    public byte[] buf = null!;
-    public byte[] src = default!;
-    /// <summary>Writes an ASCII token to the output stream; also handed to the
-    /// section writers as their line sink, so it stays a method of the state.</summary>
+
+    public MemoryStream ms = null!;
+    /// <summary>Writes an ASCII token to the output stream.</summary>
     public void W(string s) { var b = System.Text.Encoding.ASCII.GetBytes(s); ms.Write(b, 0, b.Length); }
-    public long hintEnd;
 }
 }

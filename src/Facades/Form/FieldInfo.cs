@@ -156,15 +156,18 @@ public sealed partial class Form
             fieldCaption = _doc.Form.GetTaggedCaption(field) ?? _doc.Form.GetXfaFieldCaption(fieldName);
         fieldCaption ??= field.AlternateName;
 
+        // The box is the first widget's: the rectangle of a field shown in several places spans
+        // them all, and that span stays the field's position.
         var fieldRect = field.Rect;
+        var boxRect = field.FirstWidgetRect() ?? fieldRect;
         var facade = new FormFieldFacade { Caption = fieldCaption };
-        if (fieldRect is not null)
+        if (fieldRect is not null && boxRect is not null)
         {
             facade.Box = new System.Drawing.Rectangle(
-                (int)fieldRect.LLX,
-                (int)fieldRect.LLY,
-                (int)(fieldRect.URX - fieldRect.LLX),
-                (int)(fieldRect.URY - fieldRect.LLY));
+                (int)boxRect.LLX,
+                (int)boxRect.LLY,
+                (int)(boxRect.URX - boxRect.LLX),
+                (int)(boxRect.URY - boxRect.LLY));
             // Position is the 1-based [page, llx, lly, urx, ury] rectangle tuple the
             // facade exposes; element 0 carries the owning page number.
             facade.Position = new float[]
@@ -321,10 +324,9 @@ public sealed partial class Form
         var nObj = _doc.Reader.Resolve(apDict.Get("N"));
         if (nObj is Core.PdfDictionary nDict)
         {
-            foreach (var key in nDict.Keys)
+            foreach (var key in nDict.Keys.Where(key => key != "Off" && !result.ContainsKey(key)))
             {
-                if (key != "Off" && !result.ContainsKey(key))
-                    result[key] = key;
+                result[key] = key;
             }
         }
     }

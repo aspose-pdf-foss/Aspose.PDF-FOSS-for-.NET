@@ -29,8 +29,10 @@ public class CosPdfDictionary : CosPdfPrimitive, IDictionary<string, ICosPdfPrim
 
     internal PdfDictionary Dictionary => _dict;
 
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
     /// <summary>Every key, including those whose value the editor cannot show.</summary>
     public ICollection<string> AllKeys => new List<string>(_dict.Keys);
+#pragma warning restore S2365
 
     /// <summary>The keys whose value the editor shows.</summary>
     public ICollection<string> Keys
@@ -38,8 +40,8 @@ public class CosPdfDictionary : CosPdfPrimitive, IDictionary<string, ICosPdfPrim
         get
         {
             var keys = new List<string>();
-            foreach (var key in _dict.Keys)
-                if (Read(key) is not null) keys.Add(key);
+            foreach (var key in _dict.Keys.Where(key => Read(key) is not null))
+                keys.Add(key);
             return keys;
         }
     }

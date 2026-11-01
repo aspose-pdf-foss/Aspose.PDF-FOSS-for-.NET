@@ -30,7 +30,6 @@ public sealed partial class TextFragmentAbsorber
         var (_, by2) = ApplyCtm(rx.run.X + rx.run.TmC * rx.ascentHeight, rx.run.Y + rx.run.TmD * rx.ascentHeight, rx.run.Ctm);
         rx.bandLly = Math.Min(by1, by2);
         rx.bandUry = Math.Max(by1, by2);
-        rx.bandH = rx.bandUry - rx.bandLly;
 
         rx.tol = 0.5;
         rx.dbg = Environment.GetEnvironmentVariable("ASPOSE_FOSS_EXCLDEBUG") == "1";

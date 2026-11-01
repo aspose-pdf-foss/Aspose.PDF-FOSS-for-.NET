@@ -53,10 +53,10 @@ public class AutoTagTableTests
     /// <summary>A framed cell from (<paramref name="x0"/>, <paramref name="top"/>) to
     /// (<paramref name="x1"/>, <paramref name="bottom"/>) showing <paramref name="text"/>.</summary>
     private static string Cell(double x0, double top, double x1, double bottom, string text, string font = "F1")
-        => $"0.75 w {x0} {bottom} {x1 - x0} {top - bottom} re S\nBT /{font} 10 Tf {x0 + 4} {top - 14} Td ({text}) Tj ET\n";
+        => FormattableString.Invariant($"0.75 w {x0} {bottom} {x1 - x0} {top - bottom} re S\nBT /{font} 10 Tf {x0 + 4} {top - 14} Td ({text}) Tj ET\n");
 
     private static string Line(double x, double y, string text, string font = "F1", int size = 10)
-        => $"BT /{font} {size} Tf {x} {y} Td ({text}) Tj ET\n";
+        => FormattableString.Invariant($"BT /{font} {size} Tf {x} {y} Td ({text}) Tj ET\n");
 
     private static Document Tag(byte[] pdf)
     {
@@ -86,8 +86,8 @@ public class AutoTagTableTests
                 text += " " + new string('.', (int)((boxes[0] - 4 - 60 - helvetica.MeasureString(text + " ", 8)) / 2.224));
             sb.Append(Line(60, y + height - 10 - 10 * k, text, "F1", 8));
         }
-        if (shaded) sb.Append($"0.9 g {boxes[^2]} {y} {boxes[^1] - boxes[^2]} {height} re f 0 g\n");
-        for (var k = 0; k + 1 < boxes.Length; k++) sb.Append($"0.5 w {boxes[k]} {y} {boxes[k + 1] - boxes[k]} {height} re S\n");
+        if (shaded) sb.Append(FormattableString.Invariant($"0.9 g {boxes[^2]} {y} {boxes[^1] - boxes[^2]} {height} re f 0 g\n"));
+        for (var k = 0; k + 1 < boxes.Length; k++) sb.Append(FormattableString.Invariant($"0.5 w {boxes[k]} {y} {boxes[k + 1] - boxes[k]} {height} re S\n"));
         return sb.Append(Line(boxes[0] + 3, y + 4, number, "F2", 8)).ToString();
     }
 
@@ -113,7 +113,7 @@ public class AutoTagTableTests
         Assert.DoesNotContain("2.", TextOf(one));
         Assert.Null(one.Attributes.GetAttributes(AttributeOwnerStandard.Layout).GetAttribute(AttributeKey.TextAlign));
         // ... and an entry of one line too, the entry under it no part of its cell (no rule parts them in the text column).
-        Assert.DoesNotContain("5.", TextOf(Assert.Single(cells, c => TextOf(c).StartsWith("4."))));
+        Assert.DoesNotContain("5.", TextOf(Assert.Single(cells, c => TextOf(c).StartsWith("4.", StringComparison.Ordinal))), StringComparison.Ordinal);
         // ... across the columns no rule parts in its row (those the boxes under the subheading rule).
         Assert.Equal(3, one.Attributes.GetAttributes(AttributeOwnerStandard.Table).GetAttribute(AttributeKey.ColSpan)?.GetNumberValue());
         // The grey boxes are shaded: the entries' last boxes and the box beside the subheading.
@@ -220,7 +220,7 @@ public class AutoTagTableTests
     {
         // No rule down the page: each rule between two rows is drawn in three pieces, one a column. The head stands
         // over the first rule, the last row under the last one; the cells hold several lines of small type.
-        string Rule(double y) => $"0.5 w 72 {y} m 200 {y} l S\n200 {y} m 262 {y} l S\n262 {y} m 328 {y} l S\n";
+        string Rule(double y) => FormattableString.Invariant($"0.5 w 72 {y} m 200 {y} l S\n200 {y} m 262 {y} l S\n262 {y} m 328 {y} l S\n");
         string Cell(double x, double top, params string[] lines) => string.Concat(lines.Select((l, i) => Line(x, top - 10 * i, l, size: 8)));
         var head = Line(76, 576, "If you are in...", "F2", 8) + Cell(204, 576, "Without a", "payment...") + Cell(266, 576, "With a", "payment...");
         var first = Cell(76, 547, "Connecticut, Delaware,", "Georgia, Illinois, Indiana,", "Kentucky, Maine, Maryland,", "Ohio, Vermont, Virginia")
@@ -293,7 +293,7 @@ public class AutoTagTableTests
         // Rows 30 pt tall: the left cells hold two lines, the right ones one line level with the left's first -
         // set from the top, 6 pt under the rule. The right column's figures stand midway across it, its heading
         // at its left.
-        static string Box(double x0, double top, double x1, double bottom) => $"0.75 w {x0} {bottom} {x1 - x0} {top - bottom} re S\n";
+        static string Box(double x0, double top, double x1, double bottom) => FormattableString.Invariant($"0.75 w {x0} {bottom} {x1 - x0} {top - bottom} re S\n");
         var page = Box(72, 700, 272, 670) + Box(272, 700, 472, 670) + Line(76, 686, "Month of the year") + Line(76, 674, "it was first used")
                    + Line(276, 686, "Share")
                    + Box(72, 670, 272, 640) + Box(272, 670, 472, 640) + Line(76, 656, "January, after the") + Line(76, 644, "first day of it")
@@ -320,7 +320,7 @@ public class AutoTagTableTests
     {
         // The right column's heading and figures all stand midway across it, the heading the widest of them; the
         // left column's cells all start at its left.
-        static string Box(double x0, double top, double x1, double bottom) => $"0.75 w {x0} {bottom} {x1 - x0} {top - bottom} re S\n";
+        static string Box(double x0, double top, double x1, double bottom) => FormattableString.Invariant($"0.75 w {x0} {bottom} {x1 - x0} {top - bottom} re S\n");
         static string Midway(double y, string text)
             => Line(Math.Round(272 + (200 - Aspose.Pdf.Text.FontRepository.FindFont("Helvetica").MeasureString(text, 10)) / 2, 1), y, text);
         var page = Box(72, 700, 272, 680) + Box(272, 700, 472, 680) + Line(76, 686, "Kind of filer") + Midway(686, "Total time in hours")
@@ -492,7 +492,7 @@ public class AutoTagTableTests
         Assert.Equal("NIST SP", string.Concat(items.Where(i => i.Rotation == 0).Select(i => i.Text)));
         Assert.Equal(90, Assert.Single(items, i => i.Rotation != 0).Rotation);
     }
-    private static string Rule(double x0, double y0, double x1, double y1) => $"0.75 w {x0} {y0} m {x1} {y1} l S\n";
+    private static string Rule(double x0, double y0, double x1, double y1) => FormattableString.Invariant($"0.75 w {x0} {y0} m {x1} {y1} l S\n");
 
     [Fact]
     public void DataRowsAndColumnsNoRuleSeparatesAreRowsAndColumnsOfTheirOwn()
@@ -582,7 +582,7 @@ public class AutoTagTableTests
     {
         // Citation links whose boxes reach into the bracket after the number.
         static string Link(double x0, double x1) =>
-            $"<< /Type /Annot /Subtype /Link /Rect [{x0} 696 {x1} 710] /Border [0 0 0] /A << /S /URI /URI (http://cite.example/{x0}) >> >>";
+            FormattableString.Invariant($"<< /Type /Annot /Subtype /Link /Rect [{x0} 696 {x1} 710] /Border [0 0 0] /A << /S /URI /URI (http://cite.example/{x0}) >> >>");
         var page = Line(72, 700, "Recurrent memory [") + Line(200, 700, "13") + Line(211, 700, "] and gated recurrent [")
                    + Line(330, 700, "7") + Line(336, 700, "] networks.");
         using var doc = Tag(BuildPages((page, $"/Annots [{Link(199, 214)} {Link(329, 340)}]")));

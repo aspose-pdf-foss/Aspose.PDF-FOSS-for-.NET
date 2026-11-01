@@ -29,7 +29,7 @@ internal static partial class HtmlToPdfConverter
                 {
                     if (kv.Value.TryGetValue("font", out var bf))
                     {
-                        var m = Regex.Match(bf, @"([\d.]+)\s*px");
+                        var m = SafeRegex.Match(bf, @"([\d.]+)\s*px");
                         if (m.Success) fb.sf.ButtonFontPx = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
                     }
                     if (kv.Value.TryGetValue("color", out var bc))
@@ -70,7 +70,7 @@ internal static partial class HtmlToPdfConverter
         fb.padR = 8;
         if (fb.textInput.Attrs is not null && fb.textInput.Attrs.TryGetValue("style", out var istyle))
         {
-            var pm = Regex.Match(istyle, @"(?<![\w-])padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            var pm = SafeRegex.Match(istyle, @"(?<![\w-])padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
             if (pm.Success)
             {
                 var parts = pm.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -102,7 +102,7 @@ internal static partial class HtmlToPdfConverter
                     string? v = null, nm = null;
                     d.Attrs?.TryGetValue("value", out v);
                     d.Attrs?.TryGetValue("name", out nm);
-                    if (!string.IsNullOrEmpty(v)) fb.buttons.Add((DecodeEntities(v!), nm ?? ""));
+                    if (!string.IsNullOrEmpty(v)) fb.buttons.Add((DecodeEntities(v), nm ?? ""));
                 }
             }
             else if (d.Tag == "img" && fb.icon is null && fb.textInput is not null

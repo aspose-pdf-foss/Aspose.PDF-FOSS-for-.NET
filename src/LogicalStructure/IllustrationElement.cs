@@ -7,8 +7,8 @@ namespace Aspose.Pdf.LogicalStructure;
 /// (Figure, Formula). Lets callers treat any illustration uniformly.</summary>
 public abstract class IllustrationElement : StructureElement
 {
-    internal IllustrationElement(string structureType) : base(structureType) { }
-    internal IllustrationElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
+    private protected IllustrationElement(string structureType) : base(structureType) { }
+    private protected IllustrationElement(PdfDictionary dict, PdfReader? reader) : base(dict, reader) { }
 
     /// <summary>Image file backing this illustration. FOSS-extra — stored only.</summary>
     public string? ImagePath { get; private set; }

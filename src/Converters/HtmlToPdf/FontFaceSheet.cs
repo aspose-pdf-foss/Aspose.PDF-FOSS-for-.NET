@@ -14,14 +14,14 @@ internal static partial class HtmlToPdfConverter
     // Measured on the faux-bolding fixture:
     //  - page width = side margin + body width + side margin (90 + 612 + 90 =
     //    792), page height stays the default sheet (842); flow starts at a
-    //    72 pt top margin;
+    //    72 pt top margin,
     //  - a text line is a CSS line box on the face's WIN metrics: line height
     //    1.2 em, half-leading (1.2 − (winAsc+winDesc)) · size / 2, baseline at
     //    halfLead + winAsc · size from the box top (reproduces baselines
-    //    117.42 / 139.92 to 0.001 with ITCFrankGoth 0.934/0.250);
+    //    117.42 / 139.92 to 0.001 with ITCFrankGoth 0.934/0.250),
     //  - adjacent block margins COLLAPSE to the larger (the div's 36 swallows
     //    the paragraph's 5); padding-bottom then border-bottom follow the line
-    //    box (border stroked at its centre line, full content width);
+    //    box (border stroked at its centre line, full content width),
     //  - a <b> run selects the family's own bold-declared @font-face source —
     //    the same program when the author mapped bold to the regular file, so
     //    no synthetic bolding ever happens.

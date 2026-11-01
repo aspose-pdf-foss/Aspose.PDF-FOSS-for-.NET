@@ -22,8 +22,8 @@ internal sealed class PdfReal : PdfObject
         var g = Value.ToString("G", CultureInfo.InvariantCulture);
         if (g.IndexOf('E') < 0 && g.IndexOf('e') < 0)
             return g;
-        // "0.################" never uses an exponent and trims trailing zeros;
-        // 16 fractional digits cover the sub-1e-4 magnitudes that triggered the
+        // "0.################" never uses an exponent and trims trailing zeros; 16
+        // fractional digits cover the sub-1e-4 magnitudes that triggered the
         // exponent without introducing floating-point noise.
         var plain = Value.ToString("0.################", CultureInfo.InvariantCulture);
         return plain.Length == 0 || plain == "-0" ? "0" : plain;

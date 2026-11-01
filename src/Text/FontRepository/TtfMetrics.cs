@@ -238,11 +238,32 @@ public partial class FontRepository
         return rawWidths;
     }
 
-    private static Dictionary<int, int> ReadCmapFormat4(byte[] data, int cmapOffset)
+    /// <summary>The single-byte codes the width tables cover.</summary>
+    private const int SingleByteCodes = 256;
+
+    /// <summary>The Windows platform's full-Unicode encoding, the one a format 12 table is keyed by.</summary>
+    private const int WindowsUnicodeFullEncoding = 10;
+
+    /// <summary>The Macintosh platform and its Roman encoding: a (1,0) table keys Mac Roman codes.</summary>
+    private const int MacintoshPlatform = 1;
+    private const int MacRomanEncoding = 0;
+
+    /// <summary>The printable ASCII codes, which Mac Roman keys as Unicode does.</summary>
+    private const int FirstPrintableAscii = 0x20;
+    private const int LastPrintableAscii = 0x7E;
+
+    /// <summary>The face's Unicode character map for the width tables: its format 4 table, or,
+    /// when it carries none (a face whose only table is a format 12 one), the single-byte codes
+    /// of its format 12 table - which went unread, so such a face measured every character at
+    /// the default advance - or, with no Unicode table at all, the printable ASCII codes of its
+    /// (1,0) Macintosh table.</summary>
+    private static Dictionary<int, int> ReadUnicodeCmap(byte[] data, int cmapOffset)
     {
         var map = new Dictionary<int, int>();
         if (cmapOffset + 4 > data.Length) return map;
         var numSubtables = ReadUInt16BE(data, cmapOffset + 2);
+        var format12Offset = -1;
+        var macintoshOffset = -1;
         for (int i = 0; i < numSubtables; i++)
         {
             var recOff = cmapOffset + 4 + i * 8;
@@ -250,9 +271,14 @@ public partial class FontRepository
             var platformID = ReadUInt16BE(data, recOff);
             var encodingID = ReadUInt16BE(data, recOff + 2);
             var subtableOffset = cmapOffset + (int)ReadUInt32BE(data, recOff + 4);
-            if (!((platformID == 3 && encodingID == 1) || platformID == 0)) continue;
             if (subtableOffset + 14 > data.Length) continue;
             var format = ReadUInt16BE(data, subtableOffset);
+            if (format == 12 && format12Offset < 0
+                && (platformID == 0 || (platformID == 3 && encodingID == WindowsUnicodeFullEncoding)))
+                format12Offset = subtableOffset;
+            if (platformID == MacintoshPlatform && encodingID == MacRomanEncoding && macintoshOffset < 0)
+                macintoshOffset = subtableOffset;
+            if (!((platformID == 3 && encodingID == 1) || platformID == 0)) continue;
             if (format != 4) continue;
             var segCount = ReadUInt16BE(data, subtableOffset + 6) / 2;
             var endCodesOff = subtableOffset + 14;
@@ -281,9 +307,53 @@ public partial class FontRepository
                     if (glyphId != 0) map.TryAdd(c, glyphId);
                 }
             }
-            break;
+            return map;
         }
+        if (format12Offset >= 0) ReadCmapFormat12(data, format12Offset, map);
+        else if (macintoshOffset >= 0) ReadMacintoshAscii(data, macintoshOffset, map);
         return map;
+    }
+
+    /// <summary>The printable ASCII codes of a Macintosh byte table (format 0) or trimmed table
+    /// (format 6). The Mac Roman codes above them name other characters than the Unicode points
+    /// of those numbers, and are left to the default advance.</summary>
+    private static void ReadMacintoshAscii(byte[] data, int subtableOffset, Dictionary<int, int> map)
+    {
+        var format = ReadUInt16BE(data, subtableOffset);
+        var firstCode = format == 6 ? ReadUInt16BE(data, subtableOffset + 6) : 0;
+        var entryCount = format == 6 ? ReadUInt16BE(data, subtableOffset + 8) : 0;
+        for (var c = FirstPrintableAscii; c <= LastPrintableAscii; c++)
+        {
+            var glyphId = 0;
+            if (format == 0 && subtableOffset + 6 + c < data.Length)
+                glyphId = data[subtableOffset + 6 + c];
+            else if (format == 6 && c >= firstCode && c - firstCode < entryCount
+                     && subtableOffset + 12 + 2 * (c - firstCode) <= data.Length)
+                glyphId = ReadUInt16BE(data, subtableOffset + 10 + 2 * (c - firstCode));
+            if (glyphId > 0) map.TryAdd(c, glyphId);
+        }
+    }
+
+    /// <summary>The single-byte codes of a format 12 table: its groups, sorted by their first
+    /// code, map each code of a run to consecutive glyphs.</summary>
+    private static void ReadCmapFormat12(byte[] data, int subtableOffset, Dictionary<int, int> map)
+    {
+        if (subtableOffset + 16 > data.Length) return;
+        var numGroups = ReadUInt32BE(data, subtableOffset + 12);
+        for (long g = 0; g < numGroups; g++)
+        {
+            var groupOff = subtableOffset + 16 + g * 12;
+            if (groupOff + 12 > data.Length) break;
+            var startCode = ReadUInt32BE(data, (int)groupOff);
+            if (startCode >= SingleByteCodes) break;
+            var endCode = Math.Min(ReadUInt32BE(data, (int)groupOff + 4), SingleByteCodes - 1);
+            var startGlyph = ReadUInt32BE(data, (int)groupOff + 8);
+            for (var c = startCode; c <= endCode; c++)
+            {
+                var glyphId = (int)(startGlyph + c - startCode);
+                if (glyphId > 0) map.TryAdd((int)c, glyphId);
+            }
+        }
     }
 
     private static int ReadUInt16BE(byte[] data, int offset) =>
@@ -346,11 +416,11 @@ public partial class FontRepository
                     }
                 }
                 var fam = winEnglish ?? macEnglish ?? winAny;
-                if (!string.IsNullOrWhiteSpace(fam)) return fam!;
+                if (!string.IsNullOrWhiteSpace(fam)) return fam;
                 break;
             }
         }
-        catch { }
+        catch { /* a name table that does not parse falls back to the font name below */ }
         return ReadTtfFontName(data);
     }
 
@@ -444,8 +514,8 @@ public partial class FontRepository
             var english = (platformID == 3 && (languageID & 0x3FF) == 0x009) // any en-* LCID
                           || (platformID == 1 && languageID == 0)
                           || platformID == 0;
-            if (nameID == 4) { if (english) fullNameEn ??= name; fullName ??= name; }
-            if (nameID == 1) { if (english) familyNameEn ??= name; familyName ??= name; }
+            if (nameID == 4) { if (english) { fullNameEn ??= name; } fullName ??= name; }
+            if (nameID == 1) { if (english) { familyNameEn ??= name; } familyName ??= name; }
         }
         return fullNameEn ?? familyNameEn ?? fullName ?? familyName ?? "Unknown";
     }

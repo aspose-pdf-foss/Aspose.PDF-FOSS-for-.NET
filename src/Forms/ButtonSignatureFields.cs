@@ -6,7 +6,7 @@ using Aspose.Pdf.IO;
 namespace Aspose.Pdf.Forms;
 
 /// <summary>Push-button form field (FT=Btn with Pushbutton flag set).</summary>
-public class ButtonField : Field
+public partial class ButtonField : Field
 {
     internal ButtonField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
@@ -59,7 +59,7 @@ public class ButtonField : Field
             if (value is null)
                 mk.Remove("CA");
             else
-                mk.Set("CA", new PdfString(Compat.Latin1.GetBytes(value)));
+                mk.Set("CA", EncodePdfTextString(value));
             // Drop any pre-existing /AP so the button face is rebuilt with the new
             // caption (a loaded button carries a baked-in appearance that
             // GenerateAppearance would otherwise leave untouched).
@@ -80,15 +80,24 @@ public class ButtonField : Field
         // style-specific chrome; the plain solid
         // face keeps the simple rectangle stroke.
         var borderStyle = GetBorderStyleValue();
-        string face = borderStyle is not Aspose.Pdf.Annotations.BorderStyle.Solid
-            ? BuildStyledButtonFace(w, h, borderStyle, fontName, fontSize)
-            : BuildSolidButtonFace(w, h, fontName, fontSize);
+        // Each state draws its own icon (/MK /I, /MK /IX for the down state) as /MK /TP places it.
+        var (normalIcon, downIcon, iconPosition) = StateIcons();
+        _iconPosition = iconPosition;
+        string Face(PdfStream? icon)
+        {
+            _captionFonts = null;
+            _faceIcon = icon;
+            return borderStyle is not Aspose.Pdf.Annotations.BorderStyle.Solid
+                ? BuildStyledButtonFace(w, h, borderStyle, fontName, fontSize)
+                : BuildSolidButtonFace(w, h, fontName, fontSize);
+        }
 
         var ap = new PdfDictionary();
-        ap.Set("N", MakeApXObject(face, w, h, MakeStandardFontResources(fontName)));
-        // Push buttons carry a down (/D) appearance too; reuse the same face so
+        ap.Set("N", MakeApXObject(Face(normalIcon), w, h, WithIcon(CaptionFontResources(fontName), normalIcon)));
+        // Push buttons carry a down (/D) appearance too: the same face with the down icon, so
         // callers reading States["D"] see the current caption.
-        ap.Set("D", MakeApXObject(face, w, h, MakeStandardFontResources(fontName)));
+        ap.Set("D", MakeApXObject(Face(downIcon), w, h, WithIcon(CaptionFontResources(fontName), downIcon)));
+        _faceIcon = null;
         Dict.Set("AP", ap);
     }
 
@@ -97,7 +106,8 @@ public class ButtonField : Field
         var sb = new System.Text.StringBuilder();
         sb.Append("q ");
         var mk = BuildMkBackgroundAndBorder(w, h);
-        if (mk.Length == 0)
+        // A button showing an icon has no face of its own beyond what its /MK gives it.
+        if (mk.Length == 0 && _faceIcon is null)
             // Default push-button chrome: light-grey face with a grey border. Fill and
             // stroke share the widget-sized rectangle — the face carries no geometry
             // other than the box itself, and the stroke's outer half is clipped by the
@@ -136,7 +146,6 @@ public class ButtonField : Field
             sb.Append($"{bgMk} 0 0 {FmtNum(w)} {FmtNum(h)} re f ");
 
         var bc = ColorStrokeOp(chars.Border);
-        double b2 = bw * 2;
         var innerRect = $"{FmtNum(bw / 2)} {FmtNum(bw / 2)} {FmtNum(w - bw)} {FmtNum(h - bw)} re";
 
         switch (style)
@@ -152,17 +161,8 @@ public class ButtonField : Field
             case Aspose.Pdf.Annotations.BorderStyle.Beveled:
             case Aspose.Pdf.Annotations.BorderStyle.Inset:
             {
-                var (hi, shadow) = style == Aspose.Pdf.Annotations.BorderStyle.Beveled
-                    ? ("1 g", ScaleColorFill(bgColor.A != 0 ? bgColor : System.Drawing.Color.Gray, 216.0 / 255.0))
-                    : ("0.4980392157 0.4980392157 0.4980392157 rg", "0.8470588235 0.8470588235 0.8470588235 rg");
-                // Lit chevron (top-left edges).
-                sb.Append($"{hi} {FmtNum(bw)} {FmtNum(bw)} m {FmtNum(bw)} {FmtNum(h - bw)} l " +
-                          $"{FmtNum(w - bw)} {FmtNum(h - bw)} l {FmtNum(w - b2)} {FmtNum(h - b2)} l " +
-                          $"{FmtNum(b2)} {FmtNum(h - b2)} l {FmtNum(b2)} {FmtNum(b2)} l f ");
-                // Shadowed chevron (bottom-right edges).
-                sb.Append($"{shadow} {FmtNum(w - bw)} {FmtNum(h - bw)} m {FmtNum(w - bw)} {FmtNum(bw)} l " +
-                          $"{FmtNum(bw)} {FmtNum(bw)} l {FmtNum(b2)} {FmtNum(b2)} l {FmtNum(w - b2)} {FmtNum(b2)} l " +
-                          $"{FmtNum(w - b2)} {FmtNum(h - b2)} l f ");
+                var bevelBase = bgColor.A != 0 ? bgColor : System.Drawing.Color.Gray;
+                sb.Append(BevelChevrons(style == Aspose.Pdf.Annotations.BorderStyle.Beveled, w, h, bw, bevelBase));
                 // Beveled closes its stroke (s); Inset leaves it open (S).
                 var stroke = style == Aspose.Pdf.Annotations.BorderStyle.Beveled ? "s" : "S";
                 sb.Append($"{bc} {FmtNum(bw)} w {innerRect} {stroke} ");
@@ -184,16 +184,27 @@ public class ButtonField : Field
         // caption falls back to its field value, which is what a caller who only set
         // Value on a freshly built push button expects to see drawn on the face.
         var caption = NormalCaption ?? Value ?? string.Empty;
+        // Rough centring: average glyph advance ~0.5em; a caption beyond ASCII is shown and
+        // measured through the face that draws it.
+        var (captionFont, shown, textW) = caption.Length == 0 ? (fontName, "", 0)
+            : TryShowCaptionInCoveringFace(caption, fontName, fontSize)
+            ?? (fontName, $"({EscapePdfText(caption)})", caption.Length * fontSize * 0.5);
+        // The icon is drawn under the caption, in the part of the face the caption leaves it.
+        var region = (x: 0.0, y: 0.0, w, h);
+        if (_faceIcon is { } icon)
+        {
+            var (iconRegion, captionRegion) = IconLayout(w, h, _iconPosition, textW, fontSize);
+            sb.Append(DrawIcon(icon, iconRegion));
+            if (captionRegion is not { } shownRegion) return;
+            region = shownRegion;
+        }
         if (caption.Length == 0) return;
-        var escaped = EscapePdfText(caption);
-        // Rough centring: average glyph advance ~0.5em.
-        var textW = caption.Length * fontSize * 0.5;
-        var tx = System.Math.Max(2, (w - textW) / 2);
-        var ty = h / 2 - fontSize * 0.35;
+        var tx = region.x + System.Math.Max(2, (region.w - textW) / 2);
+        var ty = region.y + region.h / 2 - fontSize * 0.35;
         if (wrapColorInText)
-            sb.Append($"BT 0 0 0 rg /{fontName} {FmtNum(fontSize)} Tf {FmtNum(tx)} {FmtNum(ty)} Td ({escaped}) Tj ET ");
+            sb.Append($"BT 0 0 0 rg /{captionFont} {FmtNum(fontSize)} Tf {FmtNum(tx)} {FmtNum(ty)} Td {shown} Tj ET ");
         else
-            sb.Append($"BT /{fontName} {FmtNum(fontSize)} Tf 0 g {FmtNum(tx)} {FmtNum(ty)} Td ({escaped}) Tj ET ");
+            sb.Append($"BT /{captionFont} {FmtNum(fontSize)} Tf 0 g {FmtNum(tx)} {FmtNum(ty)} Td {shown} Tj ET ");
     }
 
     private static string ColorFillOp(System.Drawing.Color c)
@@ -201,10 +212,6 @@ public class ButtonField : Field
 
     private static string ColorStrokeOp(System.Drawing.Color c)
         => $"{FmtNum(c.R / 255.0)} {FmtNum(c.G / 255.0)} {FmtNum(c.B / 255.0)} RG";
-
-    // Darken a colour by a factor to derive the bevel-shadow tint.
-    private static string ScaleColorFill(System.Drawing.Color c, double factor)
-        => $"{FmtNum(c.R / 255.0 * factor)} {FmtNum(c.G / 255.0 * factor)} {FmtNum(c.B / 255.0 * factor)} rg";
 
     private PdfDictionary? GetMK(bool create)
     {
@@ -242,7 +249,7 @@ public class ButtonField : Field
         if (value is null)
             mk.Remove(key);
         else
-            mk.Set(key, new PdfString(Compat.Latin1.GetBytes(value)));
+            mk.Set(key, EncodePdfTextString(value));
     }
 
     /// <summary>Caption shown when the user holds the mouse button down (/MK /AC).</summary>
@@ -259,14 +266,30 @@ public class ButtonField : Field
         set => SetMkString("RC", value);
     }
 
-    /// <summary>Form XObject used as the normal-state icon (/MK /I). Stored only.</summary>
-    public XForm? NormalIcon { get; set; }
+    /// <summary>Form XObject used as the normal-state icon (/MK /I).</summary>
+    public XForm? NormalIcon { get => GetMkIcon("I"); set => SetMkIcon("I", value); }
 
-    /// <summary>Form XObject used as the rollover icon (/MK /RI). Stored only.</summary>
-    public XForm? RolloverIcon { get; set; }
+    /// <summary>Form XObject used as the rollover icon (/MK /RI).</summary>
+    public XForm? RolloverIcon { get => GetMkIcon("RI"); set => SetMkIcon("RI", value); }
 
-    /// <summary>Form XObject used as the down/alternate icon (/MK /IX). Stored only.</summary>
-    public XForm? AlternateIcon { get; set; }
+    /// <summary>Form XObject used as the down/alternate icon (/MK /IX).</summary>
+    public XForm? AlternateIcon { get => GetMkIcon("IX"); set => SetMkIcon("IX", value); }
+
+    /// <summary>The icon form the widget carries under the /MK key, with its own resources, so the
+    /// image it holds can be read; null when the widget has no such icon.</summary>
+    private XForm? GetMkIcon(string key)
+    {
+        var stream = Reader.ResolveStream(GetMK(create: false)?.Get(key));
+        return stream is null ? null : new XForm(stream, Reader);
+    }
+
+    private void SetMkIcon(string key, XForm? icon)
+    {
+        var mk = GetMK(create: icon is not null);
+        if (mk is null) return;
+        if (icon is null) mk.Remove(key);
+        else mk.Set(key, icon.Stream);
+    }
 
     /// <summary>Position of the caption relative to the icon (/MK /TP).</summary>
     public IconCaptionPosition ICPosition
@@ -286,11 +309,6 @@ public class ButtonField : Field
     /// <summary>Icon scaling parameters (/MK /IF). Always returns a fresh wrapper; not persisted.</summary>
     public IconFit IconFit { get; } = new IconFit();
 
-    /// <summary>
-    /// Attach an image as the button's normal icon. Cross-platform-friendly stub:
-    /// the image is stored opaquely (advanced GDI rendering not supported).
-    /// </summary>
-    public void AddImage(System.Drawing.Image image) { _ = image; }
 }
 
 /// <summary>
@@ -413,12 +431,18 @@ public class SignatureField : Field
 
     internal SignatureField(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
 
+    /// <summary>Whether <paramref name="key"/> of a field dictionary is a signature's value. A copy of the
+    /// field into another file leaves it out: its byte range covers the bytes of the file it was made in, so
+    /// in the copy it would be a broken signature. The field and its widget stay, an empty field to sign again.</summary>
+    internal static bool IsSignatureValue(PdfDictionary field, string key)
+        => key == "V" && field.GetName("FT") == "Sig";
+
     /// <summary>Create an empty signature field on <paramref name="doc"/>'s
     /// first page sized to <paramref name="rect"/>. Add the field to
     /// <c>doc.Form</c> to expose it on the form, then sign via
     /// <see cref="Sign(Signature)"/>.</summary>
     public SignatureField(Document doc, Rectangle rect)
-        : base(BuildSignatureFieldDict(rect), doc.Pages[1].Reader)
+        : base(BuildSignatureFieldDict(rect), doc.Reader)
     {
         OwnerDocument = doc;
     }
@@ -529,8 +553,8 @@ public class SignatureField : Field
         // stays byte-identical.
         if (!Compat.IsWindows())
         {
-            // ImageFormat is inert metadata - comparing codec GUIDs runs anywhere;
-            // only ENCODING through System.Drawing is Windows-bound. The analyzer
+            // ImageFormat is inert metadata - comparing codec GUIDs runs anywhere; only
+            // ENCODING through System.Drawing is Windows-bound. The analyzer
             // attributes the whole type, hence the pragma.
 #pragma warning disable CA1416
             var wantsPng = format.Guid == System.Drawing.Imaging.ImageFormat.Png.Guid;
@@ -605,7 +629,7 @@ public class SignatureField : Field
         var bbox = reader.ResolveArray(form.Dict.Get("BBox"));
         if (bbox is not { Count: >= 4 }) return null;
         static double N(Aspose.Pdf.Core.PdfObject? o) =>
-            o is Aspose.Pdf.Core.PdfInteger i ? i.Value : o is Aspose.Pdf.Core.PdfReal r ? r.Value : 0;
+            o switch { Aspose.Pdf.Core.PdfInteger i => i.Value, Aspose.Pdf.Core.PdfReal r => r.Value, _ => 0 };
         double bx = N(reader.Resolve(bbox[0])), by = N(reader.Resolve(bbox[1]));
         double bw = Math.Abs(N(reader.Resolve(bbox[2])) - bx);
         double bh = Math.Abs(N(reader.Resolve(bbox[3])) - by);
@@ -641,7 +665,7 @@ public class SignatureField : Field
         {
             // The sheet is scaffolding: the caller's document must come back unchanged.
             if (sheet is not null)
-                try { doc.Pages.Delete(sheet.Number); } catch { }
+                try { doc.Pages.Delete(sheet.Number); } catch { /* cleanup of a scaffolding page - a failed delete must not hide the result */ }
         }
     }
 

@@ -15,11 +15,11 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
 // The margin-assigned fragment's face, line measure and page-break helpers.
-    private static string MfFace(MarginFragmentState mf, HtmlFragmentLayoutState hl, Converters.HtmlToPdfConverter.FlowRun r)
+    private static string MfFace(HtmlFragmentLayoutState hl, Converters.HtmlToPdfConverter.FlowRun r)
         => Converters.HtmlToPdfConverter.Std14Face(
             r.Family ?? hl.html.TextState?.Font?.FontName, r.Bold, r.Italic);
 
-    private static double MfWidthOf(MarginFragmentState mf, HtmlFragmentLayoutState hl, string t, string face)
+    private static double MfWidthOf(MarginFragmentState mf, string t, string face)
     {
         if (t.Length == 0) return 0;
         try

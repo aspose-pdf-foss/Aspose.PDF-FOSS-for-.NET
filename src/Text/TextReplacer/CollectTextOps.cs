@@ -13,7 +13,7 @@ public sealed partial class TextReplacer
     /// bytes, byte span, text matrix + composed CTM, font state (dict/ToUnicode/size/Tc),
     /// TJ kern total, and the positioning-Tm operand span. Shared by the cross-operator
     /// replace and the run-move reflow.</summary>
-    private List<CrossTextOp> CollectTextOps(byte[] streamBytes,
+    private static List<CrossTextOp> CollectTextOps(byte[] streamBytes,
         Dictionary<string, PdfDictionary> fonts, PdfReader reader,
         double initCtmA = 1, double initCtmB = 0, double initCtmC = 0, double initCtmD = 1,
         double initCtmTx = 0, double initCtmTy = 0)

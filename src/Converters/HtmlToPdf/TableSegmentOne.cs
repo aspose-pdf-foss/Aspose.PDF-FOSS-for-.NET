@@ -17,16 +17,21 @@ internal static partial class HtmlToPdfConverter
         if (isTable && TakeFosterParentedText(ref seg) is { Length: > 0 } fostered)
             BuildNonTableSegment(fbk, fostered, segs, segIdx);
         if (UnwrapSingleColumnTable(fbk, seg, isTable)) return true;
+        // (a stylesheet form's text-box table grids with its fields in their cells)
+        var fieldGrid = isTable && fbk.cv.profile.fieldCellGrids && FieldGridTable(seg);
         // The escaped-attr dialect grids EVERY table — form controls
         // draw INSIDE grid cells rather than flattening the table.
         // A radio-only table grids too: its options ride the cells inline.
-        if (isTable && (fbk.cv.profile.escapedAttrDoc || fbk.cv.profile.dwFormDoc
-            // A UA form document grids its tables too: the metric grid seats their text
-            // inputs and checkboxes as replaced boxes in the cells.
-            || fbk.cv.profile.uaFormCells
-            || !(fbk.perTableFormGate && HasVisibleFormControl(seg)
-                 && !RadioGridableControls(seg, fbk.cv.profile.uaStdSerif)
-                 && !ButtonFamilyControlsOnly(seg))))
+        // A UA form document grids its tables too: the metric grid seats their text
+        // inputs and checkboxes as replaced boxes in the cells.
+        var gridsControls = fbk.cv.profile.escapedAttrDoc || fbk.cv.profile.dwFormDoc || fbk.cv.profile.uaFormCells || fieldGrid;
+        var flatForControls = isTable && !gridsControls
+            && (fbk.perTableFormGate || fbk.cv.profile.fieldCellGrids) && HasVisibleFormControl(seg)
+            && !RadioGridableControls(seg, fbk.cv.profile.uaStdSerif)
+            && !ButtonFamilyControlsOnly(seg);
+        // (a section wrapper flattened for a control it holds flows row by row instead)
+        if (flatForControls && UnwrapSectionWrapperTable(fbk, seg)) return true;
+        if (isTable && !flatForControls)
         {
             // The sheet-typography box flow: the table's own sheet margins (its tag and
             // class rules) are the box space above and below it (probed: `table
@@ -38,13 +43,13 @@ internal static partial class HtmlToPdfConverter
             // (quirks documents only: a standards parser closes the paragraph before the table,
             // and the empty paragraph's margins collapse away - the statement's grid keeps its seat)
             if (fbk.cv.profile.uaStdSerif && _quirksRowStrut && segIdx > 0 && !segs[segIdx - 1].isTable
-                && Regex.IsMatch(segs[segIdx - 1].html, @"<p\b(?![^>]*/\s*>)[^>]*>\s*$", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(segs[segIdx - 1].html, @"<p\b(?![^>]*/\s*>)[^>]*>\s*$", RegexOptions.IgnoreCase))
                 tableMt = Math.Max(tableMt, UaParagraphMarginPt);
             // A UA-flow table's OWN inline margin-top is box space above it (measured: the
             // dunning letter's address grid opens 3.6 cm below the page top).
             if ((fbk.cv.profile.uaStdSerif || fbk.cv.profile.ptFormDoc)
-                && Regex.Match(seg, @"^\s*<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } tagM
-                && Regex.Match(DivStyleOf(tagM.Value), MarginTopDeclRx, RegexOptions.IgnoreCase) is { Success: true } mtM
+                && SafeRegex.Match(seg, @"^\s*<table\b[^>]*>", RegexOptions.IgnoreCase) is { Success: true } tagM
+                && SafeRegex.Match(DivStyleOf(tagM.Value), MarginTopDeclRx, RegexOptions.IgnoreCase) is { Success: true } mtM
                 && UaTableMarginPt(fbk.cv.css, mtM.Groups[1].Value.Trim()) is { } mtPt && mtPt > 0)
                 tableMt = Math.Max(tableMt, mtPt);
             // …and the margin-top the innermost wrapper's id/class rule declares over a grid it
@@ -54,13 +59,15 @@ internal static partial class HtmlToPdfConverter
             fbk.list.Add(new Block
             {
                 IsTable = true,
-                TableHtml = seg,
-                FloatFirst = Regex.IsMatch(seg, @"^<table\b[^>]*\balign\s*=\s*[""']?left",
+                TableHtml = RestoreRowMarks(seg, fbk.rowBlocks),
+                FloatFirst = SafeRegex.IsMatch(seg, @"^<table\b[^>]*\balign\s*=\s*[""']?left",
                     RegexOptions.IgnoreCase),
+                FieldGrid = fieldGrid,
                 PageBreakAfterTable = breakAfterSegs?.Contains(segIdx) ?? false,
                 MarginTop = tableMt,
                 MarginBottom = tableMb,
                 CssAncestors = fbk.openChain,
+                HostChain = fbk.hostChain,
                 HostFace = HostChainTypography(fbk.cv.css, fbk.hostChain).face,
                 HostFontPt = HostChainTypography(fbk.cv.css, fbk.hostChain).pt,
                 HostWidthPt = HostChainWidth(fbk.cv.css, fbk.hostChain),
@@ -72,6 +79,18 @@ internal static partial class HtmlToPdfConverter
         }
         return true;
     }
+
+    /// <summary>The grid builder lays out a cell's own markup and knows no prebuilt rows: a row
+    /// placeholder a nested grid carries gets its markup back, or the cell would lose that line.</summary>
+    private static string RestoreRowMarks(string tableHtml, List<Block> rowBlocks)
+    {
+        if (rowBlocks.Count == 0 || tableHtml.IndexOf("<rowmark", StringComparison.Ordinal) < 0) return tableHtml;
+        return SafeRegex.Replace(RowMarkRx, tableHtml, m =>
+            int.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var i) && i >= 0 && i < rowBlocks.Count
+                && rowBlocks[i].RowSourceHtml is { } source ? source : m.Value);
+    }
+
+    private static readonly Regex RowMarkRx = new Regex(@"<rowmark i=""(\d+)""></rowmark>", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The face and size the nearest wrapper's id or class rule declares over a table (the
     /// inherited typography its cells draw in); null / 0 where no wrapper states one.</summary>
@@ -137,7 +156,7 @@ internal static partial class HtmlToPdfConverter
     /// half a point too little above a 12 pt grid and moves everything under it.</summary>
     private static double? UaTableMarginPt(IReadOnlyDictionary<string, Dictionary<string, string>> css, string decl)
     {
-        var em = Regex.Match(decl, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*r?em$", RegexOptions.IgnoreCase);
+        var em = SafeRegex.Match(decl, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*r?em$", RegexOptions.IgnoreCase);
         if (!em.Success) return TryParseLength(decl);
         if (!double.TryParse(em.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var n)) return null;
@@ -158,7 +177,7 @@ internal static partial class HtmlToPdfConverter
                 foreach (var kv in rule) merged[kv.Key] = kv.Value;
         }
         Overlay("table");
-        var clsM = Regex.Match(tableHtml, @"^<table\b[^>]*\bclass\s*=\s*[""']([^""']+)", RegexOptions.IgnoreCase);
+        var clsM = SafeRegex.Match(tableHtml, @"^<table\b[^>]*\bclass\s*=\s*[""']([^""']+)", RegexOptions.IgnoreCase);
         if (clsM.Success)
             foreach (var c in clsM.Groups[1].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
             {
@@ -184,14 +203,14 @@ internal static partial class HtmlToPdfConverter
         // A tag inside a COMMENT is not markup: scan a same-length copy with the comment
         // regions blanked and slice the original by index (a commented-out `<td>` otherwise
         // reads as a real cell open and the stray `-->` after it as authored text).
-        var scan = HtmlCommentRx.Replace(tableHtml, cm => new string(' ', cm.Length));
+        var scan = SafeRegex.Replace(HtmlCommentRx, tableHtml, cm => new string(' ', cm.Length));
         var rowStyle = "";
         // Every stray stretch is fostered, in source order, onto ONE line in front of the
         // table (measured: two rows each opening with text put both on the line above the
         // grid); the cuts are applied after the scan so the indices stay valid.
         var fostered = new StringBuilder();
         var cuts = new List<(int start, int end)>();
-        foreach (Match m in FosterScanRx.Matches(scan))
+        foreach (Match m in SafeRegex.Matches(FosterScanRx, scan))
         {
             var tag = m.Groups["tag"].Value.ToLowerInvariant();
             var close = m.Groups["close"].Length > 0;
@@ -229,14 +248,14 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>An HTML comment, whose content is never markup.</summary>
-    private static readonly Regex HtmlCommentRx = new Regex(@"<!--[\s\S]*?-->", RegexOptions.Compiled);
+    private static readonly Regex HtmlCommentRx = new Regex(@"<!--[\s\S]*?-->", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The tags the foster scan walks: table structure only.</summary>
     private static readonly Regex FosterScanRx = new Regex(
         @"<(?<close>/?)(?<tag>table|thead|tbody|tfoot|tr|td|th)\b[^>]*>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The text a stretch of markup would DRAW: tags removed, entities resolved.</summary>
     private static string FosterVisibleText(string html)
-        => DecodeEntities(Regex.Replace(html, "<[^>]*>", " ")).Replace(' ', ' ');
+        => DecodeEntities(SafeRegex.Replace(html, "<[^>]*>", " ")).Replace(' ', ' ');
 }

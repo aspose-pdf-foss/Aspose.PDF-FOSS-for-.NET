@@ -9,9 +9,7 @@ public partial class TextFragment
     // replacement, else the same family's system face, else Times New Roman.
     private static bool Covers(Aspose.Pdf.Text.Font f, string s)
     {
-        foreach (var ch in s)
-            if (!char.IsWhiteSpace(ch) && !f.CanRepresent(ch)) return false;
-        return true;
+        return !s.Any(ch => !char.IsWhiteSpace(ch) && !f.CanRepresent(ch));
     }
 
     // Greedy wrap at spaces against the fragment width, measuring each candidate
@@ -64,7 +62,7 @@ public partial class TextFragment
     }
 
     /// <summary></summary>
-    private void WrapFormFillWords(FormFillWrapState fw)
+    private static void WrapFormFillWords(FormFillWrapState fw)
     {
         foreach (var word in fw.newText.Split(' '))
         {

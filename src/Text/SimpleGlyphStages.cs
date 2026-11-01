@@ -5,7 +5,7 @@ namespace Aspose.Pdf.Text;
 internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
 {
     /// <summary>The stages of the simple glyph parse: the flags, the x and y coordinates and the contours; each returns false when the table runs out.</summary>
-    private bool BuildGlyphContours(SimpleGlyphState sg, int c)
+    private static bool BuildGlyphContours(SimpleGlyphState sg, int c)
     {
         if (sg.endPts[c] < sg.ptIdx - 1 || sg.endPts[c] >= sg.numPoints) return false;
         var count = sg.endPts[c] - sg.ptIdx + 1;

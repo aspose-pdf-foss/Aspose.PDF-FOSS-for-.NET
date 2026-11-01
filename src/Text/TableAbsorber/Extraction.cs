@@ -15,9 +15,11 @@ public sealed partial class TableAbsorber
     private static void ExtractTextAndLines(byte[] stream, Dictionary<string, PdfDictionary> fonts,
         PdfReader reader, List<TextRun> textRuns, List<HEdge> hEdges, List<VEdge> vEdges,
         double ctmA = 1, double ctmB = 0, double ctmC = 0, double ctmD = 1, double ctmE = 0, double ctmF = 0,
-        PdfDictionary? xobjects = null, int depth = 0)
+        PdfDictionary? xobjects = null, int depth = 0, List<PendingLine>? drawn = null, PdfDictionary? colourSpaces = null)
     {
         var tl = new TableLinesState();
+        tl.colourSpaces = colourSpaces;
+        tl.reader = reader;
         tl.lexer = new PdfLexer(stream);
         tl.operands = new List<PdfObject>();
         tl.toUnicode = null;
@@ -49,6 +51,7 @@ public sealed partial class TableAbsorber
 
         tl.pendingLines = new List<PendingLine>();
         tl.pendingRects = new List<PendingRect>();
+        tl.drawn = drawn;
 
         while (true)
         {
@@ -72,8 +75,14 @@ public sealed partial class TableAbsorber
                         case "BT": case "TL": case "Tf": case "Td": case "TD": case "T*": case "Tm": case "Tj": case "TJ":
                             ExtractLinesTextOperator(tl, fonts, reader, textRuns, op);
                             break;
-                        case "m": case "l": case "h": case "re": case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n": case "W": case "W*":
+                        case "m": case "l": case "h": case "re": case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n": case "W": case "W*": case "c": case "v": case "y":
                             ExtractLinesPathOperator(tl, hEdges, vEdges, op);
+                            break;
+                        case "g": case "rg": case "k": case "sc": case "scn": case "cs":
+                            TrackFillColour(tl, op);
+                            break;
+                        case "G": case "RG": case "K": case "SC": case "SCN": case "CS":
+                            TrackStrokeColour(tl, op);
                             break;
                         case "BI": SkipInlineImage(tl.lexer); tl.operands.Clear(); continue;
                     }
@@ -86,17 +95,21 @@ public sealed partial class TableAbsorber
 
     /// <summary>Flush buffered path segments into H/V edge lists, applying the TS collectEdges logic.</summary>
     private static void FlushPendingEdges(List<PendingLine> lines, List<PendingRect> rects,
-        List<HEdge> hEdges, List<VEdge> vEdges, bool stroked)
+        List<HEdge> hEdges, List<VEdge> vEdges, bool stroked, bool filled, TableLinesState tl)
     {
         // Process line segments
         foreach (var line in lines)
         {
             var dy = Math.Abs(line.Y2 - line.Y1);
             var dx = Math.Abs(line.X2 - line.X1);
+            // A stroked segment that is no rule - slanting, or one short step of a traced
+            // curve - is part of a drawing, remembered for the figure test.
+            if (stroked && (dx > LineRectThreshold) == (dy > LineRectThreshold) && dx + dy > 0) tl.drawn?.Add(line);
+            var paper = IsPaperStroke(tl, line, stroked, filled);
             if (dy <= LineRectThreshold && dx > LineRectThreshold)
-                hEdges.Add(new HEdge((line.Y1 + line.Y2) / 2, Math.Min(line.X1, line.X2), Math.Max(line.X1, line.X2)));
+                hEdges.Add(new HEdge((line.Y1 + line.Y2) / 2, Math.Min(line.X1, line.X2), Math.Max(line.X1, line.X2), PaperStroke: paper));
             else if (dx <= LineRectThreshold && dy > LineRectThreshold)
-                vEdges.Add(new VEdge((line.X1 + line.X2) / 2, Math.Min(line.Y1, line.Y2), Math.Max(line.Y1, line.Y2)));
+                vEdges.Add(new VEdge((line.X1 + line.X2) / 2, Math.Min(line.Y1, line.Y2), Math.Max(line.Y1, line.Y2), PaperStroke: paper));
         }
 
         // Process rects (matching TS collectEdges logic)
@@ -110,12 +123,12 @@ public sealed partial class TableAbsorber
             // puts the table top at 723.22, not 723.46).
             if (h <= LineRectThreshold && w >= MinCellW)
             {
-                hEdges.Add(new HEdge(y, x, x + w));
+                hEdges.Add(new HEdge(y, x, x + w, IsHiddenBar(tl, rect, stroked)));
                 continue;
             }
             if (w <= LineRectThreshold && h >= MinCellH)
             {
-                vEdges.Add(new VEdge(x, y, y + h));
+                vEdges.Add(new VEdge(x, y, y + h, IsHiddenBar(tl, rect, stroked)));
                 continue;
             }
 
@@ -153,7 +166,7 @@ public sealed partial class TableAbsorber
     {
         if (streams.Count == 1) return streams[0];
         using var ms = new MemoryStream();
-        foreach (var s in streams) { if (ms.Length > 0) ms.WriteByte((byte)'\n'); ms.Write(s); }
+        foreach (var s in streams) { if (ms.Length > 0) { ms.WriteByte((byte)'\n'); } ms.Write(s); }
         return ms.ToArray();
     }
 
@@ -174,10 +187,19 @@ public sealed partial class TableAbsorber
     private static PdfArray ParseArray(PdfLexer lexer)
     {
         var arr = new PdfArray();
-        while (true) { var t = lexer.NextToken(); if (t.Kind == TokenKind.ArrayEnd || t.Kind == TokenKind.Eof) break;
-            switch (t.Kind) { case TokenKind.Integer: arr.Add(new PdfInteger(t.IntValue)); break; case TokenKind.Real: arr.Add(new PdfReal(t.RealValue)); break;
-                case TokenKind.LiteralString: arr.Add(new PdfString(t.BytesValue!)); break; case TokenKind.HexString: arr.Add(new PdfString(t.BytesValue!, isHex: true)); break;
-                case TokenKind.Name: arr.Add(new PdfName(t.StringValue!)); break; } }
+        while (true)
+        {
+            var t = lexer.NextToken();
+            if (t.Kind == TokenKind.ArrayEnd || t.Kind == TokenKind.Eof) break;
+            switch (t.Kind)
+            {
+                case TokenKind.Integer: arr.Add(new PdfInteger(t.IntValue)); break;
+                case TokenKind.Real: arr.Add(new PdfReal(t.RealValue)); break;
+                case TokenKind.LiteralString: arr.Add(new PdfString(t.BytesValue!)); break;
+                case TokenKind.HexString: arr.Add(new PdfString(t.BytesValue!, isHex: true)); break;
+                case TokenKind.Name: arr.Add(new PdfName(t.StringValue!)); break;
+            }
+        }
         return arr;
     }
 

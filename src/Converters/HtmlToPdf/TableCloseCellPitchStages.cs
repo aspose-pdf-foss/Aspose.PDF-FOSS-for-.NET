@@ -13,9 +13,7 @@ internal static partial class HtmlToPdfConverter
         // face the sheet names: Arial 13 px steps 15 px, 16 px steps 18. One document-wide pitch spaces a
         // 9.75 pt label like body text, and leaving it unset spaces it on the grid's ambient size.
         if (cc.ps.sheetFace is { } qFace && WinMetricsFor(qFace) is { } qm
-            && (spec.FontPt > 0 ? spec.FontPt
-                : cc.ps.cellClassPt > 0 ? cc.ps.cellClassPt
-                : cc.tf.TextState.FontSize) is > 0 and var qSize)
+            && ((spec.FontPt, cc.ps.cellClassPt) switch { (> 0, _) => spec.FontPt, (_, > 0) => cc.ps.cellClassPt, _ => cc.tf.TextState.FontSize }) is > 0 and var qSize)
             cc.tf.CssLineHeightPt = MetricLineHeight(qSize, qm.sum);
         else if (cc.ps.cellOwnLineHPt > 0)
         {

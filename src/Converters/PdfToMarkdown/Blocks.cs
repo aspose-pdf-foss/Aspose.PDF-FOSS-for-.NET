@@ -70,17 +70,17 @@ internal static partial class MarkdownRenderer
         }
 
         for (var a = 0; a < sections.Count; a++)
-        for (var b = a + 1; b < sections.Count; b++)
-        {
-            var ra = sections[a].Rectangle;
-            var rb = sections[b].Rectangle;
-            var yOverlap = Math.Min(ra.URY, rb.URY) - Math.Max(ra.LLY, rb.LLY);
-            var minHeight = Math.Min(ra.URY - ra.LLY, rb.URY - rb.LLY);
-            var xDisjoint = ra.URX < rb.LLX - 2 || rb.URX < ra.LLX - 2;
-            if (yOverlap > 0.3 * minHeight && xDisjoint
-                && !InAnyRegion(ra, tableRegions) && !InAnyRegion(rb, tableRegions))
-                return true;
-        }
+            for (var b = a + 1; b < sections.Count; b++)
+            {
+                var ra = sections[a].Rectangle;
+                var rb = sections[b].Rectangle;
+                var yOverlap = Math.Min(ra.URY, rb.URY) - Math.Max(ra.LLY, rb.LLY);
+                var minHeight = Math.Min(ra.URY - ra.LLY, rb.URY - rb.LLY);
+                var xDisjoint = ra.URX < rb.LLX - 2 || rb.URX < ra.LLX - 2;
+                if (yOverlap > 0.3 * minHeight && xDisjoint
+                    && !InAnyRegion(ra, tableRegions) && !InAnyRegion(rb, tableRegions))
+                    return true;
+            }
         return false;
     }
 
@@ -195,9 +195,9 @@ internal static partial class MarkdownRenderer
     private static Rectangle GroupRect(List<MarkupSection> group)
     {
         double llx = double.MaxValue, lly = double.MaxValue, urx = double.MinValue, ury = double.MinValue;
-        foreach (var s in group)
+        foreach (var rectangle in group.Select(s => s.Rectangle))
         {
-            var r = s.Rectangle;
+            var r = rectangle;
             if (r == null) continue;
             llx = Math.Min(llx, r.LLX); lly = Math.Min(lly, r.LLY);
             urx = Math.Max(urx, r.URX); ury = Math.Max(ury, r.URY);
@@ -215,17 +215,18 @@ internal static partial class MarkdownRenderer
         var parent = Enumerable.Range(0, n).ToArray();
         int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
         for (var a = 0; a < n; a++)
-        for (var b = a + 1; b < n; b++)
-        {
-            var ra = secs[a].Rectangle;
-            var rb = secs[b].Rectangle;
-            var yOverlap = Math.Min(ra.URY, rb.URY) - Math.Max(ra.LLY, rb.LLY);
-            var minHeight = Math.Min(ra.URY - ra.LLY, rb.URY - rb.LLY);
-            var gap = ra.URX < rb.LLX ? rb.LLX - ra.URX
-                : rb.URX < ra.LLX ? ra.LLX - rb.URX : -1;
-            if (yOverlap > 0.3 * minHeight && gap >= 0 && gap < 25)
-                parent[Find(a)] = Find(b);
-        }
+            for (var b = a + 1; b < n; b++)
+            {
+                var ra = secs[a].Rectangle;
+                var rb = secs[b].Rectangle;
+                var yOverlap = Math.Min(ra.URY, rb.URY) - Math.Max(ra.LLY, rb.LLY);
+                var minHeight = Math.Min(ra.URY - ra.LLY, rb.URY - rb.LLY);
+                double gap = -1;
+                if (ra.URX < rb.LLX) gap = rb.LLX - ra.URX;
+                else if (rb.URX < ra.LLX) gap = ra.LLX - rb.URX;
+                if (yOverlap > 0.3 * minHeight && gap >= 0 && gap < 25)
+                    parent[Find(a)] = Find(b);
+            }
 
         var byRoot = new Dictionary<int, (int firstIdx, List<MarkupSection> members)>();
         for (var k = 0; k < n; k++)
@@ -332,17 +333,17 @@ internal static partial class MarkdownRenderer
         var style = FontStyles.Regular;
         var have = false;
         foreach (var line in paragraph)
-        foreach (var e in line.Elems)
-        {
-            if (e.IsImage) continue;
-            var f = e.Frag;
-            if (f == null || string.IsNullOrWhiteSpace(f.Text)) continue;
-            var fStyle = f.TextState.FontStyle;
-            var fSize = f.TextState.FontSize;
-            if (!have) { size = fSize; style = fStyle; have = true; continue; }
-            if (fStyle != style) return null;
-            if (Math.Abs(size - fSize) > FontSizeEqualityThreshold) return null;
-        }
+            foreach (var e in line.Elems)
+            {
+                if (e.IsImage) continue;
+                var f = e.Frag;
+                if (f == null || string.IsNullOrWhiteSpace(f.Text)) continue;
+                var fStyle = f.TextState.FontStyle;
+                var fSize = f.TextState.FontSize;
+                if (!have) { size = fSize; style = fStyle; have = true; continue; }
+                if (fStyle != style) return null;
+                if (Math.Abs(size - fSize) > FontSizeEqualityThreshold) return null;
+            }
         if (!have || size < 0) return null;
         if (size < commonSize) return null;
         if (style == FontStyles.Regular && size < HeaderFontSizeRatio * commonSize) return null;
@@ -352,8 +353,7 @@ internal static partial class MarkdownRenderer
 
     private static void AddDistinct(List<double> sizes, double s)
     {
-        foreach (var x in sizes)
-            if (Math.Abs(x - s) <= FontSizeEqualityThreshold) return;
+        if (sizes.Any(x => Math.Abs(x - s) <= FontSizeEqualityThreshold)) return;
         sizes.Add(s);
     }
 

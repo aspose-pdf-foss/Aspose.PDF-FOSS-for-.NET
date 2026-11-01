@@ -4,10 +4,12 @@ using Aspose.Pdf.IO;
 
 namespace Aspose.Pdf.Text;
 
+#pragma warning disable S1210 // public API: ordering only, the published class defines no operators
 /// <summary>
 /// Represents a table detected on a PDF page.
 /// </summary>
 public sealed class AbsorbedTable : IComparable<AbsorbedTable>
+#pragma warning restore S1210
 {
     /// <summary>Creates an empty table with no rows.</summary>
     public AbsorbedTable() { }
@@ -20,7 +22,9 @@ public sealed class AbsorbedTable : IComparable<AbsorbedTable>
         get
         {
             if (Rows is IList<AbsorbedRow> list) return list;
+#pragma warning disable S2365 // public API: the published list view
             return new List<AbsorbedRow>(Rows);
+#pragma warning restore S2365
         }
     }
 

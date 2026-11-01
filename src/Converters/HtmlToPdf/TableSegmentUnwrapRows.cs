@@ -16,25 +16,24 @@ internal static partial class HtmlToPdfConverter
         // their lines stand a double chrome apart (probed on the RTL letter:
         // 4.5 between the last line of one and the leading line of the next).
         var stacked = fbk.lastUnwrapEnd == fbk.list.Count && fbk.list.Count > 0;
-        foreach (Match trM in Regex.Matches(seg, @"<tr\b[^>]*>([\s\S]*?)</tr\s*>",
+        foreach (Match trM in SafeRegex.Matches(seg, @"<tr\b[^>]*>([\s\S]*?)</tr\s*>",
                      RegexOptions.IgnoreCase))
         {
-            var tdM = Regex.Match(trM.Groups[1].Value,
+            var tdM = SafeRegex.Match(trM.Groups[1].Value,
                 @"<td\b([^>]*)>([\s\S]*?)</td\s*>", RegexOptions.IgnoreCase);
             if (!tdM.Success) continue;
-            var cellCentered = Regex.IsMatch(tdM.Groups[1].Value,
+            var cellCentered = SafeRegex.IsMatch(tdM.Groups[1].Value,
                 @"\balign\s*=\s*[""']?center", RegexOptions.IgnoreCase)
                 // …or the row's / cell's own text-align (the RTL letter's subject row)
-                || (fbk.cv.profile.rtlDoc && Regex.IsMatch(
-                    Regex.Match(trM.Value, @"^<tr\b[^>]*>", RegexOptions.IgnoreCase).Value + tdM.Groups[1].Value,
+                || (fbk.cv.profile.rtlDoc && SafeRegex.IsMatch(
+                    SafeRegex.Match(trM.Value, @"^<tr\b[^>]*>", RegexOptions.IgnoreCase).Value + tdM.Groups[1].Value,
                     @"text-align\s*:\s*center", RegexOptions.IgnoreCase));
             // the cell's own inline style (its font-size) styles the unwrapped
             // blocks as the cell styled its text
-            var tdStyle = Regex.Match(tdM.Groups[1].Value,
+            var tdStyle = SafeRegex.Match(tdM.Groups[1].Value,
                 @"\bstyle\s*=\s*(?:""([^""]*)""|'([^']*)')", RegexOptions.IgnoreCase);
-            var cellOpen = tdStyle.Success
-                ? "<div style=\"" + (tdStyle.Groups[1].Success ? tdStyle.Groups[1].Value : tdStyle.Groups[2].Value) + "\">"
-                : "<div>";
+            string cellOpen = "<div>";
+            if (tdStyle.Success) cellOpen = "<div style=\"" + (tdStyle.Groups[1].Success ? tdStyle.Groups[1].Value : tdStyle.Groups[2].Value) + "\">";
             if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_BLOCKS") == "1")
                 Console.WriteLine($"[unwrap] rtl={fbk.cv.profile.rtlDoc} stacked={stacked} wrapBandW={wrapBandW:0.##} fitBandW={fitBandW:0.##} centered={cellCentered} face='{fbk.cv.profile.metricFace}'");
             var beforeUnwrap = fbk.list.Count;
@@ -98,8 +97,12 @@ internal static partial class HtmlToPdfConverter
                 fbk.list[ub].MarginBottom = 0;
                 if (!string.IsNullOrWhiteSpace(fbk.list[ub].Text)) break;
             }
-            fbk.list[beforeUnwrap].PadTop +=
-                firstUnwrapRow ? (stacked ? 2 * UaCellChromePt : UaCellChromePt) : UaWrapperRowChromePt;
+            // the ids of the table, the row and the cell are link targets at the row's first block
+            var structureIds = ElementIds((firstUnwrapRow ? SafeRegex.Match(seg, @"<table\b[^>]*>", RegexOptions.IgnoreCase).Value : "")
+                + SafeRegex.Match(trM.Value, @"^<tr\b[^>]*>", RegexOptions.IgnoreCase).Value + "<td" + tdM.Groups[1].Value + ">");
+            if (structureIds.Count > 0) (fbk.list[beforeUnwrap].AnchorNames ??= new List<string>()).InsertRange(0, structureIds);
+            if (firstUnwrapRow) fbk.list[beforeUnwrap].PadTop += stacked ? 2 * UaCellChromePt : UaCellChromePt;
+            else fbk.list[beforeUnwrap].PadTop += UaWrapperRowChromePt;
             firstUnwrapRow = false;
         }
     }

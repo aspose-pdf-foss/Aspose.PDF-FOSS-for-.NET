@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Annotations;
 /// inside a rectangle, optionally inset by /RD (PDF 32000 §12.5.6.8).</summary>
 public abstract partial class CommonFigureAnnotation : MarkupAnnotation
 {
-    internal CommonFigureAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
+    private protected CommonFigureAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
     protected CommonFigureAnnotation(Page page, Rectangle rect) : base(page, rect) { }
     protected CommonFigureAnnotation(Document document, Rectangle rect) : base(document, rect) { }
 
@@ -38,7 +38,15 @@ public abstract partial class CommonFigureAnnotation : MarkupAnnotation
         }
     }
 
-    private static double N(PdfObject o) => o is PdfReal r ? r.Value : o is PdfInteger i ? i.Value : 0;
+    private static double N(PdfObject o) => o switch { PdfReal r => r.Value, PdfInteger i => i.Value, _ => 0 };
+
+    /// <summary>A colour set on a figure that already has an appearance is drawn: the appearance is
+    /// painted again with it. A figure painted for the first time at the save takes every property
+    /// set by then.</summary>
+    private protected override void OnColorChanged()
+    {
+        if (NormalAppearance is not null) UpdateAppearances();
+    }
 
     /// <summary>Generate the normal appearance for a Square or Circle annotation
     /// (PDF 32000 §12.5.6.8): stroke the figure with the border colour, width and

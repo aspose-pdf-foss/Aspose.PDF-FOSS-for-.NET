@@ -9,7 +9,7 @@ namespace Aspose.Pdf.Facades;
 public sealed partial class PdfAnnotationEditor
 {
     /// <summary>An annotation's child nodes are its popup and its replies - each imported against the annotation it answers.</summary>
-    private static void ImportXfdfChildAnnotations(Document doc, XmlNode node, Page page, PdfDictionary dict)
+    private static void ImportXfdfChildAnnotations(XmlNode node, Page page, PdfDictionary dict)
     {
         foreach (XmlNode childNode in node.ChildNodes)
         {
@@ -246,7 +246,7 @@ public sealed partial class PdfAnnotationEditor
 
             var prmDict = new PdfDictionary();
             var sizeA = node.Attributes?["size"];
-            if (sizeA is not null && int.TryParse(sizeA.Value, out var sz)) prmDict.Set("Size", new PdfInteger(sz));
+            if (sizeA is not null && int.TryParse(sizeA.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sz)) prmDict.Set("Size", new PdfInteger(sz));
             var csA = node.Attributes?["checksum"];
             if (csA is not null) prmDict.Set("CheckSum", new PdfString(FromHex(csA.Value)));
             var crA = node.Attributes?["creation"];
@@ -291,9 +291,9 @@ public sealed partial class PdfAnnotationEditor
             var rateA = node.Attributes?["rate"];
             soundDict.Set("R", new PdfReal(rateA is not null && double.TryParse(rateA.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var rr) ? rr : 11025));
             var bitsA = node.Attributes?["bits"];
-            if (bitsA is not null && int.TryParse(bitsA.Value, out var bb)) soundDict.Set("B", new PdfInteger(bb));
+            if (bitsA is not null && int.TryParse(bitsA.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bb)) soundDict.Set("B", new PdfInteger(bb));
             var chA = node.Attributes?["channels"];
-            if (chA is not null && int.TryParse(chA.Value, out var ch)) soundDict.Set("C", new PdfInteger(ch));
+            if (chA is not null && int.TryParse(chA.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ch)) soundDict.Set("C", new PdfInteger(ch));
             // /E (sound encoding) — element "encoding" attr, normalised to the PDF name.
             var encA = node.Attributes?["encoding"];
             if (encA is not null)
@@ -323,7 +323,7 @@ public sealed partial class PdfAnnotationEditor
             var m = new PdfDictionary();
             m.Set("Type", new PdfName("Measure"));
             if (measureNode.Attributes?["rateValue"] is { } rv)
-                m.Set("R", new PdfString(System.Text.Encoding.UTF8.GetBytes(rv.Value)));
+                m.Set("R", Aspose.Pdf.Forms.Field.EncodePdfTextString(rv.Value));
             foreach (var (xfdfName, pdfKey) in new[]
                      { ("area", "A"), ("distance", "D"), ("xformat", "X"), ("yformat", "Y"), ("angle", "T"), ("slope", "S") })
             {
@@ -334,16 +334,16 @@ public sealed partial class PdfAnnotationEditor
                     var nf = new PdfDictionary();
                     nf.Set("Type", new PdfName("NumberFormat"));
                     if (child.Attributes?["u"] is { } u)
-                        nf.Set("U", new PdfString(System.Text.Encoding.UTF8.GetBytes(u.Value)));
+                        nf.Set("U", Aspose.Pdf.Forms.Field.EncodePdfTextString(u.Value));
                     if (child.Attributes?["c"] is { } c
                         && double.TryParse(c.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var cv))
                         nf.Set("C", new PdfReal(cv));
                     if (child.Attributes?["f"] is { } fAttr) nf.Set("F", new PdfName(fAttr.Value));
-                    if (child.Attributes?["d"] is { } d && int.TryParse(d.Value, out var dv2))
+                    if (child.Attributes?["d"] is { } d && int.TryParse(d.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var dv2))
                         nf.Set("D", new PdfInteger(dv2));
                     foreach (var (attr, k) in new[] { ("rd", "RD"), ("rt", "RT"), ("ps", "PS"), ("ss", "SS") })
                         if (child.Attributes?[attr] is { } sv)
-                            nf.Set(k, new PdfString(System.Text.Encoding.UTF8.GetBytes(sv.Value)));
+                            nf.Set(k, Aspose.Pdf.Forms.Field.EncodePdfTextString(sv.Value));
                     arr ??= new PdfArray();
                     arr.Add(nf);
                 }
@@ -458,6 +458,16 @@ public sealed partial class PdfAnnotationEditor
             }
             dict.Set("BS", bs);
         }
+        // A cloudy style is a border effect (/BE) with its intensity, not a border style.
+        if (string.Equals(styleAttr?.Value, "cloudy", StringComparison.OrdinalIgnoreCase))
+        {
+            var effect = new PdfDictionary();
+            effect.Set("S", new PdfName("C"));
+            if (double.TryParse(node.Attributes?[XfdfTags.Intensity]?.Value, NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out var intensity))
+                effect.Set("I", new PdfReal(intensity));
+            dict.Set("BE", effect);
+        }
     }
 
     /// <summary>The annotation's contents, its rich text and the appearance, colour and justification they set.</summary>
@@ -472,7 +482,13 @@ public sealed partial class PdfAnnotationEditor
         // it is reconstructed here to round-trip faithfully.
         var richTextNode = node.SelectSingleNode("contents-richtext") ?? node.SelectSingleNode("*[local-name()='contents-richtext']");
         if (richTextNode is not null)
+        {
             dict.Set("RC", MakePdfTextString("<?xml version=\"1.0\"?>" + richTextNode.InnerXml));
+            // Rich text alone leaves the note empty wherever the plain /Contents is what is
+            // read: the plain text is the text of the rich one.
+            if (contentsNode is null && richTextNode.InnerText is { Length: > 0 } plain)
+                dict.Set("Contents", MakePdfTextString(plain));
+        }
 
         // Default appearance
         var daNode = node.SelectSingleNode("defaultappearance") ?? node.SelectSingleNode("*[local-name()='defaultappearance']");
@@ -486,7 +502,7 @@ public sealed partial class PdfAnnotationEditor
             var rgb = ParseHexColor(textColorAttr.Value);
             if (rgb is not null)
             {
-                var tf = System.Text.RegularExpressions.Regex.Match(daText ?? "", @"/\S+\s+[\d.]+\s+Tf");
+                var tf = SafeRegex.Match(daText ?? "", @"/\S+\s+[\d.]+\s+Tf");
                 var tfPart = tf.Success ? tf.Value : "/Helvetica 12 Tf";
                 daText = string.Format(CultureInfo.InvariantCulture, "{0:0.######} {1:0.######} {2:0.######} rg {3}",
                     rgb[0], rgb[1], rgb[2], tfPart);
@@ -597,7 +613,7 @@ public sealed partial class PdfAnnotationEditor
     }
 
     /// <summary>The annotation's own dictionary, seated on the rectangle the XFDF node declares.</summary>
-    private static PdfDictionary BuildXfdfAnnotationDict(XmlNode node, Page page, string subtype)
+    private static PdfDictionary BuildXfdfAnnotationDict(XmlNode node, string subtype)
     {
         PdfDictionary? dict = default;
         var rectAttr = node.Attributes?["rect"];

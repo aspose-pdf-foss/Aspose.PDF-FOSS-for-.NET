@@ -33,7 +33,9 @@ internal static partial class HtmlToPdfConverter
         public string Label = "";
         public bool Large;                         // .btn-lg
         public bool IsButtonTag;                   // <button> draws the UA outline
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public Color Fill = Color.FromArgb(236, 236, 236);
+#pragma warning restore S3218
         public Color Border = Color.FromArgb(145, 150, 156);
         public Color Fg = Color.FromArgb(51, 51, 50);
     }
@@ -80,10 +82,12 @@ internal static partial class HtmlToPdfConverter
     // Glyphicons Halflings :before content (the stylesheet's own mapping — the
     // parser drops :before rules, so the three icons this sheet uses are pinned).
     private static int BsGlyphiconCp(string classes)
-        => classes.Contains("glyphicon-envelope") ? 0x2709
-         : classes.Contains("glyphicon-search") ? 0xE003
-         : classes.Contains("glyphicon-print") ? 0xE045
-         : 0;
+    {
+        if (classes.Contains("glyphicon-envelope")) return 0x2709;
+        if (classes.Contains("glyphicon-search")) return 0xE003;
+        if (classes.Contains("glyphicon-print")) return 0xE045;
+        return 0;
+    }
 
     /// <summary>Render a themed Bootstrap screen document, or null when the page
     /// does not carry the dialect's fingerprint.</summary>
@@ -104,10 +108,9 @@ internal static partial class HtmlToPdfConverter
                 System.Globalization.CultureInfo.InvariantCulture, out var lineFactor)
             || lineFactor is <= 1.0 or >= 2.0) return null;
         if (!css.ContainsKey(".container") || !css.ContainsKey(".table")) return null;
-        if (!Regex.IsMatch(html, @"class\s*=\s*[""']container[""']", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(html, @"class\s*=\s*[""']container[""']", RegexOptions.IgnoreCase))
             return null;
         bs.body = body;
-        bs.bodyBg = bodyBg;
         bs.bodyFs = bodyFs;
         bs.lineFactor = lineFactor;
 
@@ -117,6 +120,11 @@ internal static partial class HtmlToPdfConverter
 
         bs.blocks = ParseBootstrapBlocks(bs.bodyHtml, bs, css);
         if (bs.blocks.Count == 0) return null;
+        // Outside the jumbotron arm a paragraph is drawn on one calibrated line: a page whose
+        // paragraph is wider than the container is a flowing document, not this screen.
+        var lineRoom = pageWidth - 2 * BsMarginX - 2 * bs.containerPad;
+        if (!bs.jumboDoc && bs.blocks.Exists(b => b is BsParagraph p && SingleLineWidth(bs, p) > lineRoom))
+            return null;
 
         bs.doc = new Document();
         bs.page = bs.doc.Pages.Add(pageWidth, pageHeight);
@@ -139,29 +147,40 @@ internal static partial class HtmlToPdfConverter
         {
             RenderJumbotron(bs, pageWidth, pageHeight);
         }
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var blk in bs.blocks)
+#pragma warning restore S3267
         {
             if (!RenderBootstrapBlock(bs, pageWidth, pageHeight, blk)) break;
         }
         return bs.doc;
     }
 
-    private abstract class BsBlock { }
-    private sealed class BsRule : BsBlock { }
-    private sealed class BsHeading : BsBlock { public string Text = ""; }
-    private sealed class BsParagraph : BsBlock { public List<BsRun> Runs = new(); }
-    private sealed class BsTable : BsBlock
+    /// <summary>The width of a text paragraph's runs set on one line; zero for a paragraph of buttons, which lays out on its own.</summary>
+    private static double SingleLineWidth(BootstrapScreenState bs, BsParagraph p)
     {
-        public List<List<(string Text, bool Th)>> Rows = new();
+        if (!p.Runs.TrueForAll(r => r.Button is null)) return 0;
+        return p.Runs.Where(r => r.Text is not null).Sum(r => MeasureFaceText(bs.face, r.Text!, bs.bodyFs));
     }
 
-    private static List<BsBlock> ParseBootstrapBlocks(string bodyHtml, BootstrapScreenState bs, IReadOnlyDictionary<string, Dictionary<string, string>> css)
+    private interface IBsBlock { }
+    private sealed class BsRule : IBsBlock { }
+    private sealed class BsHeading : IBsBlock { public string Text = ""; }
+    private sealed class BsParagraph : IBsBlock { public List<BsRun> Runs = new(); }
+    private sealed class BsTable : IBsBlock
+    {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
+        public List<List<(string Text, bool Th)>> Rows = new();
+#pragma warning restore S3218
+    }
+
+    private static List<IBsBlock> ParseBootstrapBlocks(string bodyHtml, BootstrapScreenState bs, IReadOnlyDictionary<string, Dictionary<string, string>> css)
     {
         var bb = new BootstrapBlocksState();
         bb.bodyHtml = bodyHtml;
         bb.bs = bs;
         bb.css = css;
-        bb.blocks = new List<BsBlock>();
+        bb.blocks = new List<IBsBlock>();
         bb.p = null;
         bb.table = null;
         bb.row = null;
@@ -183,7 +202,7 @@ internal static partial class HtmlToPdfConverter
     /// widest cell. Returns the y (top-down) below the table box.</summary>
     private static double RenderBootstrapTable(Page page, BsTable t, double yTd,
         double contentX, double contentW, double pageHeight,
-        string face, string boldFace, (double asc, double sum) fm,
+        string face, string boldFace,
         double fontSize, double lineH, double drop, double pad,
         Color borderCol, Color tableBg, Color textCol,
         BootstrapScreenState bs)

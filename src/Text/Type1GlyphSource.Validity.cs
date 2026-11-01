@@ -18,11 +18,8 @@ internal sealed partial class Type1GlyphSource
     /// BoldItalic siblings, clean, keep their runs; a synthetic one-face page reproduces it).</summary>
     internal bool HasUndefinedCommand()
     {
-        foreach (var cs in _charStringsByGid)
-            if (cs is not null && HasUndefinedCommand(cs)) return true;
-        foreach (var subr in _subrs)
-            if (subr is not null && HasUndefinedCommand(subr)) return true;
-        return false;
+        if (_charStringsByGid.Any(cs => cs is not null && HasUndefinedCommand(cs))) return true;
+        return _subrs.Any(subr => subr is not null && HasUndefinedCommand(subr));
     }
 
     private static bool HasUndefinedCommand(byte[] decrypted)
@@ -33,7 +30,9 @@ internal sealed partial class Type1GlyphSource
             var b = decrypted[i];
             if (b >= 32)
             {
-                i += b <= 246 ? 1 : b <= 254 ? 2 : 5;
+                if (b <= 246) i += 1;
+                else if (b <= 254) i += 2;
+                else i += 5;
                 continue;
             }
             if (b == 12)

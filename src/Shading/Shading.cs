@@ -50,7 +50,7 @@ public abstract class ShadingBase
     /// <summary>Whether anti-aliasing is requested (advisory).</summary>
     public bool AntiAlias { get; }
 
-    internal ShadingBase(PdfDictionary dict, PdfReader reader)
+    private protected ShadingBase(PdfDictionary dict, PdfReader reader)
     {
         var csObj = reader.Resolve(dict.Get("ColorSpace"));
         ColorSpaceName = csObj switch

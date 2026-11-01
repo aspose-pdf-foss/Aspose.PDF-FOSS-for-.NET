@@ -32,7 +32,7 @@ internal static partial class HtmlToPdfConverter
         // Comments blank out too (space-padded so SrcIndex offsets survive) —
         // ParseDom has no comment handling and their text would leak into the
         // tree as literal content.
-        try { rb.dom = ParseDom(Regex.Replace(Regex.Replace(rb.html,
+        try { rb.dom = ParseDom(SafeRegex.Replace(SafeRegex.Replace(rb.html,
                  @"<!--[\s\S]*?-->", m => new string(' ', m.Length)),
                  @"<(script|style|head)[^>]*>[\s\S]*?</\1>",
                  m => new string(' ', m.Length), RegexOptions.IgnoreCase)); }
@@ -85,7 +85,11 @@ internal static partial class HtmlToPdfConverter
             rb.sb.Remove(start, end - start);
             rb.sb.Insert(start, $"<rowmark i=\"{i}\"></rowmark>");
         }
-        foreach (var (_, _, b) in rb.extracts) rowBlocks.Add(b);
+        foreach (var (start, end, b) in rb.extracts)
+        {
+            b.RowSourceHtml = rb.html.Substring(start, end - start);
+            rowBlocks.Add(b);
+        }
         return (rb.sb.ToString(), rowBlocks);
     }
 }

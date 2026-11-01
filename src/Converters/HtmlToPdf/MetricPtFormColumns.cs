@@ -2,8 +2,8 @@
 
 namespace Aspose.Pdf.Converters;
 
-// The pt-sized FORM grid (MEASURED, the helpdesk request form: `BODY { font-family: Tahoma;
-// font-size: 8pt }`, cell class rules in the same face, text inputs and selects in the cells,
+// The pt-sized FORM grid (MEASURED, the helpdesk request form: `BODY { font-family: Tahoma; font-size:
+// 8pt }`, cell class rules in the same face, text inputs and selects in the cells,
 // six 98 % tables): its columns solve on the probed auto-table rule below, and a grid whose
 // MIN-content is wider than the body lays out at that min-content and grows the sheet to one
 // page margin past it. Probed on the reference converter (~90 synthetic fixtures, every fixture
@@ -45,7 +45,9 @@ internal static partial class HtmlToPdfConverter
                     declared = Math.Max(declared, r[c].WidthPx + pad + CellPadLeftExtra(r[c], mt.p) + CellPadRightExtra(r[c], mt.p));
             isFixed[c] = declared > 0;
             maxBox[c] = declared > 0 ? declared : Math.Max(MetricColumnMaxContentPt(mt, c), mt.minCol[c]) + pad;
+#pragma warning disable S4143 // not a blind overwrite: the slot is seeded first, then raised or finalised
             maxBox[c] = Math.Max(maxBox[c], minBox[c]);
+#pragma warning restore S4143
         }
         PtFormRaiseSpannedMins(mt, minBox, maxBox);
 
@@ -57,7 +59,10 @@ internal static partial class HtmlToPdfConverter
         // (a percent table shares the BODY: the sheet less the page margins and the body margin each
         //  side - probed: 98 % of 544.609 on the 736.609 sheet, centred by the difference)
         var body = mt.pageWidth - 2 * (mt.mps.pageMarginLeft + mt.symInsetPt);
-        var box = mt.tableWpt > 0 ? mt.tableWpt : mt.tablePct > 0 ? body * mt.tablePct / 100.0 : body;
+        double box;
+        if (mt.tableWpt > 0) box = mt.tableWpt;
+        else if (mt.tablePct > 0) box = body * mt.tablePct / 100.0;
+        else box = body;
         var region = box - chrome - (live - 1) * mt.s;
         var w = PtFormDistribute(mt, minBox, maxBox, isFixed, region);
         if (Environment.GetEnvironmentVariable("ASPOSE_TRACE_MCOL") == "1")
@@ -92,7 +97,9 @@ internal static partial class HtmlToPdfConverter
             for (var c = 0; c < n; c++)
             {
                 if (mt.colVoid![c]) continue;
-                w[c] = isFixed[c] ? maxBox[c] : sumMaxAuto > 0 ? rest * maxBox[c] / sumMaxAuto : maxBox[c];
+                if (isFixed[c]) w[c] = maxBox[c];
+                else if (sumMaxAuto > 0) w[c] = rest * maxBox[c] / sumMaxAuto;
+                else w[c] = maxBox[c];
             }
             return w;
         }
@@ -102,7 +109,8 @@ internal static partial class HtmlToPdfConverter
             for (var c = 0; c < n; c++)
             {
                 if (mt.colVoid![c]) continue;
-                w[c] = isFixed[c] ? maxBox[c] : minBox[c] + (slackAuto > 0 ? give * (maxBox[c] - minBox[c]) / slackAuto : 0);
+                if (isFixed[c]) w[c] = maxBox[c];
+                else w[c] = minBox[c] + (slackAuto > 0 ? give * (maxBox[c] - minBox[c]) / slackAuto : 0);
             }
             return w;
         }

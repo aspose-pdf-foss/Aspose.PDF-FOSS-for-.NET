@@ -31,14 +31,18 @@ public partial class RedactionAnnotation : Annotation
     public string DefaultAppearance
     {
         get => (InternalReader.Resolve(Dict.Get("DA")) as PdfString)?.ToText() ?? string.Empty;
-        set => Dict.Set("DA", new PdfString(System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty)));
+        set
+        {
+            Dict.Set("DA", new PdfString(System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty)));
+            DropStaleOverlayAppearance();
+        }
     }
 
     /// <summary>Font size used by the overlay text. Stored only.</summary>
     public float FontSize { get; set; }
 
     /// <summary>Flatten this redaction's overlay onto the page. Stored only — use <see cref="Redact()"/> to actually remove content.</summary>
-    public new void Flatten() { }
+    public new void Flatten() { /* stored only: Redact() removes the content */ }
 
     private Page? _page;
 
@@ -53,7 +57,8 @@ public partial class RedactionAnnotation : Annotation
         set
         {
             if (value is null) Dict.Remove("OverlayText");
-            else Dict.Set("OverlayText", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else Dict.Set("OverlayText", Forms.Field.EncodePdfTextString(value));
+            DropStaleOverlayAppearance();
         }
     }
 
@@ -65,14 +70,22 @@ public partial class RedactionAnnotation : Annotation
             var obj = Dict.Get("Repeat");
             return obj is PdfBoolean b && b.Value;
         }
-        set => Dict.Set("Repeat", value ? PdfBoolean.True : PdfBoolean.False);
+        set
+        {
+            Dict.Set("Repeat", value ? PdfBoolean.True : PdfBoolean.False);
+            DropStaleOverlayAppearance();
+        }
     }
 
     /// <summary>Justification: 0=left, 1=center, 2=right (/Q entry).</summary>
     public int Justification
     {
         get => (int)Dict.GetInt("Q");
-        set => Dict.Set("Q", new PdfInteger(value));
+        set
+        {
+            Dict.Set("Q", new PdfInteger(value));
+            DropStaleOverlayAppearance();
+        }
     }
 
     /// <summary>Text alignment for overlay text (maps to /Q).</summary>
@@ -105,6 +118,7 @@ public partial class RedactionAnnotation : Annotation
         {
             if (value is null) Dict.Remove("IC");
             else Dict.Set("IC", ColorToArray(value));
+            DropStaleOverlayAppearance();
         }
     }
 
@@ -171,8 +185,14 @@ public partial class RedactionAnnotation : Annotation
                 }
                 Dict.Set("QuadPoints", arr);
             }
+            DropStaleOverlayAppearance();
         }
     }
+
+    /// <summary>The overlay appearance (/RO) a file stored pictures the mark as it was: once the caller changes
+    /// the areas, the fill, or the overlay text and its layout, it is out of date and the applied redaction is
+    /// drawn from the mark's entries instead, as a viewer redraws an edited mark.</summary>
+    private void DropStaleOverlayAppearance() => Dict.Remove("RO");
 
     /// <summary>The /CreationDate as a DateTime.</summary>
     public DateTime CreationDate
@@ -201,6 +221,11 @@ public partial class RedactionAnnotation : Annotation
         if (page is null || Rect is null) return;
         var r = Rect;
 
+        // Text placed through Paragraphs and not laid out yet is page content too: it is laid
+        // out first, so what lands under the rectangle is removed with the rest instead of
+        // being drawn over the fill at the save.
+        if (page.Paragraphs.Count > 0) page.ProcessParagraphs();
+
         // Remove for good what the page paints under the rectangle - glyphs, the parts of paths
         // and images there, the same inside the forms it draws - so none of it can be read back
         // out of the file, while what lies outside keeps its place.
@@ -215,15 +240,75 @@ public partial class RedactionAnnotation : Annotation
         RemoveFieldsUnder(r);
         RemoveAnnotationsUnder(page, r);
 
-        var b = new Content.ContentStreamBuilder();
-        b.SaveState();
-        b.SetFillColor(fill.R / 255.0, fill.G / 255.0, fill.B / 255.0);
-        b.Rectangle(r.LLX, r.LLY, r.URX - r.LLX, r.URY - r.LLY);
-        b.Fill();
-        b.RestoreState();
-        page.AddContentStream(b.Build());
+        // The overlay appearance, when the mark has one, is what the applied redaction shows: it takes the
+        // place of the fill, the overlay text and its default appearance (PDF 32000-1 table 195).
+        if (InternalReader.ResolveStream(Dict.Get("RO")) is { } overlay && overlay.Dict.GetName("Subtype") == "Form")
+        {
+            DrawOverlayAppearance(page, overlay, r);
+        }
+        else
+        {
+            var b = new Content.ContentStreamBuilder();
+            b.SaveState();
+            b.SetFillColor(fill.R / 255.0, fill.G / 255.0, fill.B / 255.0);
+            b.Rectangle(r.LLX, r.LLY, r.URX - r.LLX, r.URY - r.LLY);
+            b.Fill();
+            b.RestoreState();
+            page.AddContentStream(b.Build());
 
-        EmitOverlayText(page, r);
+            EmitOverlayText(page, r);
+        }
+        RemoveAppliedMark(page);
+    }
+
+    /// <summary>Draw the mark's overlay appearance form on the redacted rectangle, placed as an appearance is.</summary>
+    private void DrawOverlayAppearance(Page page, PdfStream overlay, Rectangle r)
+    {
+        var name = Forms.Form.RegisterAppearanceAsXForm(page.Dict, overlay, InternalReader);
+        var (sx, sy, tx, ty) = FitToRect(overlay, r);
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        string F(double v) => v.ToString("0.#####", ci);
+        page.AddContentStream(Compat.Latin1.GetBytes($"q {F(sx)} 0 0 {F(sy)} {F(tx)} {F(ty)} cm /{name} Do Q\n"));
+    }
+
+    /// <summary>The fill colour a default appearance string sets for its text - the last g, rg or k operator with
+    /// numeric operands - or null when it sets none.</summary>
+    private static string? DefaultAppearanceFillColour(string da)
+    {
+        var tokens = da.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        string? colour = null;
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            var operands = tokens[i] switch { "g" => 1, "rg" => 3, "k" => 4, _ => 0 };
+            if (operands == 0 || i < operands) continue;
+            var values = new string[operands];
+            Array.Copy(tokens, i - operands, values, 0, operands);
+            if (values.All(v => double.TryParse(v, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out _)))
+                colour = string.Join(" ", values) + " " + tokens[i];
+        }
+        return colour;
+    }
+
+    /// <summary>An applied redaction is page content now. Its mark leaves the page with its popup,
+    /// or a viewer goes on drawing the mark's outline over the area and offering to apply it again.</summary>
+    private void RemoveAppliedMark(Page page)
+    {
+        var reader = page.Reader;
+        if (reader.Resolve(page.Dict.Get("Annots")) is not PdfArray annots) return;
+        var kept = new PdfArray();
+        foreach (var entry in annots)
+        {
+            var dict = reader.ResolveDict(entry);
+            if (ReferenceEquals(dict, Dict)) continue;
+            if (dict is not null && dict.GetName("Subtype") == "Popup"
+                && ReferenceEquals(reader.ResolveDict(dict.Get("Parent")), Dict)) continue;
+            kept.Add(entry);
+        }
+        if (kept.Count == annots.Count) return;
+        if (kept.Count > 0) page.Dict.Set("Annots", kept);
+        else page.Dict.Remove("Annots");
+        reader.MayHaveOrphansOnSave = true;
     }
 
     /// <summary>Draw the redaction's /OverlayText as real, searchable page text so it survives the
@@ -254,7 +339,7 @@ public partial class RedactionAnnotation : Annotation
         // Only the FACE is taken from /DA — the size stays the annotation's own, so
         // an overlay that was already being drawn keeps the metrics it laid out with.
         string? daFontName = null;
-        var daMatch = System.Text.RegularExpressions.Regex.Match(
+        var daMatch = SafeRegex.Match(
             DefaultAppearance ?? string.Empty, @"/(\S+)\s+([0-9.]+)\s+Tf");
         if (daMatch.Success) daFontName = daMatch.Groups[1].Value;
 
@@ -264,7 +349,7 @@ public partial class RedactionAnnotation : Annotation
         // as a Type0/Identity-H composite with /ToUnicode, so the drawn text extracts
         // back verbatim. Latin-1-only overlays keep the legacy Helvetica emission.
         var needsUnicode = false;
-        foreach (var ch in overlay) if (ch > 255) { needsUnicode = true; break; }
+        if (overlay.Any(ch => ch > 255)) { needsUnicode = true; }
         var ttf = needsUnicode && daFontName is not null
             ? Aspose.Pdf.Text.FontRepository.GetTtfData(daFontName) : null;
 
@@ -298,24 +383,54 @@ public partial class RedactionAnnotation : Annotation
             showOp = "(" + overlay.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)") + ")";
         }
 
-        double tx = TextAlignment switch
-        {
-            HorizontalAlignment.Center => (minX + maxX) / 2 - w / 2,
-            HorizontalAlignment.Right => maxX - w,
-            _ => minX,
-        };
-        double baseline = top - fs;
+        double bottom = quads is { Length: >= 4 }
+            ? Math.Min(Math.Min(quads[0].Y, quads[1].Y), Math.Min(quads[2].Y, quads[3].Y))
+            : r.LLY;
         var tc = Color;
 
         string F(double v) => v.ToString("0.####", ci);
+        // The text takes the colour its default appearance gives it; the annotation colour stands in without one.
+        var colour = DefaultAppearanceFillColour(DefaultAppearance ?? string.Empty)
+            ?? $"{F(tc.R / 255.0)} {F(tc.G / 255.0)} {F(tc.B / 255.0)} rg";
         var sb = new System.Text.StringBuilder();
         sb.Append("BT\n");
-        sb.Append($"{F(tc.R / 255.0)} {F(tc.G / 255.0)} {F(tc.B / 255.0)} rg\n");
+        sb.Append(colour).Append('\n');
         sb.Append($"/{fontRes} {F(fs)} Tf\n");
-        sb.Append($"1 0 0 1 {F(tx)} {F(baseline)} Tm\n");
-        sb.Append($"{showOp} Tj\n");
+        foreach (var (tx, baseline) in OverlayPositions(minX, maxX, top, bottom, w, fs))
+        {
+            sb.Append($"1 0 0 1 {F(tx)} {F(baseline)} Tm\n");
+            sb.Append($"{showOp} Tj\n");
+        }
         sb.Append("ET\n");
         page.AddContentStream(Compat.Latin1.GetBytes(sb.ToString()));
+    }
+
+    /// <summary>The pitch of the rows a repeated overlay is tiled in, and the gap between the
+    /// repeats along a row, in em.</summary>
+    private const double OverlayPitchEm = 1.2;
+    private const double OverlayGapEm = 1.0;
+
+    /// <summary>Where the overlay text is drawn: once on the first line of the box, aligned per
+    /// /Q; with /Repeat, tiled over the whole box - repeated along each row a gap apart, the rows
+    /// a pitch apart down to the bottom - each row aligned the same way.</summary>
+    private IEnumerable<(double x, double baseline)> OverlayPositions(
+        double minX, double maxX, double top, double bottom, double w, double fs)
+    {
+        var repeat = Repeat;
+        var gap = fs * OverlayGapEm;
+        var count = repeat ? Math.Max(1, (int)Math.Floor((maxX - minX + gap) / (w + gap))) : 1;
+        var rowWidth = count * w + (count - 1) * gap;
+        var x0 = TextAlignment switch
+        {
+            HorizontalAlignment.Center => (minX + maxX) / 2 - rowWidth / 2,
+            HorizontalAlignment.Right => maxX - rowWidth,
+            _ => minX,
+        };
+        for (var baseline = top - fs; ; baseline -= fs * OverlayPitchEm)
+        {
+            for (var i = 0; i < count; i++) yield return (x0 + i * (w + gap), baseline);
+            if (!repeat || baseline - fs * OverlayPitchEm < bottom) yield break;
+        }
     }
 
     /// <summary>Get (or create) the page's /Resources/Font dictionary.</summary>
@@ -332,7 +447,9 @@ public partial class RedactionAnnotation : Annotation
     /// Standard-14 ascent/descent, and return its resource name (reusing an existing matching entry).
     /// The descriptor is what lets the text absorber report the overlay fragment at its descent line
     /// (baseline − descent) — a plain descriptor-less Helvetica would surface
-    /// at the raw baseline.</summary>
+    /// at the raw baseline. A Helvetica the page already has is only reused when it is the same
+    /// kind of font: one with its own /Widths or its own encoding maps the overlay's codes to
+    /// other glyphs and other advances, and the letters overprint one another.</summary>
     internal static string RegisterOverlayFont(Page page)
     {
         var resources = page.Reader.ResolveDict(page.Dict.Get("Resources"));
@@ -342,7 +459,8 @@ public partial class RedactionAnnotation : Annotation
 
         foreach (var key in fontDict.Keys)
             if (page.Reader.Resolve(fontDict.Get(key)) is PdfDictionary ex
-                && ex.GetName("BaseFont") == "Helvetica" && ex.Get("FontDescriptor") is not null)
+                && ex.GetName("BaseFont") == "Helvetica" && ex.Get("FontDescriptor") is not null
+                && ex.Get("Widths") is null && ex.GetName("Encoding") == "WinAnsiEncoding")
                 return key;
 
         var name = "FRov";
@@ -401,9 +519,7 @@ public partial class RedactionAnnotation : Annotation
         {
             var fd = reader.ResolveDict(fref);
             var hit = CentreInside(fd);
-            if (!hit && fd is not null && reader.Resolve(fd.Get("Kids")) is PdfArray kids)
-                foreach (var k in kids)
-                    if (CentreInside(reader.ResolveDict(k))) { hit = true; break; }
+            if (!hit && fd is not null && reader.Resolve(fd.Get("Kids")) is PdfArray kids && kids.Any(k => CentreInside(reader.ResolveDict(k)))) { hit = true; }
             if (hit && fd is not null) removedFields.Add(fd);
             else keptFields.Add(fref);
         }

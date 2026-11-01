@@ -28,7 +28,6 @@ public sealed class PdfPageEditor : System.IDisposable
     public const int DGLITTER  = 16;
 
     private Document? _document;
-    private int[]? _processPages;
     private float _moveX;
     private float _moveY;
 
@@ -103,6 +102,16 @@ public sealed class PdfPageEditor : System.IDisposable
         outputStream.Write(bytes, 0, bytes.Length);
     }
 
+    /// <summary>Applies the pending page changes to the bound document and returns it as PDF bytes. Throws if no document is bound.</summary>
+    public byte[] Save()
+    {
+        if (_document is null)
+            throw new InvalidOperationException("No document bound. Call BindPdf first.");
+        ApplyPendingPageResize();
+        ApplyPendingContentTransform();
+        return _document.ToArray();
+    }
+
     // Resizing/moving a page replaces its /Contents with a new stream (and may re-wrap it),
     // leaving the original content stream unreferenced. The default save serialises every
     // in-use xref entry, so without a reachability sweep those orphaned streams inflate the
@@ -122,8 +131,34 @@ public sealed class PdfPageEditor : System.IDisposable
     public Document Document => _document
         ?? throw new InvalidOperationException("No document bound. Call BindPdf first.");
 
-    /// <summary>The size to resize the target pages to when the changes are applied (<c>ApplyChanges</c> or <c>Save</c>); null leaves the page size unchanged.</summary>
-    public PageSize? PageSize { get; set; }
+    /// <summary>The size to resize the target pages to when the changes are applied (<c>ApplyChanges</c> or <c>Save</c>); null leaves the page size unchanged.
+    /// A bound editor that has not been given a size answers with the size of its first target page, so
+    /// <c>editor.PageSize.IsLandscape = true</c> turns that size; the pages are resized only once a size was
+    /// set or the one handed out was changed.</summary>
+    public PageSize? PageSize
+    {
+        get
+        {
+            if (_pageSize is null && _offeredPageSize is null && _document is not null && _document.Pages.Count > 0)
+            {
+                var first = TargetPagesForStateful().FirstOrDefault() ?? _document.Pages[1];
+                var size = GetPageSize(first.Number);
+                _offeredPageSize = size;
+                _offeredDimensions = (size.Width, size.Height);
+            }
+            return _pageSize ?? _offeredPageSize;
+        }
+        set { _pageSize = value; _offeredPageSize = null; }
+    }
+
+    private PageSize? _pageSize;
+    private PageSize? _offeredPageSize;
+    private (float Width, float Height) _offeredDimensions;
+
+    /// <summary>The size the pages are to be resized to: the one set, or the offered one once the caller changed it.</summary>
+    private PageSize? RequestedPageSize =>
+        _pageSize ?? (_offeredPageSize is { } offered
+            && !(offered.Width, offered.Height).Equals(_offeredDimensions) ? offered : null);
 
     /// <summary>Where a page's content sits horizontally on the resized page when <c>PageSize</c> is set: left (the default), centre or right.</summary>
     public HorizontalAlignment HorizontalAlignment { get; set; } = HorizontalAlignment.None;
@@ -148,8 +183,8 @@ public sealed class PdfPageEditor : System.IDisposable
     /// with its own settings and a trailing Save does not resize a page twice.</summary>
     private void ApplyPendingPageResize()
     {
-        if (_document is null || PageSize is null) return;
-        double newW = PageSize.Width, newH = PageSize.Height;
+        if (_document is null || RequestedPageSize is not { } requested) return;
+        double newW = requested.Width, newH = requested.Height;
         if (newW <= 0 || newH <= 0) return;
         var sx = Zoom > 0 ? Zoom : 1.0;
         foreach (var page in TargetPagesForStateful())
@@ -184,7 +219,14 @@ public sealed class PdfPageEditor : System.IDisposable
             tx -= sx * box.LLX;
             ty -= sx * box.LLY;
             page.ApplyContentResize(sx, sx, tx, ty);
-            page.SetMediaBox(new Rectangle(0, 0, pw, ph));
+            var resized = new Rectangle(0, 0, pw, ph);
+            page.SetMediaBox(resized);
+            // The boxes the page carries inside its media box follow it: a crop box left at
+            // the old size keeps the visible page at the old size.
+            if (page.Dict.ContainsKey("CropBox")) page.SetCropBox(resized);
+            if (page.Dict.ContainsKey("BleedBox")) page.SetBleedBox(resized);
+            if (page.Dict.ContainsKey("TrimBox")) page.SetTrimBox(resized);
+            if (page.Dict.ContainsKey("ArtBox")) page.SetArtBox(resized);
         }
     }
 
@@ -197,7 +239,7 @@ public sealed class PdfPageEditor : System.IDisposable
     /// page-fit scale.</summary>
     private void ApplyPendingContentTransform()
     {
-        if (_document is null || PageSize is not null) return;
+        if (_document is null || RequestedPageSize is not null) return;
         double sx = Zoom > 0 ? Zoom : 1.0;
         bool hasAlignment = HorizontalAlignment != Aspose.Pdf.HorizontalAlignment.None
             || VerticalAlignmentType != Aspose.Pdf.VerticalAlignment.None;
@@ -211,7 +253,9 @@ public sealed class PdfPageEditor : System.IDisposable
         // as well — with the rotation baked into the wrapper cm — once the
         // readers see through the wrapper; adopt that model only together
         // with wrapper-aware readers).
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
         if (sx == 1.0 && _moveX == 0 && _moveY == 0 && !hasAlignment && Rotation != 0) return;
+#pragma warning restore S1244
         foreach (var page in TargetPagesForStateful())
         {
             if (!_transformedPages.Add(page)) continue;
@@ -255,16 +299,6 @@ public sealed class PdfPageEditor : System.IDisposable
                 page.ApplyZoomAsForm(sx, sx, tx, ty);
             }
         }
-    }
-
-    /// <summary>Applies the pending page changes to the bound document and returns it as PDF bytes. Throws if no document is bound.</summary>
-    public byte[] Save()
-    {
-        if (_document is null)
-            throw new InvalidOperationException("No document bound. Call BindPdf first.");
-        ApplyPendingPageResize();
-        ApplyPendingContentTransform();
-        return _document.ToArray();
     }
 
     /// <summary>Release the bound document. Matches the
@@ -320,12 +354,12 @@ public sealed class PdfPageEditor : System.IDisposable
         {
             if (_document is null)
                 throw new InvalidOperationException("No document bound. Call BindPdf first.");
-            foreach (var page in TargetPagesForStateful())
+            foreach (var dict in TargetPagesForStateful().Select(page => page.Dict))
             {
                 if (value < 0)
-                    page.Dict.Remove("Dur");
+                    dict.Remove("Dur");
                 else
-                    page.Dict.Set("Dur", new PdfInteger(value));
+                    dict.Set("Dur", new PdfInteger(value));
             }
         }
     }
@@ -410,11 +444,7 @@ public sealed class PdfPageEditor : System.IDisposable
     /// all pages. Currently honoured by <see cref="DisplayDuration"/>, <see cref="Rotation"/>,
     /// <see cref="TransitionType"/>, and <see cref="TransitionDuration"/>.
     /// </summary>
-    public int[]? ProcessPages
-    {
-        get => _processPages;
-        set => _processPages = value;
-    }
+    public int[]? ProcessPages { get; set; }
 
     /// <summary>Transition style code (use the static constants on this class). 0 = no transition.</summary>
     public int TransitionType
@@ -523,12 +553,12 @@ public sealed class PdfPageEditor : System.IDisposable
     private IEnumerable<Page> TargetPagesForStateful()
     {
         if (_document is null) yield break;
-        if (_processPages is null || _processPages.Length == 0)
+        if (ProcessPages is null || ProcessPages.Length == 0)
         {
             foreach (var p in _document.Pages) yield return p;
             yield break;
         }
-        foreach (var n in _processPages)
+        foreach (var n in ProcessPages)
             if (n >= 1 && n <= _document.PageCount)
                 yield return _document.Pages.At(n);
     }
@@ -600,6 +630,7 @@ public sealed class PdfPageEditor : System.IDisposable
         return null;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     // ── Stateless API ─────────────────────────────────────────────────────────
     /// <summary>
     /// Rotate specified pages. If no page numbers given, rotates all pages.
@@ -608,21 +639,24 @@ public sealed class PdfPageEditor : System.IDisposable
     /// <param name="rotation">Rotation in degrees (0, 90, 180, 270).</param>
     /// <param name="pageNumbers">1-based page numbers to rotate. Empty = all pages.</param>
     public byte[] RotatePages(byte[] input, int rotation, params int[] pageNumbers)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         var pages = GetTargetPages(doc, pageNumbers);
-        foreach (var page in pages)
+        foreach (var dict in pages.Select(page => page.Dict))
         {
-            var current = (int)page.Dict.GetInt("Rotate");
-            page.Dict.Set("Rotate", new PdfInteger((current + rotation) % 360));
+            var current = (int)dict.GetInt("Rotate");
+            dict.Set("Rotate", new PdfInteger((current + rotation) % 360));
         }
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Set the rotation of specified pages to an absolute value.
     /// </summary>
     public byte[] SetRotation(byte[] input, int rotation, params int[] pageNumbers)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         var pages = GetTargetPages(doc, pageNumbers);
@@ -633,10 +667,12 @@ public sealed class PdfPageEditor : System.IDisposable
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Resize specified pages to a new media box.
     /// </summary>
     public byte[] ResizePages(byte[] input, Rectangle newMediaBox, params int[] pageNumbers)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         var pages = GetTargetPages(doc, pageNumbers);
@@ -647,6 +683,7 @@ public sealed class PdfPageEditor : System.IDisposable
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Set the CropBox (visible area) on a specific page.
     /// Per PDF spec section 14.11.2, CropBox defaults to MediaBox if not specified.
@@ -655,34 +692,42 @@ public sealed class PdfPageEditor : System.IDisposable
     /// <param name="pageNumber">1-based page number.</param>
     /// <param name="rect">The crop box rectangle.</param>
     public byte[] SetCropBox(byte[] input, int pageNumber, Rectangle rect)
+#pragma warning restore S2325
     {
         return SetBox(input, pageNumber, "CropBox", rect);
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Set the TrimBox (intended finished page size after trimming) on a specific page.
     /// </summary>
     public byte[] SetTrimBox(byte[] input, int pageNumber, Rectangle rect)
+#pragma warning restore S2325
     {
         return SetBox(input, pageNumber, "TrimBox", rect);
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Set the BleedBox (region to which content should be clipped when printed) on a specific page.
     /// </summary>
     public byte[] SetBleedBox(byte[] input, int pageNumber, Rectangle rect)
+#pragma warning restore S2325
     {
         return SetBox(input, pageNumber, "BleedBox", rect);
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Set the ArtBox (meaningful content area) on a specific page.
     /// </summary>
     public byte[] SetArtBox(byte[] input, int pageNumber, Rectangle rect)
+#pragma warning restore S2325
     {
         return SetBox(input, pageNumber, "ArtBox", rect);
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Adjust page margins by modifying the CropBox relative to the MediaBox.
     /// The CropBox is set to MediaBox inset by the specified margins.
@@ -694,6 +739,7 @@ public sealed class PdfPageEditor : System.IDisposable
     /// <param name="right">Right margin inset.</param>
     /// <param name="top">Top margin inset.</param>
     public byte[] SetMargins(byte[] input, int pageNumber, double left, double bottom, double right, double top)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         var page = GetPage(doc, pageNumber);
@@ -703,38 +749,47 @@ public sealed class PdfPageEditor : System.IDisposable
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Get the CropBox for a specific page. Returns null if not explicitly set.
     /// </summary>
     public Rectangle? GetCropBox(byte[] input, int pageNumber)
+#pragma warning restore S2325
     {
         return GetBox(input, pageNumber, "CropBox");
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Get the TrimBox for a specific page. Returns null if not explicitly set.
     /// </summary>
     public Rectangle? GetTrimBox(byte[] input, int pageNumber)
+#pragma warning restore S2325
     {
         return GetBox(input, pageNumber, "TrimBox");
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Get the BleedBox for a specific page. Returns null if not explicitly set.
     /// </summary>
     public Rectangle? GetBleedBox(byte[] input, int pageNumber)
+#pragma warning restore S2325
     {
         return GetBox(input, pageNumber, "BleedBox");
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Get the ArtBox for a specific page. Returns null if not explicitly set.
     /// </summary>
     public Rectangle? GetArtBox(byte[] input, int pageNumber)
+#pragma warning restore S2325
     {
         return GetBox(input, pageNumber, "ArtBox");
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Scale page content by adjusting the MediaBox dimensions.
     /// The MediaBox origin stays the same; width and height are multiplied by scale factors.
@@ -744,6 +799,7 @@ public sealed class PdfPageEditor : System.IDisposable
     /// <param name="scaleX">Horizontal scale factor (e.g. 2.0 = double width).</param>
     /// <param name="scaleY">Vertical scale factor (e.g. 0.5 = half height).</param>
     public byte[] ScalePage(byte[] input, int pageNumber, double scaleX, double scaleY)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         var page = GetPage(doc, pageNumber);
@@ -768,7 +824,7 @@ public sealed class PdfPageEditor : System.IDisposable
         return arr;
     }
 
-    private byte[] SetBox(byte[] input, int pageNumber, string boxName, Rectangle rect)
+    private static byte[] SetBox(byte[] input, int pageNumber, string boxName, Rectangle rect)
     {
         using var doc = Document.Open(input);
         var page = GetPage(doc, pageNumber);
@@ -776,7 +832,7 @@ public sealed class PdfPageEditor : System.IDisposable
         return doc.ToArray();
     }
 
-    private Rectangle? GetBox(byte[] input, int pageNumber, string boxName)
+    private static Rectangle? GetBox(byte[] input, int pageNumber, string boxName)
     {
         using var doc = Document.Open(input);
         var page = GetPage(doc, pageNumber);

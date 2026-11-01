@@ -11,7 +11,7 @@ namespace Aspose.Pdf;
 public partial class Table
 {
     /// <summary>The object stage of a row-plan paragraph: nested tables, images and form controls, verbatim. Returns true when the paragraph is done.</summary>
-    private bool RowPlanParagraphObjects(BaseParagraph paragraph, RowPlanColumnState pc, RowPlanState rp, int col, Row row, double[] colWidths, int[] cellMap, int[]? gridToCell, int[]? effRowSpan, double svgFillHeight)
+    private bool RowPlanParagraphObjects(BaseParagraph paragraph, RowPlanColumnState pc, RowPlanState rp, int col, Row row, double[] colWidths, double svgFillHeight)
     {
         StampLeading(pc.lines, pc.paraLineStart, pc.paraLeading);
         StampDeclaredLineBox(pc.lines, pc.paraLineStart, pc.paraLineBox);
@@ -34,10 +34,10 @@ public partial class Table
         // text from each inner cell is joined with " | " as a visual
         // separator; proper nested-table rendering would need its own
         // slice pass, but this keeps pagination honest.
-        if (paragraph is Table inner)
-        {
-            if (PlanInnerTableParagraph(inner, pc, rp, col, row) is { } planInnerTableParagraphResult) return planInnerTableParagraphResult;
-        }
+        // A turned text is a box of its turned extent, kept as a picture's is.
+        if (paragraph is TextFragment turned && PlanRotatedTextParagraph(turned, pc, rp, col, row)) return true;
+
+        if (paragraph is Table inner && PlanInnerTableParagraph(inner, pc, rp, col, row) is { } planInnerTableParagraphResult) return planInnerTableParagraphResult;
 
         // A reserved block in a cell is a box of the height its caller lays it out at, kept
         // as a picture's box is; where the cell puts it is reported when the page is drawn.
@@ -51,10 +51,7 @@ public partial class Table
         // display size (explicit Fix* or natural, fit to the cell width), reserve
         // matching vertical space as blank lines so the row's height budget and
         // pagination cover it, and stash the bytes for the render pass to blit.
-        if (paragraph is Image cellImg)
-        {
-            if (PlanImageParagraph(cellImg, pc, rp, col, row, colWidths, svgFillHeight) is { } planImageParagraphResult) return planImageParagraphResult;
-        }
+        if (paragraph is Image cellImg && PlanImageParagraph(cellImg, pc, rp, col, row, colWidths, svgFillHeight) is { } planImageParagraphResult) return planImageParagraphResult;
 
         // A FloatingBox seated in a cell holds a positioned picture: out of the
         // cell's flow, it draws from the cell's content origin and leaves the
@@ -71,7 +68,7 @@ public partial class Table
         if (paragraph is Aspose.Pdf.Forms.RadioButtonOptionField opt)
         {
             var capSize = opt.Caption?.TextState.FontSize > 0
-                ? opt.Caption!.TextState.FontSize
+                ? opt.Caption.TextState.FontSize
                 : pc.defaultFontSize;
             var glyphH = opt.Height > 0 ? opt.Height : capSize;
             // A control row is sized to its glyph/caption without the extra
@@ -111,6 +108,28 @@ public partial class Table
             return true;
         }
 
+        if (paragraph is Aspose.Pdf.Annotations.Annotation annotation)
+        {
+            PlanCellAnnotationParagraph(annotation, pc, rp);
+            return true;
+        }
+
         return false;
+    }
+
+    /// <summary>A text box in a cell, or any other annotation (a list, a button, a link): a block of its own
+    /// height, as a checkbox is - the row covers it and the render pass seats its widget at the cell position.
+    /// A field sized as a share of its cell takes that share of the cell's content box.</summary>
+    private void PlanCellAnnotationParagraph(Aspose.Pdf.Annotations.Annotation annotation, RowPlanColumnState pc, RowPlanState rp)
+    {
+        if (annotation is Aspose.Pdf.Forms.Field { CellWidthFraction: > 0 } shareField)
+            shareField.SetGeneratorBlockWidth(shareField.CellWidthFraction * pc.availWidth);
+        var line = new CellLine { Text = "", FontSize = pc.defaultFontSize };
+        double boxH;
+        if (annotation is Aspose.Pdf.Forms.TextBoxField tbf) { line.TextBox = tbf; boxH = tbf.Height; }
+        else { line.Annotation = annotation; boxH = annotation.Height; }
+        if (boxH <= 0) boxH = pc.defaultFontSize;
+        Consider(rp, boxH, boxH);
+        pc.lines.Add(line);
     }
 }

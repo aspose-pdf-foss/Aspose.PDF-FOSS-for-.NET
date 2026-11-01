@@ -53,11 +53,10 @@ private sealed class StampContentState
     // When wrapping is requested but no explicit stamp width is set, wrap to the
     // page's available extent along the text's advance axis so a WordWrap stamp lays
     // out as multiple on-page lines instead of one line running off the edge — which
-    // page-bounds text extraction would then crop. The extent is the UNROTATED
-    // MediaBox dimension: the stamp's own Rotate turns the advance vertical at 90/270
-    // (Rotation values are degrees, %180==90 catches both), while page /Rotate is a
-    // view transform only — extraction bounds are the unrotated MediaBox, so page.Width
-    // /Height (which swap for a rotated page) must not choose the wrap axis.
+    // page-bounds text extraction would then crop. The extent is the stamp frame's
+    // dimension (Page.ShownFrame: the media box, or the shown page of a turned one, whose
+    // stamp is drawn through the shown-to-media matrix): the stamp's own Rotate turns the
+    // advance vertical at 90/270 (Rotation values are degrees, %180==90 catches both).
     public int stampDeg;
     public bool wrapVertical;
     public Rectangle mb = null!;
@@ -100,8 +99,8 @@ private sealed class StampContentState
     // An OFF-AXIS rotated stamp (e.g. 45°) is anchored by its ROTATED BOUNDING BOX,
     // not by the baseline start: the stamp's content box rotates about
     // the box origin and translates so the rotated box's min corner lands at
-    // (XIndent, YIndent) (the matrix composes size·scale·rotation·shift(point);
-    // the anchor is offset by the rotated box extents). Pinning the baseline start
+    // (XIndent, YIndent) (the matrix composes size·scale·rotation·shift(point); the
+    // anchor is offset by the rotated box extents). Pinning the baseline start
     // (originX, cmY) leaves the stamp shifted by the rotated box's overhang. Applied
     // only to the SIMPLE case it is derived for — a single-line, XIndent/YIndent-placed
     // stamp with no alignment override, background box, wrap or width; quarter rotations
@@ -109,8 +108,8 @@ private sealed class StampContentState
     public bool rotAnchorSimple;
     // Optional background box: when TextState.BackgroundColor is set, fill a
     // rectangle behind the text in the block-local (already rotated/placed)
-    // space. The box spans the block width and one 1.1-em line box per row;
-    // the text baseline is raised by the descent so the glyphs sit inside it.
+    // space. The box spans the block width and one 1.1-em line box per row; the
+    // text baseline is raised by the descent so the glyphs sit inside it.
     public double bgYOffset;
     public Page page = null!;
     public List<byte[]> rows = null!;

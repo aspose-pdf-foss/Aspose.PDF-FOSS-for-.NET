@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Aspose.Pdf.Converters;
@@ -56,6 +57,7 @@ internal static partial class HtmlToPdfConverter
                     $"q 1 0 0 1 0 {-shift:F2} cm\n")));
                 spPage.AddContentStream(Encoding.ASCII.GetBytes("Q\n"));
                 spPage.MediaBox = new Rectangle(0, 0, cv.pageWidth, finalH);
+                ShiftAnnotationsDown(cv.doc.Reader, spPage, shift);
             }
         }
 
@@ -74,6 +76,39 @@ internal static partial class HtmlToPdfConverter
                 sp.AddContentStream(Encoding.ASCII.GetBytes("Q\n"));
                 sp.MediaBox = new Rectangle(0, 0, cv.scaleReqPageW, cv.scaleReqPageH);
             }
+        }
+    }
+
+    /// <summary>The single sheet's content moved down by <paramref name="shift"/> through a
+    /// matrix, which annotations do not follow: each widget and link rectangle, and a jump's
+    /// target top on the same sheet, move with it, or every field stays above the sheet.</summary>
+    private static void ShiftAnnotationsDown(IO.PdfReader reader, Page page, double shift)
+    {
+        static double Num(Core.PdfObject o) => o switch
+        {
+            Core.PdfReal r => r.Value,
+            Core.PdfInteger i => i.Value,
+            _ => double.NaN,
+        };
+        static void ShiftAt(Core.PdfArray arr, int index, double by)
+        {
+            if (index < arr.Count && Num(arr[index]) is var v && !double.IsNaN(v))
+                arr.ReplaceAt(index, new Core.PdfReal(v - by));
+        }
+        // (the raw /Annots entries: the sheet's fields need no annotation wrappers to move)
+        if (reader.ResolveArray(page.Dict.Get("Annots")) is not { } annots) return;
+        foreach (var entry in annots)
+        {
+            if (reader.ResolveDict(entry) is not { } annot) continue;
+            if (reader.ResolveArray(annot.Get("Rect")) is { Count: 4 } rect)
+            {
+                ShiftAt(rect, 1, shift);
+                ShiftAt(rect, 3, shift);
+            }
+            var action = reader.ResolveDict(annot.Get("A"));
+            if (reader.ResolveArray(annot.Get("Dest") ?? action?.Get("D")) is { Count: >= 4 } dest
+                && dest[1] is Core.PdfName { Value: "XYZ" })
+                ShiftAt(dest, 3, shift);
         }
     }
 
@@ -103,8 +138,8 @@ internal static partial class HtmlToPdfConverter
                     s.AppendLine("ET");
                     pg.AddContentStream(Encoding.ASCII.GetBytes(s.ToString()));
                 }
-                if (!string.IsNullOrEmpty(cv.runHeader)) EmitRunning(cv.runHeader!, cv.pageHeight - 24);
-                if (!string.IsNullOrEmpty(cv.runFooter)) EmitRunning(cv.runFooter!, 24);
+                if (!string.IsNullOrEmpty(cv.runHeader)) EmitRunning(cv.runHeader, cv.pageHeight - 24);
+                if (!string.IsNullOrEmpty(cv.runFooter)) EmitRunning(cv.runFooter, 24);
             }
         }
 
@@ -196,6 +231,7 @@ internal static partial class HtmlToPdfConverter
         // order that the fragment-index tests depend on.
         for (var fi = cv.floatFirstOps.Count - 1; fi >= 0; fi--)
             cv.floatFirstOps[fi].page.PrependContentStream(cv.floatFirstOps[fi].ops);
+        DropEmptyPageOfTrailingBreak(cv);
 
         // When custom (font-family) faces were embedded, drop the eager Standard-14
         // Helvetica/Courier resources that no content stream actually references, so the
@@ -268,7 +304,7 @@ internal static partial class HtmlToPdfConverter
                     // section lands the same distance down the fresh sheet as it sat below
                     // the previous message.
                     var head = back;
-                    while (head > 0 && IsBlankFlowBlock(cv, blockList[head - 1])) head--;
+                    while (head > 0 && IsBlankFlowBlock(blockList[head - 1])) head--;
                     (cv.msoKeepWithImage ??= new System.Collections.Generic.HashSet<Block>()).Add(blockList[head]);
                     break;
                 }
@@ -289,7 +325,9 @@ internal static partial class HtmlToPdfConverter
         // pure-blue runs with an fs/10 stroke). The plain serif writer carries
         // block-level ink only, and the menu items are fully-linked lines.
         if (cv.wikiExportDoc)
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
             foreach (var wb in cv.blocks)
+#pragma warning restore S3267
                 if (wb.Anchors is { Count: > 0 })
                 {
                     wb.UnderlineRuns ??= new();
@@ -305,7 +343,9 @@ internal static partial class HtmlToPdfConverter
         // The UA flow's links draw in the UA link ink, underlined (probed: pure-blue
         // runs with a 0.1 em stroke 0.1 em under the baseline, the face inherited).
         if (cv.profile.uaStdSerif && !cv.wikiExportDoc && !cv.profile.dwFormDoc)
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
             foreach (var ub in cv.blocks)
+#pragma warning restore S3267
                 if (ub.Anchors is { Count: > 0 })
                 {
                     ub.UnderlineRuns ??= new();
@@ -359,8 +399,8 @@ internal static partial class HtmlToPdfConverter
                 if ((cv.blocks[fi].FloatLeft || cv.blocks[fi].FloatRight)
                     && (cv.blocks[fi + 1].FloatLeft || cv.blocks[fi + 1].FloatRight)
                     // …and only where each is a float in its OWN right. Blocks that merely sit
-                    // inside one floated container inherit its flag (CSS does not inherit float;
-                    // the flag is carried down so a nested image still leaves the flow), and
+                    // inside one floated container inherit its flag (CSS does not inherit float; the
+                    // flag is carried down so a nested image still leaves the flow), and
                     // levelling THOSE stacks a container's paragraphs on one line.
                     && !cv.blocks[fi].FloatInherited && !cv.blocks[fi + 1].FloatInherited
                     && !cv.blocks[fi].IsTable && !cv.blocks[fi + 1].IsTable
@@ -376,7 +416,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>The per-conversion collections and float cursors start empty.</summary>
-    private static void ResetFlowCollections(ConvertState cv, HtmlLoadOptions? options)
+    private static void ResetFlowCollections(ConvertState cv)
     {
         cv.sb = new StringBuilder();
 
@@ -384,7 +424,7 @@ internal static partial class HtmlToPdfConverter
         cv.fontFileCache = new Dictionary<string, (int objNum, string embedName)>(StringComparer.Ordinal);
 
 
-        cv.radioOptions = new List<(string group, bool chk, Page page, Rectangle rect)>();
+        cv.radioOptions = new List<(string group, string value, bool chk, bool locked, Page page, Rectangle rect)>();
 
         // Radio groups built for GRID tables (the radio factory): one
         // RadioButtonField per HTML `name`, its options handed to the cells as
@@ -393,10 +433,12 @@ internal static partial class HtmlToPdfConverter
         cv.profile.gridRadioGroups = new Dictionary<string, Aspose.Pdf.Forms.RadioButtonField>(StringComparer.Ordinal);
         cv.profile.gridRadioPages = new List<(Aspose.Pdf.Forms.RadioButtonField rbf, Page page)>();
         cv.profile.gridRadioCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        cv.profile.gridRadioValues = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         cv.flow.gridRadioAnon = 0;
 
         cv.anchorTargets = new Dictionary<string, (Page page, double y)>(StringComparer.Ordinal);
         cv.pendingLinks = new List<(Page page, Aspose.Pdf.Rectangle rect, string url, string? text)>();
+        cv.flow.pendingLinks = cv.pendingLinks;
 
         cv.floatFirstOps = new List<(Page page, byte[] ops)>();
 
@@ -404,8 +446,9 @@ internal static partial class HtmlToPdfConverter
         cv.bgSpanStack = new Stack<(Page page, double topY, Color fill, double widthPt, double widthFrac,
             double padTop, double padBottom, double padLeft)>();
         cv.flow.fsIndentLive = 0.0;
-        cv.profile.fsBoxW = cv.fieldsetDoc ? cv.fsBodyPct * (cv.pageWidth - 180.0) - 3.0
-            : cv.uaFieldsetBoxes ? cv.pageWidth - cv.marginLeft - cv.marginRight - UaBodyMarginPt - 2 * UaFieldsetSideInsetPt : 0.0;
+        if (cv.fieldsetDoc) cv.profile.fsBoxW = cv.fsBodyPct * (cv.pageWidth - 180.0) - 3.0;
+        else if (cv.uaFieldsetBoxes) cv.profile.fsBoxW = cv.pageWidth - cv.marginLeft - cv.marginRight - UaBodyMarginPt - 2 * UaFieldsetSideInsetPt;
+        else cv.profile.fsBoxW = 0.0;
 
         cv.flow.lastWasHardBreak = false;
         // Set when the flow cursor rests on a just-rendered table's bottom edge:
@@ -451,13 +494,13 @@ internal static partial class HtmlToPdfConverter
             // The sheet splits the button rule: one rule carries the gradient (its
             // first stop is the fill), another the caption colour — read them all.
             var haveFill = false; var haveFg = false;
-            foreach (Match btnRule in Regex.Matches(cv.html,
+            foreach (Match btnRule in SafeRegex.Matches(cv.html,
                 @"(?<![\w.#-])button\s*\{([^}]*)\}", RegexOptions.IgnoreCase))
             {
                 var btnBody = btnRule.Groups[1].Value;
                 if (!haveFill)
                 {
-                    var bgHex = Regex.Match(btnBody, "#[0-9a-fA-F]{6}");
+                    var bgHex = SafeRegex.Match(btnBody, "#[0-9a-fA-F]{6}");
                     if (bgHex.Success && ParseCssColor(bgHex.Value) is { } btnFill)
                     {
                         cv.dialectButtonFill = btnFill;
@@ -466,10 +509,10 @@ internal static partial class HtmlToPdfConverter
                 }
                 if (!haveFg)
                 {
-                    var fgDecl = Regex.Match(btnBody, @"(?<![\w-])color\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
+                    var fgDecl = SafeRegex.Match(btnBody, @"(?<![\w-])color\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
                     if (fgDecl.Success && ParseCssColor(fgDecl.Groups[1].Value.Trim()) is { } btnFg)
                     {
-                        cv.dialectButtonTextRg = FormattableString.Invariant(
+                        cv.dialectButtonTextRg = Compat.Format(CultureInfo.InvariantCulture,
                             $"{btnFg.R / 255.0:0.###} {btnFg.G / 255.0:0.###} {btnFg.B / 255.0:0.###} rg");
                         haveFg = true;
                     }
@@ -485,21 +528,27 @@ internal static partial class HtmlToPdfConverter
             // Only the bare STANDARDS doctype charges: a legacy/system form
             // (`<!DOCTYPE HTML SYSTEM>`) keeps quirks (probed: 88.80 either way
             // for it, 96.24 only under `<!DOCTYPE html>`).
-            && Regex.IsMatch(cv.html, @"^\s*<!DOCTYPE\s+html\s*>", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(cv.html, @"^\s*<!DOCTYPE\s+html\s*>", RegexOptions.IgnoreCase)
             && cv.blocks.Count > 0 && !cv.blocks[0].IsTable && cv.blocks[0].FontRes == "F1"
             && cv.blocks[0].FontSize is <= 0 or 12.0 && !string.IsNullOrWhiteSpace(cv.blocks[0].Text)
             // …and the charge belongs to a LEADING <p> ELEMENT: a document whose
             // first rendered content is a bare anchor/div line keeps the quirks
             // seat even in standards mode (probed: doctype + bare text = 88.80,
             // doctype + <p> = 96.24). The first renderable element decides.
-            && Regex.Match(
-                    Regex.Replace(cv.html, @"<(script|style|head)[^>]*>[\s\S]*?</\1>", "",
+            && SafeRegex.Match(
+                    SafeRegex.Replace(cv.html, @"<(script|style|head)[^>]*>[\s\S]*?</\1>", "",
                         RegexOptions.IgnoreCase),
                     @"<(p|h[1-6]|div|a|ul|ol|table|img|span|blockquote|pre|input|button|nav|label)\b",
                     RegexOptions.IgnoreCase) is { Success: true } firstElem
             && firstElem.Groups[1].Value.Equals("p", StringComparison.OrdinalIgnoreCase))
         {
-            cv.flow.y -= UaDoctypeLeadParagraphPt;
+            // (the charge is the paragraph margin less the body margin it collapses into: an authored
+            // body margin absorbs it up to its own size, a padded body keeps the two apart - probed:
+            // 72 + 13.44 under body margins up to 16px, 72 + 15 under 20px, 72 + 28.5 + 13.44 under
+            // padding: 30px)
+            cv.flow.y -= AuthoredBodyBox(cv)
+                ? Math.Max(0, UaParagraphMarginPt - BodyTopCollapsePt(cv))
+                : UaDoctypeLeadParagraphPt;
             // This charge IS the standards-mode first-block seat, probed as the
             // whole 96.24 − 88.80 delta — the html5-bare first-block
             // MAX-collapse below models the same physics and must not stack a
@@ -569,14 +618,14 @@ internal static partial class HtmlToPdfConverter
         // sitting two header lines plus the spans' 5px bottom margin under the
         // content top.
         if (cv.profile.dwFormDoc)
-            cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+            cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
                 $"q {DwRuleGray:0.###} {DwRuleGray:0.###} {DwRuleGray:0.###} rg {cv.marginLeft:0.##} {cv.pageHeight - cv.marginTop - DwHeaderRuleDropPt - DwHeaderRuleHPt:0.##} {cv.pageWidth - cv.marginLeft - 90.0 + UaBodyMarginPt:0.##} {DwHeaderRuleHPt:0.##} re f Q\n")));
 
         if (cv.profile.uaStdSerif && cv.blocks.Any(b => b.LeftIndent < 0))
-            cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+            cv.flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
                 $"{cv.marginLeft - UaBodyMarginPt:0.##} 0 {cv.pageWidth - cv.marginLeft + UaBodyMarginPt:0.##} {cv.pageHeight:0.##} re W n\n")));
 
-        cv.titleMatch = Regex.Match(cv.html, @"<title[^>]*>(.*?)</title>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        cv.titleMatch = SafeRegex.Match(cv.html, @"<title[^>]*>(.*?)</title>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (cv.titleMatch.Success)
             cv.doc.Info.Title = DecodeEntities(cv.titleMatch.Groups[1].Value).Trim();
 
@@ -594,7 +643,18 @@ internal static partial class HtmlToPdfConverter
             || (cv.profile.sectionedReport && cv.blocks.Count > 0 && cv.blocks[0].IsTable)
             || (cv.profile.uaGridBoxes && !cv.profile.bodyZeroMargin && cv.blocks.Count > 0 && (cv.blocks[0].IsTable || cv.blocks[0].MarginTop <= 0))))
             cv.marginTop = 72.0 + UaBodyMarginPt;
+        // …and so does every document on the calibrated flow that OPENS with a grid. The calibrated top
+        // margin is a first-BASELINE seat - the page's 72, the body inset and a text line's drop - and a
+        // grid has no baseline: its box lays out downward from the content top, the page's 72 plus the
+        // body's own top inset (probed: a bordered table's frame opens at 78 under a margin-less body, 87
+        // under body { margin: 15pt }, 94.5 under 30px and 72 under margin: 0, whatever the doctype, the
+        // sheet's form or the cellspacing; a leading text line keeps the calibrated seat). The UA and
+        // metric flows open at 72 and spend the body inset themselves. Breaks written before the grid
+        // stand their line boxes on the first page (see OpeningGridLeadingBreaksPt).
+        var openingGrid = !cv.marginsExplicit && !cv.uaFlow && !cv.profile.metricFlow && cv.blocks.Count > 0 && cv.blocks[0].IsTable;
+        if (openingGrid) cv.marginTop = 72.0 + BodyTopInsetPt(cv);
         cv.flow.y = cv.pageHeight - cv.marginTop;
+        if (openingGrid) cv.flow.y -= OpeningGridLeadingBreaksPt(cv);
         // `@page :first` gave the opening sheet a top margin of its own.
         cv.flow.y += cv.cssPageFirstTopLift;
         // Metric flow: the BODY top margin indents the first page only — continuation
@@ -742,8 +802,8 @@ internal static partial class HtmlToPdfConverter
             foreach (var b in cv.blocks)
             {
                 if (string.IsNullOrEmpty(b.ImageSrc)
-                    // a %-max-width image clamps to the content box instead
-                    || b.ImageMaxWFrac > 0) continue;
+                    // a %-max-width or %-width image fits the content box instead
+                    || b.ImageMaxWFrac > 0 || b.ImageWidthFrac > 0) continue;
                 // An inline-SVG placeholder widens by its viewport (CSS px) —
                 // the 600px chart map opens a 96 + 450 + 90 sheet (measured).
                 if (b.ImageSrc.StartsWith("inline-svg:", StringComparison.Ordinal))
@@ -765,9 +825,11 @@ internal static partial class HtmlToPdfConverter
                     // (the snip-capture email: a 615px PNG drawn at width=1920).
                     var ib = LoadConverterImage(b.ImageSrc, options);
                     if (ib is not null)
-                        iwPt = b.ImageWidth > 0 ? b.ImageWidth * 0.75
-                            : TryReadImagePixelSize(ib) is (var ipw2, _) && ipw2 > 0
-                                ? ipw2 * 0.75 : 0;
+                    {
+                        if (b.ImageWidth > 0) iwPt = b.ImageWidth * 0.75;
+                        else if (TryReadImagePixelSize(ib) is (var ipw2, _) && ipw2 > 0) iwPt = ipw2 * 0.75;
+                        else iwPt = 0;
+                    }
                 }
                 else
                 {
@@ -798,10 +860,9 @@ internal static partial class HtmlToPdfConverter
         // FIRST member) falls to the same face — that face IS the stack's first
         // resolvable member, exactly the CSS fallback the expected render takes.
         if (cv.profile.uaStdSerif && cv.uaBodyFace is not null)
-            foreach (var ubb in cv.blocks)
-                if (string.IsNullOrEmpty(ubb.FontFamily)
-                    || PosFace(ubb.FontFamily).ttf is null)
-                    ubb.FontFamily = cv.uaBodyFace;
+            foreach (var ubb in cv.blocks.Where(ubb => string.IsNullOrEmpty(ubb.FontFamily)
+                    || PosFace(ubb.FontFamily).ttf is null))
+                ubb.FontFamily = cv.uaBodyFace;
     }
 
     /// <summary>Page size and margins: report, styled-fragment and redline documents take their dialect margins, and a letter-width page without explicit margins takes the UA defaults.</summary>
@@ -839,13 +900,13 @@ internal static partial class HtmlToPdfConverter
         // overflowing its column) and the sheet widens to hold it inside the
         // cell's 2 pt padding.
         if (cv.profile.ssrsReportDoc && !(cv.pageInfo?.WidthAssigned ?? false)
-            && Regex.Match(cv.html, @"data:image/jpe?g;base64,([A-Za-z0-9+/=]+)",
+            && SafeRegex.Match(cv.html, @"data:image/jpe?g;base64,([A-Za-z0-9+/=]+)",
                 RegexOptions.IgnoreCase) is { Success: true } sjm)
         {
             try
             {
-                var (sjw, sjh) = JpegDims(
-                    System.Convert.FromBase64String(sjm.Groups[1].Value));
+                var (sjw, _) = JpegDims(
+                    Base64Payload(sjm.Groups[1].Value));
                 if (sjw > 0)
                 {
                     var sjNeed = cv.marginLeft + 2.0
@@ -853,7 +914,7 @@ internal static partial class HtmlToPdfConverter
                     if (sjNeed > cv.pageWidth) cv.pageWidth = sjNeed;
                 }
             }
-            catch { }
+            catch { /* malformed base64 - no image */ }
         }
 
         // A body that declares its own width in PHYSICAL units widens the sheet to its

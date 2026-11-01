@@ -31,7 +31,7 @@ internal static partial class HtmlToPdfConverter
                 if (justify)
                 {
                     var spaces = 0;
-                    foreach (var ch in text) if (ch == ' ') spaces++;
+                    foreach (var ch in text.Where(ch => ch == ' ')) spaces++;
                     var natural = MeasureFaceText(mFace, text, ic.fs);
                     if (spaces > 0 && natural < ic.colW)
                         tw2 = (ic.colW - natural) / spaces;
@@ -55,21 +55,21 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Collects the flow from the inline markup: each block's runs wrapped to the column width, blank lines between blocks, justified where the style says so.</summary>
     private static void CollectInlineColumnRuns(InlineColumnsState ic)
     {
-        foreach (Match im in Regex.Matches(ic.body, @"<(p|table)\b([^>]*)>([\s\S]*?)</\1\s*>",
-                     RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(ic.body, @"<(p|table)\b([^>]*)>([\s\S]*?)</\1\s*>",
+                     RegexOptions.IgnoreCase).Select(im => im.Groups))
         {
-            if (im.Groups[1].Value.Equals("p", StringComparison.OrdinalIgnoreCase))
+            if (groups[1].Value.Equals("p", StringComparison.OrdinalIgnoreCase))
             {
-                var inner = im.Groups[3].Value;
-                var text = CollapseWs(DecodeEntities(Regex.Replace(inner, @"<[^>]+>", ""))).Trim();
+                var inner = groups[3].Value;
+                var text = CollapseWs(DecodeEntities(SafeRegex.Replace(inner, @"<[^>]+>", ""))).Trim();
                 if (text.Length == 0) { AddBlank(ic); continue; }
-                var justify = Regex.IsMatch(im.Groups[2].Value,
+                var justify = SafeRegex.IsMatch(groups[2].Value,
                     @"text-align\s*:\s*justify", RegexOptions.IgnoreCase);
                 // A paragraph wholly inside <b>/<i> keeps that weight; mixed
                 // emphasis draws at the paragraph's own weight (this dialect's
                 // headings are wholly bold, its body wholly plain).
-                var bold = Regex.IsMatch(inner, @"^\s*(?:<[bi]\b[^>]*>\s*)+")
-                    && Regex.IsMatch(inner, @"(?:</[bi]\s*>\s*)+$");
+                var bold = SafeRegex.IsMatch(inner, @"^\s*(?:<[bi]\b[^>]*>\s*)+")
+                    && SafeRegex.IsMatch(inner, @"(?:</[bi]\s*>\s*)+$");
                 var lines = MeasuredWordWrap(text, ic.colW, bold ? ic.face + " Bold" : ic.face, ic.fs);
                 for (var li = 0; li < lines.Length; li++)
                     ic.flow.Add((new List<(double, string, bool)> { (0, lines[li], bold) },
@@ -80,38 +80,38 @@ internal static partial class HtmlToPdfConverter
             // that box, each cell's lines pouring through the same grid. A row
             // with no ink is a blank line, exactly like an empty paragraph.
             var tw = ic.colW;
-            if (Regex.Match(im.Groups[2].Value, @"width\s*:\s*([\d.]+)%",
+            if (SafeRegex.Match(groups[2].Value, @"width\s*:\s*([\d.]+)%",
                     RegexOptions.IgnoreCase) is { Success: true } twM
                 && double.TryParse(twM.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var twPct))
                 tw = ic.colW * twPct / 100.0;
-            foreach (Match rm in Regex.Matches(im.Groups[3].Value,
+            foreach (Match rm in SafeRegex.Matches(groups[3].Value,
                          @"<tr\b[^>]*>([\s\S]*?)</tr\s*>", RegexOptions.IgnoreCase))
             {
                 var cells = new List<(double W, string Text, bool Bold)>();
-                foreach (Match cm in Regex.Matches(rm.Groups[1].Value,
-                             @"<t[dh]\b([^>]*)>([\s\S]*?)</t[dh]\s*>", RegexOptions.IgnoreCase))
+                foreach (var cmGroups in SafeRegex.Matches(rm.Groups[1].Value,
+                             @"<t[dh]\b([^>]*)>([\s\S]*?)</t[dh]\s*>", RegexOptions.IgnoreCase).Select(cm => cm.Groups))
                 {
                     var cw = tw / Math.Max(1, cells.Count + 1);
-                    if (Regex.Match(cm.Groups[1].Value, @"width\s*:\s*([\d.]+)%",
+                    if (SafeRegex.Match(cmGroups[1].Value, @"width\s*:\s*([\d.]+)%",
                             RegexOptions.IgnoreCase) is { Success: true } cwM
                         && double.TryParse(cwM.Groups[1].Value,
                             System.Globalization.NumberStyles.Float,
                             System.Globalization.CultureInfo.InvariantCulture, out var cwPct))
                         cw = tw * cwPct / 100.0;
                     var ctext = CollapseWs(DecodeEntities(
-                        Regex.Replace(cm.Groups[2].Value, @"<[^>]+>", ""))).Trim();
-                    cells.Add((cw, ctext, Regex.IsMatch(cm.Groups[2].Value, @"<b\b", RegexOptions.IgnoreCase)));
+                        SafeRegex.Replace(cmGroups[2].Value, @"<[^>]+>", ""))).Trim();
+                    cells.Add((cw, ctext, SafeRegex.IsMatch(cmGroups[2].Value, @"<b\b", RegexOptions.IgnoreCase)));
                 }
                 if (cells.Count == 0) continue;
                 var wrapped = new List<string[]>();
                 var deep = 0;
                 foreach (var (cw, ctext, cb) in cells)
                 {
-                    var ls = ctext.Length == 0
-                        ? System.Array.Empty<string>()
-                        : MeasuredWordWrap(ctext, cw, cb ? ic.face + " Bold" : ic.face, ic.fs);
+                    string[] ls;
+                    if (ctext.Length == 0) ls = System.Array.Empty<string>();
+                    else ls = MeasuredWordWrap(ctext, cw, cb ? ic.face + " Bold" : ic.face, ic.fs);
                     wrapped.Add(ls);
                     deep = Math.Max(deep, ls.Length);
                 }

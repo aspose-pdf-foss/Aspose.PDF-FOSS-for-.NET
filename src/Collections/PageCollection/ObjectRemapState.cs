@@ -15,5 +15,7 @@ private sealed class ObjectRemapState
     public HashSet<object> visitedIdentity = null!;
     public int nextObjNum;
     public PdfObject? root;
+    // The source's named destinations, null when it has none.
+    public CarriedDestinations? destinations;
 }
 }

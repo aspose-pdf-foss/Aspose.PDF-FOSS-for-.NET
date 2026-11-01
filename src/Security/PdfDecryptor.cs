@@ -22,7 +22,6 @@ internal sealed class PdfDecryptor
     private static readonly byte[] AesSalt = "sAlT"u8.ToArray();
 
     private readonly byte[] _encryptionKey;
-    private readonly int _version;     // V value
     private readonly int _revision;    // R value
     private readonly bool _encryptMetadata;
     private readonly string _defaultStreamFilter;  // StmF
@@ -42,7 +41,6 @@ internal sealed class PdfDecryptor
     {
         _custom = custom;
         _encryptionKey = encryptionKey;
-        _version = version;
         _revision = revision;
         _encryptMetadata = encryptMetadata;
         _defaultStreamFilter = defaultStreamFilter;
@@ -152,7 +150,7 @@ internal sealed class PdfDecryptor
         if (v == 5 || v == 6)
         {
             // AES-256 (R5 or R6; V6/R7 with the GCM filter)
-            return TryCreateV5(encryptDict, r, keyLength, oBytes, uBytes, password, encryptMetadata, stmF, strF);
+            return TryCreateV5(encryptDict, r, oBytes, uBytes, password, encryptMetadata, stmF, strF);
         }
 
         // V1–V4: the spec fixes /O and /U at 32 bytes. A shorter entry is a
@@ -314,7 +312,11 @@ internal sealed class PdfDecryptor
         var iv = data[..16];
         var ciphertext = data[16..];
 
-        if (ciphertext.Length == 0 || ciphertext.Length % 16 != 0)
+        // A value that is only its initialisation vector encrypts nothing: its plaintext is
+        // empty, not the vector's bytes (which would surface as a title of random characters).
+        if (ciphertext.Length == 0)
+            return Array.Empty<byte>();
+        if (ciphertext.Length % 16 != 0)
             return data; // Invalid AES data — return as-is
 
         try
@@ -462,8 +464,7 @@ internal sealed class PdfDecryptor
 
     #region V5 (AES-256) Key Derivation (§7.6.3.3.3, §7.6.3.4.1)
 
-    private static PdfDecryptor? TryCreateV5(PdfDictionary encryptDict, int revision,
-        int keyLength, byte[] oBytes, byte[] uBytes, string password,
+    private static PdfDecryptor? TryCreateV5(PdfDictionary encryptDict, int revision, byte[] oBytes, byte[] uBytes, string password,
         bool encryptMetadata, string stmF, string strF)
     {
         // SASLprep (RFC 4013) the password, then UTF-8 encode and truncate to

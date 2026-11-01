@@ -29,8 +29,10 @@ public sealed partial class Form
             if (field is null) return false;
             // The facade fills raw: a value the field's /AA/F formatter cannot
             // parse is still stored and rendered verbatim (the DOM Value setter
-            // keeps reject-invalid semantics).
-            if (field is TextBoxField tb) tb.SetValue(fieldValue, validateFormat: false);
+            // keeps reject-invalid semantics). Markup given to a rich text field is its
+            // rich value, laid out as such, not literal text.
+            if (field is RichTextBoxField rich && RichTextBoxField.LooksLikeRichMarkup(fieldValue)) rich.RichTextValue = fieldValue;
+            else if (field is TextBoxField tb) tb.SetValue(fieldValue, validateFormat: false);
             else field.Value = fieldValue;
             return true;
         }
@@ -47,10 +49,6 @@ public sealed partial class Form
             return FillField(fieldName, box.OnValue);
         return FillField(fieldName, beChecked ? "Yes" : "Off");
     }
-
-    /// <summary>Fill a barcode field by name with the given data.</summary>
-    public bool FillBarcodeField(string fieldName, string data)
-        => FillField(fieldName, data);
 
     /// <summary>Fill a text field with the supplied value, optionally fitting font size to the box.</summary>
     public bool FillField(string fieldName, string value, bool fitFontSize)
@@ -78,13 +76,10 @@ public sealed partial class Form
             _doc.Form.SetXfaFieldValue(fieldName, rb.Options[index + 1].Value);
             return true;
         }
-        if (field is ChoiceField cf)
+        if (field is ChoiceField cf && index >= 0 && index < cf.Options.Count)
         {
-            if (index >= 0 && index < cf.Options.Count)
-            {
-                cf.Selected = index;
-                return true;
-            }
+            cf.Selected = index;
+            return true;
         }
         return false;
     }
@@ -97,6 +92,10 @@ public sealed partial class Form
         if (field is null) return;
         field.Value = string.Join(",", fieldValues);
     }
+
+    /// <summary>Fill a barcode field by name with the given data.</summary>
+    public bool FillBarcodeField(string fieldName, string data)
+        => FillField(fieldName, data);
 
     /// <summary>
     /// Apply multiple field values and return the resulting PDF as a stream.
@@ -111,12 +110,7 @@ public sealed partial class Form
         {
             if (!FillField(fieldNames[i], fieldValues[i])) allOk = false;
         }
-        // A signed document must be updated incrementally so the original bytes
-        // (and thus the existing signature's /ByteRange) survive; a full rewrite
-        // would invalidate the signature.
-        var bytes = _doc.Form is { SignaturesExist: true }
-            ? _doc.ToArrayIncremental()
-            : _doc.ToArray();
+        var bytes = SerializedBytes();
         output.Write(bytes, 0, bytes.Length);
         output.Position = 0;
         return allOk;
@@ -140,7 +134,7 @@ public sealed partial class Form
         // XFA field has no AcroForm widget (FindByName is null), so this is the only sink.
         if (_doc.Form.IsXfa)
             _doc.Form.SetXfaFieldImage(fieldName, Convert.ToBase64String(imageBytes),
-                DetectImageContentType(imageBytes));
+                Aspose.Pdf.Forms.Form.ImageContentType(imageBytes));
 
         var field = _doc.Form.FindFieldOrNull(fieldName);
         if (field is null) return;
@@ -173,15 +167,6 @@ public sealed partial class Form
 
     /// <summary>MIME type for an XFA image field's datasets <c>contentType</c>, from the
     /// image's magic bytes. Uses <c>image/jpg</c> (XFA's spelling, not image/jpeg).</summary>
-    private static string DetectImageContentType(byte[] b)
-    {
-        if (b.Length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpg";
-        if (b.Length >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "image/png";
-        if (b.Length >= 3 && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46) return "image/gif";
-        if (b.Length >= 2 && b[0] == 0x42 && b[1] == 0x4D) return "image/bmp";
-        return "image/jpg";
-    }
-
     /// <summary>Build an image XObject from <paramref name="imageBytes"/> and write
     /// it as the widget's normal appearance, scaled to fill the widget rectangle.</summary>
     private void SetImageAppearance(Core.PdfDictionary widget, byte[] imageBytes)

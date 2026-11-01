@@ -5,8 +5,10 @@ using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf.Operators;
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>EMC — End marked content.</summary>
 public sealed class EMC : Operator
+#pragma warning restore S101
 {
     /// <summary>Creates an <c>EMC</c> operator, which ends the innermost marked-content sequence opened by <c>BMC</c> or <c>BDC</c>.</summary>
     public EMC() { }
@@ -15,8 +17,10 @@ public sealed class EMC : Operator
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>BDC — Begin marked content with properties.</summary>
 public sealed class BDC : Operator
+#pragma warning restore S101
 {
     /// <summary>Gets or sets the marked-content tag, such as <c>Span</c> or <c>P</c>, without the leading slash.</summary>
     public string Tag { get; set; }
@@ -42,8 +46,10 @@ public sealed class BDC : Operator
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>BMC — Begin marked-content sequence (no properties).</summary>
 public sealed class BMC : Operator
+#pragma warning restore S101
 {
     /// <summary>Gets or sets the marked-content tag, without the leading slash.</summary>
     public string Tag { get; set; }

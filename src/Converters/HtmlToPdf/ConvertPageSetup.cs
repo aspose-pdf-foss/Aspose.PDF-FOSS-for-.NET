@@ -12,12 +12,13 @@ internal static partial class HtmlToPdfConverter
         ResolvePageGeometry(cv, options);
 
         if (RenderEarlyDialects(cv, options) is { } renderEarlyDialectsResult) return renderEarlyDialectsResult;
-        ResolveFloatBands(cv, options);
-        if (RenderChartDialects(cv, options) is { } renderChartDialectsResult) return renderChartDialectsResult;
+        ResolveFloatBands(cv);
+        if (RenderChartDialects(cv) is { } renderChartDialectsResult) return renderChartDialectsResult;
         cv.html = ReplaceCanvasesWithSvg(cv.html);
         (cv.html, cv.inlineSvgs) = ExtractInlineSvgs(cv.html);
 
         cv.css = ParseStyleSheet(cv.html);
+        MergeBodyTagStyle(cv);
         if (RenderStyledDialectsA(cv, options) is { } renderStyledDialectsAResult) return renderStyledDialectsAResult;
         if (RenderStyledDialectsB(cv, options) is { } renderStyledDialectsBResult) return renderStyledDialectsBResult;
         if (RenderStyledDialectsC(cv, options) is { } renderStyledDialectsCResult) return renderStyledDialectsCResult;
@@ -25,7 +26,7 @@ internal static partial class HtmlToPdfConverter
         // Full-chain rules (id-anchored / child-combinator / 3+-part selectors the
         // flat map drops) for the lifted-table builds — null when the document has
         // none, which keeps every legacy path untouched.
-        ResolveBodyBackground(cv, options);
+        ResolveBodyBackground(cv);
 
         // Print-grid dialect (gated): a bootstrap-style report — .col-xs-N percent
         // column classes plus an @media print reset (* { color:#000 !important }).

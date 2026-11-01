@@ -59,14 +59,14 @@ internal static partial class AutoTagger
     }
 
     private static readonly System.Text.RegularExpressions.Regex MarkedFigure = new(
-        "^" + Figure + @"\s+[a-z]$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        "^" + Figure + @"\s+[a-z]$", System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Where the figure of a table's cell ends: a figure with the letter of a note after it ("124.0 e") ends
     /// where its last digit does, the letter standing past the edge the column's figures end at.</summary>
     private static (double L, double R, string Text)? FigureIn(List<Line> lines, double left, double right, double bottom, double top)
     {
         if (TextIn(lines, left, right, bottom, top) is not { } whole) return null;
-        if (!MarkedFigure.IsMatch(whole.Text)) return whole;
+        if (!SafeRegex.IsMatch(MarkedFigure, whole.Text)) return whole;
         var frags = lines.Where(l => l.Baseline > bottom && l.Baseline <= top).SelectMany(l => l.Frags)
             .Where(f => !string.IsNullOrWhiteSpace(f.Text) && (f.X + f.R) / 2 >= left && (f.X + f.R) / 2 <= right).OrderBy(f => f.X).ToList();
         var figure = whole.Text[..^1].TrimEnd();
@@ -83,7 +83,7 @@ internal static partial class AutoTagger
     private static double FigureWidth(string text) => text.Sum(c => char.IsDigit(c) || char.IsLetter(c) ? 1.0 : 0.5);
 
     private static readonly System.Text.RegularExpressions.Regex OneFigure = new(
-        "^" + Figure + "$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        "^" + Figure + "$", System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The columns of a table set flush right: their body cells (under the heading rows) end at one edge
     /// and start ragged - a statistical table's figures - with the edge they end at.</summary>
@@ -107,7 +107,7 @@ internal static partial class AutoTagger
             flush[c] = ends.Count >= 2 && ends.Max(e => e.R) - ends.Min(e => e.R) <= AlignTolerance
                                        && ends.Max(e => e.L) - ends.Min(e => e.L) > AlignTolerance;
             even[c] = c > 0 && ends.Count >= 2 && ends.Max(e => e.R) - ends.Min(e => e.R) <= AlignTolerance
-                      && ends.Max(e => e.L) - ends.Min(e => e.L) <= AlignTolerance && ends.All(e => OneFigure.IsMatch(e.Text));
+                      && ends.Max(e => e.L) - ends.Min(e => e.L) <= AlignTolerance && ends.All(e => SafeRegex.IsMatch(OneFigure, e.Text));
             if (flush[c] || even[c]) rightEdge[c] = ends.Max(e => e.R);
         }
         if (flush.Any(f => f))
@@ -140,7 +140,7 @@ internal static partial class AutoTagger
     /// /StartIndent): a label set in a level under the one above it. Nothing for a cell starting with the column.</summary>
     private static void StateCellIndent(LS.StructureElement cell, List<Line> lines, double columnStart, double left, double right, double bottom, double top)
     {
-        if (double.IsNaN(columnStart) || TextIn(lines, left, right, bottom, top) is not { } e || OneFigure.IsMatch(e.Text)) return;
+        if (double.IsNaN(columnStart) || TextIn(lines, left, right, bottom, top) is not { } e || SafeRegex.IsMatch(OneFigure, e.Text)) return;
         // Spaces the label is set in with show its indent themselves: it starts where they do.
         var start = lines.Where(l => l.Baseline > bottom && l.Baseline <= top).SelectMany(l => l.Frags)
             .Where(f => string.IsNullOrWhiteSpace(f.Text) && f.X >= left - AlignTolerance && f.X < e.L && f.R <= e.L + SpaceJoin)
@@ -186,7 +186,9 @@ internal static partial class AutoTagger
     {
         var edges = new List<double>(colX);
         for (var c = 1; c < flush.Length; c++)
+#pragma warning disable S1244 // an edge set on an upright rule is a copy of the rule's position - exact on purpose
             if (flush[c - 1] && flush[c] && edgeRules?.Any(r => !r.Horizontal && r.Drawn && r.At == colX[c]) != true)
+#pragma warning restore S1244
                 edges[c] = Math.Min(right[c - 1] + FlushRightPad, colX[c]);
         return edges;
     }

@@ -17,12 +17,12 @@ public partial class Table
     // block's middle row. Its background and border go down before any row so the
     // fill cannot cover the text that follows it.
     private void EmitSpanBlockContent(SlicesContentState slc, string fontName, Page? linkPage, SpanBlock block, double x, double w, double h,
-        double top, double bottom)
+        double top)
     {
         slc.cell = block.Cell;
         slc.row = block.Row;
         slc.padding = EffectivePad(slc.cell, slc.row);
-        slc.dp = DefaultPad(slc.cell, slc.row);
+        slc.dp = DefaultPad;
         slc.padLeft = slc.padding?.Left ?? slc.dp;
         slc.padRight = slc.padding?.Right ?? slc.dp;
         slc.padTop = slc.padding?.Top ?? 0;
@@ -48,11 +48,12 @@ public partial class Table
         slc.blockH = lineCount == 0 ? 0
             : (lineCount - 1) * block.LineHeight + block.TightLine + slc.gapsTotal;
         slc.effVA = slc.cell.VerticalAlignment != VerticalAlignment.None ? slc.cell.VerticalAlignment : slc.row.VerticalAlignment;
-        slc.offset = slc.effVA == VerticalAlignment.Bottom
-            ? Math.Max(slc.padTop, h - (slc.padding?.Bottom ?? 0) - slc.blockH)
-            : slc.effVA == VerticalAlignment.Top
-                ? slc.padTop
-                : Math.Max(slc.padTop, (h - slc.blockH) / 2);
+        slc.offset = slc.effVA switch
+        {
+            VerticalAlignment.Bottom => Math.Max(slc.padTop, h - (slc.padding?.Bottom ?? 0) - slc.blockH),
+            VerticalAlignment.Top => slc.padTop,
+            _ => Math.Max(slc.padTop, (h - slc.blockH) / 2),
+        };
         slc.gapAccum = 0.0;
         for (var li = lineStart; li < lineStart + lineCount; li++)
         {
@@ -65,34 +66,40 @@ public partial class Table
     /// <summary>Register the slice's hyperlinks, radio options and checkboxes on the link page.</summary>
     private void RegisterSliceLinks(SlicesContentState slc, Page? linkPage)
     {
-        if (linkPage is not null && slc.links is { Count: > 0 })
+        // A header row repeated on a spill page draws controls an earlier page of this build holds, and a widget
+        // stands on one page: where the spill pages share the start page and their caller seats each page's draws
+        // on its own page, such a control stays on the page its row was first built for - neither placed again
+        // nor listed among this page's draws.
+        if (SpillPagesShareFontDict)
         {
-            foreach (var (rect, link) in slc.links)
-            {
-                if (link is WebHyperlink wh && !string.IsNullOrEmpty(wh.Url))
-                    // Record the target URL as the link's /Contents so it is
-                    // recoverable from the annotation after a save/reload round-trip.
-                    linkPage.Annotations.AddLinkAnnotation(rect, wh.Url).Contents = wh.Url;
-                else if (link is LocalHyperlink lh && lh.TargetPageNumber > 0)
-                    linkPage.Annotations.AddLinkAnnotation(rect,
-                        new Aspose.Pdf.Annotations.GoToAction(
-                            new Aspose.Pdf.Annotations.XYZExplicitDestination(lh.TargetPageNumber, 0, 0, 0)));
-            }
+            slc.optionSink?.RemoveAll(o => !_builtControls.Add(o.opt));
+            slc.checkboxSink?.RemoveAll(d => !_builtControls.Add(d.annot));
         }
+        // (the link annotations are recorded with the page's widgets, for a caller that seats a spill page's again)
+        var linkDraws = new List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>();
+        // A page that does not exist yet keeps its links and annotations for the caller to bind there.
+        var bindPage = DefersStartPageAnnotations && !SpillPagesShareFontDict ? null : linkPage;
+        if (bindPage is not null && slc.links is { Count: > 0 })
+            foreach (var (rect, link) in slc.links)
+                if (AddCellLink(bindPage, rect, link) is { } annot) linkDraws.Add((annot, rect));
+        _pageLinks.Add(bindPage is null && slc.links is not null ? slc.links : new List<(Rectangle rect, Hyperlink link)>());
 
         // Radio-option widgets laid out in cells: place each option's widget at its
         // glyph rectangle and add it to the page /Annots so it round-trips as an
         // interactive control alongside the drawn glyph.
         if (linkPage is not null && slc.optionSink is { Count: > 0 })
             foreach (var (opt, rect) in slc.optionSink)
-                opt.OwnerRadio?.PlaceOptionWidget(opt, linkPage, rect);
+                if (opt.OwnerRadio is not null) Forms.RadioButtonField.PlaceOptionWidget(opt, linkPage, rect);
 
-        // Checkbox widgets laid out in cells: move each widget to its glyph rectangle
-        // (its /AP appearance draws the box and check at that position).
-        if (linkPage is not null && slc.checkboxSink is { Count: > 0 })
-            foreach (var (cbf, rect) in slc.checkboxSink)
-                cbf.PlaceWidget(linkPage, rect);
-        _pageCheckboxes.Add(slc.checkboxSink ?? new List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>());
+        // Widgets and annotations laid out in cells: move each to its laid-out rectangle
+        // (a widget's /AP appearance draws the control at that position).
+        if (bindPage is not null && slc.checkboxSink is { Count: > 0 })
+            foreach (var (annot, rect) in slc.checkboxSink)
+                PlaceCellAnnotation(annot, bindPage, rect);
+        var pageDraws = slc.checkboxSink ?? new List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>();
+        pageDraws.AddRange(linkDraws);
+        _pageCheckboxes.Add(pageDraws);
+        _pageOptions.Add(slc.optionSink ?? new List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>());
 
         RestorePageMacros(slc.macroSwaps);
     }
@@ -206,21 +213,22 @@ public partial class Table
     }
 
     /// <summary>One line of a span block: its gap, text runs with their faces and colours, and the link rectangle it books.</summary>
-    private bool EmitSpanBlockLine(SlicesContentState slc, string fontName, Page? linkPage, SpanBlock block, double x, double w, double top, int li, int seat)
+    private static bool EmitSpanBlockLine(SlicesContentState slc, string fontName, Page? linkPage, SpanBlock block, double x, double w, double top, int li, int seat)
     {
         slc.line = block.Lines[li];
         slc.gapAccum += slc.line.TopGap;
         if (slc.line.Text.Length == 0) return true;
-        slc.tw = slc.line.KernedWidth > 0 ? slc.line.KernedWidth
-            // A line laid out to a declared box is measured exactly (see
-            // MeasureStyledLine).
-            : DeclaresLineBox(slc.line) ? MeasureWidthExactAfm(slc.line.Text, slc.line.FontSize)
-            : MeasureWidth(slc.line.Text, slc.line.FontSize);
-        slc.lineX = slc.line.Align == HorizontalAlignment.Center
-            ? x + Math.Max(slc.padLeft, (w - slc.tw) / 2)
-            : slc.line.Align == HorizontalAlignment.Right
-                ? Math.Max(x + slc.padLeft, x + w - slc.padRight - slc.tw)
-                : x + slc.padLeft;
+        if (slc.line.KernedWidth > 0) slc.tw = slc.line.KernedWidth;
+        // A line laid out to a declared box is measured exactly (see
+        // MeasureStyledLine).
+        else if (DeclaresLineBox(slc.line)) slc.tw = MeasureWidthExactAfm(slc.line.Text, slc.line.FontSize);
+        else slc.tw = MeasureWidth(slc.line.Text, slc.line.FontSize);
+        slc.lineX = slc.line.Align switch
+        {
+            HorizontalAlignment.Center => x + Math.Max(slc.padLeft, (w - slc.tw) / 2),
+            HorizontalAlignment.Right => Math.Max(x + slc.padLeft, x + w - slc.padRight - slc.tw),
+            _ => x + slc.padLeft,
+        };
         // A declared line box advances by its own height and seats its baseline
         // half its surplus leading below its top, the same as in an ordinary cell.
         slc.lineBase = DeclaresLineBox(slc.line)
@@ -229,19 +237,17 @@ public partial class Table
             : top - slc.offset - slc.gapAccum - seat * block.LineHeight - slc.line.FontSize;
         // Styled segment runs: each piece draws in its OWN face, size,
         // colour and underline on the line's shared baseline.
-        if (slc.line.SegRuns is { Count: > 0 } spanRuns)
-        {
-            if (EmitSpanBlockRuns(slc, fontName, linkPage, spanRuns)) return true;
-        }
+        if (slc.line.SegRuns is { Count: > 0 } spanRuns && EmitSpanBlockRuns(slc, fontName, linkPage, spanRuns)) return true;
         // Embedded-serif span line (HonorCellFontFaces): draw through the
         // Type0 path with kerned advances, like the grid-cell renderer.
-        if (slc.line.Type0Ttf is not null && linkPage is not null)
-        {
-            if (EmitSpanBlockType0(slc, linkPage)) return true;
-        }
+        if (slc.line.Type0Ttf is not null && linkPage is not null && EmitSpanBlockType0(slc, linkPage)) return true;
         slc.builder.BeginText();
-        slc.builder.SetFont(slc.line.BaseFont is { } face && linkPage is not null ? RegisterFont(linkPage, face)
-            : slc.line.Bold && linkPage is not null ? RegisterFont(linkPage, "Helvetica-Bold") : fontName, slc.line.FontSize);
+        slc.builder.SetFont((slc.line.BaseFont, linkPage, slc.line.Bold) switch
+        {
+            ({ } face, not null, _) => RegisterFont(linkPage, face),
+            (_, not null, true) => RegisterFont(linkPage, "Helvetica-Bold"),
+            _ => fontName,
+        }, slc.line.FontSize);
         ApplyColor(slc.builder, slc.line.ForegroundColor);
         slc.builder.MoveTextPosition(slc.lineX, slc.lineBase);
         slc.builder.ShowText(slc.line.Text);
@@ -250,9 +256,15 @@ public partial class Table
     }
 
     /// <summary>A line set in an embedded Type0 face: the subset glyph ids shown at the line origin with the link rectangle.</summary>
-    private bool EmitSpanBlockType0(SlicesContentState slc, Page? linkPage)
+    private static bool EmitSpanBlockType0(SlicesContentState slc, Page? linkPage)
     {
         var sbFontDict = ResolvePageFontDict(linkPage!);
+        // (a mixed-weight line draws run by run, each in its own face, as in a grid cell)
+        if (slc.line.StyleRuns is { Count: > 0 })
+        {
+            DrawStyleRuns(slc.builder, sbFontDict, slc.line, slc.lineX, slc.lineBase);
+            return true;
+        }
         var (sbRes, sbHex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
             sbFontDict, slc.line.Type0Ttf!, slc.line.Type0FontName ?? "Arial", slc.line.Text,
             stripSpacesInBaseFont: true);
@@ -294,7 +306,7 @@ public partial class Table
     }
 
     /// <summary>A line of segment runs: each run with its own face, size and colour at the walked pen.</summary>
-    private bool EmitSpanBlockRuns(SlicesContentState slc, string fontName, Page? linkPage, List<SpanRun> spanRuns)
+    private static bool EmitSpanBlockRuns(SlicesContentState slc, string fontName, Page? linkPage, List<SpanRun> spanRuns)
     {
         // A picture among the runs stands on the baseline at its offset: drawn
         // in place when a page can hold it, else blitted with the page's images.

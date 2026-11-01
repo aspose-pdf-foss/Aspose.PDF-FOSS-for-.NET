@@ -16,12 +16,12 @@ internal static partial class HtmlToPdfConverter
     // spaces stay as drawn glyphs, and leading tabs advance the pen without ink.
     //
     // Geometry (all measured, fs 12px = 9 pt Arial on A4):
-    //   content x = 96 (the 90 pt margin + the UA body 8 px);
-    //   line i baseline (from top) = 86.1108 + i · 10.7593 — the ladder's first
+    //   content x = 96 (the 90 pt margin + the UA body 8 px); line
+    //   i baseline (from top) = 86.1108 + i · 10.7593 — the ladder's first
     //   rung is the label's leading source newline, so the first VISIBLE line
-    //   (i = 1) seats at 96.8701;
-    //   a leading tab advances 2.46533 pt (7.396 over the fixture's three tabs);
-    //   a space glyph advances 0.278 em = 2.502 pt.
+    //   (i = 1) seats at 96.8701; a
+    //   leading tab advances 2.46533 pt (7.396 over the fixture's three tabs); a
+    //   space glyph advances 0.278 em = 2.502 pt.
 
     private const double PwFirstLineTopTd = 86.1108;   // measured: rung 0 of the ladder
     private const double PwLinePitchPt = 10.7593;      // measured: 14.3457 px line box
@@ -45,14 +45,14 @@ internal static partial class HtmlToPdfConverter
             { preWrapCls = sel[1..]; break; }
         if (preWrapCls is null) return null;
 
-        var body = Regex.Match(html, @"<body\b[^>]*>([\s\S]*)</body>", RegexOptions.IgnoreCase) is
+        var body = SafeRegex.Match(html, @"<body\b[^>]*>([\s\S]*)</body>", RegexOptions.IgnoreCase) is
             { Success: true } bm ? bm.Groups[1].Value : html;
-        if (Regex.IsMatch(body, @"<(table|img|input|select|textarea)\b", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(body, @"<(table|img|input|select|textarea)\b", RegexOptions.IgnoreCase))
             return null;
-        var labels = Regex.Matches(body, @"<label\b([^>]*)>([\s\S]*?)</label>", RegexOptions.IgnoreCase);
+        var labels = SafeRegex.Matches(body, @"<label\b([^>]*)>([\s\S]*?)</label>", RegexOptions.IgnoreCase);
         if (labels.Count != 1) return null;
         var labelAttrs = labels[0].Groups[1].Value;
-        var clsM = Regex.Match(labelAttrs, @"class\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+        var clsM = SafeRegex.Match(labelAttrs, @"class\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
         if (!clsM.Success) return null;
         var classes = clsM.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (Array.IndexOf(classes, preWrapCls) < 0) return null;
@@ -68,7 +68,7 @@ internal static partial class HtmlToPdfConverter
                 // These sheets declare the px value then its rem twin ("12px" then
                 // "1.2rem"), and last-wins leaves the rem — under the gated 62.5%
                 // root, 1 rem = 10 px.
-                var fm = Regex.Match(fv, @"(\d+(?:\.\d+)?)(px|rem)");
+                var fm = SafeRegex.Match(fv, @"(\d+(?:\.\d+)?)(px|rem)");
                 if (fm.Success)
                 {
                     fsPx = double.Parse(fm.Groups[1].Value,
@@ -77,7 +77,7 @@ internal static partial class HtmlToPdfConverter
                 }
             }
             if (rule.TryGetValue("color", out var cv)
-                && ParseCssColor(Regex.Replace(cv, @"\s*!\s*important", "",
+                && ParseCssColor(SafeRegex.Replace(cv, @"\s*!\s*important", "",
                        RegexOptions.IgnoreCase).Trim()) is { } c)
                 color = c;
         }
@@ -94,7 +94,7 @@ internal static partial class HtmlToPdfConverter
         var sb = new StringBuilder();
         // The label content with tags stripped but WHITESPACE KEPT — the pre-wrap
         // layout is exactly the source text's own line structure.
-        var text = DecodeEntities(Regex.Replace(labels[0].Groups[2].Value, @"<[^>]+>", ""))
+        var text = DecodeEntities(SafeRegex.Replace(labels[0].Groups[2].Value, @"<[^>]+>", ""))
             .Replace("\r\n", "\n").Replace(' ', ' ');
         var lines = text.Split('\n');
         for (var i = 0; i < lines.Length; i++)

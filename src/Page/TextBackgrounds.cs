@@ -38,7 +38,9 @@ public sealed partial class Page
         var bf = new BgColorFlushState();
         bf.pageBuilder = new Content.ContentStreamBuilder();
         bf.formBuilders = new Dictionary<PdfStream, Content.ContentStreamBuilder>();
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var frag in _bgColorFragments)
+#pragma warning restore S3267
         {
             if (!FlushFragmentBackground(bf, frag)) break;
         }
@@ -46,6 +48,11 @@ public sealed partial class Page
         if (bf.bytes.Length > 0)
         {
             PrependContentStream(bf.bytes);
+        }
+        if (bf.overlayBuilder is not null)
+        {
+            bf.overlayBuilder.RestoreState();
+            _bgColorOverlay = bf.overlayBuilder.Build();
         }
         foreach (var (formStream, formBuilder) in bf.formBuilders)
         {
@@ -63,6 +70,19 @@ public sealed partial class Page
                 _reader.OwnerDocument?.MarkDirty(formStream.ObjectNumber, formStream);
         }
         _bgColorFragments.Clear();
+    }
+
+    /// <summary>The highlights drawn over the page content (see FlushFragmentBackground),
+    /// held back until the source boxes they replace are spliced out: such a highlight
+    /// stands exactly where its box stood, and the splice would take it along.</summary>
+    private byte[]? _bgColorOverlay;
+
+    /// <summary>Append the highlights drawn over the page content; after FlushUnderlineRemovals.</summary>
+    internal void FlushBgColorOverlay()
+    {
+        if (_bgColorOverlay is null) return;
+        AddContentStream(_bgColorOverlay);
+        _bgColorOverlay = null;
     }
 
     /// <summary>
@@ -121,16 +141,16 @@ public sealed partial class Page
             // is unaffected.
             double soDirX = frag.TextDirX, soDirY = frag.TextDirY;
             double soDirLen = Math.Sqrt(soDirX * soDirX + soDirY * soDirY);
-            if (soDirLen > 1e-6 && Math.Abs(soDirY / soDirLen) > 0.01)
+            if (soDirLen > 1e-6 && (Math.Abs(soDirY / soDirLen) > 0.01 || soDirX < 0))
             {
                 double ux = soDirX / soDirLen, uy = soDirY / soDirLen;
                 double rw;
                 try { rw = frag.TextState.Font?.MeasureString(frag.Text, fs) ?? frag.Text.Length * fs * 0.5; }
                 catch { rw = frag.Text.Length * fs * 0.5; }
                 var fgr = frag.TextState.ForegroundColor;
-                builder.SaveState();
+                SaveDecorationState(builder, AppendedDecorationMatrix(frag.PositionFrame, TransformsSince(frag.PositionFrame), inRunSpace: false));
                 builder.SetFillColor(fgr?.R / 255.0 ?? 0, fgr?.G / 255.0 ?? 0, fgr?.B / 255.0 ?? 0);
-                builder.SetMatrix(ux, uy, -uy, ux, fragPos.XIndent, fragPos.YIndent);
+                SetAlongRun(builder, frag, ux, uy, fragPos.XIndent, fragPos.YIndent);
                 builder.Rectangle(0, soOffset, rw, soThick);
                 builder.Fill();
                 builder.RestoreState();
@@ -156,7 +176,8 @@ public sealed partial class Page
             var fg = frag.TextState.ForegroundColor;
             double r = fg?.R / 255.0 ?? 0, g = fg?.G / 255.0 ?? 0, b = fg?.B / 255.0 ?? 0;
 
-            builder.SaveState();
+            // Written in the run's space, the rule is drawn through the run's matrix (see AppendedDecorationMatrix).
+            SaveDecorationState(builder, AppendedDecorationMatrix(frag.PositionFrame, FromRunSpace(frag), inRunSpace: true));
             builder.SetFillColor(r, g, b);
             builder.Rectangle(rectX, rectY, w, strikeoutH);
             builder.Fill();
@@ -201,7 +222,7 @@ public sealed partial class Page
                         nums.Add(v);
                 switch (name)
                 {
-                    case "rg" when nums.Count >= 3:
+                    case "rg" or "scn" or "sc" when nums.Count >= 3:
                         r = nums[0]; g = nums[1]; b = nums[2]; colorSet = true; break;
                     case "g" when nums.Count >= 1:
                         r = g = b = nums[0]; colorSet = true; break;
@@ -210,10 +231,8 @@ public sealed partial class Page
                         g = (1 - nums[1]) * (1 - nums[3]);
                         b = (1 - nums[2]) * (1 - nums[3]);
                         colorSet = true; break;
-                    case "scn" or "sc" when nums.Count >= 3:
-                        r = nums[0]; g = nums[1]; b = nums[2]; colorSet = true; break;
                     case "re" when nums.Count >= 4:
-                        reX = nums[0]; reY = nums[1]; reW = nums[2]; reH = nums[3];
+                        reW = nums[2]; reH = nums[3];
                         haveRect = true; break;
                     case "m" or "l" when nums.Count >= 2:
                         pts.Add((nums[0], nums[1])); break;
@@ -315,7 +334,7 @@ public sealed partial class Page
         bk.contentsObj = _reader.Resolve(_dict.Get("Contents"));
         if (bk.contentsObj is PdfStream single)
         {
-            try { var d = _reader.DecodeStream(single); contentMs.Write(d, 0, d.Length); } catch { }
+            try { var d = _reader.DecodeStream(single); contentMs.Write(d, 0, d.Length); } catch { /* a stream that does not decode is skipped, as if absent */ }
         }
         else if (bk.contentsObj is PdfArray contentArr)
         {
@@ -323,7 +342,7 @@ public sealed partial class Page
             {
                 if (_reader.ResolveStream(item) is not { } cs) continue;
                 try { var d = _reader.DecodeStream(cs); contentMs.Write(d, 0, d.Length); contentMs.WriteByte((byte)'\n'); }
-                catch { }
+                catch { /* a stream that does not decode is skipped, as if absent */ }
             }
         }
         bk.contents = contentMs.ToArray();

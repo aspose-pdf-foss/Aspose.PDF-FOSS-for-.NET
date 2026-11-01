@@ -8,9 +8,9 @@ public sealed partial class TableAbsorber
 {
     private readonly record struct TextRun(string Text, double X, double Y, double W, double H);
 
-    private readonly record struct HEdge(double Y, double X1, double X2);
+    private readonly record struct HEdge(double Y, double X1, double X2, bool Hidden = false, bool PaperStroke = false);
 
-    private readonly record struct VEdge(double X, double Y1, double Y2);
+    private readonly record struct VEdge(double X, double Y1, double Y2, bool Hidden = false, bool PaperStroke = false);
 
     /// <summary>Maximum gap (points) between two edge positions for them to be clustered into one boundary.
     /// Set higher than TS (3) because C# processes raw m/l operators which produce double-border pairs ~5pt apart.</summary>
@@ -35,7 +35,9 @@ public sealed partial class TableAbsorber
     {
         // Ruled tables only here; borderless recognition (the flow engine's) runs on
         // the page's fragments afterwards.
-        if (hEdges.Count < 2 || vEdges.Count < 2) return [];
+        if (hEdges.Count < 2 || vEdges.Count < 1) return [];
+
+        DropHiddenSeparators(hEdges, vEdges);
 
         // Reassemble ruled lines drawn as several collinear pieces (dashed
         // borders, per-cell border strokes): abutting/overlapping pieces on the
@@ -72,7 +74,7 @@ public sealed partial class TableAbsorber
                     Console.Error.WriteLine($"[tbl]   V x={e.X:F2} y={e.Y1:F2}..{e.Y2:F2}");
             }
             // A component without a 2x2 rule lattice cannot bound a cell.
-            if (compH.Count < 2 || compV.Count < 2) continue;
+            if (!CanBoundCells(compH, compV)) continue;
             var minX = Math.Min(compH.Min(e => e.X1), compV.Min(e => e.X)) - EdgeTol;
             var maxX = Math.Max(compH.Max(e => e.X2), compV.Max(e => e.X)) + EdgeTol;
             var minY = Math.Min(compV.Min(e => e.Y1), compH.Min(e => e.Y)) - EdgeTol;
@@ -90,7 +92,7 @@ public sealed partial class TableAbsorber
             // each side — is a table boundary: detect grids per band, not across it.
             foreach (var (bandH, bandV) in SplitComponentBands(compH, compV))
             {
-                if (bandH.Count < 2 || bandV.Count < 2) continue;
+                if (!CanBoundCells(bandH, bandV)) continue;
                 var bMinY = Math.Min(bandV.Min(e => e.Y1), bandH.Min(e => e.Y)) - EdgeTol;
                 var bMaxY = Math.Max(bandV.Max(e => e.Y2), bandH.Max(e => e.Y)) + EdgeTol;
                 var compRuns = runs.Where(r =>
@@ -157,8 +159,11 @@ public sealed partial class TableAbsorber
             result.Add((y, x1, x2, yMin, yMax, parallel));
         }
         var topY = result.Count > 0 ? result.Max(r => r.yMax) : 0;
-        return result.Select(r => new HEdge(
-            !r.parallel ? r.y : (r.yMax >= topY - 1e-9 ? r.yMax : r.yMin), r.x1, r.x2)).ToList();
+        return result.Select(r =>
+        {
+            if (!r.parallel) return new HEdge(r.y, r.x1, r.x2);
+            return new HEdge(r.yMax >= topY - 1e-9 ? r.yMax : r.yMin, r.x1, r.x2);
+        }).ToList();
     }
 
     /// <summary>Merge collinear vertical pieces: same rule (ΔX within
@@ -202,7 +207,7 @@ public sealed partial class TableAbsorber
         dr.runs = runs;
         dr.hEdges = hEdges;
         dr.vEdges = vEdges;
-        if (dr.hEdges.Count < 2 || dr.vEdges.Count < 2)
+        if (!CanBoundCells(dr.hEdges, dr.vEdges))
             return [];
 
 
@@ -218,12 +223,20 @@ public sealed partial class TableAbsorber
         const double OpenSideClosure = 1.0;
         dr.rulesRight = dr.hEdges.Max(e => e.X2);
         dr.rulesLeft = dr.hEdges.Min(e => e.X1);
-        if (dr.rulesRight > dr.colBounds[^1] + EdgeTol) dr.colBounds.Add(dr.rulesRight + OpenSideClosure);
-        if (dr.rulesLeft < dr.colBounds[0] - EdgeTol) dr.colBounds.Insert(0, dr.rulesLeft - OpenSideClosure);
+        if (dr.rulesRight > dr.colBounds[^1] + EdgeTol) { dr.colBounds.Add(dr.rulesRight + OpenSideClosure); dr.openRight = true; }
+        if (dr.rulesLeft < dr.colBounds[0] - EdgeTol) { dr.colBounds.Insert(0, dr.rulesLeft - OpenSideClosure); dr.openLeft = true; }
         dr.rulesTop = dr.vEdges.Max(e => e.Y2);
         dr.rulesBottom = dr.vEdges.Min(e => e.Y1);
-        if (dr.rulesTop > dr.rowBounds[^1] + EdgeTol) dr.rowBounds.Add(dr.rulesTop + OpenSideClosure);
-        if (dr.rulesBottom < dr.rowBounds[0] - EdgeTol) dr.rowBounds.Insert(0, dr.rulesBottom - OpenSideClosure);
+        if (dr.rulesTop > dr.rowBounds[^1] + EdgeTol)
+        {
+            dr.openTop = ColumnRulesRunPast(dr.vEdges, dr.rowBounds[^1], dr.rulesTop, upward: true);
+            dr.rowBounds.Add(dr.rulesTop + OpenSideClosure);
+        }
+        if (dr.rulesBottom < dr.rowBounds[0] - EdgeTol)
+        {
+            dr.openBottom = ColumnRulesRunPast(dr.vEdges, dr.rowBounds[0], dr.rulesBottom, upward: false);
+            dr.rowBounds.Insert(0, dr.rulesBottom - OpenSideClosure);
+        }
 
         // A row boundary needs meaningful rule coverage: an H rule spanning a
         // sliver of the region (a small box ruled INSIDE one cell) must not
@@ -231,8 +244,12 @@ public sealed partial class TableAbsorber
         if (dr.rowBounds.Count > 2)
         {
             var regW = Math.Max(1, dr.vEdges.Max(e => e.X) - dr.vEdges.Min(e => e.X));
+            // The boundary closing a row every column rule runs past has no rule by definition.
+            var topClosure = dr.openTop ? dr.rowBounds[^1] : double.NaN;
+            var bottomClosure = dr.openBottom ? dr.rowBounds[0] : double.NaN;
             dr.rowBounds.RemoveAll(y =>
             {
+                if (y.Equals(topClosure) || y.Equals(bottomClosure)) return false;
                 var cover = dr.hEdges.Where(e => Math.Abs(e.Y - y) <= EdgeTol)
                     .Sum(e => e.X2 - e.X1);
                 return cover < regW * 0.2;
@@ -263,6 +280,8 @@ public sealed partial class TableAbsorber
 
         dr.totalCells = dr.nRows * dr.nCols;
         RelaxCellSideThreshold(dr);
+        AcceptCellsOnOpenSides(dr);
+        AcceptMergedCells(dr);
 
 
         dr.visited = new bool[dr.nRows, dr.nCols];
@@ -306,13 +325,13 @@ public sealed partial class TableAbsorber
             var group = new List<AbsorbedTable> { tables[i] };
             used[i] = true;
             var left = tables[i].Rect?.LLX ?? 0;
-            var right = tables[i].Rect?.URX ?? 0;
+            _ = tables[i].Rect?.URX ?? 0;
 
             for (var j = i + 1; j < tables.Count; j++)
             {
                 if (used[j]) continue;
                 var jLeft = tables[j].Rect?.LLX ?? 0;
-                var jRight = tables[j].Rect?.URX ?? 0;
+                _ = tables[j].Rect?.URX ?? 0;
                 // Same left edge — fragments of one over-segmented table
                 if (Math.Abs(jLeft - left) < EdgeTol * 3)
                 {
@@ -341,13 +360,13 @@ public sealed partial class TableAbsorber
 
             double minX = double.MaxValue, minY = double.MaxValue;
             double maxX = double.MinValue, maxY = double.MinValue;
-            foreach (var t in group)
+            foreach (var rect in group.Select(t => t.Rect))
             {
-                if (t.Rect is null) continue;
-                if (t.Rect.LLX < minX) minX = t.Rect.LLX;
-                if (t.Rect.LLY < minY) minY = t.Rect.LLY;
-                if (t.Rect.URX > maxX) maxX = t.Rect.URX;
-                if (t.Rect.URY > maxY) maxY = t.Rect.URY;
+                if (rect is null) continue;
+                if (rect.LLX < minX) minX = rect.LLX;
+                if (rect.LLY < minY) minY = rect.LLY;
+                if (rect.URX > maxX) maxX = rect.URX;
+                if (rect.URY > maxY) maxY = rect.URY;
             }
 
             result.Add(new AbsorbedTable
@@ -551,11 +570,12 @@ public sealed partial class TableAbsorber
         bt.vEdges = vEdges;
         bt.rowIndices = bt.component.Select(p => p.r).Distinct().OrderBy(r => r).ToList();
 
-        bt.compSet = new HashSet<(int r, int c)>(bt.component);
         bt.consumed = new HashSet<(int r, int c)>();
 
         bt.allRows = new List<AbsorbedRow>();
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var r in bt.rowIndices.AsEnumerable().Reverse())
+#pragma warning restore S3267
         {
             if (!BuildComponentRow(bt, r)) break;
         }
@@ -604,11 +624,11 @@ public sealed partial class TableAbsorber
         // row — ragged rows (row-spans, colspans) misalign positional indexing.
         var lefts = new List<double>();
         foreach (var row in rows)
-            foreach (var cell in row.Cells)
+            foreach (var rect in row.Cells.Select(cell => cell.Rect))
             {
-                if (cell.Rect is null) continue;
-                if (!lefts.Any(x => Math.Abs(x - cell.Rect.LLX) <= EdgeTol))
-                    lefts.Add(cell.Rect.LLX);
+                if (rect is null) continue;
+                if (!lefts.Any(x => Math.Abs(x - rect.LLX) <= EdgeTol))
+                    lefts.Add(rect.LLX);
             }
         lefts.Sort();
         int ColOf(AbsorbedCell cell) =>

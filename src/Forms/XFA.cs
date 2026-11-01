@@ -2,6 +2,7 @@ using System.Xml;
 
 namespace Aspose.Pdf.Forms;
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>
 /// XmlNode-based accessor for the document's XFA packets (template / datasets /
 /// config / form / xdp). Distinct from <see cref="XfaAccessor"/>; this surface
@@ -10,6 +11,7 @@ namespace Aspose.Pdf.Forms;
 /// the underlying XML strings.
 /// </summary>
 public sealed class XFA
+#pragma warning restore S101
 {
     private readonly Form _form;
     private readonly XmlNamespaceManager _nsMgr;
@@ -19,11 +21,13 @@ public sealed class XFA
         _form = form;
         var nt = new NameTable();
         _nsMgr = new XmlNamespaceManager(nt);
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
         _nsMgr.AddNamespace("tpl", "http://www.xfa.org/schema/xfa-template/2.6/");
         _nsMgr.AddNamespace("pl", "http://www.xfa.org/schema/xfa-template/2.6/");
         _nsMgr.AddNamespace("xfa", "http://www.xfa.org/schema/xfa-data/1.0/");
         _nsMgr.AddNamespace("datasets", "http://www.xfa.org/schema/xfa-datasets/2.6/");
         _nsMgr.AddNamespace("xdp", "http://ns.adobe.com/xdp/");
+#pragma warning restore S1075
     }
 
     /// <summary>Namespace manager used when navigating the XFA XML packets. The <c>tpl</c>
@@ -80,7 +84,7 @@ public sealed class XFA
         foreach (var part in Aspose.Pdf.Forms.Form.SplitSomPath(path))
         {
             if (current is null) return null;
-            var m = System.Text.RegularExpressions.Regex.Match(part, @"^(.+)\[(\d+)\]$");
+            var m = SafeRegex.Match(part, @"^(.+)\[(\d+)\]$");
             var name = m.Success ? m.Groups[1].Value : part;
             var idx = m.Success ? int.Parse(m.Groups[2].Value) : 0;
             var seen = 0; XmlNode? found = null;
@@ -122,7 +126,9 @@ public sealed class XFA
         if (_xdpDoc is not null && xml == _templateSnapshot)
             return _xdpDoc;
         var doc = new XmlDocument();
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
         var root = doc.CreateElement("xdp", "xdp", "http://ns.adobe.com/xdp/");
+#pragma warning restore S1075
         doc.AppendChild(root);
         AppendPacket(doc, root, "template", xml);
         AppendPacket(doc, root, "datasets", _form.GetXfaDatasetsXml());
@@ -170,11 +176,15 @@ public sealed class XFA
         finally { _templateWriteBack = false; }
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>The XFA Config node. Not yet exposed by the library; returns null.</summary>
     public XmlNode? Config => null;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>The XFA Form node. Not yet exposed by the library; returns null.</summary>
     public XmlNode? Form => null;
+#pragma warning restore S2325
 
     /// <summary>Composite XDP document wrapping all XFA packets, or null when no XFA is
     /// present. The SAME live document that backs <see cref="Template"/> — nodes created
@@ -187,7 +197,7 @@ public sealed class XFA
     /// <summary>Read / write an XFA field by full name (dotted path).</summary>
     public string this[string fieldName]
     {
-        get => _form.GetXfaFieldValue(fieldName) ?? string.Empty;
+        get => _form.GetXfaFieldValueOrWidget(fieldName) ?? string.Empty;
         set
         {
             _form.SetXfaFieldValue(fieldName, value);
@@ -223,8 +233,9 @@ public sealed class XFA
     }
 
     /// <summary>
-    /// Set the bytes of an XFA image field. Stored on the datasets node; the
-    /// appearance stream is not currently regenerated.
+    /// Set the bytes of an XFA image field. Stored on the datasets node as base64, tagged with the
+    /// content type the bytes declare, as a viewer stores a picture; the appearance stream is not
+    /// currently regenerated.
     /// </summary>
     public void SetFieldImage(string fieldName, System.IO.Stream image)
     {
@@ -232,8 +243,8 @@ public sealed class XFA
         using var ms = new System.IO.MemoryStream();
         if (image.CanSeek) image.Position = 0;
         image.CopyTo(ms);
-        var base64 = System.Convert.ToBase64String(ms.ToArray());
-        _form.SetXfaFieldValue(fieldName, base64);
+        var bytes = ms.ToArray();
+        _form.SetXfaFieldImage(fieldName, System.Convert.ToBase64String(bytes), Aspose.Pdf.Forms.Form.ImageContentType(bytes));
     }
 
     private static XmlNode? LoadAsNode(string? xml)

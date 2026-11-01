@@ -140,7 +140,6 @@ public sealed class OutlineBuilder
     {
         // Build indirect refs to each page object
         var refs = new List<PdfObject>();
-        var xref = _document.Reader.XRefTable;
         var catalog = _document.Reader.Catalog;
         var pagesDict = _document.Reader.ResolveDict(catalog.Get("Pages"));
         if (pagesDict is null) return refs;

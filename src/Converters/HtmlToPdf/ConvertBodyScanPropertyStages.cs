@@ -13,7 +13,7 @@ internal static partial class HtmlToPdfConverter
         // geometry — auto centres a box no wider than the content band,
         // zero is the reset.
         if (prop == "margin"
-            && Regex.IsMatch(kv.Value[prop].Trim(), @"^(?:(?:0(?:px|pt|em|in|cm|mm)?|auto)\s+)*(?:0(?:px|pt|em|in|cm|mm)?|auto)$",
+            && SafeRegex.IsMatch(kv.Value[prop].Trim(), @"^(?:(?:0(?:px|pt|em|in|cm|mm)?|auto)\s+)*(?:0(?:px|pt|em|in|cm|mm)?|auto)$",
                 RegexOptions.IgnoreCase)) return true;
         // …and a PULL-UP shorthand - a negative top value with a zero or auto left - states a
         // stated margin the flow reads off the shorthand itself (the e-mail cards' `.header_sub
@@ -25,21 +25,33 @@ internal static partial class HtmlToPdfConverter
         // states the vertical margins the UA flow reads off the rule (the change-control print
         // sheet's `h1 { margin: 0.75em 0 }` and `pre { margin: 0.25em 0 0 0 }`)
         if (prop == "margin" && cv.bodyClassSheet && MarginShorthandSidesZero(kv.Value[prop])) return true;
+        // A letter-spacing dresses its own element's glyphs and lays nothing else out (probed:
+        // `h1 { letter-spacing: 1px }` leaves the reference's page in the UA flow, its heading the UA
+        // serif 33.75 centred and its grid's cells apart).
+        if (prop == "letter-spacing") return true;
         // Vertical margins on a rule the block-margin override applies
         // (the h1/p margin resets of the order-ticket family) render in
         // the flow — they do not disqualify it. A class margin-left
         // indents its block in the flow the same way.
         if (prop is "margin-top" or "margin-bottom" or "margin-left") return true;
+        // …as do a margin-right, which insets the block from the right edge, and a text-indent, which moves the
+        // block's first line (a hanging block's back over its margin-left): both render in the flow.
+        if (prop is "margin-right" or "text-indent") return true;
         // A line-height rule is typography the UA flow paces its lines by, not a layout it
         // leaves the flow for (probed: `p { line-height: 3.9em }` paces the UA serif paragraph at
         // 46.8 pt under the UA h1; `p { line-height: 1.5em }` at 18; a bold 14 pt span's 16 pt
         // box rides its UA line).
         if (prop == "line-height") return true;
-        // A line-height rule is typography the UA flow paces its lines by, not a layout it
-        // leaves the flow for (probed: `p { line-height: 3.9em }` paces the UA serif paragraph at
-        // 46.8 pt under the UA h1; `p { line-height: 1.5em }` at 18; a bold 14 pt span's 16 pt
-        // box rides its UA line).
-        if (prop == "line-height") return true;
+        // A visibility rule hides or shows its element in place - a hidden box keeps its space - and lays
+        // nothing else out (probed: a `.Invisible { visibility: hidden }` span in a grid cell leaves the
+        // reference's table, rows and cells in the flow, the span's space kept).
+        // (…a one-part CLASS or tag rule: an id rule hides the one control a script toggles - `#btnAddNew {
+        // visibility: hidden }` - and that page is the scripted form the calibrated flow renders, its controls at
+        // their widths; a descendant rule - `a.tip span`, a tooltip - hides through the table walker's chains)
+        if (prop == "visibility" && SafeRegex.IsMatch(kv.Key.Trim(), @"^[a-zA-Z]*(?:\.[\w-]+)?$")) return true;
+        // …and an AUTO width is the box the flow gives the element anyway (`body { width: auto }`, under
+        // `@media print` too: the reference keeps the UA serif and the cells' class rules).
+        if (prop is "width" or "min-width" && kv.Value[prop].Trim().Equals("auto", StringComparison.OrdinalIgnoreCase)) return true;
         // …and a class PADDING longhand likewise. PROBED (against the reference): a typography
         // class carrying `font-weight; font-size; padding-top:15px` leaves the paragraphs
         // around it at the UA pitch, so the reference renders such a rule without leaving
@@ -63,6 +75,10 @@ internal static partial class HtmlToPdfConverter
         // says nothing about the flow around it (probed: the reference keeps its flow and
         // draws the 712.5 x 27 pt control at the cell's content corner).
         if (IsControlSelector(kv.Key)) return true;
+        // A horizontal rule's border declarations (`hr { border-width: 1px }`, its style or colour)
+        // dress the rule's own stroke and lay nothing else out: the flow around the rule is the
+        // one the reference keeps (its breaks after a table each a line box, its text under the grid).
+        if (IsRuleSelector(kv.Key) && prop.StartsWith("border", StringComparison.Ordinal)) return true;
         // A DEAD-SHEET document's residual head rules: a text-direction or scripting property
         // lays nothing out (`unicode-bidi: isolate` on a wiki's edit links, an IE `behavior:`
         // url) - the flow keeps its box model. (A live-sheet document keeps the full test: the

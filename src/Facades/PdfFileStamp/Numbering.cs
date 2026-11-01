@@ -29,6 +29,27 @@ public sealed partial class PdfFileStamp
     public void AddHeader(string imageFile, float topMargin, float leftMargin, float rightMargin) =>
         ApplyImageBand(File.ReadAllBytes(imageFile), top: true, primaryMargin: topMargin, leftMargin, rightMargin);
 
+    /// <summary>
+    /// Add a header text to all pages.
+    /// </summary>
+    public byte[] AddHeader(byte[] input, string text,
+        double fontSize = 10, double margin = 36)
+    {
+        using var doc = Document.Open(input);
+        var stamp = new TextStamp(text)
+        {
+            FontSize = (float)fontSize,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
+            YIndent = margin,
+        };
+
+        foreach (var page in doc.Pages)
+            page.AddStamp(stamp);
+
+        return doc.ToArray();
+    }
+
     /// <summary>Adds the text as a footer centered at the bottom of every page, <c>bottomMargin</c> points above the bottom edge, with left and right margins of 36 points.</summary>
     public void AddFooter(FormattedText formattedText, float bottomMargin) =>
         AddFooter(formattedText, bottomMargin, leftMargin: 36f, rightMargin: 36f);
@@ -52,6 +73,27 @@ public sealed partial class PdfFileStamp
     /// <summary>Adds the image file as a footer on every page, <c>bottomMargin</c> points above the bottom edge and centered between the left and right margins (in points).</summary>
     public void AddFooter(string imageFile, float bottomMargin, float leftMargin, float rightMargin) =>
         ApplyImageBand(File.ReadAllBytes(imageFile), top: false, primaryMargin: bottomMargin, leftMargin, rightMargin);
+
+    /// <summary>
+    /// Add a footer text to all pages.
+    /// </summary>
+    public byte[] AddFooter(byte[] input, string text,
+        double fontSize = 10, double margin = 36)
+    {
+        using var doc = Document.Open(input);
+        var stamp = new TextStamp(text)
+        {
+            FontSize = (float)fontSize,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            YIndent = margin,
+        };
+
+        foreach (var page in doc.Pages)
+            page.AddStamp(stamp);
+
+        return doc.ToArray();
+    }
 
     /// <summary>Adds a page number at the bottom middle of every page, using the text and formatting of <c>formattedText</c>; <c>{0}</c> in the text becomes the page number and <c>{1}</c> the page count.</summary>
     public void AddPageNumber(FormattedText formattedText) =>
@@ -101,7 +143,8 @@ public sealed partial class PdfFileStamp
             var stamp = BuildTextStamp(rendered, sourceText);
             stamp.HorizontalAlignment = hAlign;
             stamp.VerticalAlignment = vAlign;
-            stamp.XIndent = leftMargin > 0 ? leftMargin : (rightMargin > 0 ? -rightMargin : 0);
+            if (leftMargin > 0) stamp.XIndent = leftMargin;
+            else stamp.XIndent = rightMargin > 0 ? -rightMargin : 0;
             stamp.YIndent = useTop ? topMargin : bottomMargin;
             stamp.RotateAngle = PageNumberRotation;
             page.AddStamp(stamp);
@@ -129,7 +172,6 @@ public sealed partial class PdfFileStamp
     private void ApplyTextBand(FormattedText formattedText, bool top, float primaryMargin, float leftMargin, float rightMargin)
     {
         if (_document is null) throw new InvalidOperationException("No document bound.");
-        var fontSize = formattedText.FontSize;
         // FormattedText.Text is only the first line; a header/footer built from a
         // multi-line FormattedText (AddNewLineText) must carry every line so the
         // stamp renders each as its own row.
@@ -309,48 +351,6 @@ public sealed partial class PdfFileStamp
     }
 
     /// <summary>
-    /// Add a header text to all pages.
-    /// </summary>
-    public byte[] AddHeader(byte[] input, string text,
-        double fontSize = 10, double margin = 36)
-    {
-        using var doc = Document.Open(input);
-        var stamp = new TextStamp(text)
-        {
-            FontSize = (float)fontSize,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Top,
-            YIndent = margin,
-        };
-
-        foreach (var page in doc.Pages)
-            page.AddStamp(stamp);
-
-        return doc.ToArray();
-    }
-
-    /// <summary>
-    /// Add a footer text to all pages.
-    /// </summary>
-    public byte[] AddFooter(byte[] input, string text,
-        double fontSize = 10, double margin = 36)
-    {
-        using var doc = Document.Open(input);
-        var stamp = new TextStamp(text)
-        {
-            FontSize = (float)fontSize,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            YIndent = margin,
-        };
-
-        foreach (var page in doc.Pages)
-            page.AddStamp(stamp);
-
-        return doc.ToArray();
-    }
-
-    /// <summary>
     /// Add a watermark text to all pages.
     /// </summary>
     public byte[] AddWatermark(byte[] input, string text,
@@ -370,10 +370,12 @@ public sealed partial class PdfFileStamp
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Add an RGB image stamp to all pages.
     /// </summary>
     public byte[] AddImageStamp(byte[] input, byte[] rgbPixels, int width, int height,
+#pragma warning restore S2325
         double displayWidth = 0, double displayHeight = 0,
         double x = 100, double y = 100)
     {
@@ -390,10 +392,12 @@ public sealed partial class PdfFileStamp
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Add a grayscale image stamp to all pages.
     /// </summary>
     public byte[] AddGrayscaleImageStamp(byte[] input, byte[] grayPixels, int width, int height,
+#pragma warning restore S2325
         double displayWidth = 0, double displayHeight = 0,
         double x = 100, double y = 100)
     {

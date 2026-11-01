@@ -11,7 +11,7 @@ namespace Aspose.Pdf.Forms;
 public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>
 {
     /// <summary>The stages of flattening one page's fields: one annotation at a time, then the appended content.</summary>
-    private void AppendFlattenedContent(FlattenPageState fp)
+    private static void AppendFlattenedContent(FlattenPageState fp)
     {
         var existingData = fp.page.GetContentStreamBytes() ?? [];
 
@@ -39,7 +39,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     }
 
     /// <summary>The stages of flattening one page's fields: one annotation at a time, then the appended content.</summary>
-    private void FlattenAnnotation(FlattenPageState fp, PdfObject annotRef)
+    private static void FlattenAnnotation(FlattenPageState fp, PdfObject annotRef)
     {
         var annotDict = fp.reader.ResolveDict(annotRef);
         if (annotDict is null)

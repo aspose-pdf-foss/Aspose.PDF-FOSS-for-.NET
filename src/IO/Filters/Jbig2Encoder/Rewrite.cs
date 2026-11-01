@@ -51,7 +51,7 @@ internal static partial class Jbig2Encoder
                     GenericRegion(residual, stride, kept, residualCombination ?? 0));
             }
             if (Clip(patch, layout.PageWidth, layout.PageHeight) is { Width: > 0, Height: > 0 } patched)
-                WriteSegment(output, ++number, ImmediateLosslessGenericRegion, pageNumber,
+                WriteSegment(output, number + 1, ImmediateLosslessGenericRegion, pageNumber,
                     GenericRegion(painted, stride, patched, Replace));
             closed = true;
         }

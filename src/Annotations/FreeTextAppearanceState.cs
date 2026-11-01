@@ -25,6 +25,10 @@ private sealed class FreeTextAppearanceState
     public double w;
     public double h;
     public double borderWidth;
+    // A callout's leader points, and where its inner rectangle starts within the annotation's.
+    public Point[]? callout;
+    public double calloutDx;
+    public double calloutDy;
     // Text inset scales with the border: 2pt inside a standard 1pt border, flush
     // with the rectangle for a borderless (W=0) typewriter annotation. Calibrated
     // so that a 12pt Helvetica line of 130.08pt in a 136.05pt
@@ -54,6 +58,13 @@ private sealed class FreeTextAppearanceState
     public double ehh;
     public Aspose.Pdf.Core.PdfDictionary fontDict = null!;
     public Aspose.Pdf.Text.FontMetrics metrics = null!;
+    // The program of the face the text is drawn in when the /DA names one outside the
+    // standard 14 (or the text needs glyphs WinAnsi lacks): embedded as a composite
+    // font in the appearance's own resources, the lines shown as glyph ids through it.
+    public byte[]? faceTtf;
+    public string faceName = "";
+    // The width of a run at the font size, in the face the text is drawn in.
+    public Func<string, double> measure = null!;
     public List<string> lines = null!;
     public System.Globalization.CultureInfo ci = null!;
     public double leading;

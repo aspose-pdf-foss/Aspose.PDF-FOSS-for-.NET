@@ -30,7 +30,7 @@ internal static partial class HtmlToPdfConverter
         // `width="247"` attribute overwrote a `style="width:148.35pt"` and the column
         // came out too wide to wrap its text as the reference does.
         var cellWidthFromStyle = cell.WidthPxStyle || (cell.WidthPct > 0 && ca.TryGetValue("style", out var stW)
-            && Regex.IsMatch(stW, @"(?<![-\w])width\s*:\s*[\d.]+\s*%", RegexOptions.IgnoreCase));
+            && SafeRegex.IsMatch(stW, @"(?<![-\w])width\s*:\s*[\d.]+\s*%", RegexOptions.IgnoreCase));
         if (!cellWidthFromStyle)
         {
             if (ca.TryGetValue("width", out var wv) && wv.Trim().EndsWith('%')
@@ -69,17 +69,18 @@ internal static partial class HtmlToPdfConverter
     private static string FoldBorderLonghands(string style)
     {
         if (style.IndexOf("-width", StringComparison.OrdinalIgnoreCase) < 0) return style;
-        var folded = style;
+        var folded = new StringBuilder(style);
         foreach (var side in new[] { "top", "right", "bottom", "left" })
         {
-            var w = Regex.Match(style, @"(?<![-\w])border-" + side + @"-width\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
-            var st = Regex.Match(style, @"(?<![-\w])border-" + side + @"-style\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
-            if (!w.Success || !st.Success || Regex.IsMatch(style, @"(?<![-\w])border-" + side + @"\s*:", RegexOptions.IgnoreCase)) continue;
-            var col = Regex.Match(style, @"(?<![-\w])border-" + side + @"-color\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
-            folded += "; border-" + side + ": " + w.Groups[1].Value.Trim() + " " + st.Groups[1].Value.Trim()
-                + (col.Success ? " " + col.Groups[1].Value.Trim() : "");
+            var w = SafeRegex.Match(style, @"(?<![-\w])border-" + side + @"-width\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            var st = SafeRegex.Match(style, @"(?<![-\w])border-" + side + @"-style\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            if (!w.Success || !st.Success || SafeRegex.IsMatch(style, @"(?<![-\w])border-" + side + @"\s*:", RegexOptions.IgnoreCase)) continue;
+            var col = SafeRegex.Match(style, @"(?<![-\w])border-" + side + @"-color\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            folded.Append("; border-").Append(side).Append(": ").Append(w.Groups[1].Value.Trim())
+                .Append(' ').Append(st.Groups[1].Value.Trim())
+                .Append(col.Success ? " " + col.Groups[1].Value.Trim() : "");
         }
-        return folded;
+        return folded.ToString();
     }
 
     private static void ApplyMetricCellStyleBorders(MetricCell cell, string tdst)
@@ -88,37 +89,37 @@ internal static partial class HtmlToPdfConverter
         // a style border-bottom draws the rule under the cell
         // (the financial-statement idiom — order-free tokens,
         // `none` draws nothing)
-        var bbm = Regex.Match(tdst,
+        var bbm = SafeRegex.Match(tdst,
             @"border-bottom\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (bbm.Success
             && !bbm.Groups[1].Value.Contains("none", StringComparison.OrdinalIgnoreCase)
-            && Regex.IsMatch(bbm.Groups[1].Value, @"solid|double", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(bbm.Groups[1].Value, @"solid|double", RegexOptions.IgnoreCase))
         {
             var bbv = bbm.Groups[1].Value;
-            var bbw = Regex.Match(bbv, @"([\d.]+)\s*(pt|px)", RegexOptions.IgnoreCase);
-            cell.BorderBottomW = bbw.Success
-                ? double.Parse(bbw.Groups[1].Value,
-                      System.Globalization.CultureInfo.InvariantCulture)
-                  * (bbw.Groups[2].Value.Equals("px",
-                      StringComparison.OrdinalIgnoreCase) ? PxPt : 1.0)
-                : 0.75;
+            var bbw = SafeRegex.Match(bbv, @"([\d.]+)\s*(pt|px)", RegexOptions.IgnoreCase);
+            if (bbw.Success)
+                cell.BorderBottomW = double.Parse(bbw.Groups[1].Value,
+                        System.Globalization.CultureInfo.InvariantCulture)
+                    * (bbw.Groups[2].Value.Equals("px",
+                        StringComparison.OrdinalIgnoreCase) ? PxPt : 1.0);
+            else cell.BorderBottomW = 0.75;
             cell.BorderBottomDouble = bbv.Contains("double",
                 StringComparison.OrdinalIgnoreCase);
-            if (ParseCssColor(Regex.Replace(bbv, @"solid|double|[\d.]+\s*(?:pt|px)", "", RegexOptions.IgnoreCase).Trim())
+            if (ParseCssColor(SafeRegex.Replace(bbv, @"solid|double|[\d.]+\s*(?:pt|px)", "", RegexOptions.IgnoreCase).Trim())
                 is { } bbc)
                 cell.BorderBottomCol = bbc;
         }
         // a style border-top draws the rule over the cell in its colour (the report
         // footer's `BORDER-TOP: black 2pt solid` band rule)
-        var btm = Regex.Match(tdst, @"border-top\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var btm = SafeRegex.Match(tdst, @"border-top\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (btm.Success
             && !btm.Groups[1].Value.Contains("none", StringComparison.OrdinalIgnoreCase)
             && btm.Groups[1].Value.Contains("solid", StringComparison.OrdinalIgnoreCase)
-            && Regex.Match(btm.Groups[1].Value, @"([\d.]+)\s*(pt|px)", RegexOptions.IgnoreCase) is { Success: true } btw)
+            && SafeRegex.Match(btm.Groups[1].Value, @"([\d.]+)\s*(pt|px)", RegexOptions.IgnoreCase) is { Success: true } btw)
         {
             cell.BorderTopW = DtpNum(btw.Groups[1].Value)
                 * (btw.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase) ? PxPt : 1.0);
-            if (ParseCssColor(Regex.Replace(btm.Groups[1].Value, @"solid|[\d.]+\s*(?:pt|px)", "", RegexOptions.IgnoreCase).Trim())
+            if (ParseCssColor(SafeRegex.Replace(btm.Groups[1].Value, @"solid|[\d.]+\s*(?:pt|px)", "", RegexOptions.IgnoreCase).Trim())
                 is { } btc)
                 cell.BorderTopCol = btc;
         }
@@ -127,13 +128,13 @@ internal static partial class HtmlToPdfConverter
         // (…and a border-left the same way, both in pixels or points - the Words letter's 0.75pt sides)
         foreach (var side in new[] { "right", "left" })
         {
-            var brm = Regex.Match(tdst, @"(?<![-\w])border-" + side + @"\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            var brm = SafeRegex.Match(tdst, @"(?<![-\w])border-" + side + @"\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
             if (!brm.Success) continue;
             var brv = brm.Groups[1].Value;
-            var bwm = Regex.Match(brv, @"([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
+            var bwm = SafeRegex.Match(brv, @"([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
             if (!bwm.Success || !brv.Contains("solid", StringComparison.OrdinalIgnoreCase)) continue;
             var sideW = DtpNum(bwm.Groups[1].Value) * (bwm.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase) ? PxPt : 1.0);
-            var sideCol = ParseCssColor(Regex.Replace(brv, @"solid|[\d.]+\s*(?:px|pt)", "", RegexOptions.IgnoreCase).Trim());
+            var sideCol = ParseCssColor(SafeRegex.Replace(brv, @"solid|[\d.]+\s*(?:px|pt)", "", RegexOptions.IgnoreCase).Trim());
             if (side == "right")
             {
                 cell.BorderRightW = sideW;
@@ -153,14 +154,14 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The style width (percent, or an absolute mm/cm/in/pt/px box, a min-width marking the setter cell) and an absolute height onto the cell.</summary>
     private static void ApplyMetricCellStyleSize(MetricCell cell, string tdst)
     {
-        var twm2 = Regex.Match(tdst, @"width\s*:\s*(\d+(?:\.\d+)?)\s*%");
+        var twm2 = SafeRegex.Match(tdst, @"width\s*:\s*(\d+(?:\.\d+)?)\s*%");
         if (twm2.Success)
             cell.WidthPct = double.Parse(twm2.Groups[1].Value,
                 System.Globalization.CultureInfo.InvariantCulture);
         // An ABSOLUTE inline width (the SSRS width-setter
         // rows: `WIDTH: 12.7mm; MIN-WIDTH: 12.7mm`) fixes
         // the column outright.
-        var twAbs = Regex.Match(tdst,
+        var twAbs = SafeRegex.Match(tdst,
             @"(?<![-\w])width\s*:\s*([\d.]+)\s*(mm|cm|in|pt|px)",
             RegexOptions.IgnoreCase);
         var twAbsV = 0.0;
@@ -185,14 +186,14 @@ internal static partial class HtmlToPdfConverter
             cell.WidthPxStyle = true;
         }
         if (twAbs.Success
-            && Regex.IsMatch(tdst, @"min-width\s*:", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(tdst, @"min-width\s*:", RegexOptions.IgnoreCase))
             cell.WidthSetterCell = true;
         // An ABSOLUTE inline height (the report grid's row pacers: `HEIGHT: 6.35mm`) floors
         // the row band; an EMPTY spacer row is EXACTLY that height. PIXELS count too - a
         // `height: 20px` cell bands its row at 15 pt and a middle-aligned neighbour then
         // centres in it (measured: the request form's rows pitch 13.125, which is the
         // 11.25 line box plus half the 3.75 the band exceeds it by).
-        var thAbs = Regex.Match(tdst,
+        var thAbs = SafeRegex.Match(tdst,
             @"(?<![-\w])height\s*:\s*([\d.]+)\s*(mm|cm|in|pt|px)\b",
             RegexOptions.IgnoreCase);
         if (thAbs.Success && double.TryParse(thAbs.Groups[1].Value,
@@ -218,7 +219,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>One side's `padding-&lt;side>` from the cell's inline style, in points (px, pt or em), or null when it states none.</summary>
     private static double? CellSidePaddingPt(string tdst, string prop, MetricCell cell, double emPt = 0)
     {
-        var m = Regex.Match(tdst, @"(?<![-\w])" + prop + @"\s*:\s*([\d.]+)\s*(px|pt|em)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(tdst, @"(?<![-\w])" + prop + @"\s*:\s*([\d.]+)\s*(px|pt|em)", RegexOptions.IgnoreCase);
         if (!m.Success) return CellShorthandPaddingPt(tdst, prop, cell, emPt);
         var v = DtpNum(m.Groups[1].Value);
         return m.Groups[2].Value.ToLowerInvariant() switch
@@ -236,14 +237,14 @@ internal static partial class HtmlToPdfConverter
     /// cell declares no shorthand or a value does not parse.</summary>
     private static double? CellShorthandPaddingPt(string tdst, string prop, MetricCell cell, double emPt = 0)
     {
-        var sh = Regex.Match(tdst, @"(?<![-\w])padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var sh = SafeRegex.Match(tdst, @"(?<![-\w])padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (!sh.Success) return null;
         var parts = sh.Groups[1].Value.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length is < 1 or > 4) return null;
         var v = new double[parts.Length];
         for (var i = 0; i < parts.Length; i++)
         {
-            var pm = Regex.Match(parts[i], @"^([\d.]+)\s*(px|pt|em|in|cm|mm)?$", RegexOptions.IgnoreCase);
+            var pm = SafeRegex.Match(parts[i], @"^([\d.]+)\s*(px|pt|em|in|cm|mm)?$", RegexOptions.IgnoreCase);
             if (!pm.Success) return null;
             var n = DtpNum(pm.Groups[1].Value);
             v[i] = pm.Groups[2].Value.ToLowerInvariant() switch
@@ -259,10 +260,10 @@ internal static partial class HtmlToPdfConverter
         var right = parts.Length >= 2 ? v[1] : v[0];
         var left = parts.Length == 4 ? v[3] : right;
         var bottom = parts.Length >= 3 ? v[2] : v[0];
-        return prop.EndsWith("left", StringComparison.OrdinalIgnoreCase) ? left
-            : prop.EndsWith("right", StringComparison.OrdinalIgnoreCase) ? right
-            : prop.EndsWith("top", StringComparison.OrdinalIgnoreCase) ? v[0]
-            : bottom;
+        if (prop.EndsWith("left", StringComparison.OrdinalIgnoreCase)) return left;
+        if (prop.EndsWith("right", StringComparison.OrdinalIgnoreCase)) return right;
+        if (prop.EndsWith("top", StringComparison.OrdinalIgnoreCase)) return v[0];
+        return bottom;
     }
 
     /// <summary>The cell's inline style: size, font-size, padding-top on report cells, text-align, background, a non-black colour, bold, nowrap, and the border edges.</summary>
@@ -272,7 +273,7 @@ internal static partial class HtmlToPdfConverter
         // The cell's own inline vertical-align, which the VALIGN attribute and a class rule
         // already reached but a style attribute did not: a `vertical-align: top` cell seats
         // its line at the band top instead of centring in it.
-        var tvam = Regex.Match(tdst, CellVerticalAlignRx, RegexOptions.IgnoreCase);
+        var tvam = SafeRegex.Match(tdst, CellVerticalAlignRx, RegexOptions.IgnoreCase);
         if (tvam.Success)
         {
             var tva = tvam.Groups[1].Value.Trim().ToLowerInvariant();
@@ -281,14 +282,14 @@ internal static partial class HtmlToPdfConverter
             else if (tva is "middle" or "center")
             { cell.VAlignMiddle = true; cell.VAlignTop = false; cell.VAlignBottom = false; }
         }
-        var tfm = Regex.Match(tdst, @"font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var tfm = SafeRegex.Match(tdst, @"font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (tfm.Success && TryParseCssFontSize(tfm.Groups[1].Value.Trim()) is { } tdfs)
         { cell.FontSize = tdfs; cell.FontInline = true; }
         // The cell's own family and line box: a td that styles its text
         // carries both to every line it holds (probed on the letter grid:
         // `font-family: Calibri` draws Calibri, and `line-height: 14px`
         // pitches its wrapped lines 10.5 rather than the face's own box).
-        var tffm = Regex.Match(tdst, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var tffm = SafeRegex.Match(tdst, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (tffm.Success && FirstFontFamily(tffm.Groups[1].Value) is { Length: > 0 } tfam
             && (!mt.stdSerif || SourceEngineFaces.Contains(tfam)))
         {
@@ -297,7 +298,7 @@ internal static partial class HtmlToPdfConverter
             // table's base line (the same law as a row naming one).
             cell.CellInlineTypo = true;
         }
-        var tlhm = Regex.Match(tdst, @"line-height\s*:\s*([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
+        var tlhm = SafeRegex.Match(tdst, @"line-height\s*:\s*([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
         if (tlhm.Success)
             cell.LineHeightPt = DtpNum(tlhm.Groups[1].Value)
                 * (tlhm.Groups[2].Value.Equals("pt", StringComparison.OrdinalIgnoreCase) ? 1 : PxPt);
@@ -322,7 +323,7 @@ internal static partial class HtmlToPdfConverter
             if (CellSidePaddingPt(tdst, "padding-top", cell, mt.mps.fontSize) is { } tptPt) cell.PadTopPt = Math.Max(0, tptPt - mt.p);
             if (mt.stdSerif && CellSidePaddingPt(tdst, "padding-bottom", cell, mt.mps.fontSize) is { } tpbPt) cell.PadBottomPt = Math.Max(0, tpbPt - mt.p);
         }
-        var tam = Regex.Match(tdst, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
+        var tam = SafeRegex.Match(tdst, @"text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase);
         if (tam.Success)
             cell.Align = tam.Groups[1].Value.ToLowerInvariant() switch
             {
@@ -330,22 +331,22 @@ internal static partial class HtmlToPdfConverter
                 "center" => HorizontalAlignment.Center,
                 _ => HorizontalAlignment.Left,
             };
-        var tbgm = Regex.Match(tdst, @"background(?:-color)?\s*:\s*([^;]+)",
+        var tbgm = SafeRegex.Match(tdst, @"background(?:-color)?\s*:\s*([^;]+)",
             RegexOptions.IgnoreCase);
         if (tbgm.Success && ParseCssColor(tbgm.Groups[1].Value.Trim()) is { } tdsbg)
             cell.Bg = tdsbg;
-        var tcm = Regex.Match(tdst, @"(?<![-\w])color\s*:\s*([^;]+)",
+        var tcm = SafeRegex.Match(tdst, @"(?<![-\w])color\s*:\s*([^;]+)",
             RegexOptions.IgnoreCase);
         if (tcm.Success && ParseCssColor(tcm.Groups[1].Value.Trim()) is { } tdcol
             && (tdcol.R != 0 || tdcol.G != 0 || tdcol.B != 0))
             cell.Fore = tdcol;
-        if (Regex.IsMatch(tdst, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(tdst, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
             cell.Bold = true;
         // `pre` keeps the source line whole, exactly as `nowrap` does — but `pre-wrap`
         // and `pre-line` break, so the keyword must not match by prefix.
-        if (Regex.IsMatch(tdst, @"white-space\s*:\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(tdst, @"white-space\s*:\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
             cell.NoWrap = true;
-        if (Regex.IsMatch(tdst, @"white-space\s*:\s*pre-wrap", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(tdst, @"white-space\s*:\s*pre-wrap", RegexOptions.IgnoreCase))
             cell.PreWrap = true;
         ApplyMetricCellStyleBorders(cell, tdst);
     }
@@ -372,7 +373,7 @@ internal static partial class HtmlToPdfConverter
             // and boleto skins): typography, fill, ink,
             // geometry and per-side borders
             if (mt.wrapperStacks)
-                ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, cell, cnr);
+                ApplyCellClassBag(mt.mps, mt.stdSerif, cell, cnr);
         }
     }
 }

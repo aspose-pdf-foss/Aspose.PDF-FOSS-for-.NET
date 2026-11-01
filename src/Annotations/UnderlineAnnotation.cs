@@ -15,4 +15,13 @@ public partial class UnderlineAnnotation : TextMarkupAnnotation
         SetDefaultQuadPoints(rect);
     }
     public new AnnotationType AnnotationType => AnnotationType.Underline;
+
+    /// <summary>Regenerate the normal appearance (/AP /N): a line under each quad, a line width above its
+    /// bottom, in the annotation colour.</summary>
+    public override void UpdateAppearances() =>
+        DrawLineMarks((b, quad, width) =>
+        {
+            b.MoveTo(quad.minX, quad.minY + width);
+            b.LineTo(quad.maxX, quad.minY + width);
+        });
 }

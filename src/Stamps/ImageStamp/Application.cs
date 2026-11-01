@@ -17,17 +17,19 @@ public partial class ImageStamp
         st.h = DisplayHeight;
 
         st.pageBox = st.page.MediaBox;
-        st.ax = XIndent != 0 ? XIndent
-            : X != 0 ? X
-            : HorizontalAlignment switch
+        if (XIndent != 0) st.ax = XIndent;
+        else if (X != 0) st.ax = X;
+        else
+            st.ax = HorizontalAlignment switch
             {
                 HorizontalAlignment.Right => st.pageBox.Width - st.w,
                 HorizontalAlignment.Center => (st.pageBox.Width - st.w) / 2.0,
                 _ => 0,
             };
-        st.ay = YIndent != 0 ? YIndent
-            : Y != 0 ? Y
-            : VerticalAlignment switch
+        if (YIndent != 0) st.ay = YIndent;
+        else if (Y != 0) st.ay = Y;
+        else
+            st.ay = VerticalAlignment switch
             {
                 VerticalAlignment.Top => st.pageBox.Height - st.h,
                 VerticalAlignment.Center => (st.pageBox.Height - st.h) / 2.0,
@@ -46,6 +48,12 @@ public partial class ImageStamp
         st.minY = System.Math.Min(System.Math.Min(0, st.mb), System.Math.Min(st.md, st.mb + st.md));
         st.me = st.ax - st.minX;
         st.mf = st.ay - st.minY;
+        // A centred axis turns the image about the centred box's centre (as a text stamp
+        // does), not about a corner of its turned bounds.
+        if (XIndent == 0 && X == 0 && HorizontalAlignment == HorizontalAlignment.Center)
+            st.me = st.ax + st.w / 2.0 - (st.ma + st.mc) / 2.0;
+        if (YIndent == 0 && Y == 0 && VerticalAlignment == VerticalAlignment.Center)
+            st.mf = st.ay + st.h / 2.0 - (st.mb + st.md) / 2.0;
 
         st.wantBlend = !string.IsNullOrEmpty(BlendMode) && BlendMode != "Normal";
         st.gsName = RegisterGsExtGState(st.page, st.wantBlend ? BlendMode : null, Opacity);
@@ -78,7 +86,7 @@ public partial class ImageStamp
 
         st.contentOps = Background
             ? $"{st.idComment}{st.rectComment}{st.stampBody}"
-            : $"{st.idComment}{st.rectComment}/Artifact BDC\n{st.stampBody}EMC\n";
+            : $"{st.idComment}{st.rectComment}/Artifact BMC\n{st.stampBody}EMC\n";
         st.contentBytes = System.Text.Encoding.ASCII.GetBytes(st.contentOps);
 
         // Add the stamp as a separate content stream so the page's existing
@@ -114,7 +122,7 @@ public partial class ImageStamp
         imgDict.Set("Width", new PdfInteger(_width));
         imgDict.Set("Height", new PdfInteger(_height));
         imgDict.Set("BitsPerComponent", new PdfInteger(_bitsPerComponent));
-        imgDict.Set("ColorSpace", new PdfName(_colorSpace));
+        imgDict.Set("ColorSpace", _colorSpaceObject ?? new PdfName(_colorSpace));
         imgDict.Set("Filter", new PdfName(_filter));
         if (_decodeParms is not null)
             imgDict.Set("DecodeParms", _decodeParms);
@@ -216,14 +224,8 @@ public partial class ImageStamp
     /// their own marked-content block.</summary>
     internal string RegisterXObject(Page page)
     {
-        var imgStream = BuildImageXObject();
-
-        // Managed stamps record their id on the XObject dictionary so the stamp
-        // facade can rediscover them after a save. The %StampId content-stream
-        // comment alone does not survive re-serialisation (comments are dropped),
-        // but a /StampId dict entry does — and PdfContentEditor.GetStamps reads it.
-        if (StampId != 0 || ForceStampIdComment)
-            imgStream.Dict.Set("StampId", new PdfInteger(StampId));
+        // The stamp placed again in the same document draws the image it embedded the first time.
+        var imgStream = SharedImageXObject(page.Reader);
 
         var resources = GetOrCreateResources(page);
         var xobjectDict = GetOrCreateDict(page, resources, "XObject");
@@ -253,7 +255,7 @@ public partial class ImageStamp
         var gs = new PdfDictionary();
         gs.Set("Type", new PdfName("ExtGState"));
         if (!string.IsNullOrEmpty(blendMode))
-            gs.Set("BM", new PdfName(blendMode!));
+            gs.Set("BM", new PdfName(blendMode));
         if (opacity < 0.999)
         {
             gs.Set("ca", new PdfReal(opacity));
@@ -308,7 +310,7 @@ public partial class ImageStamp
         return dict;
     }
 
-    private static byte[] CompressFlate(byte[] data) => IO.Filters.ManagedDeflater.DeflateZlib(data);
+    private static byte[] CompressFlate(byte[] data) => IO.Filters.ManagedDeflater.DeflateSamples(data);
 
     private static string Format(double v)
     {
@@ -332,12 +334,11 @@ public partial class ImageStamp
         double id = default;
         double ie = default;
         double iff = default;
-        ia = id = 1; ib = ic = ie = iff = 0;
         try
         {
             var content = page.GetContentStreamBytes();
             if (content is null || content.Length == 0) return null;
-            var (a, b, c, d, e, f) = ComputeActiveCtm(content);
+            var (a, b, c, d, e, f) = ScanGraphicsState(content).Ctm;
             // Already identity → nothing to undo (the common, well-formed case).
             if (System.Math.Abs(a - 1) < 1e-6 && System.Math.Abs(b) < 1e-6
                 && System.Math.Abs(c) < 1e-6 && System.Math.Abs(d - 1) < 1e-6

@@ -19,7 +19,7 @@ internal static partial class HtmlToPdfConverter
     private const string LpHrTopRgb = "0 0 0";         // the UA hr: black over grey
     private const string LpHrBottomRgb = "0.333 0.333 0.333";
 
-    private static readonly Regex LpTokenRx = new("[^ \\t\\r\\n]+[ \\t\\r\\n]*|[ \\t\\r\\n]+", RegexOptions.Compiled);
+    private static readonly Regex LpTokenRx = new("[^ \\t\\r\\n]+[ \\t\\r\\n]*|[ \\t\\r\\n]+", RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static double LpLineH(LetterPreviewState lp, double fs) => MetricLineHeight(fs, lp.tm.sum);
 
@@ -73,14 +73,14 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Plain text of an HTML fragment: tags dropped, entities decoded, ASCII
     /// whitespace collapsed (an nbsp stays).</summary>
     private static string LpFlat(string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, "<[^>]+>", "")), "[ \\t\\r\\n]+", " ").Trim(' ');
+        => SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(frag, "<[^>]+>", "")), "[ \\t\\r\\n]+", " ").Trim(' ');
 
     /// <summary>The br-separated lines of a fragment; the last br ends its line without
     /// opening another (every earlier trailing br is an empty line - measured: five closing
     /// brs draw four blank lines).</summary>
     private static List<string> LpSegments(string frag)
     {
-        var parts = Regex.Split(frag, "<br\\s*/?>", RegexOptions.IgnoreCase);
+        var parts = SafeRegex.Split(frag, "<br\\s*/?>", RegexOptions.IgnoreCase);
         var segs = new List<string>();
         foreach (var p in parts) segs.Add(LpFlat(p));
         if (segs.Count > 1 && segs[^1].Length == 0) segs.RemoveAt(segs.Count - 1);
@@ -95,7 +95,7 @@ internal static partial class HtmlToPdfConverter
         var cur = new List<LpRun>();
         foreach (var run in inline)
         {
-            foreach (Match m in LpTokenRx.Matches(run.Text))
+            foreach (Match m in SafeRegex.Matches(LpTokenRx, run.Text))
                 foreach (var tok in LpSplitHyphen(m.Value))
                 {
                     if (LpTryAppend(cur, run, tok, width)) continue;
@@ -128,7 +128,9 @@ internal static partial class HtmlToPdfConverter
 
     private static void LpAppend(List<LpRun> cur, LpRun src, string tok)
     {
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
         if (cur.Count > 0 && cur[^1].Face == src.Face && cur[^1].Fs == src.Fs && cur[^1].Underline == src.Underline) cur[^1].Text += tok;
+#pragma warning restore S1244
         else cur.Add(new LpRun { Face = src.Face, Fs = src.Fs, Text = tok, Underline = src.Underline });
     }
 
@@ -195,7 +197,10 @@ internal static partial class HtmlToPdfConverter
         var y = topTd;
         foreach (var ln in lines)
         {
-            var x = center ? x0 + (boxW - ln.Width) / 2 : right ? x0 + boxW - ln.Width : x0;
+            double x;
+            if (center) x = x0 + (boxW - ln.Width) / 2;
+            else if (right) x = x0 + boxW - ln.Width;
+            else x = x0;
             foreach (var r in ln.Runs)
             {
                 LpEmit(lp, r, x, y + ln.Above, rgb);

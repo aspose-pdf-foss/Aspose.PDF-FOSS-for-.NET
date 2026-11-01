@@ -65,10 +65,9 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
     {
         EnsureParsed();
         var matches = new List<Artifact>();
-        foreach (var a in _items!)
+        foreach (var a in (_items!).Where(a => string.Equals(a.GetValue(name), expectedValue, StringComparison.Ordinal)))
         {
-            if (string.Equals(a.GetValue(name), expectedValue, StringComparison.Ordinal))
-                matches.Add(a);
+            matches.Add(a);
         }
         return matches;
     }
@@ -82,11 +81,15 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
         artifact.Page = _page;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether this collection is read-only (always false).</summary>
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether access to this collection is thread-safe (always false).</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Synchronisation root for thread-safe access.</summary>
     public object SyncRoot { get; } = new object();
@@ -456,7 +459,7 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
     /// BMC — Begin Marked Content (no properties).
     /// If the tag is /Artifact, starts capturing a new artifact.
     /// </summary>
-    private void HandleBMC(List<PdfObject> operands, ParseState state)
+    private static void HandleBMC(List<PdfObject> operands, ParseState state)
     {
         state.McDepth++;
         var tag = operands.Count > 0 ? (operands[0] as PdfName)?.Value : null;
@@ -469,7 +472,7 @@ public sealed class ArtifactCollection : IEnumerable<Artifact>
     /// BDC — Begin Marked Content with properties dictionary.
     /// Same as BMC but also reads /Type, /Subtype, /BBox, /Attached from the properties.
     /// </summary>
-    private void HandleBDC(List<PdfObject> operands, ParseState state)
+    private static void HandleBDC(List<PdfObject> operands, ParseState state)
     {
         state.McDepth++;
         var tag = operands.Count > 0 ? (operands[0] as PdfName)?.Value : null;

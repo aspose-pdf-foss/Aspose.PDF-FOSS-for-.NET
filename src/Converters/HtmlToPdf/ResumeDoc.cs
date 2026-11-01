@@ -21,7 +21,7 @@ internal static partial class HtmlToPdfConverter
         if (PosFace(rd.face).ttf is null || WinMetricsFor(rd.face) is not { } wm) return null;
         rd.wm = wm;
         rd.inv = System.Globalization.CultureInfo.InvariantCulture;
-        rd.c = Regex.Replace(html, @"\s+", " ");
+        rd.c = SafeRegex.Replace(html, @"\s+", " ");
         rd.marginTop = options?.PageInfo?.Margin?.Top ?? 13.0;
         rd.marginBottom = options?.PageInfo?.Margin?.Bottom ?? 13.0;
 
@@ -34,10 +34,12 @@ internal static partial class HtmlToPdfConverter
         rd.black = Color.FromArgb(0, 0, 0);
         rd.y = rd.marginTop;
         rd.runRx = new Regex(@"<(/?)(\w[\w-]*)((?:[^>""']|""[^""]*""|'[^']*')*?)(/?)>|([^<]+)",
-            RegexOptions.Singleline);
+            RegexOptions.Singleline, RegexLimits.Timeout);
         rd.seq = 10;
         rd.firstSection = true;
-        foreach (Match secM in Regex.Matches(rd.c,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match secM in SafeRegex.Matches(rd.c,
+#pragma warning restore S3267
             @"<div id=""SECTION_(\w{4})\d+"" class=""[^""]*""[^>]*>", RegexOptions.IgnoreCase))
         {
             if (!RenderResumeSection(rd, secM)) break;

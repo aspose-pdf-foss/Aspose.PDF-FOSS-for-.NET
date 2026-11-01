@@ -52,7 +52,7 @@ public class AutoTagDenseTableTests
     /// <summary>One row as one TJ: the label from x 72, then the figures from x 200, 54 pt apart
     /// (24 pt of figures and a 30 pt kerning gap).</summary>
     private static string Row(double y, string label, string[] figures)
-        => $"BT /F1 10 Tf 72 {y} Td [({label}) -{(200 - 72 - label.Length * 6) * 100} "
+        => FormattableString.Invariant($"BT /F1 10 Tf 72 {y} Td [({label}) -{(200 - 72 - label.Length * 6) * 100} ")
            + string.Join(" -3000 ", figures.Select(f => $"({f})")) + "] TJ ET\n";
 
     private const string Prose = "BT /F1 10 Tf 72 700 Td (The table below gives the rates for each class of credit over four years.) Tj ET\n";
@@ -213,8 +213,8 @@ public class AutoTagDenseTableTests
                    + "BT /F1 10 Tf 76 666 Td (NIST) Tj ET BT /F1 10 Tf 184 666 Td (National Institute) Tj ET\n"
                    + "BT /F1 10 Tf 76 646 Td (XOR) Tj ET BT /F1 10 Tf 184 646 Td (Exclusive-OR.) Tj ET\n";
         var terms = string.Concat(new[] { ("A", "The additional data."), ("C", "The ciphertext."), ("H", "The hash subkey."), ("P", "The plaintext.") }
-            .Select((t, k) => $"BT /F1 12 Tf 72 {620 - 27.6 * k} Td ({t.Item1}) Tj ET BT /F1 12 Tf 180 {620 - 27.6 * k} Td ({t.Item2}) Tj ET "
-                              + $"BT /F1 12 Tf 72 {606.2 - 27.6 * k} Td ( ) Tj ET\n"));
+            .Select((t, k) => FormattableString.Invariant($"BT /F1 12 Tf 72 {620 - 27.6 * k} Td ({t.Item1}) Tj ET BT /F1 12 Tf 180 {620 - 27.6 * k} Td ({t.Item2}) Tj ET ")
+                              + FormattableString.Invariant($"BT /F1 12 Tf 72 {606.2 - 27.6 * k} Td ( ) Tj ET\n")));
         using var doc = Tag(Build(Prose + grid + terms));
         var tables = doc.TaggedContent.StructTreeRootElement.FindElements<StructureElement>(true).Where(e => e.S.Name == "Table").ToList();
         Assert.Equal(2, tables.Count);
@@ -230,7 +230,7 @@ public class AutoTagDenseTableTests
 
     /// <summary>A row as <see cref="Row"/> with its label from <paramref name="x"/>.</summary>
     private static string RowAt(double x, double y, string label, string[] figures)
-        => $"BT /F1 10 Tf {x} {y} Td [({label}) -{(200 - x - label.Length * 6) * 100} "
+        => FormattableString.Invariant($"BT /F1 10 Tf {x} {y} Td [({label}) -{(200 - x - label.Length * 6) * 100} ")
            + string.Join(" -3000 ", figures.Select(f => $"({f})")) + "] TJ ET\n";
 
     [Fact]
@@ -308,7 +308,7 @@ public class AutoTagDenseTableTests
     {
         // Tight columns: each row's figures one string, a single space between them (Courier: 30 pt a figure).
         string Tight(double y, string label, string[] figures)
-            => $"BT /F1 10 Tf 72 {y} Td ({label}) Tj ET\nBT /F1 10 Tf 200 {y} Td ({string.Join(" ", figures)}) Tj ET\n";
+            => FormattableString.Invariant($"BT /F1 10 Tf 72 {y} Td ({label}) Tj ET\nBT /F1 10 Tf 200 {y} Td ({string.Join(" ", figures)}) Tj ET\n");
         var content = Prose + string.Concat(Enumerable.Range(0, 4).Select(r => Tight(660 - 14 * r, Labels[r], Figures[r])));
         using var doc = Tag(Build(content));
         var rows = Cells(doc);
@@ -322,7 +322,7 @@ public class AutoTagDenseTableTests
     {
         // Each figure its own string in columns 30 pt apart, but for one row whose third and fourth figures
         // are one string, a space between them (Courier: 6 pt a character).
-        string Figure(double x, double y, string text) => $"BT /F1 10 Tf {x} {y} Td ({text}) Tj ET\n";
+        string Figure(double x, double y, string text) => FormattableString.Invariant($"BT /F1 10 Tf {x} {y} Td ({text}) Tj ET\n");
         string Spaced(int r) => Figure(72, 660 - 14 * r, Labels[r])
             + (r == 2
                 ? Figure(200, 660 - 14 * r, Figures[r][0]) + Figure(230, 660 - 14 * r, Figures[r][1])
@@ -337,8 +337,8 @@ public class AutoTagDenseTableTests
 
     // Six columns of figures set flush right, 50 pt apart, ending at x 250, 300, ... 500.
     private static string FlushRight(double y, string label, string[] cells)
-        => $"BT /F1 10 Tf 72 {y} Td ({label}) Tj ET\n"
-           + string.Concat(cells.Select((t, c) => $"BT /F1 10 Tf {250 + 50 * c - 6 * t.Length} {y} Td ({t}) Tj ET\n"));
+        => FormattableString.Invariant($"BT /F1 10 Tf 72 {y} Td ({label}) Tj ET\n")
+           + string.Concat(cells.Select((t, c) => FormattableString.Invariant($"BT /F1 10 Tf {250 + 50 * c - 6 * t.Length} {y} Td ({t}) Tj ET\n")));
 
     private static readonly string[][] Ragged =
     {

@@ -15,7 +15,7 @@ public partial class Table
         ? MeasureTimesRoman(ms, mfs) : MeasureWidth(ms, mfs);
 
     /// <summary>Render one control line of the cell: its checkbox, radio option, inline inputs, inline buttons, inline options and text at the walked or stacked position.</summary>
-    private bool RenderControlLine(ControlLinesState cl, int li, ContentStreamBuilder builder, List<CellLine> cellLines, int lastLine, double leftX, double lineHeight, string fontName, List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>? optionSink, List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink, double? seatBottom, Page? fontPage)
+    private bool RenderControlLine(ControlLinesState cl, int li, ContentStreamBuilder builder, List<CellLine> cellLines, int lastLine, double leftX, double lineHeight, string fontName, List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>? optionSink, List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>? checkboxSink, double? seatBottom, Page? fontPage)
     {
         cl.line = cellLines[li];
         cl.lineTop = cl.exactStack ? cl.yCursor : cl.walkY;
@@ -25,17 +25,20 @@ public partial class Table
         // measured), other lines their css box. The row PLAN keeps
         // the plain 13.5 boxes — the rows are shorter than the
         // drawn button stack and the boxes overflow the row bottom.
-        cl.walkY -= DwFormCells && cl.line.Text.IndexOf(InlineButtonChar) >= 0
-            ? (li + 1 < lastLine
+        if (DwFormCells && cl.line.Text.IndexOf(InlineButtonChar) >= 0)
+            cl.walkY -= li + 1 < lastLine
                 && cellLines[li + 1].Text.IndexOf(InlineButtonChar) >= 0
                 ? Converters.HtmlToPdfConverter.DwButtonFollowPt
-                : Converters.HtmlToPdfConverter.DwButtonLinePt)
-            : DwFormCells && cl.line.OwnLinePt > 0 ? cl.line.OwnLinePt
-            : cl.line.ImgReserve && cl.line.FontSize > 0 ? cl.line.FontSize : lineHeight;
-        cl.yCursor -= cl.line.Checkbox is not null && HtmlUaControlGrid && cl.line.BoxH > 0 ? cl.line.BoxH
-            : cl.line.Checkbox is { } adv && (adv.Height > 0)
-            ? adv.Height
-            : cl.exactStack ? cl.line.FontSize : lineHeight;
+                : Converters.HtmlToPdfConverter.DwButtonLinePt;
+        else if (DwFormCells && cl.line.OwnLinePt > 0) cl.walkY -= cl.line.OwnLinePt;
+        else if (cl.line.ImgReserve && cl.line.FontSize > 0) cl.walkY -= cl.line.FontSize;
+        else cl.walkY -= lineHeight;
+        if (cl.line.Checkbox is not null && HtmlUaControlGrid && cl.line.BoxH > 0) cl.yCursor -= cl.line.BoxH;
+        else if (cl.line.Checkbox is { } adv && (adv.Height > 0)) cl.yCursor -= adv.Height;
+        else if (cl.line.TextBox is { Height: > 0 } box) cl.yCursor -= box.Height;
+        else if (cl.line.Annotation is { Height: > 0 } annotBox) cl.yCursor -= annotBox.Height;
+        else if (cl.exactStack) cl.yCursor -= cl.line.FontSize;
+        else cl.yCursor -= lineHeight;
         cl.textX = leftX + cl.line.LeftIndent;
 
         PlaceControlLineCheckbox(cl, cellLines, leftX, seatBottom, checkboxSink);
@@ -62,26 +65,17 @@ public partial class Table
         // pen by the whole outlined box; text outside the markers draws normally.
         // DataWorks form-grid controls: an InlineInputChar draws the input's
         // declared box with its value typeset inside (mono for textareas, at
-        // the box top; sans for inputs, vertically centred, clipped to fit);
-        // an InlineCheckChar draws a bare checkmark.
-        if (cl.line.Text.IndexOf(InlineInputChar) >= 0
+        // the box top; sans for inputs, vertically centred, clipped to fit); an
+        // InlineCheckChar draws a bare checkmark.
+        if ((cl.line.Text.IndexOf(InlineInputChar) >= 0
             || cl.line.Text.IndexOf(InlineCheckChar) >= 0
-            || cl.line.Text.IndexOf(InlineCheckboxGapChar) >= 0)
-        {
-            if (RenderInlineInputs(cl, builder, fontName, fontPage)) return true;
-        }
-        if (cl.line.Text.IndexOf(InlineButtonChar) >= 0)
-        {
-            if (RenderInlineButtons(cl, builder, fontName)) return true;
-        }
+            || cl.line.Text.IndexOf(InlineCheckboxGapChar) >= 0) && RenderInlineInputs(cl, builder, fontName, fontPage)) return true;
+        if (cl.line.Text.IndexOf(InlineButtonChar) >= 0 && RenderInlineButtons(cl, builder, fontName)) return true;
 
         // Inline radio options: the line's marker chars draw as circle glyphs IN
         // the text run (`◯ ◯Yes ◉ ◉No` on one line), each advancing the pen by
         // the control box; caption text between markers draws normally.
-        if (cl.line.InlineOptions is { Count: > 0 } inlineOpts)
-        {
-            if (RenderInlineOptions(inlineOpts, cl, builder, optionSink)) return true;
-        }
+        if (cl.line.InlineOptions is { Count: > 0 } inlineOpts && RenderInlineOptions(inlineOpts, cl, builder, optionSink)) return true;
 
         if (!string.IsNullOrEmpty(cl.line.Text))
         {
@@ -100,11 +94,20 @@ public partial class Table
         return true;
     }
 
-    /// <summary>A checkbox line's widget: the UA grid seats it inside its inline box on the baseline; the generator cell seats it at the line top (a lone box on the row bottom).</summary>
+    /// <summary>A checkbox line's widget: the UA grid seats it inside its inline box on the baseline; the generator cell seats it at the line top (a lone box on the row bottom). A text box line's widget seats at the line top at its own size.</summary>
     private void PlaceControlLineCheckbox(ControlLinesState cl, List<CellLine> cellLines, double leftX, double? seatBottom,
-        List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink)
+        List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>? checkboxSink)
     {
-        if (cl.line.Checkbox is { } uaCbf && HtmlUaControlGrid)
+        if (((Aspose.Pdf.Annotations.Annotation?)cl.line.TextBox ?? cl.line.Annotation) is { } block)
+        {
+            // A field's block is its layout size; another annotation's its rectangle.
+            var (bw, bh) = block is Aspose.Pdf.Forms.Field blockField ? blockField.GeneratorBlockSize() : (block.Width, block.Height);
+            var tw = bw > 0 ? bw : cl.line.FontSize;
+            var th = bh > 0 ? bh : cl.line.FontSize;
+            checkboxSink?.Add((block, new Rectangle(leftX, cl.lineTop - th, leftX + tw, cl.lineTop)));
+            cl.textX = leftX + tw;
+        }
+        else if (cl.line.Checkbox is { } uaCbf && HtmlUaControlGrid)
         {
             // the widget sits one point inside the inline box, whose bottom is the baseline
             var uaBase = cl.lineTop - cl.line.FontSize;
@@ -218,7 +221,9 @@ public partial class Table
         cl.dwSb = new System.Text.StringBuilder();
         cl.dwConsumed = 0;
         cl.dwTi = 0;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var dch in cl.line.Text)
+#pragma warning restore S3267
         {
             if (!PlaceInlineInputChar(dch, cl, builder, fontName, fontPage)) break;
         }

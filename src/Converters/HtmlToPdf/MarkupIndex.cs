@@ -19,7 +19,7 @@ internal sealed class MarkupIndex
     private static readonly ConditionalWeakTable<string, MarkupIndex> Cache = new();
 
     /// <summary>A tag opening exactly at the match start.</summary>
-    private static readonly Regex TagOpen = new(@"\G<(\w+)\b");
+    private static readonly Regex TagOpen = new(@"\G<(\w+)\b", RegexOptions.None, RegexLimits.Timeout);
 
     /// <summary>The index of this markup, built on first use and kept with the string.</summary>
     internal static MarkupIndex For(string html) => Cache.GetValue(html, h => new MarkupIndex(h));
@@ -42,7 +42,7 @@ internal sealed class MarkupIndex
         _html = html;
         // Every class attribute, with the tag it stands in when one opens before
         // it on the same tag (a `class=` inside a script or a stylesheet has none).
-        foreach (Match m in Regex.Matches(html, @"class\s*=\s*[""']([^""']*)", RegexOptions.IgnoreCase))
+        foreach (Match m in SafeRegex.Matches(html, @"class\s*=\s*[""']([^""']*)", RegexOptions.IgnoreCase))
         {
             var value = m.Groups[1].Value;
             var lt = html.LastIndexOf('<', m.Index);
@@ -51,22 +51,22 @@ internal sealed class MarkupIndex
             var index = m.Index;
             if (lt >= 0 && (gt < 0 || gt > m.Index))
             {
-                var tagM = TagOpen.Match(html, lt, Math.Min(html.Length - lt, 64));
+                var tagM = SafeRegex.Match(TagOpen, html, lt, Math.Min(html.Length - lt, 64));
                 if (tagM.Success) { tag = tagM.Groups[1].Value; index = lt; }
             }
             var at = _classUses.Count;
             _classUses.Add(new ClassUse(tag, index, value));
-            foreach (var token in Regex.Split(value.ToLowerInvariant(), @"\W+"))
+            foreach (var token in SafeRegex.Split(value.ToLowerInvariant(), @"\W+"))
             {
                 if (token.Length == 0) continue;
                 if (!_usesByToken.TryGetValue(token, out var list)) _usesByToken[token] = list = new List<int>();
                 if (list.Count == 0 || list[^1] != at) list.Add(at);
             }
         }
-        foreach (Match m in Regex.Matches(html, @"<(\w+)")) _tags.Add(m.Groups[1].Value.ToLowerInvariant());
+        foreach (Match m in SafeRegex.Matches(html, @"<(\w+)")) _tags.Add(m.Groups[1].Value.ToLowerInvariant());
         var opens = new List<int>();
         var closes = new List<int>();
-        foreach (Match m in Regex.Matches(html, @"<(/?)table\b", RegexOptions.IgnoreCase))
+        foreach (Match m in SafeRegex.Matches(html, @"<(/?)table\b", RegexOptions.IgnoreCase))
             (m.Groups[1].Value.Length == 0 ? opens : closes).Add(m.Index);
         _tableOpens = opens.ToArray();
         _tableCloses = closes.ToArray();
@@ -81,7 +81,7 @@ internal sealed class MarkupIndex
     internal bool HasId(string id)
     {
         if (_ids.TryGetValue(id, out var known)) return known;
-        return _ids[id] = Regex.IsMatch(_html, @"id\s*=\s*[""']?" + Regex.Escape(id) + @"\b", RegexOptions.IgnoreCase);
+        return _ids[id] = SafeRegex.IsMatch(_html, @"id\s*=\s*[""']?" + Regex.Escape(id) + @"\b", RegexOptions.IgnoreCase);
     }
 
     /// <summary>True when some class attribute carries the class as a word: what
@@ -110,16 +110,16 @@ internal sealed class MarkupIndex
     private List<int> UsesOf(string cls)
     {
         if (_usesOfClass.TryGetValue(cls, out var found)) return found;
-        var word = new Regex(@"\b" + Regex.Escape(cls) + @"\b", RegexOptions.IgnoreCase);
+        var word = new Regex(@"\b" + Regex.Escape(cls) + @"\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         // A class name opening on a word character can only match where its first
         // word stands as a token of the value; any other shape checks every value.
-        var firstToken = Regex.Match(cls.ToLowerInvariant(), @"^\w+").Value;
-        IEnumerable<int> candidates = firstToken.Length > 0
-            ? _usesByToken.TryGetValue(firstToken, out var byToken) ? byToken : Array.Empty<int>()
-            : Enumerable.Range(0, _classUses.Count);
+        var firstToken = SafeRegex.Match(cls.ToLowerInvariant(), @"^\w+").Value;
+        IEnumerable<int> candidates;
+        if (firstToken.Length > 0) candidates = _usesByToken.TryGetValue(firstToken, out var byToken) ? byToken : Array.Empty<int>();
+        else candidates = Enumerable.Range(0, _classUses.Count);
         var uses = new List<int>();
-        foreach (var i in candidates)
-            if (word.IsMatch(_classUses[i].Value)) uses.Add(i);
+        foreach (var i in candidates.Where(i => SafeRegex.IsMatch(word, _classUses[i].Value)))
+            uses.Add(i);
         return _usesOfClass[cls] = uses;
     }
 }

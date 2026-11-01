@@ -57,9 +57,11 @@ internal static partial class ManagedInflater
         }
         catch (InvalidDataException)
         {
+            // a truncated or corrupt deflate stream keeps what inflated so far
         }
         catch (IndexOutOfRangeException)
         {
+            // a truncated or corrupt deflate stream keeps what inflated so far
         }
         return output.ToArray();
     }
@@ -80,9 +82,11 @@ internal static partial class ManagedInflater
         }
         catch (InvalidDataException)
         {
+            // a truncated or corrupt deflate stream keeps what inflated so far
         }
         catch (IndexOutOfRangeException)
         {
+            // a truncated or corrupt deflate stream keeps what inflated so far
         }
         if (output.Length > maxBytes) output.Length = maxBytes;
         return output.ToArray();

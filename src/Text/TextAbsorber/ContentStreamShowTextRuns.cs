@@ -8,11 +8,14 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextAbsorber
 {
     /// <summary>The array's own runs: each string decoded, measured and shown, each number kerned, with the operator's RTL pass over the whole.</summary>
-    private void ShowTextArrayRuns(ExtractState xs, string op, PdfArray tjArr)
+    /// <summary>A rotated run's row X: its device X when the page's rotation dominates, else its matrix X.</summary>
+    private double RotatedRunX(ExtractState xs) =>
+        _pageRotDominant ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx : xs.tmE;
+
+    private void ShowTextArrayRuns(ExtractState xs, PdfArray tjArr)
     {
         var tj = new ShowTextArrayState();
         tj.tjWidth = 0;
-        tj.tjDecodedLen = 0;
         tj.tjBuf = new StringBuilder();
         tj.clipRot = xs.clipRect is not null && xs.tmRotated && xs.currentMetrics is not null;
         tj.clipping = tj.clipRot || (xs.clipRect is not null && xs.tmD > 0 && xs.currentMetrics is not null);
@@ -20,26 +23,30 @@ public sealed partial class TextAbsorber
         tj.clipPen = xs.tx;
         tj.hadString = false;
         tj.tjRunPageX = 0;
+        // Before the line tracking: the array that opens a new logical line anchors that line, not this one.
+        BreakAtBackwardJump(xs, xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr);
         MarkShowTextArrayLineCells(xs, tj, tjArr);
         TrackRowX(xs.tmRotated
-            ? (_pageRotDominant ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx : xs.tmE)
+            ? RotatedRunX(xs)
             : (xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA) * xs.cmLa + xs.cmLe);
         tj.leadingSpaces = 0;
         tj.tjRunDevX = xs.tmRotated ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx : 0;
         tj.tjUseDev = xs.tmRotated && !double.IsNaN(xs.lastRunEndDevX);
         tj.tjUsePage = !xs.tmRotated && !double.IsNaN(xs.lastRunEndPageX);
         tj.tjStartPageX = xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr;
-        tj.tjGapPre = double.IsNaN(xs.lastRunEndX) ? 0
-            : tj.tjUseDev ? tj.tjRunDevX - xs.lastRunEndDevX
-            : tj.tjUsePage ? tj.tjStartPageX - xs.lastRunEndPageX
-            : (xs.tx - xs.lastRunEndX) * (xs.tmRotated ? xs.tmA : xs.tmAr);
-        OpenShowTextArrayGap(xs, tj, op, tjArr);
+        if (double.IsNaN(xs.lastRunEndX)) tj.tjGapPre = 0;
+        else if (tj.tjUseDev) tj.tjGapPre = tj.tjRunDevX - xs.lastRunEndDevX;
+        else if (tj.tjUsePage) tj.tjGapPre = tj.tjStartPageX - xs.lastRunEndPageX;
+        else tj.tjGapPre = (xs.tx - xs.lastRunEndX) * (xs.tmRotated ? xs.tmA : xs.tmAr);
+        OpenShowTextArrayGap(xs, tj);
         tj.tjRel = new List<double>();
         ArmShowTextArraySynth(xs, tj, tjArr);
         tj.tjDbg = GridDebug ? new StringBuilder() : null;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var item in tjArr)
+#pragma warning restore S3267
         {
-            if (!ShowTextArrayItem(xs, tj, op, item)) break;
+            if (!ShowTextArrayItem(xs, tj, item)) break;
         }
         if (xs.currentFontNonAgl && tj.hadString)
             RecordAglError(xs.currentFontName, tj.tjBuf.ToString(),
@@ -56,13 +63,13 @@ public sealed partial class TextAbsorber
         MarkShowTextArrayCells(xs, tj);
         AppendShowTextArrayRun(xs, tj);
         xs.lastRunEndDevX = xs.tmRotated ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx + tj.tjWidth * xs.tmA : double.NaN;
-        xs.lastRunEndPageX = xs.tmRotated ? double.NaN : xs.tmE + (xs.tx + tj.tjWidth - xs.tlmX) * xs.tmAr;
-        xs.lastRunStartPageX = xs.tmRotated ? double.NaN : xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr;
-        xs.lastRunEndX = xs.tx + tj.tjWidth * (xs.tmRotated ? xs.tmA : 1.0); // rotated: advance projects through the axis norm
-        xs.lastRunEstWidth = tj.tjWidth;
-        xs.lastDecodedLength = tj.tjDecodedLen;
+        // The next run's gap is measured from the furthest ink: a trailing kern that pulls the pen
+        // back over the last glyph does not open a gap after it.
+        var tjEndWidth = xs.tmRotated || tj.tjInkWidth <= tj.tjWidth || NearRightToLeftText() ? tj.tjWidth : tj.tjInkWidth;
+        TrackRunExtent(xs, xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr, xs.tmE + (xs.tx + tjEndWidth - xs.tlmX) * xs.tmAr,
+            xs.tx + tjEndWidth * (xs.tmRotated ? xs.tmA : 1.0)); // rotated: advance projects through the axis norm
         xs.tx += tj.tjWidth;
         // Track rendered Y for subsequent line-break suppression logic
-        xs.lastRenderedY = xs.tmY; xs.lastRenderedFs = xs.fontSize * (xs.tmRotated ? xs.tmN : 1.0); xs.lastRenderedCmTy = xs.localCmTy;
+        xs.lastRenderedY = xs.tmY; xs.lastRenderedCmTy = xs.localCmTy;
     }
 }

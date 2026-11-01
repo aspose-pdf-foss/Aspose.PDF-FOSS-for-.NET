@@ -43,7 +43,7 @@ namespace Aspose.Pdf.Printing
             if (!defaults.IsDefaultPaperSize) PaperSize = defaults.PaperSize;
             if (!defaults.IsDefaultPaperSource) PaperSource = defaults.PaperSource;
             if (!defaults.IsDefaultPrinterResolution) PrinterResolution = defaults.PrinterResolution;
-            if (!defaults.IsDefaultMargins) Margins = defaults.Margins;
+            if (defaults.MarginsGiven) Margins = defaults.Margins;
             if (!defaults.IsDefaultLandscape) Landscape = defaults.Landscape;
             if (!defaults.IsDefaultColor) Color = defaults.Color;
         }
@@ -110,6 +110,11 @@ namespace Aspose.Pdf.Printing
 
         /// <summary>True while <see cref="Margins"/> has never been assigned.</summary>
         public bool IsDefaultMargins { get; private set; } = true;
+
+        /// <summary>True when the caller gave margins: assigned them, or set a side of the ones these settings
+        /// hold (<c>Margins.Left = 0</c>), which leaves <see cref="IsDefaultMargins"/> as it was. A job prints with
+        /// given margins; it lays a page whose margins nobody gave inside the printer's own.</summary>
+        internal bool MarginsGiven => !IsDefaultMargins || _margins?.Edited == true;
 
         internal bool IsDefaultPaperSize { get; private set; } = true;
         internal bool IsDefaultPaperSource { get; private set; } = true;

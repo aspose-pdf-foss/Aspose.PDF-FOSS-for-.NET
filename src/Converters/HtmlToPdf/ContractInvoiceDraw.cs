@@ -10,7 +10,7 @@ internal static partial class HtmlToPdfConverter
 // Contract invoice drawing helpers: drop, width, runs, fills, lines and the page break.
     private static double Drop(ContractInvoiceState cv, double fs, double box) => (box - fs * cv.wm.sum) / 2 + fs * cv.wm.asc;
 
-    private static double W(ContractInvoiceState cv, string t, string face, double fs) => MeasureFaceText(face, t, fs);
+    private static double W(string t, string face, double fs) => MeasureFaceText(face, t, fs);
 
     private static void EmitRun(ContractInvoiceState cv, string text, double fs, string face, double x, double baseline, Color col)
     {

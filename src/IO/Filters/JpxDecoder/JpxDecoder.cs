@@ -5,9 +5,9 @@ namespace Aspose.Pdf.IO.Filters;
 
 /// <summary>
 /// Minimal JPEG 2000 (ISO/IEC 15444-1) decoder for the JPXDecode filter, scoped to
-/// the feature subset produced by common scanned-PDF encoders: a single tile, one or
-/// three components, 8-bit samples, default (maximal) precincts, LRCP progression and
-/// a single quality layer. Both the reversible 5/3 and irreversible 9/7 wavelet
+/// the feature subset produced by common scanned-PDF encoders: one or more tiles, one,
+/// three or four components, 8-bit samples, default or custom precincts, the LRCP, RLCP
+/// and RPCL progressions and any number of quality layers. Both the reversible 5/3 and irreversible 9/7 wavelet
 /// transforms are supported. Returns 8-bit samples (one byte per component per pixel).
 /// Returns null when the codestream uses features outside this subset.
 /// </summary>
@@ -47,7 +47,6 @@ internal static partial class JpxDecoder
     private sealed class SubbandBlock
     {
         public int X0, Y0, X1, Y1; // code-block bounds in subband coordinates
-        public int[] Coeffs = Array.Empty<int>(); // signed magnitudes (subband units)
         public int ZeroBitplanes;
         public int NumPasses;
         public int Lblock = 3;
@@ -63,8 +62,7 @@ internal static partial class JpxDecoder
         public int Cbw, Cbh;     // code-block dims
         public int NumBlocksW, NumBlocksH;
         public SubbandBlock[] Blocks = Array.Empty<SubbandBlock>();
-        public TagTree InclTree = null!;
-        public TagTree ZbpTree = null!;
+        public Precinct[] Precincts = Array.Empty<Precinct>();
         public int Expn;          // quantization exponent
         public int Mant;          // quantization mantissa
         public int Gain;          // log2 gain (0,1,1,2 for LL,HL/LH,HH)
@@ -76,6 +74,16 @@ internal static partial class JpxDecoder
     {
         public int X0, Y0, X1, Y1; // resolution bounds in tile-component coords
         public Subband[] Bands = Array.Empty<Subband>();
+        public int PrecW, PrecH;   // precinct grid (one packet per precinct, layer and component)
+    }
+
+    /// <summary>The code-blocks of one subband that fall in one precinct (a column and row
+    /// range of the subband's block grid) and the tag trees its packets code them with.</summary>
+    private sealed class Precinct
+    {
+        public int C0, C1, R0, R1;
+        public TagTree InclTree = null!;
+        public TagTree ZbpTree = null!;
     }
 
     // ── Decoder ─────────────────────────────────────────────────────

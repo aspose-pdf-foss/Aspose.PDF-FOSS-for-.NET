@@ -33,12 +33,23 @@ internal static class JpegEncoderImpl
     /// 1×1 default that callers used before DPI propagation existed.
     /// </summary>
     public static byte[] Encode(PixelGetter getter, int width, int height, int quality, int xDpi = 0, int yDpi = 0)
+        => Encode(getter, width, height, quality, xDpi, yDpi, gray: false);
+
+    /// <summary>Encode 8-bit grey samples (one byte per pixel) as a one-component JPEG.</summary>
+    public static byte[] EncodeGray(byte[] gray, int width, int height, int quality)
+        => Encode((int x, int y) =>
+        {
+            var g = gray[y * width + x];
+            return (g, g, g);
+        }, width, height, quality, 0, 0, gray: true);
+
+    private static byte[] Encode(PixelGetter getter, int width, int height, int quality, int xDpi, int yDpi, bool gray)
     {
         if (quality < 1) quality = 1;
         if (quality > 100) quality = 100;
 
         using var ms = new MemoryStream();
-        var writer = new JpegWriter(ms, width, height, quality, getter, xDpi, yDpi);
+        var writer = new JpegWriter(ms, width, height, quality, getter, xDpi, yDpi, gray);
         writer.Write();
         return ms.ToArray();
     }
@@ -46,9 +57,11 @@ internal static class JpegEncoderImpl
     private sealed class JpegWriter
     {
         private readonly Stream _out;
-        private readonly int _width, _height, _quality;
+        private readonly int _width, _height;
         private readonly int _xDpi, _yDpi;
         private readonly PixelGetter _getPixel;
+        // One component: the luminance alone, in non-interleaved 8x8 blocks.
+        private readonly bool _gray;
 
         // Quantization tables (luminance and chrominance)
         private readonly int[] _lumQt = new int[64];
@@ -83,12 +96,12 @@ internal static class JpegEncoderImpl
         private int[] _acLumCo = AcLumEhufco, _acLumSi = AcLumEhufsi;
         private int[] _acChrCo = AcChrEhufco, _acChrSi = AcChrEhufsi;
 
-        public JpegWriter(Stream output, int width, int height, int quality, PixelGetter getter, int xDpi, int yDpi)
+        public JpegWriter(Stream output, int width, int height, int quality, PixelGetter getter, int xDpi, int yDpi, bool gray)
         {
+            _gray = gray;
             _out = output;
             _width = width;
             _height = height;
-            _quality = quality;
             _xDpi = xDpi;
             _yDpi = yDpi;
             _getPixel = getter;
@@ -111,12 +124,12 @@ internal static class JpegEncoderImpl
             WriteSOI();
             WriteAPP0();
             WriteDQT(0, _lumQt);
-            WriteDQT(1, _chrQt);
+            if (!_gray) WriteDQT(1, _chrQt);
             WriteSOF0();
             WriteDHT(0, 0, _dcLumBits, _dcLumVals);   // DC luminance
-            WriteDHT(0, 1, _dcChrBits, _dcChrVals);   // DC chrominance
+            if (!_gray) WriteDHT(0, 1, _dcChrBits, _dcChrVals);   // DC chrominance
             WriteDHT(1, 0, _acLumBits, _acLumVals);   // AC luminance
-            WriteDHT(1, 1, _acChrBits, _acChrVals);   // AC chrominance
+            if (!_gray) WriteDHT(1, 1, _acChrBits, _acChrVals);   // AC chrominance
             WriteSOS();
             WriteImageData();
             FlushBits();
@@ -181,10 +194,16 @@ internal static class JpegEncoderImpl
         private void WriteSOF0()
         {
             WriteMarker(0xC0);
-            Write16(17); // length
+            Write16(_gray ? 11 : 17); // length
             _out.WriteByte(8); // precision
             Write16(_height);
             Write16(_width);
+            if (_gray)
+            {
+                _out.WriteByte(1); // components
+                _out.WriteByte(1); _out.WriteByte(0x11); _out.WriteByte(0); // Y: id=1, 1x1, quant table 0
+                return;
+            }
             _out.WriteByte(3); // components
 
             // 4:2:0 chroma subsampling: luminance sampled 2x2 per MCU, chrominance 1x1
@@ -213,6 +232,16 @@ internal static class JpegEncoderImpl
         private void WriteSOS()
         {
             WriteMarker(0xDA);
+            if (_gray)
+            {
+                Write16(8); // length
+                _out.WriteByte(1); // components
+                _out.WriteByte(1); _out.WriteByte(0x00); // Y: DC table 0, AC table 0
+                _out.WriteByte(0);  // Ss
+                _out.WriteByte(63); // Se
+                _out.WriteByte(0);  // Ah/Al
+                return;
+            }
             Write16(12); // length
             _out.WriteByte(3); // components
             _out.WriteByte(1); _out.WriteByte(0x00); // Y: DC table 0, AC table 0
@@ -223,53 +252,138 @@ internal static class JpegEncoderImpl
             _out.WriteByte(0);  // Ah/Al
         }
 
+        // 4:2:0 minimum coded unit: 16x16 pixels -> four 8x8 Y blocks, one 8x8 Cb, one 8x8 Cr.
+        private const int McuSide = 16;
+        private const int BlocksPerMcu = 6;
+        private const int BlockSize = 64;
+        private const int CbBlock = 4;
+        // Coefficients kept from pass 1 at most (64 MB): a larger image recomputes in pass 2,
+        // so the streaming getter never forces a whole-image buffer.
+        private const long MaxKeptCoefficients = 32L << 20;
+
+        // The quantised blocks of the scan, kept from pass 1 so pass 2 only entropy-codes them:
+        // colour conversion, DCT and quantisation are most of the work and come out the same.
+        private short[]? _scan;
+
+        // One MCU's pixels, fetched once: the level-shifted luma and the Cb/Cr terms per pixel.
+        private readonly int[] _mcuLuma = new int[McuSide * McuSide];
+        private readonly double[] _mcuCb = new double[McuSide * McuSide];
+        private readonly double[] _mcuCr = new double[McuSide * McuSide];
+
         private void WriteImageData()
         {
-            var block = new int[64];
-
-            // 4:2:0 minimum coded unit: 16x16 pixels → four 8x8 Y blocks, one 8x8 Cb, one 8x8 Cr.
-            for (var my = 0; my < _height; my += 16)
+            if (_gray)
             {
-                for (var mx = 0; mx < _width; mx += 16)
+                WriteGrayImageData();
+                return;
+            }
+            var mcuCount = (long)((_width + McuSide - 1) / McuSide) * ((_height + McuSide - 1) / McuSide);
+            var keep = _gathering && mcuCount * BlocksPerMcu * BlockSize <= MaxKeptCoefficients;
+            if (keep) _scan = new short[mcuCount * BlocksPerMcu * BlockSize];
+            var replay = !_gathering && _scan is not null;
+            var block = new int[BlockSize];
+            var qblock = new int[BlockSize];
+            var at = 0;
+            for (var my = 0; my < _height; my += McuSide)
+            {
+                for (var mx = 0; mx < _width; mx += McuSide)
                 {
-                    // Four luminance blocks in raster order (top-left, top-right, bottom-left, bottom-right).
-                    for (var yb = 0; yb < 2; yb++)
-                        for (var xb = 0; xb < 2; xb++)
-                        {
-                            ExtractLumaBlock(mx + xb * 8, my + yb * 8, block);
-                            _dcY = EncodeBlock(block, _lumQt, _dcY, _dcLumCo, _dcLumSi, _acLumCo, _acLumSi, _dcLumFreq, _acLumFreq);
-                        }
-
-                    // One chroma block per MCU, each sample averaged over its 2x2 luma footprint.
-                    ExtractChromaBlock(mx, my, chroma: 1, block);
-                    _dcCb = EncodeBlock(block, _chrQt, _dcCb, _dcChrCo, _dcChrSi, _acChrCo, _acChrSi, _dcChrFreq, _acChrFreq);
-
-                    ExtractChromaBlock(mx, my, chroma: 2, block);
-                    _dcCr = EncodeBlock(block, _chrQt, _dcCr, _dcChrCo, _dcChrSi, _acChrCo, _acChrSi, _dcChrFreq, _acChrFreq);
+                    if (!replay) LoadMcu(mx, my);
+                    for (var b = 0; b < BlocksPerMcu; b++, at += BlockSize)
+                    {
+                        if (replay) Array.Copy(_scan!, at, qblock, 0, BlockSize);
+                        else QuantizeMcuBlock(b, block, qblock, keep ? at : -1);
+                        EmitMcuBlock(b, qblock);
+                    }
                 }
             }
         }
 
-        /// <summary>Fill an 8x8 luminance block (level-shifted by -128) from the pixels at
-        /// (bx,by); coordinates past the image edge clamp to the last row/column.</summary>
-        private void ExtractLumaBlock(int bx, int by, int[] block)
+        /// <summary>The one-component scan: each 8x8 block of luminance in raster order (a
+        /// non-interleaved scan's data unit is one block), kept from pass 1 as the colour scan is.</summary>
+        private void WriteGrayImageData()
         {
-            for (var y = 0; y < 8; y++)
+            var blockCount = (long)((_width + 7) / 8) * ((_height + 7) / 8);
+            var keep = _gathering && blockCount * BlockSize <= MaxKeptCoefficients;
+            if (keep) _scan = new short[blockCount * BlockSize];
+            var replay = !_gathering && _scan is not null;
+            var block = new int[BlockSize];
+            var qblock = new int[BlockSize];
+            var at = 0;
+            for (var by = 0; by < _height; by += 8)
             {
-                var py = Math.Min(by + y, _height - 1);
-                for (var x = 0; x < 8; x++)
+                for (var bx = 0; bx < _width; bx += 8, at += BlockSize)
                 {
-                    var px = Math.Min(bx + x, _width - 1);
-                    var (r, g, b) = _getPixel(px, py);
-                    block[y * 8 + x] = (int)Math.Round(0.299 * r + 0.587 * g + 0.114 * b - 128);
+                    if (replay)
+                    {
+                        Array.Copy(_scan!, at, qblock, 0, BlockSize);
+                    }
+                    else
+                    {
+                        for (var y = 0; y < 8; y++)
+                            for (var x = 0; x < 8; x++)
+                                block[y * 8 + x] = _getPixel(Math.Min(bx + x, _width - 1), Math.Min(by + y, _height - 1)).r - 128;
+                        Quantize(block, _lumQt, qblock);
+                        if (keep)
+                            for (var i = 0; i < BlockSize; i++) _scan![at + i] = (short)qblock[i];
+                    }
+                    _dcY = EmitBlock(qblock, _dcY, _dcLumCo, _dcLumSi, _acLumCo, _acLumSi, _dcLumFreq, _acLumFreq);
                 }
             }
         }
 
-        /// <summary>Fill an 8x8 chroma block (<paramref name="chroma"/> 1 = Cb, 2 = Cr) for the
-        /// 16x16 MCU at (mx,my): each output sample is the average Cb/Cr of its 2x2 pixel group,
-        /// implementing 4:2:0 subsampling. Edge coordinates clamp to the image bounds.</summary>
-        private void ExtractChromaBlock(int mx, int my, int chroma, int[] block)
+        /// <summary>Fetch the 16x16 MCU at (mx,my) once; coordinates past the image edge clamp
+        /// to the last row/column.</summary>
+        private void LoadMcu(int mx, int my)
+        {
+            for (var y = 0; y < McuSide; y++)
+            {
+                var py = Math.Min(my + y, _height - 1);
+                for (var x = 0; x < McuSide; x++)
+                {
+                    var (r, g, b) = _getPixel(Math.Min(mx + x, _width - 1), py);
+                    var i = y * McuSide + x;
+                    _mcuLuma[i] = (int)Math.Round(0.299 * r + 0.587 * g + 0.114 * b - 128);
+                    _mcuCb[i] = -0.168736 * r - 0.331264 * g + 0.5 * b;
+                    _mcuCr[i] = 0.5 * r - 0.418688 * g - 0.081312 * b;
+                }
+            }
+        }
+
+        /// <summary>Block <paramref name="b"/> of the loaded MCU, transformed and quantised into
+        /// <paramref name="qblock"/>; kept in the scan at <paramref name="keepAt"/> unless it is -1.</summary>
+        private void QuantizeMcuBlock(int b, int[] block, int[] qblock, int keepAt)
+        {
+            if (b < CbBlock) FillLumaBlock(b, block);
+            else FillChromaBlock(b == CbBlock ? _mcuCb : _mcuCr, block);
+            Quantize(block, b < CbBlock ? _lumQt : _chrQt, qblock);
+            if (keepAt < 0) return;
+            for (var i = 0; i < BlockSize; i++) _scan![keepAt + i] = (short)qblock[i];
+        }
+
+        private void EmitMcuBlock(int b, int[] qblock)
+        {
+            if (b < CbBlock)
+                _dcY = EmitBlock(qblock, _dcY, _dcLumCo, _dcLumSi, _acLumCo, _acLumSi, _dcLumFreq, _acLumFreq);
+            else if (b == CbBlock)
+                _dcCb = EmitBlock(qblock, _dcCb, _dcChrCo, _dcChrSi, _acChrCo, _acChrSi, _dcChrFreq, _acChrFreq);
+            else
+                _dcCr = EmitBlock(qblock, _dcCr, _dcChrCo, _dcChrSi, _acChrCo, _acChrSi, _dcChrFreq, _acChrFreq);
+        }
+
+        /// <summary>Luminance block <paramref name="b"/> (0-3, raster order: top-left, top-right,
+        /// bottom-left, bottom-right) of the loaded MCU.</summary>
+        private void FillLumaBlock(int b, int[] block)
+        {
+            var origin = (b >> 1) * 8 * McuSide + (b & 1) * 8;
+            for (var y = 0; y < 8; y++)
+                for (var x = 0; x < 8; x++)
+                    block[y * 8 + x] = _mcuLuma[origin + y * McuSide + x];
+        }
+
+        /// <summary>A chroma block of the loaded MCU: each sample is the average Cb/Cr of its
+        /// 2x2 pixel group, implementing 4:2:0 subsampling.</summary>
+        private static void FillChromaBlock(double[] terms, int[] block)
         {
             for (var y = 0; y < 8; y++)
             {
@@ -278,22 +392,13 @@ internal static class JpegEncoderImpl
                     double sum = 0;
                     for (var dy = 0; dy < 2; dy++)
                         for (var dx = 0; dx < 2; dx++)
-                        {
-                            var px = Math.Min(mx + x * 2 + dx, _width - 1);
-                            var py = Math.Min(my + y * 2 + dy, _height - 1);
-                            var (r, g, b) = _getPixel(px, py);
-                            sum += chroma == 1
-                                ? -0.168736 * r - 0.331264 * g + 0.5 * b        // Cb
-                                :  0.5 * r - 0.418688 * g - 0.081312 * b;       // Cr
-                        }
+                            sum += terms[(y * 2 + dy) * McuSide + x * 2 + dx];
                     block[y * 8 + x] = (int)Math.Round(sum / 4.0);
                 }
             }
         }
 
-        private int EncodeBlock(int[] block, int[] qt, int dcPred,
-            int[] dcEhufco, int[] dcEhufsi, int[] acEhufco, int[] acEhufsi,
-            int[] dcFreq, int[] acFreq)
+        private void Quantize(int[] block, int[] qt, int[] qblock)
         {
             // Forward DCT
             FDCT(block);
@@ -305,21 +410,25 @@ internal static class JpegEncoderImpl
             // round to |coef| ≥ 1024 — category 11 has no AC code, so an unclamped value would
             // emit a zero-length code and desync the decoder (a chroma drift / colour cast over
             // the rest of the scan). Clamping costs an imperceptible amount of the top coefficient.
-            var qblock = new int[64];
-            for (var i = 0; i < 64; i++)
+            for (var i = 0; i < BlockSize; i++)
             {
                 var zigIdx = ZigZag[i];
                 var q = (int)Math.Round((double)block[zigIdx] / qt[zigIdx]);
-                if (i > 0) q = q > 1023 ? 1023 : (q < -1023 ? -1023 : q);
+                if (i > 0) q = q switch { > 1023 => 1023, < -1023 => -1023, _ => q };
                 qblock[i] = q;
             }
+        }
 
+        private int EmitBlock(int[] qblock, int dcPred,
+            int[] dcEhufco, int[] dcEhufsi, int[] acEhufco, int[] acEhufsi,
+            int[] dcFreq, int[] acFreq)
+        {
             // Encode DC. The difference is what gets coded, so clamp the difference (not the
             // absolute level) to category 11, then carry the reconstructed value forward as the
             // predictor so the decoder stays in lock-step.
             var dc = qblock[0];
             var diff = dc - dcPred;
-            diff = diff > 2047 ? 2047 : (diff < -2047 ? -2047 : diff);
+            diff = diff switch { > 2047 => 2047, < -2047 => -2047, _ => diff };
             dc = dcPred + diff;
             var cat = Category(diff);
             EmitSymbol(cat, dcEhufco, dcEhufsi, dcFreq);
@@ -362,17 +471,22 @@ internal static class JpegEncoderImpl
             else WriteBits(ehufco[sym], ehufsi[sym]);
         }
 
-        private static void FDCT(int[] block)
+        // The transform's working arrays, one set per writer: a pair per block was most of
+        // what an encode allocated.
+        private readonly double[] _dctWork = new double[64];
+        private readonly double[] _dctColumn = new double[8];
+
+        private void FDCT(int[] block)
         {
             // Simple forward DCT (rows then columns)
-            var ws = new double[64];
+            var ws = _dctWork;
             for (var i = 0; i < 64; i++) ws[i] = block[i];
 
             for (var row = 0; row < 8; row++)
                 FDCT1D(ws, row * 8);
+            var tmp = _dctColumn;
             for (var col = 0; col < 8; col++)
             {
-                var tmp = new double[8];
                 for (var i = 0; i < 8; i++) tmp[i] = ws[i * 8 + col];
                 FDCT1D(tmp, 0);
                 for (var i = 0; i < 8; i++) ws[i * 8 + col] = tmp[i];
@@ -430,18 +544,28 @@ internal static class JpegEncoderImpl
             data[off + 1] = t7;
         }
 
-        private static int Category(int val)
+        // The bit length of every magnitude the clamped coefficients and differences can take.
+        private static readonly byte[] CategoryOf = BuildCategories(2048);
+
+        private static byte[] BuildCategories(int count)
         {
-            if (val < 0) val = -val;
-            var cat = 0;
-            while (val > 0) { val >>= 1; cat++; }
-            return cat;
+            var categories = new byte[count];
+            for (var v = 1; v < count; v++) categories[v] = (byte)(categories[v >> 1] + 1);
+            return categories;
         }
+
+        private static int Category(int val) => CategoryOf[val < 0 ? -val : val];
 
         private static int EncodeDiff(int diff, int cat)
         {
             return diff >= 0 ? diff : diff + (1 << cat) - 1;
         }
+
+        // The entropy-coded bytes gather here and reach the stream a buffer at a time: a
+        // write per byte, through the stream's virtual call, was a fair share of the encode.
+        private readonly byte[] _coded = new byte[CodedBufferSize];
+        private int _codedCount;
+        private const int CodedBufferSize = 1 << 16;
 
         private void WriteBits(int code, int size)
         {
@@ -451,22 +575,30 @@ internal static class JpegEncoderImpl
             while (_bitCount >= 8)
             {
                 _bitCount -= 8;
-                var b = (byte)((_bitBuf >> _bitCount) & 0xFF);
-                _out.WriteByte(b);
-                if (b == 0xFF)
-                    _out.WriteByte(0x00); // byte stuffing
+                WriteCodedByte((byte)((_bitBuf >> _bitCount) & 0xFF));
             }
+        }
+
+        private void WriteCodedByte(byte b)
+        {
+            // Two bytes may follow (the stuffing after an FF): flush ahead of them.
+            if (_codedCount + 2 > _coded.Length) FlushCodedBytes();
+            _coded[_codedCount++] = b;
+            if (b == 0xFF)
+                _coded[_codedCount++] = 0x00; // byte stuffing
+        }
+
+        private void FlushCodedBytes()
+        {
+            _out.Write(_coded, 0, _codedCount);
+            _codedCount = 0;
         }
 
         private void FlushBits()
         {
             if (_bitCount > 0)
-            {
-                var b = (byte)((_bitBuf << (8 - _bitCount)) & 0xFF);
-                _out.WriteByte(b);
-                if (b == 0xFF)
-                    _out.WriteByte(0x00);
-            }
+                WriteCodedByte((byte)((_bitBuf << (8 - _bitCount)) & 0xFF));
+            FlushCodedBytes();
             _bitBuf = 0;
             _bitCount = 0;
         }

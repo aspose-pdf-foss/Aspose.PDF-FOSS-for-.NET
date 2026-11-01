@@ -31,9 +31,8 @@ internal sealed class PsFontLibrary
     public PsFontLibrary(IEnumerable<string> folders)
     {
         if (folders is null) return;
-        foreach (var folder in folders)
-            if (!string.IsNullOrEmpty(folder))
-                _folders.Add(folder);
+        foreach (var folder in folders.Where(folder => !string.IsNullOrEmpty(folder)))
+            _folders.Add(folder);
     }
 
     /// <summary>Whether a name is one of the base-14 the writer may reference
@@ -51,7 +50,7 @@ internal sealed class PsFontLibrary
     {
         if (string.IsNullOrEmpty(name)) return null;
         Scan();
-        var key = Normalise(name!);
+        var key = Normalise(name);
         if (key.Length == 0) return null;
         if (_programs.TryGetValue(key, out var exact)) return exact;
         // A face the source names with a style word the file spells differently still
@@ -97,6 +96,11 @@ internal sealed class PsFontLibrary
             return;
         }
 
+        // Two files can reduce to one key (Palatino.ttf and Palatino-Roman-Regular.ttf
+        // are both "palatino") and the first one indexed wins, so index them in one
+        // order on every file system: the name order NTFS lists them in, not the
+        // order of a Linux directory's hash table.
+        Array.Sort(files, StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
             if (!IsFontProgram(file)) continue;
@@ -114,9 +118,8 @@ internal sealed class PsFontLibrary
     {
         if (string.IsNullOrEmpty(name)) return string.Empty;
         var sb = new System.Text.StringBuilder(name.Length);
-        foreach (var c in name)
-            if (char.IsLetterOrDigit(c))
-                sb.Append(char.ToLowerInvariant(c));
+        foreach (var c in name.Where(c => char.IsLetterOrDigit(c)))
+            sb.Append(char.ToLowerInvariant(c));
         var text = sb.ToString();
         // Strip until nothing more comes off, so that a face and the file that holds
         // it reduce to the SAME form however many of these words each one spells out:

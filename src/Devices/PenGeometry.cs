@@ -1,3 +1,5 @@
+using Aspose.Pdf.Content;
+
 namespace Aspose.Pdf.Devices;
 
 /// <summary>
@@ -33,6 +35,85 @@ internal static class PenGeometry
 
     /// <summary>The join that cuts a corner straight across.</summary>
     internal const int BevelJoin = 2;
+
+    /// <summary>
+    /// The path a close-and-paint operator - s, b or b* - strokes: its last subpath closed as
+    /// h closes it (PDF 32000 §8.5.3.1), so the stroke draws the closing side. The content
+    /// parser hands every painting operator its path as built, and the open outline left the
+    /// side back to the start unstroked. Any other operator's path is returned as it is.
+    /// </summary>
+    internal static IReadOnlyList<PathCommand> ClosedForStroke(string op, IReadOnlyList<PathCommand> segments)
+    {
+        if (op is not ("s" or "b" or "b*") || segments.Count == 0
+            || segments[segments.Count - 1].Op is PathOp.Close or PathOp.Rect)
+            return segments;
+        var closed = new List<PathCommand>(segments.Count + 1);
+        closed.AddRange(segments);
+        closed.Add(new PathCommand(PathOp.Close));
+        return closed;
+    }
+
+    /// <summary>Two user-space coordinates closer than this are the same point.</summary>
+    private const double SamePointEpsilon = 1e-9;
+
+    /// <summary>
+    /// The user-space point of every subpath that draws segments of no length - <c>x y m x y l</c>,
+    /// the dot of an i or a colon in stroked lettering - when the cap leaves a mark there: a round
+    /// cap paints a disc of the pen, a projecting cap a square (PDF 32000 §8.5.3.2), a butt cap
+    /// nothing. Null when there is none. A pen draws nothing along a segment of no length, so the
+    /// renderers paint these marks themselves.
+    /// </summary>
+    internal static List<(double X, double Y)>? DegenerateSubpathPoints(IReadOnlyList<PathCommand> segments, int lineCap)
+    {
+        if (lineCap != RoundCap && lineCap != SquareCap) return null;
+        List<(double X, double Y)>? dots = null;
+        double startX = 0, startY = 0;
+        var drawn = false;
+        var degenerate = true;
+        void End()
+        {
+            if (drawn && degenerate) (dots ??= new()).Add((startX, startY));
+            drawn = false;
+            degenerate = true;
+        }
+
+        void Reach(double x, double y)
+        {
+            drawn = true;
+            if (Math.Abs(x - startX) > SamePointEpsilon || Math.Abs(y - startY) > SamePointEpsilon) degenerate = false;
+        }
+
+        foreach (var seg in segments)
+        {
+            switch (seg.Op)
+            {
+                case PathOp.MoveTo:
+                case PathOp.Rect:
+                    End();
+                    (startX, startY) = (seg.X1, seg.Y1);
+                    break;
+                case PathOp.LineTo:
+                    Reach(seg.X1, seg.Y1);
+                    break;
+                case PathOp.CurveTo:
+                    Reach(seg.X1, seg.Y1);
+                    Reach(seg.X2, seg.Y2);
+                    Reach(seg.X3, seg.Y3);
+                    break;
+                case PathOp.CurveToV:
+                case PathOp.CurveToY:
+                    Reach(seg.X1, seg.Y1);
+                    Reach(seg.X2, seg.Y2);
+                    break;
+                case PathOp.Close:
+                    End();
+                    break;
+            }
+        }
+
+        End();
+        return dots;
+    }
 
     /// <summary>
     /// Ratio of the CTM's singular values (max/min stretch). 1 for uniform scale and

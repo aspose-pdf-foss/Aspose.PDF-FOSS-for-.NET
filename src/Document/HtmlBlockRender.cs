@@ -84,7 +84,7 @@ public sealed partial class Document
         if (html.TextState?.Font is not null || !string.IsNullOrEmpty(html.TextState?.FontName)
             || bodyCssFace is not null || bodyFs > 0 || DefaultTextStateFace(page) is not null)
             return null;
-        if (!System.Text.RegularExpressions.Regex.IsMatch(html.HtmlContent ?? "",
+        if (!SafeRegex.IsMatch(html.HtmlContent ?? "",
                 @"\A\s*(?:<!--.*?-->\s*)*<(?:html|body)\b",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Singleline))
             return null;

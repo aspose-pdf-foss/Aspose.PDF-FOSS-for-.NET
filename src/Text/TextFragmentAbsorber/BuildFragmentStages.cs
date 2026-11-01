@@ -30,6 +30,9 @@ public sealed partial class TextFragmentAbsorber
             // position ("fragment right border matches its last segment's
             // right border" holds for every extracted fragment).
             frag.Segments[1].Rectangle = bf.rect;
+            // The colours the run was drawn in, captured as a search result's segment carries them.
+            frag.Segments[1].TextState.SetCapturedForegroundColor(ForegroundColorOf(run));
+            frag.Segments[1].TextState.StrokingColor = run.StrokingColor;
             // The whole run's glyph-bearing box; a run clipped to a search rectangle
             // keeps the clipped box as it is.
             if (bf.clipText == run.Text) SetInkBox(frag.Segments[1], run, 0, run.Text.Length - 1);
@@ -48,11 +51,13 @@ public sealed partial class TextFragmentAbsorber
             frag.MarkCapturedUnderlineSource(ulr.RawX, ulr.RawY, ulr.RawW, ulr.RawH);
         if (bf.capturedBg is { } bgr)
             frag.MarkCapturedBackgroundSource(bgr.RawX, bgr.RawY, bgr.RawW, bgr.RawH, bgr.FillColor);
+        if (bf.capturedSo is { } sor)
+            frag.MarkCapturedStrikeOutSource(sor.RawX, sor.RawY, sor.RawW, sor.RawH);
         _fragments.Add(frag);
     }
 
     /// <summary>Text fragment build: a run painted over by a later cover rectangle reported invisible.</summary>
-    private void ApplyRunCoverOcclusion(BuildFragmentsState bf)
+    private static void ApplyRunCoverOcclusion(BuildFragmentsState bf)
     {
         // Hidden-by-occlusion: a body-sized opaque fill painted AFTER this run that
         // fully covers its box hides it (redaction-style). Surface it through
@@ -78,7 +83,7 @@ public sealed partial class TextFragmentAbsorber
     }
 
     /// <summary>Text fragment build: a run cut away by its clip region reported invisible.</summary>
-    private void ApplyRunClipVisibility(BuildFragmentsState bf, RawTextRun run)
+    private static void ApplyRunClipVisibility(BuildFragmentsState bf, RawTextRun run)
     {
         // Hidden-by-clipping: the clip region in effect when the run was shown
         // cuts more of its box away than is tolerated - a tenth of
@@ -110,47 +115,48 @@ public sealed partial class TextFragmentAbsorber
     {
         bf.capturedUl = null;
         bf.capturedBg = null;
+        bf.capturedSo = null;
+        var (_, baselineY) = ApplyCtm(run.X, run.Y, run.Ctm);
+
+        // Background colour + underline capture only when the caller asked for
+        // graphics-related results (or underline-from-source). When no search options
+        // were supplied, honour TextSearchOptions' own default (SearchForTextRelatedGraphics
+        // = true) for BOTH captures: a plain `new TextFragmentAbsorber()` recovers
+        // TextState.BackgroundColor AND reports Underline for a rule the geometry
+        // detector accepts (an HtmlFragment round trip's <u> reads back true
+        // with default options), and strikeout
+        // already detects by default.
+        bool wantGraphics = _textSearchOptions?.SearchForTextRelatedGraphics ?? true;
+        bool wantSourceDecorations = _textEditOptions?.ToAttemptGetUnderlineFromSource ?? false;
+        bool wantUnderline = wantGraphics || wantSourceDecorations;
+        if (bf.fillIndex is not null)
         {
-            var (_, baselineY) = ApplyCtm(run.X, run.Y, run.Ctm);
-
-            // Background colour + underline capture only when the caller asked for
-            // graphics-related results (or underline-from-source). When no search options
-            // were supplied, honour TextSearchOptions' own default (SearchForTextRelatedGraphics
-            // = true) for BOTH captures: a plain `new TextFragmentAbsorber()` recovers
-            // TextState.BackgroundColor AND reports Underline for a rule the geometry
-            // detector accepts (an HtmlFragment round trip's <u> reads back true
-            // with default options), and strikeout
-            // already detects by default.
-            bool wantGraphics = _textSearchOptions?.SearchForTextRelatedGraphics ?? true;
-            bool wantSourceDecorations = _textEditOptions?.ToAttemptGetUnderlineFromSource ?? false;
-            bool wantUnderline = wantGraphics || wantSourceDecorations;
-            if (bf.fillIndex is not null)
+            if (wantGraphics)
             {
-                if (wantGraphics)
-                {
-                    var bg = bf.fillIndex.FindTopMatch(bf.py - FillRectIndex.Margin, bf.py + FillRectIndex.Margin,
-                        fr => bf.px >= fr.Llx && bf.px <= fr.Urx && bf.py >= fr.Lly && bf.py <= fr.Ury);
-                    if (bg is { } bgHit) bf.textState.SetCapturedBackgroundColor(bgHit.FillColor);
-                }
-                if (wantUnderline)
-                {
-                    bf.capturedUl = DetectUnderlineRect(bf.rect, baselineY, bf.effectiveFontSize, bf.fillIndex);
-                    if (bf.capturedUl is not null) bf.textState.SetCapturedUnderline(true);
-                }
-                // Source-highlight capture: lets a later text replacement splice the
-                // old background rect out and re-draw it at the replacement's width.
-                if (wantSourceDecorations)
-                    bf.capturedBg = DetectBackgroundRect(bf.rect, baselineY, bf.effectiveFontSize, bf.fillIndex);
-
-                // Strikeout is detected by default (no option required).
-                if (DetectStrikeoutRect(bf.rect, baselineY, bf.effectiveFontSize, bf.fillIndex) is not null)
-                    bf.textState.SetCapturedStrikeOut(true);
+                var bg = bf.fillIndex.FindTopMatch(bf.py - FillRectIndex.Margin, bf.py + FillRectIndex.Margin,
+                    fr => bf.px >= fr.Llx && bf.px <= fr.Urx && bf.py >= fr.Lly && bf.py <= fr.Ury);
+                if (bg is { } bgHit) bf.textState.SetCapturedBackgroundColor(bgHit.FillColor);
             }
+            if (wantUnderline)
+            {
+                bf.capturedUl = DetectUnderlineRect(bf.rect, baselineY, bf.effectiveFontSize, bf.fillIndex);
+                if (bf.capturedUl is not null) bf.textState.SetCapturedUnderline(true);
+            }
+            // Source-highlight capture: lets a later text replacement splice the
+            // old background rect out and re-draw it at the replacement's width.
+            if (wantSourceDecorations)
+                bf.capturedBg = DetectBackgroundRect(bf.rect, baselineY, bf.effectiveFontSize, bf.fillIndex);
+
+            // Strikeout is detected by default (no option required).
+            bf.capturedSo = DetectStrikeoutRect(bf.rect, baselineY, bf.effectiveFontSize, bf.fillIndex);
+            if (bf.capturedSo is not null) bf.textState.SetCapturedStrikeOut(true);
+            // Only with the rule is the bar a source a replacement redraws.
+            if (!wantUnderline) bf.capturedSo = null;
         }
     }
 
     /// <summary>Text fragment build: the run's text and box clipped to the search rectangle.</summary>
-    private bool ClipRunToSearchRect(BuildFragmentsState bf, RawTextRun run)
+    private static bool ClipRunToSearchRect(BuildFragmentsState bf, RawTextRun run)
     {
         bf.clipText = run.Text;
         bf.clipX = run.X;
@@ -188,7 +194,7 @@ public sealed partial class TextFragmentAbsorber
     }
 
     /// <summary>Text fragment build: a run whose glyph band falls outside the search rectangle is skipped.</summary>
-    private bool RunOutsideSearchRect(BuildFragmentsState bf, RawTextRun run)
+    private static bool RunOutsideSearchRect(BuildFragmentsState bf, RawTextRun run)
     {
         if (bf.searchRect is not null && !bf.searchRect.IsEmpty)
         {

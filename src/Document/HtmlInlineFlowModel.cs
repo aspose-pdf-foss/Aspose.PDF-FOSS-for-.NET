@@ -63,7 +63,6 @@ public sealed partial class Document
         /// <summary>Whether this markup is the fragment's last piece: only its final anonymous
         /// block ends at its baseline; every other block ends at its full line box.</summary>
         public bool lastPiece;
-        public List<HtmlInlineItem> items = null!;
         public string baseFamily = UaInlineBaseFamily;
         public double basePt = UaInlineBasePt;
         public UaFace strut = null!;

@@ -10,8 +10,7 @@ namespace Aspose.Pdf.Devices;
 
 public sealed partial class SoftwarePageRenderer
 {
-    private static void DrawXObject(RenderContext ctx, string name, GraphicsState state,
-        Dictionary<string, PdfDictionary>? extGStates)
+    private static void DrawXObject(RenderContext ctx, string name, GraphicsState state)
     {
         if (ctx.AllXObjects is null) return;
         if (!ctx.AllXObjects.TryGetValue(name, out var xobj)) return;
@@ -20,7 +19,7 @@ public sealed partial class SoftwarePageRenderer
         if (subtype == "Image")
             DrawImage(ctx, xobj, state);
         else if (subtype == "Form")
-            DrawFormXObject(ctx, xobj, state, extGStates);
+            DrawFormXObject(ctx, xobj, state);
     }
 
     /// <summary>
@@ -193,12 +192,11 @@ public sealed partial class SoftwarePageRenderer
         }
 
         // PDF 32000 §11.6.5.3: soft-mask sample values are alpha (0=transparent,
-        // max=opaque). A /Decode [1 0] entry reverses that mapping, which a layered
-        // scan (a JPEG2000 "text colour" overlay gated by a 1-bpc JBIG2 mask
-        // marked /Decode [1 0]) relies on to confine the overlay to the glyph pixels
-        // instead of flooding the page.
-        if (GrayDecodeInverts(d))
-            for (var i = 0; i < alpha.Length; i++) alpha[i] = (byte)(255 - alpha[i]);
+        // max=opaque), remapped through the mask's /Decode: [1 0] reverses the mapping,
+        // which a layered scan (a JPEG2000 "text colour" overlay gated by a 1-bpc JBIG2
+        // mask marked /Decode [1 0]) relies on to confine the overlay to the glyph pixels
+        // instead of flooding the page, and [0.4 0] leaves a mark at 40% at most.
+        IO.Filters.SampleDecode.RemapInPlace(alpha, alpha.Length, 1, d.Get("Decode"), reader);
 
         width = w;
         height = h;

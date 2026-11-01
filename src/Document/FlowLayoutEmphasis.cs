@@ -44,7 +44,11 @@ public sealed partial class Document
             var measureItalic = Text.TextPaginator.CreateMeasurer(italicFont, fontSize,
                 italicData ?? regData);
             double Measure(string s, bool bold, bool italic)
-                => bold ? measureBold(s) : italic ? measureItalic(s) : measureReg(s);
+            {
+                if (bold) return measureBold(s);
+                if (italic) return measureItalic(s);
+                return measureReg(s);
+            }
 
             // Word / whitespace tokens that never straddle a run boundary, so every
             // token has exactly one style and one measurable width.
@@ -126,8 +130,8 @@ public sealed partial class Document
         {
             var fragFs = tf.TextState.FontSizeTouched && tf.TextState.FontSize > 0
                 ? (double)tf.TextState.FontSize : XmlDefaultFontSize;
-            // An authored-empty <TextFragment /> (no segment at all) takes no room;
-            // a fragment whose segment is empty still stands one line tall.
+            // An authored-empty <TextFragment /> (no segment at all) takes no room; a
+            // fragment whose segment is empty still stands one line tall.
             if (tf.XmlEmptyShell && tf.FootNote is null && tf.EndNote is null)
                 return true;
 
@@ -136,9 +140,10 @@ public sealed partial class Document
             var ln = new XmlModelLine
             {
                 FragLeft = CurLeft + (tf.Margin?.Left ?? 0),
-                RightEdge = _startPage.Width - _marginRight - (tf.Margin?.Right ?? 0),
+                RightEdge = _startPage.LayoutFrameWidth - _marginRight - (tf.Margin?.Right ?? 0),
                 Leading = XmlModelLeading(tf),
                 Align = tf.HorizontalAlignment,
+                Link = tf.HyperlinkValue,
             };
             ln.Pen = ln.FragLeft;
 
@@ -159,8 +164,8 @@ public sealed partial class Document
             if (tf.TextState.LineSpacing > 0) return tf.TextState.LineSpacing;
             double leading = 0;
             if (tf.Segments is { Count: > 0 })
-                foreach (var seg in tf.Segments)
-                    if (seg.TextState.LineSpacing > leading) leading = seg.TextState.LineSpacing;
+                foreach (var lineSpacing in tf.Segments.Select(seg => seg.TextState).Select(textState => textState.LineSpacing).Where(lineSpacing => lineSpacing > leading))
+                    leading = lineSpacing;
             return leading;
         }
 
@@ -177,6 +182,7 @@ public sealed partial class Document
             public double RightEdge;
             public double Leading;
             public HorizontalAlignment Align;
+            public Hyperlink? Link;
         }
 
         /// <summary>Queues the line's runs and opens the next one. A line with NO glyph runs at
@@ -205,6 +211,9 @@ public sealed partial class Document
                 if (_overflowBuffer is not null)
                     _overflowBuffer.Add(Array.Empty<byte>());
             }
+            // The fragment's hyperlink covers each of its lines that shows text.
+            if (ln.Link is not null && ln.Runs.Any(r => r.text.Trim().Length > 0))
+                QueueLink(new Rectangle(ln.Runs[0].x + shift, _curY - lineH, ln.Pen + shift, _curY), ln.Link);
             _curY -= lineH;
             ln.Runs.Clear();
             ln.Pen = ln.FragLeft;
@@ -234,7 +243,9 @@ public sealed partial class Document
             if (ln.Runs.Count > 0)
             {
                 var last = ln.Runs[^1];
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
                 if (last.face == face && last.fs == fs && SameXmlRunStyle(last.st, st)
+#pragma warning restore S1244
                     && Math.Abs(last.x + MeasureLineWidth(last.text, face, fs) - ln.Pen) < 0.005)
                 {
                     ln.Runs[^1] = (last.x, last.text + text, st, face, fs);
@@ -342,8 +353,10 @@ public sealed partial class Document
                 var st = seg.TextState;
                 if (st.IsUnderline || st.IsStrikeOut) return false;
                 if (st.FontData is not null || st.Font?.SourceFontData is not null) return false;
-                var fs = st.FontSizeTouched ? (double)st.FontSize
-                    : tf.TextState.FontSize > 0 ? tf.TextState.FontSize : (double)st.FontSize;
+                double fs;
+                if (st.FontSizeTouched) fs = (double)st.FontSize;
+                else if (tf.TextState.FontSize > 0) fs = tf.TextState.FontSize;
+                else fs = (double)st.FontSize;
                 if (fs <= 0) fs = 12;
                 runs.Add((text, Text.TextBuilder.MapToStandard14Public(st), fs,
                     st.ForegroundColor ?? tf.TextState.ForegroundColor));

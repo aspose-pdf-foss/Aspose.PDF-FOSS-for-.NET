@@ -33,6 +33,34 @@ public partial class TextStamp
             ["Courier"] = "Courier New",
         };
 
+    /// <summary>The program of the face the stamp names, in its style: the face its font was found or
+    /// opened from, else the TrueType face standing in for its Standard-14 name - or a face covering
+    /// more of the text when that one lacks its script. Null when none resolves.</summary>
+    private (byte[] ttf, string name)? TryResolveStampFace()
+    {
+        (byte[] ttf, string name)? face = null;
+        if (TextState?.Font is { SourceFontData: { } regular } font)
+        {
+            var program = TextState.IsBold || TextState.IsItalic ? TextBuilder.ResolveStyledFace(TextState, regular) ?? regular : regular;
+            if (program.TtfData is { Length: > 0 } ttf) face = (ttf, font.FontName);
+        }
+        face ??= TryResolveUnicodeFallback();
+        // A face without the text's script gives way to one that has more of it, as a TextFragment's does.
+        if (face is { } named && !FontRepository.CoversText(named.ttf, Text)
+            && FontRepository.SubstituteForMissingGlyphs(Text, TextState?.Font) is { TtfData: { } covering } substitute
+            && FontRepository.CoverCount(covering, Text) > FontRepository.CoverCount(named.ttf, Text))
+            face = (covering, substitute.FontName);
+        return face;
+    }
+
+    /// <summary>A stamp drawn upright at its natural size with no background box: the shapes the Type0
+    /// stamp draws (rows, wrapping and alignment included).</summary>
+    private bool IsUprightStamp()
+    {
+        var rot = RotateAngle != 0 ? RotateAngle : (double)Rotate;
+        return !Scale && Math.Abs(rot) < 0.01 && (TextState?.BackgroundColor is null || TextState.BackgroundColor.IsEmpty);
+    }
+
     /// <summary>Resolve (creating if needed) the page's /Resources /Font dictionary so a new
     /// font can be registered there; AddStampForm later shares it into the stamp form.</summary>
     private static PdfDictionary GetPageFontDict(Page page)
@@ -58,9 +86,7 @@ public partial class TextStamp
     /// (encoded as a UTF-16 surrogate pair).</summary>
     private static bool HasSupplementaryChars(string text)
     {
-        foreach (var ch in text)
-            if (char.IsSurrogate(ch)) return true;
-        return false;
+        return text.Any(ch => char.IsSurrogate(ch));
     }
 
     private static bool CoversCp(byte[] ttf, int cp)
@@ -244,19 +270,19 @@ public partial class TextStamp
         var fn = TextState?.FontName ?? FontName ?? "Helvetica";
         var bold = TextState?.IsBold ?? false;
         var italic = TextState?.IsItalic ?? false;
+        // A face found by its styled name (Courier-Bold, Times-Italic) carries its style in the name: the
+        // suffix is read as the flags it stands for before it is stripped, so the styled face is written.
+        bold |= fn.Contains("Bold", StringComparison.Ordinal);
+        italic |= fn.EndsWith("Oblique", StringComparison.Ordinal) || fn.EndsWith("Italic", StringComparison.Ordinal);
 
         // Strip any already-baked style suffix so callers can pass
         // "Helvetica-Bold" via FontName and still get Bold|Italic
         // honoured from FontStyle without doubling up.
         var family = fn;
-        foreach (var suffix in new[] { "-BoldOblique", "-BoldItalic", "-Bold", "-Oblique", "-Italic" })
-        {
-            if (family.EndsWith(suffix, StringComparison.Ordinal))
-            {
-                family = family.Substring(0, family.Length - suffix.Length);
-                break;
-            }
-        }
+        var suffix = new[] { "-BoldOblique", "-BoldItalic", "-Bold", "-Oblique", "-Italic" }
+            .FirstOrDefault(suffix => family.EndsWith(suffix, StringComparison.Ordinal));
+        if (suffix is not null)
+            family = family.Substring(0, family.Length - suffix.Length);
 
         return family switch
         {
@@ -296,11 +322,52 @@ public partial class TextStamp
         };
     }
 
+    /// <summary>The resource of a stamp face outside the standard 14 whose program may travel with
+    /// the file: an embedded TrueType font - program, widths and descriptor - that every stamp of the
+    /// page in the same face shares. Null when the stamp keeps a font named only: a Standard-14 face,
+    /// a font without a program, one the caller keeps out of the file, a style the installed family
+    /// has no face for, or text needing its own encoding differences.</summary>
+    private string? EnsureEmbeddedFontResource(Page page, string baseFontName, List<(byte code, string glyph)> diffMap)
+    {
+        if (TextState?.Font is not { IsEmbedded: true } font || diffMap.Count > 0
+            || Standard14Fonts.IsCoreName(font.FontName) || font.SourceFontData is not { } regular) return null;
+        var program = TextState.IsBold || TextState.IsItalic ? TextBuilder.ResolveStyledFace(TextState, regular) : regular;
+        if (program?.TtfData is not { Length: > 0 } ttf || page.Reader?.OwnerDocument is not { } document
+            || FontData.RefuseEmbedding(program, document)) return null;
+        // An embedded face is named by its family and style run together ("ArialBoldItalic"): the comma
+        // form ("Arial,BoldItalic") is the convention for a face referenced by name only.
+        var embedName = baseFontName.Replace(",", string.Empty);
+        var fontDict = GetPageFontDict(page);
+        foreach (var key in fontDict.Keys)
+        {
+            var entry = page.Reader.ResolveDict(fontDict.Get(key));
+            var name = entry?.GetName("BaseFont");
+            if (entry?.GetName("Subtype") == "TrueType" && entry.Get("FontDescriptor") is not null
+                && name is not null && name.Substring(name.IndexOf('+') + 1) == embedName)
+                return key;
+        }
+        var resName = "F1";
+        var counter = 1;
+        while (fontDict.ContainsKey(resName))
+            resName = $"F{++counter}";
+        var embedded = new PdfDictionary();
+        embedded.Set("Type", new PdfName("Font"));
+        FontEmbedder.EmbedIntoFontDict(document, ttf, embedded, embedName,
+            EmbeddedFontFiles.GetValue(document, static _ => new Dictionary<string, (int objNum, string embedName)>(StringComparer.Ordinal)),
+            subset: font.IsSubset);
+        fontDict.Set(resName, embedded);
+        return resName;
+    }
+
+    // The font programs the stamps of a document embedded, by content: a face stamped on many
+    // pages travels once.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Document, Dictionary<string, (int objNum, string embedName)>> EmbeddedFontFiles = new();
+
     // Register a Standard-14 font in the page /Resources /Font dictionary
     // and return its resource name. When `diffMap` is non-empty, the entry
     // gets an /Encoding dict with /BaseEncoding /WinAnsiEncoding plus a
-    // /Differences array mapping the custom byte codes to AGL glyph names;
-    // a separate /F* slot is allocated per distinct (BaseFont, diffMap) pair
+    // /Differences array mapping the custom byte codes to AGL glyph names; a
+    // separate /F* slot is allocated per distinct (BaseFont, diffMap) pair
     // so two stamps using the same Helvetica with different Polish chars
     // each get their own encoding table.
     private static string EnsureFontResource(Page page, string baseFontName,
@@ -366,7 +433,9 @@ public partial class TextStamp
             // to consecutive code points. We emit one integer per glyph for
             // simplicity (codes aren't necessarily consecutive in our
             // unused-slot allocation order).
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
             foreach (var (code, glyph) in diffMap!)
+#pragma warning restore S8969
             {
                 diffs.Add(new PdfInteger(code));
                 diffs.Add(new PdfName(glyph));

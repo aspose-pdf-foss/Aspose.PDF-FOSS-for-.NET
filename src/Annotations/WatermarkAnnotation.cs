@@ -22,11 +22,21 @@ public sealed class Characteristics
     /// semantics.</summary>
     internal System.Action<string, System.Drawing.Color>? WriteThrough;
 
+    /// <summary>When attached, told of a rotation set on the characteristics, so the annotation's appearance
+    /// turns whenever it is set.</summary>
+    internal System.Action? RotateChanged;
+
+    private Rotation _rotate;
+
     /// <summary>Creates characteristics with a black border and a transparent background.</summary>
     public Characteristics() { }
 
     /// <summary>Rotation of the annotation appearance.</summary>
-    public Rotation Rotate { get; set; }
+    public Rotation Rotate
+    {
+        get => _rotate;
+        set { _rotate = value; RotateChanged?.Invoke(); }
+    }
 
     /// <summary>Border color used for the annotation's appearance.</summary>
     public System.Drawing.Color Border
@@ -62,10 +72,47 @@ public partial class WatermarkAnnotation : Annotation
         Dict.Set("Type", new PdfName("Annot"));
         Dict.Set("Subtype", new PdfName("Watermark"));
         Dict.Set("F", new PdfInteger(4)); // Print flag
+        FixedPrint.Changed = WriteFixedPrint;
     }
 
     /// <summary>Wrap a /Watermark annotation read from a document.</summary>
-    internal WatermarkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader) { }
+    internal WatermarkAnnotation(PdfDictionary dict, PdfReader reader) : base(dict, reader)
+    {
+        if (reader.ResolveDict(dict.Get("FixedPrint")) is { } fixedPrint)
+        {
+            var m = reader.Resolve(fixedPrint.Get("Matrix")) is PdfArray { Count: MatrixEntries } a
+                ? new Matrix(Number(a[0]), Number(a[1]), Number(a[2]), Number(a[3]), Number(a[4]), Number(a[5]))
+                : new Matrix(1, 0, 0, 1, 0, 0);
+            FixedPrint.Load(m, Number(fixedPrint.Get("H")), Number(fixedPrint.Get("V")));
+        }
+        FixedPrint.Changed = WriteFixedPrint;
+    }
+
+    private const int MatrixEntries = 6;
+
+    private static double Number(PdfObject? value) => value switch
+    {
+        PdfReal r => r.Value,
+        PdfInteger i => i.Value,
+        _ => 0,
+    };
+
+    /// <summary>Writes the fixed-print placement the caller set as the annotation's /FixedPrint dictionary
+    /// (PDF 32000-1 §12.5.6.22), the matrix and translations a printer applies; setting them used to keep
+    /// them on the object only.</summary>
+    private void WriteFixedPrint()
+    {
+        var m = FixedPrint.Matrix;
+        var matrix = new PdfArray();
+        foreach (var v in new[] { m.A, m.B, m.C, m.D, m.E, m.F })
+            matrix.Add(new PdfReal(v));
+        var fixedPrint = new PdfDictionary();
+        fixedPrint.Set("Type", new PdfName("FixedPrint"));
+        fixedPrint.Set("Matrix", matrix);
+        if (FixedPrint.HorizontalTranslation != 0) fixedPrint.Set("H", new PdfReal(FixedPrint.HorizontalTranslation));
+        if (FixedPrint.VerticalTranslation != 0) fixedPrint.Set("V", new PdfReal(FixedPrint.VerticalTranslation));
+        Dict.Set("FixedPrint", fixedPrint);
+    }
 
     /// <summary>
     /// Set the text content and text state for the watermark.
@@ -153,8 +200,9 @@ public partial class WatermarkAnnotation : Annotation
         else
             builder.SetFillColor(0, 0, 0);
 
+        var (fonts, resName, glyphLines) = BuildTextFont(fontName);
         builder.BeginText();
-        builder.SetFont("F1", fontSize);
+        builder.SetFont(resName, fontSize);
 
         // The text block sits on the bottom edge of the annotation rectangle:
         // the last line's baseline is one descent above the box floor so the
@@ -168,7 +216,8 @@ public partial class WatermarkAnnotation : Annotation
         {
             if (i > 0)
                 builder.MoveTextPosition(0, -fontSize * 1.2);
-            builder.ShowText(_texts[i]);
+            if (glyphLines is null) builder.ShowText(_texts[i]);
+            else builder.ShowTextHex(glyphLines[i]);
         }
 
         builder.EndText();
@@ -185,15 +234,7 @@ public partial class WatermarkAnnotation : Annotation
 
         // Resources with font
         var resDict = new PdfDictionary();
-        var fontDict = new PdfDictionary();
-        var f1Dict = new PdfDictionary();
-        f1Dict.Set("Type", new PdfName("Font"));
-        f1Dict.Set("Subtype", new PdfName("Type1"));
-        var pdfFontName = MapToPdfFontName(fontName);
-        f1Dict.Set("BaseFont", new PdfName(pdfFontName));
-        f1Dict.Set("Encoding", new PdfName("WinAnsiEncoding"));
-        fontDict.Set("F1", f1Dict);
-        resDict.Set("Font", fontDict);
+        resDict.Set("Font", fonts);
         if (_opacity < 1.0)
         {
             var gsDict = new PdfDictionary();
@@ -207,6 +248,37 @@ public partial class WatermarkAnnotation : Annotation
         formDict.Set("Resources", resDict);
 
         return new PdfStream(formDict, streamBytes);
+    }
+
+    /// <summary>The font the lines are shown with. A line that reaches beyond Latin-1 cannot
+    /// ride a WinAnsi standard face - its letters would come out as question marks - so when
+    /// the text state's face travels with it, that face is embedded as a composite font with
+    /// the glyphs of every line, and the lines are shown by glyph id (in visual order, for a
+    /// right-to-left script). Otherwise the standard Type1 face named by the state is used.
+    /// Returns the font resources, the resource name, and each line's glyph ids for an
+    /// embedded face.</summary>
+    private (PdfDictionary fonts, string resName, byte[][]? glyphLines) BuildTextFont(string fontName)
+    {
+        const string resourceName = "F1";
+        var fonts = new PdfDictionary();
+        var texts = _texts ?? [];
+        var ttf = _textState?.Font?.SourceFontData?.TtfData;
+        if (ttf is { Length: > 0 } && texts.Any(t => t.Any(ch => ch > 'ÿ')))
+        {
+            var glyphLines = new byte[texts.Length][];
+            var resName = resourceName;
+            for (var i = 0; i < texts.Length; i++)
+                (resName, glyphLines[i]) = Type0FontEmbedder.Embed(
+                    fonts, ttf, fontName, BidiText.ToVisualOrder(texts[i]), resNameHint: resourceName);
+            return (fonts, resName, glyphLines);
+        }
+        var f1Dict = new PdfDictionary();
+        f1Dict.Set("Type", new PdfName("Font"));
+        f1Dict.Set("Subtype", new PdfName("Type1"));
+        f1Dict.Set("BaseFont", new PdfName(MapToPdfFontName(fontName)));
+        f1Dict.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        fonts.Set(resourceName, f1Dict);
+        return (fonts, resourceName, null);
     }
 
     private static string MapToPdfFontName(string name)

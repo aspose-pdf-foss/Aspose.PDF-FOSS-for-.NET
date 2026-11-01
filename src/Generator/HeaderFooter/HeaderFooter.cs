@@ -17,12 +17,19 @@ public sealed partial class HeaderFooter
     public string Text { get; set; } = "";
 
     /// <summary>Text formatting state (font, size, color).</summary>
-    public TextState TextState { get; set; } = new()
+    public TextState TextState { get; set; } = DefaultBandState();
+
+    /// <summary>The band's own defaults: Helvetica 10 in black, the size not counted as one the
+    /// caller set, so a page's default text state can still size the band's text.</summary>
+    private static TextState DefaultBandState()
     {
-        FontName = "Helvetica",
-        FontSize = 10,
-        ForegroundColor = Color.Black,
-    };
+        var state = new TextState { FontName = DefaultBandFace, ForegroundColor = Color.Black };
+        state.SetFontSizeQuiet(DefaultBandFontSize);
+        return state;
+    }
+
+    private const string DefaultBandFace = "Helvetica";
+    private const double DefaultBandFontSize = 10;
 
     /// <summary>Margins controlling the position of the header/footer text.
     /// Untouched sides resolve to path-specific defaults at stamp time: the
@@ -233,10 +240,10 @@ public sealed partial class HeaderFooter
     {
         double fs = tf.TextState.FontSizeTouched ? tf.TextState.FontSize : 0;
         var face = tf.TextState.Font?.SourceFontData is not null ? tf.TextState.Font : null;
-        foreach (var seg in tf.Segments)
+        foreach (var textState in tf.Segments.Select(seg => seg.TextState))
         {
-            if (fs <= 0 && seg.TextState.FontSizeTouched) fs = seg.TextState.FontSize;
-            if (face is null && seg.TextState.Font?.SourceFontData is not null) face = seg.TextState.Font;
+            if (fs <= 0 && textState.FontSizeTouched) fs = textState.FontSize;
+            if (face is null && textState.Font?.SourceFontData is not null) face = textState.Font;
         }
         return (fs, face);
     }

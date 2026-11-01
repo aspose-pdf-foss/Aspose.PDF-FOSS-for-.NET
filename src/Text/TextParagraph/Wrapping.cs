@@ -1,6 +1,7 @@
 using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
 using System.Globalization;
+using System.Text;
 
 namespace Aspose.Pdf.Text;
 
@@ -22,6 +23,12 @@ public sealed partial class TextParagraph
     private double MeasureLineWidth(string text, TextState ts)
     {
         var fontSize = ts.FontSize;
+
+        // A font taken from a run of the document measures by its own advances, as the
+        // run writer shows the text in it.
+        if (ts.FontData is null && ts.Font is { IsDocumentEmbeddedFont: true } documentFont
+            && documentFont.TryEncode(text) is { } codes)
+            return documentFont.Metrics.MeasureString(codes, fontSize);
 
         // Non-Standard-14 embedded fonts (e.g. MS Gothic): measure with their real
         // glyph advances so wrap points match what the CID embedder actually draws.
@@ -110,7 +117,7 @@ public sealed partial class TextParagraph
         var hyphenWidth = MeasureText(hyphen, font, fontSize);
         var spaceWidth = MeasureText(" ", font, fontSize);
         var words = text.Split(' ');
-        var currentLine = "";
+        var currentLine = new StringBuilder();
         var currentWidth = 0.0;
 
         foreach (var word in words)
@@ -120,13 +127,14 @@ public sealed partial class TextParagraph
 
             if (currentWidth + separatorWidth + wordWidth <= maxWidth)
             {
-                if (currentLine.Length > 0) { currentLine += " "; currentWidth += spaceWidth; }
-                currentLine += word;
+                if (currentLine.Length > 0) { currentLine.Append(' '); currentWidth += spaceWidth; }
+                currentLine.Append(word);
                 currentWidth += wordWidth;
             }
             else if (currentLine.Length == 0)
             {
-                (currentLine, currentWidth) = HyphenateWord(word, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
+                (var rest, currentWidth) = HyphenateWord(word, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
+                currentLine.Append(rest);
             }
             else
             {
@@ -135,30 +143,35 @@ public sealed partial class TextParagraph
                     ? FindHyphenBreak(word, font, fontSize, remainingWidth, hyphenWidth) : 0;
                 if (fitChars > 0)
                 {
-                    currentLine += " " + word[..fitChars] + hyphen;
-                    result.Add(currentLine);
+                    currentLine.Append(' ').Append(word[..fitChars]).Append(hyphen);
+                    result.Add(currentLine.ToString());
+                    currentLine.Clear();
                     var remainder = word[fitChars..];
                     if (MeasureText(remainder, font, fontSize) <= maxWidth)
                     {
-                        currentLine = remainder;
+                        currentLine.Append(remainder);
                         currentWidth = MeasureText(remainder, font, fontSize);
                     }
                     else
                     {
-                        currentLine = "";
-                        currentWidth = 0;
-                        (currentLine, currentWidth) = HyphenateWord(remainder, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
+                        (var rest, currentWidth) = HyphenateWord(remainder, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
+                        currentLine.Append(rest);
                     }
                 }
                 else
                 {
-                    result.Add(currentLine);
-                    if (wordWidth <= maxWidth) { currentLine = word; currentWidth = wordWidth; }
-                    else (currentLine, currentWidth) = HyphenateWord(word, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
+                    result.Add(currentLine.ToString());
+                    currentLine.Clear();
+                    if (wordWidth <= maxWidth) { currentLine.Append(word); currentWidth = wordWidth; }
+                    else
+                    {
+                        (var rest, currentWidth) = HyphenateWord(word, font, fontSize, maxWidth, hyphenWidth, result, hyphen);
+                        currentLine.Append(rest);
+                    }
                 }
             }
         }
-        if (currentLine.Length > 0) result.Add(currentLine);
+        if (currentLine.Length > 0) result.Add(currentLine.ToString());
     }
 
     private static int FindHyphenBreak(string word, FontInfo? font, double fontSize,

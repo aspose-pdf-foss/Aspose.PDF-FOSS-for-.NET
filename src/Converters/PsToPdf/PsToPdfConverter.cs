@@ -39,7 +39,7 @@ internal static class PsToPdfConverter
     /// <summary>Convert PostScript source bytes.</summary>
     public static Document Convert(byte[] source, PsLoadOptions? options = null)
     {
-        source ??= new byte[0];
+        source = EncapsulatedSection(source ?? new byte[0]);
         var graphics = new PsGraphics();
         ApplyEncapsulatedExtent(graphics, source);
         var interpreter = new PsInterpreter(graphics)
@@ -70,18 +70,21 @@ internal static class PsToPdfConverter
         {
             interpreter.Run(source);
         }
-        catch (PsErrorSignal e)
+        catch (PsErrorException e)
         {
             interpreter.RecordError(e.ErrorName);
         }
-        catch (PsStopSignal)
+        catch (PsStopException)
         {
+            // stop outside any stopped context ends the job - the pages so far stand
         }
-        catch (PsQuitSignal)
+        catch (PsQuitException)
         {
+            // quit ends the job - the pages so far stand
         }
-        catch (PsExitSignal)
+        catch (PsExitException)
         {
+            // exit outside any loop ends the job - the pages so far stand
         }
     }
 
@@ -91,23 +94,49 @@ internal static class PsToPdfConverter
     /// writes such a comment without the header, and honouring it there moves every
     /// mark on the page.</summary>
     private static readonly Regex EncapsulatedHeader = new(
-        @"\A%!PS-Adobe-[\d.]+\s+EPSF-", RegexOptions.None);
+        @"\A%!PS-Adobe-[\d.]+\s+EPSF-", RegexOptions.None, RegexLimits.Timeout);
 
     private static readonly Regex BoundingBoxComment = new(
         @"^%%BoundingBox:\s*(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)",
-        RegexOptions.Multiline);
+        RegexOptions.Multiline, RegexLimits.Timeout);
 
     /// <summary>How much of the source is scanned for the header and its box. Both
     /// belong at the very top, so a deeper scan would only find quoted artwork.</summary>
     private const int HeaderScanBytes = 8192;
+
+    /// <summary>The first four bytes of an EPS file written with a binary preview header:
+    /// the PostScript section's offset and length follow as little-endian 32-bit integers.</summary>
+    private static readonly byte[] BinaryPreviewMagic = { 0xC5, 0xD0, 0xD3, 0xC6 };
+
+    /// <summary>The length of the binary preview header: the magic and seven integer fields.</summary>
+    private const int BinaryPreviewHeaderLength = 32;
+
+    /// <summary>The PostScript section of an EPS file wrapped in a binary preview header,
+    /// whose preview (a TIFF or metafile) would otherwise be read as the program and draw
+    /// nothing; any other source is returned as it is.</summary>
+    private static byte[] EncapsulatedSection(byte[] source)
+    {
+        if (source.Length < BinaryPreviewHeaderLength) return source;
+        for (var i = 0; i < BinaryPreviewMagic.Length; i++)
+            if (source[i] != BinaryPreviewMagic[i]) return source;
+        var offset = LittleEndianInt32(source, 4);
+        var length = LittleEndianInt32(source, 8);
+        if (offset < BinaryPreviewHeaderLength || length <= 0 || offset + length > source.Length) return source;
+        var section = new byte[(int)length];
+        Array.Copy(source, (int)offset, section, 0, (int)length);
+        return section;
+    }
+
+    private static long LittleEndianInt32(byte[] bytes, int at) =>
+        bytes[at] | ((long)bytes[at + 1] << 8) | ((long)bytes[at + 2] << 16) | ((long)bytes[at + 3] << 24);
 
     /// <summary>Size the page to an encapsulated artwork's own extent, and put its
     /// origin at the page's, so the marks land where the artwork expects them.</summary>
     private static void ApplyEncapsulatedExtent(PsGraphics graphics, byte[] source)
     {
         var header = Compat.Latin1.GetString(source, 0, Math.Min(source.Length, HeaderScanBytes));
-        if (!EncapsulatedHeader.IsMatch(header)) return;
-        var match = BoundingBoxComment.Match(header);
+        if (!SafeRegex.IsMatch(EncapsulatedHeader, header)) return;
+        var match = SafeRegex.Match(BoundingBoxComment, header);
         if (!match.Success) return;
         if (!Number(match, 1, out var loX) || !Number(match, 2, out var loY) ||
             !Number(match, 3, out var hiX) || !Number(match, 4, out var hiY))

@@ -85,10 +85,9 @@ public sealed partial class PdfAnnotationEditor : IDisposable
         for (var i = first; i <= last; i++)
         {
             var page = doc.Pages.At(i);
-            foreach (var annot in page.Annotations)
+            foreach (var annot in page.Annotations.Where(annot => typeFilter is null || typeFilter.Contains(annot.AnnotationType)))
             {
-                if (typeFilter is null || typeFilter.Contains(annot.AnnotationType))
-                    result.Add(annot);
+                result.Add(annot);
             }
         }
         return result;
@@ -123,12 +122,12 @@ public sealed partial class PdfAnnotationEditor : IDisposable
     public void DeleteAnnotations()
     {
         var doc = Document;
-        foreach (var page in doc.Pages)
+        foreach (var dict in doc.Pages.Select(page => page.Dict))
         {
-            var annotsObj = doc.Reader.Resolve(page.Dict.Get("Annots"));
+            var annotsObj = doc.Reader.Resolve(dict.Get("Annots"));
             if (annotsObj is not PdfArray annotArray)
             {
-                page.Dict.Remove("Annots");
+                dict.Remove("Annots");
                 continue;
             }
 
@@ -142,9 +141,9 @@ public sealed partial class PdfAnnotationEditor : IDisposable
             }
 
             if (kept.Count > 0)
-                page.Dict.Set("Annots", kept);
+                dict.Set("Annots", kept);
             else
-                page.Dict.Remove("Annots");
+                dict.Remove("Annots");
         }
     }
 
@@ -152,9 +151,9 @@ public sealed partial class PdfAnnotationEditor : IDisposable
     public void DeleteAnnotations(string annotType)
     {
         var doc = Document;
-        foreach (var page in doc.Pages)
+        foreach (var dict in doc.Pages.Select(page => page.Dict))
         {
-            var annotsObj = doc.Reader.Resolve(page.Dict.Get("Annots"));
+            var annotsObj = doc.Reader.Resolve(dict.Get("Annots"));
             if (annotsObj is not PdfArray annotArray) continue;
 
             var kept = new PdfArray();
@@ -166,9 +165,9 @@ public sealed partial class PdfAnnotationEditor : IDisposable
             }
 
             if (kept.Count > 0)
-                page.Dict.Set("Annots", kept);
+                dict.Set("Annots", kept);
             else
-                page.Dict.Remove("Annots");
+                dict.Remove("Annots");
         }
     }
 
@@ -177,9 +176,9 @@ public sealed partial class PdfAnnotationEditor : IDisposable
     {
         var annotationName = annotName;
         var doc = Document;
-        foreach (var page in doc.Pages)
+        foreach (var dict in doc.Pages.Select(page => page.Dict))
         {
-            var annotsObj = doc.Reader.Resolve(page.Dict.Get("Annots"));
+            var annotsObj = doc.Reader.Resolve(dict.Get("Annots"));
             if (annotsObj is not PdfArray annotArray) continue;
 
             var kept = new PdfArray();
@@ -197,7 +196,7 @@ public sealed partial class PdfAnnotationEditor : IDisposable
                     kept.Add(item);
             }
 
-            page.Dict.Set("Annots", kept);
+            dict.Set("Annots", kept);
         }
     }
 
@@ -240,6 +239,36 @@ public sealed partial class PdfAnnotationEditor : IDisposable
         }
     }
 
+    /// <summary>Flatten every annotation using the supplied form-flatten settings.</summary>
+    public void FlatteningAnnotations(Aspose.Pdf.Forms.Form.FlattenSettings flattenSettings)
+    {
+        // A redaction is applied by the flatten itself (see ApplyPendingRedactions),
+        // so ApplyRedactions adds nothing here; the settings are kept in the
+        // signature because the overload is part of the facade's surface.
+        FlatteningAnnotations();
+    }
+
+    /// <summary>Flatten annotations across a page range filtered by type.</summary>
+    public void FlatteningAnnotations(int start, int end, AnnotationType[] annotType)
+    {
+        var doc = Document;
+        var typeSet = annotType is null ? null : new HashSet<AnnotationType>(annotType);
+        var first = Math.Max(1, start);
+        var last = Math.Min(doc.PageCount, end);
+        for (var i = first; i <= last; i++)
+        {
+            var page = doc.Pages.At(i);
+            var snapshot = new List<Aspose.Pdf.Annotations.Annotation>();
+            foreach (var ann in page.Annotations)
+            {
+                if (ann.Dict.GetName("Subtype") == "Widget") continue;
+                if (typeSet is null || typeSet.Contains(ann.AnnotationType))
+                    snapshot.Add(ann);
+            }
+            foreach (var ann in snapshot) ann.Flatten();
+        }
+    }
+
     // ── Redact ──────────────────────────────────────────────────────────────
 
     // ── XFDF Import ─────────────────────────────────────────────────────────
@@ -254,7 +283,9 @@ public sealed partial class PdfAnnotationEditor : IDisposable
         xmlDoc.Load(xfdfStream);
 
         var nsmgr = new XmlNamespaceManager(xmlDoc.NameTable);
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
         nsmgr.AddNamespace("xfdf", "http://ns.adobe.com/xfdf/");
+#pragma warning restore S1075
 
         var annotsNode = xmlDoc.SelectSingleNode("//xfdf:xfdf/xfdf:annots", nsmgr)
                       ?? xmlDoc.SelectSingleNode("//annots");
@@ -269,11 +300,20 @@ public sealed partial class PdfAnnotationEditor : IDisposable
         ResolveImportedReplyReferences(doc);
     }
 
+    /// <summary>
+    /// Import annotations from an XFDF file path.
+    /// </summary>
+    public void ImportAnnotationsFromXfdf(string xfdfFile)
+    {
+        using var fs = new FileStream(xfdfFile, FileMode.Open, FileAccess.Read);
+        ImportAnnotationsFromXfdf(fs);
+    }
+
     /// <summary>Resolve the temporary /IRT_Name markers written by
     /// <see cref="ImportXfdfAnnotation"/> (from the XFDF <c>inreplyto</c> attribute)
     /// into real /IRT links: each marker names the replied-to annotation by its /NM,
     /// so once every annotation is imported we can connect the reply to its target.</summary>
-    private void ResolveImportedReplyReferences(Document doc)
+    private static void ResolveImportedReplyReferences(Document doc)
     {
         var byName = new Dictionary<string, PdfDictionary>(StringComparer.Ordinal);
         var pending = new List<PdfDictionary>();
@@ -298,15 +338,6 @@ public sealed partial class PdfAnnotationEditor : IDisposable
     }
 
     /// <summary>
-    /// Import annotations from an XFDF file path.
-    /// </summary>
-    public void ImportAnnotationsFromXfdf(string xfdfFile)
-    {
-        using var fs = new FileStream(xfdfFile, FileMode.Open, FileAccess.Read);
-        ImportAnnotationsFromXfdf(fs);
-    }
-
-    /// <summary>
     /// Import annotations from XFDF with type filter.
     /// </summary>
     public void ImportAnnotationFromXfdf(Stream xfdfStream, AnnotationType[] annotType)
@@ -316,7 +347,9 @@ public sealed partial class PdfAnnotationEditor : IDisposable
         xmlDoc.Load(xfdfStream);
 
         var nsmgr = new XmlNamespaceManager(xmlDoc.NameTable);
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
         nsmgr.AddNamespace("xfdf", "http://ns.adobe.com/xfdf/");
+#pragma warning restore S1075
 
         var annotsNode = xmlDoc.SelectSingleNode("//xfdf:xfdf/xfdf:annots", nsmgr)
                       ?? xmlDoc.SelectSingleNode("//annots");
@@ -345,6 +378,20 @@ public sealed partial class PdfAnnotationEditor : IDisposable
         ImportAnnotationFromXfdf(fs, annotType);
     }
 
+    /// <summary>Import annotations from an XFDF stream (every annotation type).</summary>
+    public void ImportAnnotationFromXfdf(Stream xfdfStream)
+    {
+        var allTypes = (AnnotationType[])System.Enum.GetValues(typeof(AnnotationType));
+        ImportAnnotationFromXfdf(xfdfStream, allTypes);
+    }
+
+    /// <summary>Import annotations from an XFDF file (every annotation type).</summary>
+    public void ImportAnnotationFromXfdf(string xfdfFile)
+    {
+        using var fs = new FileStream(xfdfFile, FileMode.Open, FileAccess.Read);
+        ImportAnnotationFromXfdf(fs);
+    }
+
     // ── XFDF Export ─────────────────────────────────────────────────────────
 
     // ── Import Annotations from PDFs ────────────────────────────────────────
@@ -362,19 +409,44 @@ public sealed partial class PdfAnnotationEditor : IDisposable
             stream.CopyTo(ms);
             using var sourceDoc = Document.Open(ms.ToArray());
 
-            for (int i = 0; i < sourceDoc.PageCount && i < doc.PageCount; i++)
-            {
-                var sourcePage = sourceDoc.Pages.At(i + 1);
-                var targetPage = doc.Pages.At(i + 1);
-
-                foreach (var annot in sourcePage.Annotations)
-                {
-                    if (annot.AnnotationType == AnnotationType.Widget) continue;
-                    // Clone the annotation dictionary and add to target
-                    AppendAnnotationDict(targetPage, annot.Dict);
-                }
-            }
+            var sharedPages = Math.Min(sourceDoc.PageCount, doc.PageCount);
+            var cloneMap = PageCounterparts(sourceDoc, doc, sharedPages);
+            for (int i = 1; i <= sharedPages; i++)
+                ImportPageAnnotations(doc, sourceDoc.Pages.At(i), doc.Pages.At(i), cloneMap);
         }
+    }
+
+    /// <summary>Import annotations from PDF streams filtered by type.</summary>
+    public void ImportAnnotations(Stream[] annotFileStream, AnnotationType[] annotType)
+    {
+        // Underlying ImportAnnotations(Stream[]) does not yet honour the type filter; delegate
+        // without filtering — annotations of all types are imported.
+        _ = annotType;
+        ImportAnnotations(annotFileStream);
+    }
+
+    /// <summary>Import annotations from PDF files at the given paths.</summary>
+    public void ImportAnnotations(string[] annotFile)
+    {
+        if (annotFile is null) return;
+        var streams = new List<Stream>();
+        try
+        {
+            foreach (var path in annotFile)
+                streams.Add(new FileStream(path, FileMode.Open, FileAccess.Read));
+            ImportAnnotations(streams.ToArray());
+        }
+        finally
+        {
+            foreach (var s in streams) s.Dispose();
+        }
+    }
+
+    /// <summary>Import annotations from PDF files filtered by type.</summary>
+    public void ImportAnnotations(string[] annotFile, AnnotationType[] annotType)
+    {
+        _ = annotType;
+        ImportAnnotations(annotFile);
     }
 
     // ── Save / Close ────────────────────────────────────────────────────────
@@ -433,83 +505,6 @@ public sealed partial class PdfAnnotationEditor : IDisposable
         return result.ToArray();
     }
 
-    /// <summary>Flatten every annotation using the supplied form-flatten settings.</summary>
-    public void FlatteningAnnotations(Aspose.Pdf.Forms.Form.FlattenSettings flattenSettings)
-    {
-        // A redaction is applied by the flatten itself (see ApplyPendingRedactions),
-        // so ApplyRedactions adds nothing here; the settings are kept in the
-        // signature because the overload is part of the facade's surface.
-        FlatteningAnnotations();
-    }
-
-    /// <summary>Flatten annotations across a page range filtered by type.</summary>
-    public void FlatteningAnnotations(int start, int end, AnnotationType[] annotType)
-    {
-        var doc = Document;
-        var typeSet = annotType is null ? null : new HashSet<AnnotationType>(annotType);
-        var first = Math.Max(1, start);
-        var last = Math.Min(doc.PageCount, end);
-        for (var i = first; i <= last; i++)
-        {
-            var page = doc.Pages.At(i);
-            var snapshot = new List<Aspose.Pdf.Annotations.Annotation>();
-            foreach (var ann in page.Annotations)
-            {
-                if (ann.Dict.GetName("Subtype") == "Widget") continue;
-                if (typeSet is null || typeSet.Contains(ann.AnnotationType))
-                    snapshot.Add(ann);
-            }
-            foreach (var ann in snapshot) ann.Flatten();
-        }
-    }
-
-    /// <summary>Import annotations from an XFDF stream (every annotation type).</summary>
-    public void ImportAnnotationFromXfdf(Stream xfdfStream)
-    {
-        var allTypes = (AnnotationType[])System.Enum.GetValues(typeof(AnnotationType));
-        ImportAnnotationFromXfdf(xfdfStream, allTypes);
-    }
-
-    /// <summary>Import annotations from an XFDF file (every annotation type).</summary>
-    public void ImportAnnotationFromXfdf(string xfdfFile)
-    {
-        using var fs = new FileStream(xfdfFile, FileMode.Open, FileAccess.Read);
-        ImportAnnotationFromXfdf(fs);
-    }
-
-    /// <summary>Import annotations from PDF streams filtered by type.</summary>
-    public void ImportAnnotations(Stream[] annotFileStream, AnnotationType[] annotType)
-    {
-        // Underlying ImportAnnotations(Stream[]) does not yet honour the type filter;
-        // delegate without filtering — annotations of all types are imported.
-        _ = annotType;
-        ImportAnnotations(annotFileStream);
-    }
-
-    /// <summary>Import annotations from PDF files at the given paths.</summary>
-    public void ImportAnnotations(string[] annotFile)
-    {
-        if (annotFile is null) return;
-        var streams = new List<Stream>();
-        try
-        {
-            foreach (var path in annotFile)
-                streams.Add(new FileStream(path, FileMode.Open, FileAccess.Read));
-            ImportAnnotations(streams.ToArray());
-        }
-        finally
-        {
-            foreach (var s in streams) s.Dispose();
-        }
-    }
-
-    /// <summary>Import annotations from PDF files filtered by type.</summary>
-    public void ImportAnnotations(string[] annotFile, AnnotationType[] annotType)
-    {
-        _ = annotType;
-        ImportAnnotations(annotFile);
-    }
-
     /// <summary>Import annotations from an FDF file: a /FDF /Annots array lands page
     /// by its entries' 0-based /Page, and a /Fields array is split the way the
     /// reference splits it — /Subtype-carrying entries become page-1 annotations,
@@ -559,10 +554,9 @@ public sealed partial class PdfAnnotationEditor : IDisposable
         for (var i = first; i <= last; i++)
         {
             var page = doc.Pages.At(i);
-            foreach (var ann in page.Annotations)
+            foreach (var ann in page.Annotations.Where(ann => string.Equals(ann.Author, srcAuthor, StringComparison.Ordinal)))
             {
-                if (string.Equals(ann.Author, srcAuthor, StringComparison.Ordinal))
-                    ann.Dict.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes(desAuthor ?? string.Empty)));
+                ann.Dict.Set("T", Aspose.Pdf.Forms.Field.EncodePdfTextString(desAuthor ?? string.Empty));
             }
         }
     }

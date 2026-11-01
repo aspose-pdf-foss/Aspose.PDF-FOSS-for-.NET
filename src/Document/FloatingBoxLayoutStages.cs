@@ -17,7 +17,17 @@ public sealed partial class Document
     /// <summary>Floating box layout stages: the chromeless default placement and the positioned placement arms.</summary>
     private bool PlaceFloatingBox(FloatingBoxParagraphState fx)
     {
+        // (a box with chrome - border, background - stays at the cursor and aligns its CONTENT
+        //  by these properties, as the box writer does; only a chromeless box is seated by them)
         if (fx.fbox.PositioningMode == ParagraphPositioningMode.Default
+            && fx.fbox.Left == 0 && fx.fbox.Top == 0 && fx.fbox.Width > 0 && fx.fbox.Height > 0
+            && !fx.fboxIsVisibleBox
+            && (fx.fbox.HorizontalAlignment is HorizontalAlignment.Center or HorizontalAlignment.Right
+                || fx.fbox.VerticalAlignment is VerticalAlignment.Center or VerticalAlignment.Bottom))
+        {
+            PlaceAlignedBox(fx);
+        }
+        else if (fx.fbox.PositioningMode == ParagraphPositioningMode.Default
             && fx.fbox.Left == 0 && fx.fbox.Top == 0 && (!fx.fboxIsVisibleBox || fx.fboxChromeOnFlow))
         {
             PlaceDissolvedBox(fx);
@@ -35,7 +45,7 @@ public sealed partial class Document
             // offset is not re-applied). Laid through the flow as one column.
             if (fx.fbox.Top > 0) fx.flow.AdvanceY(fx.fbox.Top);
             var offLeft = fx.marginLeft + fx.fbox.Left;
-            var offWidth = fx.fbox.Width > 0 ? fx.fbox.Width : fx.page.Width - fx.marginRight - offLeft;
+            var offWidth = fx.fbox.Width > 0 ? fx.fbox.Width : fx.page.LayoutFrameWidth - fx.marginRight - offLeft;
             LayoutDissolvedFloatingBox(fx.fbox, fx.flow, fx.page, fx.tocEntries, fx.pl, fx.headingAutoCounters,
                 fx.overflowPages, fx.marginLeft, fx.marginRight, fx.marginBottom,
                 (new[] { offLeft }, new[] { offWidth }));
@@ -58,7 +68,7 @@ public sealed partial class Document
             var cbContent = new Content.ContentStreamBuilder();
             cbContent.SaveState();
             if (fx.fbox.BackgroundColor is { } cbBg)
-                cbContent.SetFillColor(cbBg).Rectangle(cbLeft, cbTop - fx.fbox.Height, fx.fbox.Width, fx.fbox.Height).Fill();
+                FloatingBox.FillBackground(cbContent, fx.page, cbBg, cbLeft, cbTop - fx.fbox.Height, fx.fbox.Width, fx.fbox.Height);
             if (fx.fbox.Border is { } cbBorder && cbBorder.HasAnySide)
                 FloatingBox.StrokeBorder(cbContent, cbBorder, cbLeft, cbTop - fx.fbox.Height, fx.fbox.Width, fx.fbox.Height);
             cbContent.RestoreState();
@@ -66,7 +76,7 @@ public sealed partial class Document
             var cbPad = fx.fbox.Padding;
             if (cbPad?.Top > 0) fx.flow.AdvanceY(cbPad.Top);
             var (cbLefts, cbWidths) = BuildColumnGeometry(fx.fbox.ColumnInfo, cbLeft + (cbPad?.Left ?? 0),
-                fx.page.Width - fx.marginRight - cbLeft - (cbPad?.Left ?? 0));
+                fx.page.LayoutFrameWidth - fx.marginRight - cbLeft - (cbPad?.Left ?? 0));
             LayoutDissolvedFloatingBox(fx.fbox, fx.flow, fx.page, fx.tocEntries, fx.pl, fx.headingAutoCounters,
                 fx.overflowPages, fx.marginLeft, fx.marginRight, fx.marginBottom, (cbLefts, cbWidths));
             fx.flow.MoveCursorTo(Math.Min(fx.flow.CurrentY, cbTop - fx.fbox.Height));
@@ -187,7 +197,7 @@ public sealed partial class Document
     }
 
     /// <summary></summary>
-    private void PlaceRelativeBox(FloatingBoxParagraphState fx)
+    private static void PlaceRelativeBox(FloatingBoxParagraphState fx)
     {
         // Flow-positioned visible box (background/border): render it at the
         // current cursor — not the page top — so a coloured header band
@@ -197,7 +207,7 @@ public sealed partial class Document
         var savedTop = fx.fbox.Top;
         var savedLeft = fx.fbox.Left;
         fx.fbox.PositioningMode = ParagraphPositioningMode.Absolute;
-        fx.fbox.Top = targetPage.Height - fx.flow.CurrentY;
+        fx.fbox.Top = targetPage.LayoutFrameHeight - fx.flow.CurrentY;
         // The box seats at the page's LEFT CONTENT edge, not at x = 0: a
         // flow-positioned box starts where the flow does.
         fx.fbox.Left = fx.marginLeft + fx.fbox.Left;
@@ -211,12 +221,45 @@ public sealed partial class Document
         // re-seats with its chrome — without draining this the overflow rows were
         // silently dropped.
         foreach (var spill in fx.fbox.LastOverflowPages)
-            fx.overflowPages.Add((spill, fx.page.Width, fx.page.Height));
-        fx.flow.AdvanceY(fx.fbox.Height);
+            fx.overflowPages.Add((spill, fx.page.LayoutFrameWidth, fx.page.LayoutFrameHeight));
+        // The height the box was built at: a box given none takes its text's.
+        fx.flow.AdvanceY(fx.fbox.LastBoxRect.Height);
+    }
+
+    /// <summary>A sized box the caller aligned instead of placing: its own Horizontal/Vertical
+    /// Alignment seats it in the page's content area - centred, or against the right or bottom
+    /// edge - and it stays out of the flow like a placed box. It used to dissolve into the
+    /// flow (or sit at the cursor) at the content area's top-left, the alignment unread.</summary>
+    private static void PlaceAlignedBox(FloatingBoxParagraphState fx)
+    {
+        var contentWidth = fx.page.LayoutFrameWidth - fx.marginLeft - fx.marginRight;
+        var contentHeight = fx.page.LayoutFrameHeight - fx.marginTop - fx.marginBottom;
+        var slackX = Math.Max(0, contentWidth - fx.fbox.Width);
+        var slackY = Math.Max(0, contentHeight - fx.fbox.Height);
+        var savedMode = fx.fbox.PositioningMode;
+        var savedLeft = fx.fbox.Left;
+        var savedTop = fx.fbox.Top;
+        fx.fbox.Left = fx.fbox.HorizontalAlignment switch
+        {
+            HorizontalAlignment.Center => slackX / 2,
+            HorizontalAlignment.Right => slackX,
+            _ => 0,
+        };
+        fx.fbox.Top = fx.fbox.VerticalAlignment switch
+        {
+            VerticalAlignment.Center => slackY / 2,
+            VerticalAlignment.Bottom => slackY,
+            _ => 0,
+        };
+        fx.fbox.PositioningMode = ParagraphPositioningMode.Absolute;
+        PlaceOutsideFlow(fx);
+        fx.fbox.PositioningMode = savedMode;
+        fx.fbox.Left = savedLeft;
+        fx.fbox.Top = savedTop;
     }
 
     /// <summary></summary>
-    private void PlaceOutsideFlow(FloatingBoxParagraphState fx)
+    private static void PlaceOutsideFlow(FloatingBoxParagraphState fx)
     {
         if (fx.fbox.PositioningMode == ParagraphPositioningMode.Default)
         {
@@ -229,7 +272,7 @@ public sealed partial class Document
             var savedFbTop = fx.fbox.Top;
             var savedFbLeft = fx.fbox.Left;
             fx.fbox.PositioningMode = ParagraphPositioningMode.Absolute;
-            fx.fbox.Top = fx.page.Height - fx.flow.CurrentY + fx.fbox.Top;
+            fx.fbox.Top = fx.page.LayoutFrameHeight - fx.flow.CurrentY + fx.fbox.Top;
             fx.fbox.Left = fx.marginLeft + fx.fbox.Left;
             fx.fbox.PageBottomMargin = fx.marginBottom;
             fx.page.AddFloatingBox(fx.fbox);
@@ -238,7 +281,7 @@ public sealed partial class Document
             fx.fbox.Top = savedFbTop;
             fx.fbox.Left = savedFbLeft;
             foreach (var spill in fx.fbox.LastOverflowPages)
-                fx.overflowPages.Add((spill, fx.page.Width, fx.page.Height));
+                fx.overflowPages.Add((spill, fx.page.LayoutFrameWidth, fx.page.LayoutFrameHeight));
         }
         else
         {
@@ -257,7 +300,7 @@ public sealed partial class Document
             fx.fbox.Top = savedAbsTop;
             fx.fbox.Left = savedAbsLeft;
             foreach (var spill in fx.fbox.LastOverflowPages)
-                fx.overflowPages.Add((spill, fx.page.Width, fx.page.Height));
+                fx.overflowPages.Add((spill, fx.page.LayoutFrameWidth, fx.page.LayoutFrameHeight));
         }
     }
 
@@ -273,7 +316,7 @@ public sealed partial class Document
             // registration a dry run makes is thrown away below: it names a
             // font on the detached sibling it drew, not on the real page.
             var dryFontName = fx.pl.fontName;
-            plan = fx.flow.PlanDissolvedBands(candidate =>
+            plan = FlowLayout.PlanDissolvedBands(candidate =>
             {
                 var dryPage = fx.page.CreateDetachedSibling();
                 dryPage.Footer = fx.page.Footer;
@@ -293,14 +336,14 @@ public sealed partial class Document
             fx.overflowPages, fx.marginLeft, fx.marginRight, fx.marginBottom);
         if (fx.fboxChromeOnFlow && !fx.flow.IsDryRun && ReferenceEquals(chromePage, fx.flow.CurrentPage))
         {
-            var chromeW = fx.page.Width - fx.marginRight - fx.marginLeft;
+            var chromeW = fx.page.LayoutFrameWidth - fx.marginRight - fx.marginLeft;
             var chromeH = chromeTop - fx.flow.CurrentY;
             if (chromeW > 0 && chromeH > 0)
             {
                 var cb = new Content.ContentStreamBuilder();
                 cb.SaveState();
                 if (fx.fbox.BackgroundColor is { } chromeBg)
-                    cb.SetFillColor(chromeBg).Rectangle(fx.marginLeft, fx.flow.CurrentY, chromeW, chromeH).Fill();
+                    FloatingBox.FillBackground(cb, fx.page, chromeBg, fx.marginLeft, fx.flow.CurrentY, chromeW, chromeH);
                 if (fx.fbox.Border is { } chromeBorder && chromeBorder.HasAnySide)
                     FloatingBox.StrokeBorder(cb, chromeBorder, fx.marginLeft, fx.flow.CurrentY, chromeW, chromeH);
                 cb.RestoreState();

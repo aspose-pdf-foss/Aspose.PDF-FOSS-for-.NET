@@ -35,7 +35,7 @@ internal static partial class HtmlToPdfConverter
         ParseMetricsTables(mh);
         if (mh.tables.Count == 0) return null;
 
-        mh.ctaM = Regex.Match(mh.html, @"class=""[^""]*herobtn[^""]*""[^>]*>([\s\S]*?)</a>",
+        mh.ctaM = SafeRegex.Match(mh.html, @"class=""[^""]*herobtn[^""]*""[^>]*>([\s\S]*?)</a>",
             RegexOptions.IgnoreCase);
         mh.ctaText = mh.ctaM.Success ? MhFlat(mh.ctaM.Groups[1].Value) : "Try Our SDKs for Free";
 

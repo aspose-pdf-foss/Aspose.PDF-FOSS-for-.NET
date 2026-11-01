@@ -17,9 +17,7 @@ internal static class BidiText
 
     internal static bool HasRtl(string s)
     {
-        foreach (var c in s)
-            if (IsRtl(c)) return true;
-        return false;
+        return s.Any(c => IsRtl(c));
     }
 
     private static bool IsStrongL(char c) =>
@@ -110,15 +108,17 @@ internal static class BidiText
         {
             var (kind, text) = merged[r];
             if (kind != 'R') { sb.Append(text); continue; }
-            for (var k = text.Length - 1; k >= 0; k--)
+            var k = text.Length - 1;
+            while (k >= 0)
             {
                 if (char.IsLowSurrogate(text[k]) && k > 0 && char.IsHighSurrogate(text[k - 1]))
                 {
                     sb.Append(text[k - 1]).Append(text[k]);
-                    k--;
+                    k -= 2;
                     continue;
                 }
                 sb.Append(Mirror(text[k]));
+                k--;
             }
         }
         return sb.ToString();

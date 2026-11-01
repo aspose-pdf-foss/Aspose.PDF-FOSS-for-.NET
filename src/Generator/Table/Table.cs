@@ -321,7 +321,7 @@ public partial class Table : BaseParagraph
                 {
                     var cell = row.Cells[ci];
                     var pad = cell.Margin ?? row.DefaultCellPadding ?? DefaultCellPadding;
-                    var need = Math.Max(MaxLineWidth(cell, row, exact: true), WidestPicture(cell))
+                    var need = Math.Max(MaxLineWidth(cell, row, exact: true), Math.Max(WidestPicture(cell, forNarrowest: false), WidestNestedTable(cell)))
                         + (pad?.Left ?? 0) + (pad?.Right ?? 0) + AutoFitMeasureGuardPt;
                     if (need > w[ci]) w[ci] = need;
                 }
@@ -342,12 +342,17 @@ public partial class Table : BaseParagraph
     /// formatting (font size, style) of the rows it inspects.</summary>
     public double GetHeight() => GetHeight(null);
 
+    // The content band a table is measured against without a page: A4 less 36 pt margins.
+    private const double DefaultMeasureBandPt = 523.0;
+
     /// <summary>Rendered height of the table on <paramref name="parentPage"/>
     /// (or on a default content band when none is given). Pure measurement,
     /// independent of layout state (same value before and after pagination):
     /// <c>height = table margin top+bottom + table border top+bottom (once) +
     /// Σ rowHeight</c>; <c>rowHeight = max over cells of (padTop + padBottom +
-    /// Σ fragments (marginTop + marginBottom + lineCount·fontSize))</c>. The
+    /// cell border top + bottom + Σ fragments (marginTop + marginBottom + lineCount·fontSize))</c>; an HTML
+    /// fragment or a nested table counts the height the row layout sets it in
+    /// (<see cref="MeasureCellObjectHeight"/>). The
     /// line height is the font size EXACTLY (no leading); a cell's Margin
     /// REPLACES the default padding for this contract; fragment margins are
     /// summed, never collapsed; explicit column widths are used as declared
@@ -357,21 +362,34 @@ public partial class Table : BaseParagraph
         // Resolve columns against the hosting page's usable width, or a default
         // A4 content band, so percentage / auto widths don't collapse and force
         // spurious wraps in the line-count estimate.
-        var availWidth = parentPage is not null ? GetMeasureBandWidth(parentPage) : 523.0;
+        return MeasureHeight(parentPage is not null ? GetMeasureBandWidth(parentPage) : DefaultMeasureBandPt);
+    }
+
+    /// <summary>The <see cref="GetHeight(Page?)"/> contract against a given band width (a nested
+    /// table measures against its cell's inner width).</summary>
+    private double MeasureHeight(double availWidth) => MeasureHeight(availWidth, Rows.Count);
+
+    private double MeasureHeight(double availWidth, int rowCount)
+    {
         var colWidths = ParseColumnWidths(availWidth, clampToAvailable: false);
 
         double total = (Margin?.Top ?? 0) + (Margin?.Bottom ?? 0) + BorderTopBottom(Border);
-        for (var ri = 0; ri < Rows.Count; ri++)
+        for (var ri = 0; ri < rowCount; ri++)
         {
             var row = Rows.At(ri);
             if (row.FixedRowHeight > 0) { total += row.FixedRowHeight; continue; }
-            var rowH = (double)row.MinRowHeight;
-            for (var ci = 0; ci < row.Cells.Count && ci < colWidths.Length; ci++)
+            var rowH = row.MinRowHeight;
+            // (a cell after a column-spanning one stands that many grid columns on)
+            for (int ci = 0, col = 0; ci < row.Cells.Count && col < colWidths.Length; ci++)
             {
                 var cell = row.Cells.At(ci);
-                if (cell.SpanContinuation) continue;
-                var h = MeasureCellHeight(cell, row, GetCellWidth(colWidths, ci, cell.ColSpan));
-                if (h > rowH) rowH = h;
+                var span = Math.Max(1, cell.ColSpan);
+                if (!cell.SpanContinuation)
+                {
+                    var h = MeasureCellHeight(cell, row, GetCellWidth(colWidths, col, span));
+                    if (h > rowH) rowH = h;
+                }
+                col += span;
             }
             total += rowH;
         }
@@ -417,7 +435,10 @@ public partial class Table : BaseParagraph
         var pad = cell.Margin ?? row.DefaultCellPadding ?? DefaultCellPadding;
         var availW = cellWidth - (pad?.Left ?? 0) - (pad?.Right ?? 0);
         var cellFs = ResolveCellFontSize(cell, row);
-        var h = (pad?.Top ?? 0) + (pad?.Bottom ?? 0);
+        // The cell's own top and bottom border widths count in full on every row: neighbouring
+        // rows' borders abut, they are not shared (a row border counts as the cell's would).
+        var border = cell.Border ?? row.Border ?? row.DefaultCellBorder ?? DefaultCellBorder;
+        var h = (pad?.Top ?? 0) + (pad?.Bottom ?? 0) + BorderTopBottom(border);
         foreach (var p in cell.Paragraphs)
         {
             if (p is Text.TextFragment tf)
@@ -427,7 +448,7 @@ public partial class Table : BaseParagraph
                 foreach (var logical in (tf.Text ?? string.Empty).Replace("\r\n", "\n").Split('\n'))
                     h += CountMeasuredLines(logical, fs, availW) * fs;
             }
-            else if (p is HtmlFragment) h += cellFs;
+            else h += MeasureCellObjectHeight(p, availW, cellFs);
         }
         return h;
     }
@@ -504,10 +525,10 @@ public partial class Table : BaseParagraph
     public void SetColumnTextState(int colNumber, Aspose.Pdf.Text.TextState textState)
     {
         if (textState is null) return;
-        foreach (var row in Rows)
+        foreach (var cells in Rows.Select(row => row.Cells))
         {
-            if (colNumber < 0 || colNumber >= row.Cells.Count) continue;
-            var cell = row.Cells[colNumber];
+            if (colNumber < 0 || colNumber >= cells.Count) continue;
+            var cell = cells[colNumber];
             // The column's text state also ALIGNS the column: a currency column given a
             // right-aligned state right-aligns its cells, a date column centres them
             // (the report's date/currency columns are set this way and the rows come out
@@ -524,6 +545,10 @@ public partial class Table : BaseParagraph
             st.ForegroundColor ??= textState.ForegroundColor;
             if (st.FontSize <= 0 && textState.FontSize > 0) st.FontSize = textState.FontSize;
             if (st.Font is null && textState.Font is not null) st.Font = textState.Font;
+            // The column's style and underline reach a cell that set neither of its own;
+            // a cell that overrides either afterwards keeps its override.
+            if (!st.FontStyleTouched && textState.FontStyleTouched) st.FontStyle = textState.FontStyle;
+            if (!st.UnderlineTouched && textState.UnderlineTouched) st.Underline = textState.Underline;
         }
     }
 
@@ -850,11 +875,29 @@ public partial class Table : BaseParagraph
     internal IReadOnlyList<List<(ReservedBlock block, ReservedPart part, Rectangle rect)>> LastBlockDraws => _pageBlocks;
     private readonly List<List<(ReservedBlock block, ReservedPart part, Rectangle rect)>> _pageBlocks = new();
 
-    /// <summary>Per built page, the checkbox widgets laid out in its cells with the
+    /// <summary>Per built page, the widgets and annotations laid out in its cells with the
     /// rectangle each landed on. Page 0's are bound to the page at build time; a
     /// spill page's are bound by the flow dispatcher once that page exists.</summary>
-    internal IReadOnlyList<List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>> LastCheckboxDraws => _pageCheckboxes;
-    private readonly List<List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>> _pageCheckboxes = new();
+    internal IReadOnlyList<List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>> LastCheckboxDraws => _pageCheckboxes;
+    private readonly List<List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>> _pageCheckboxes = new();
+
+    /// <summary>Per built page, the radio options laid out in its cells with the rectangle each
+    /// landed on, all placed on the page the build drew them for: a caller that draws a spill
+    /// page on a page of its own seats that page's options there.</summary>
+    internal IReadOnlyList<List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>> LastOptionDraws => _pageOptions;
+    private readonly List<List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>> _pageOptions = new();
+
+    /// <summary>The cell controls the pages of the current build have drawn so far.</summary>
+    private readonly HashSet<object> _builtControls = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Bind an annotation laid out in a cell to the page the cell landed on: a form
+    /// control seats its widget, any other annotation takes the rectangle and joins the page.</summary>
+    internal static void PlaceCellAnnotation(Aspose.Pdf.Annotations.Annotation annot, Page page, Rectangle rect)
+    {
+        if (annot is Aspose.Pdf.Forms.Field field) { field.PlaceCellWidget(page, rect); return; }
+        annot.Rect = rect;
+        page.Annotations.Add(annot);
+    }
 
     private readonly List<List<(byte[] data, Rectangle rect)>> _pageImages = new();
 

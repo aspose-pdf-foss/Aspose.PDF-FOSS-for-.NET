@@ -23,7 +23,7 @@ internal static partial class HtmlToPdfConverter
     /// relative, and holding the absolute boxes.</summary>
     private static readonly Regex InchPageContainerRx = new(
         @"<div\s+style=""(?=[^""]*position:\s*relative)(?=[^""]*height:\s*[\d.]+in)(?=[^""]*width:\s*[\d.]+in)(?<st>[^""]*)""[^>]*>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>One absolutely positioned text box: its inch geometry and whatever it holds. The
     /// export wraps most values in a bare span and writes the rest as the box's own text, so the
@@ -31,13 +31,13 @@ internal static partial class HtmlToPdfConverter
     /// holding only text is the same box.</summary>
     private static readonly Regex InchTextBoxRx = new(
         @"<div\s+style=""(?=[^""]*position:\s*absolute)(?<st>[^""]*)""[^>]*>(?<body>(?:(?!</?div\b).)*?)</div>",
-        RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Singleline | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>A length declared in inches, in points; null when the property is absent or in
     /// any other unit.</summary>
     private static double? StyleInchPt(string style, string prop)
     {
-        var m = Regex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)in", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)in", RegexOptions.IgnoreCase);
         return m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var v) ? v * InchPt : null;
     }
@@ -47,7 +47,7 @@ internal static partial class HtmlToPdfConverter
     /// not this dialect.</summary>
     private static bool ReadInchStyleFixedDivs(string html, List<FixedPageDiv> divs)
     {
-        var pages = InchPageContainerRx.Matches(html);
+        var pages = SafeRegex.Matches(InchPageContainerRx, html);
         if (pages.Count == 0) return false;
         for (var p = 0; p < pages.Count; p++)
         {
@@ -59,10 +59,10 @@ internal static partial class HtmlToPdfConverter
                 SrcH = StyleInchPt(st, "height") ?? 0,
             };
             if (div.SrcW <= 0 || div.SrcH <= 0) return false;
-            foreach (Match m in InchTextBoxRx.Matches(seg))
+            foreach (var groups in SafeRegex.Matches(InchTextBoxRx, seg).Select(m => m.Groups))
             {
-                var bst = m.Groups["st"].Value;
-                var text = DecodeEntities(Regex.Replace(m.Groups["body"].Value, "<[^>]+>", ""));
+                var bst = groups["st"].Value;
+                var text = DecodeEntities(SafeRegex.Replace(groups["body"].Value, "<[^>]+>", ""));
                 if (text.Trim().Length == 0) continue;
                 if (StyleInchPt(bst, "left") is not { } left || StyleInchPt(bst, "top") is not { } top) continue;
                 // The box's own padding insets its text on both axes; the export writes the same
@@ -87,7 +87,7 @@ internal static partial class HtmlToPdfConverter
     /// dialect's own 2px when it is spelled some other way.</summary>
     private static double StyleBoxPaddingPt(string style)
     {
-        var m = Regex.Match(style, @"(?<![-\w])padding\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(style, @"(?<![-\w])padding\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
         return m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var v) ? v * 0.75 : InchBoxPaddingPt;
     }

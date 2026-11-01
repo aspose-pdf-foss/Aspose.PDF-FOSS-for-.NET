@@ -10,8 +10,9 @@ public abstract class Shape
     /// <summary>Gets or sets the drawing settings (line width, stroke and fill colours, dash pattern, opacity) used to paint the shape.</summary>
     public Aspose.Pdf.GraphInfo GraphInfo { get; set; } = new();
 
-    /// <summary>Optional text label rendered with the shape. Stored only —
-    /// concrete shapes don't currently emit the label.</summary>
+    /// <summary>Optional text label rendered with the shape: a rectangle, ellipse or circle
+    /// draws it on one line inside its box, by the label's alignment (centred when it names
+    /// none), in its standard face, size and colour.</summary>
     public Aspose.Pdf.Text.TextFragment? Text { get; set; }
 
     /// <summary>Whether this shape lies within a <paramref name="containerWidth"/>×<paramref name="containerHeight"/>
@@ -58,10 +59,10 @@ public abstract class Shape
         builder.SetLineWidth(GraphInfo.LineWidth);
         if (GraphInfo.DashPattern is { Length: > 0 })
             builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashStart);
-        if (GraphInfo.StrokeColor is { } sc)
-            builder.SetStrokeColor(sc.R, sc.G, sc.B);
-        if (GraphInfo.FillColorInternal is { } fc)
-            builder.SetFillColor(fc.R, fc.G, fc.B);
+        if (GraphInfo.Color is { } sc)
+            builder.SetStrokeColor(sc);
+        if (GraphInfo.FillColor is { } fc)
+            builder.SetFillColor(fc);
     }
 
     /// <summary>Two-pass paint for a shape whose fill and stroke carry their own
@@ -80,7 +81,9 @@ public abstract class Shape
         if (GraphInfo.FillColor.PatternColorSpace is not null) return false;
         if (GraphInfo.FillOpacity >= 1.0 && GraphInfo.StrokeOpacity >= 1.0) return false;
 
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
         if (GraphInfo.LineWidth != 1f) builder.SetLineWidth(GraphInfo.LineWidth);
+#pragma warning restore S1244
         if (GraphInfo.DashPattern is { Length: > 0 })
             builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashStart);
         builder.SetExtGState(page.AddExtGStateSequential(
@@ -88,13 +91,13 @@ public abstract class Shape
         builder.SetExtGState(page.AddExtGStateSequential(
             new Content.ExtGState { FillAlpha = GraphInfo.FillOpacity }));
 
-        if (GraphInfo.FillColorInternal is { } fc)
-            builder.SetFillColor(fc.R, fc.G, fc.B);
+        if (GraphInfo.FillColor is { } fc)
+            builder.SetFillColor(fc);
         addPath(builder);
         builder.Fill();
 
-        if (GraphInfo.StrokeColor is { } sc)
-            builder.SetStrokeColor(sc.R, sc.G, sc.B);
+        if (GraphInfo.Color is { } sc)
+            builder.SetStrokeColor(sc);
         addPath(builder);
         builder.Stroke();
         return true;

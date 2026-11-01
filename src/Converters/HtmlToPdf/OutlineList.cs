@@ -34,12 +34,12 @@ internal static partial class HtmlToPdfConverter
         public List<OutlineListItem> Items = new();
     }
 
-    private static readonly Regex OutlineStyleRegex = new(@"<style\b[^>]*>(?<css>[\s\S]*?)</style>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex OutlineTokenRegex = new(@"<[^>]+>|[^<]+", RegexOptions.Compiled);
-    private static readonly Regex OutlineTagRegex = new(@"^<(?<close>/?)(?<tag>[a-zA-Z][a-zA-Z0-9]*)(?<attrs>[^>]*?)/?>$", RegexOptions.Compiled);
-    private static readonly Regex OutlineClassRegex = new(@"\bclass\s*=\s*""(?<v>[^""]*)""", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex OutlineStyleAttrRegex = new(@"\bstyle\s*=\s*""(?<v>[^""]*)""", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex OutlineLengthRegex = new(@"^\s*(?<v>-?\d*\.?\d+)\s*(?<u>em|px|pt)?\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex OutlineStyleRegex = new(@"<style\b[^>]*>(?<css>[\s\S]*?)</style>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex OutlineTokenRegex = new(@"<[^>]+>|[^<]+", RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex OutlineTagRegex = new(@"^<(?<close>/?)(?<tag>[a-zA-Z][a-zA-Z0-9]*)(?<attrs>[^>]*?)/?>$", RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex OutlineClassRegex = new(@"\bclass\s*=\s*""(?<v>[^""]*)""", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex OutlineStyleAttrRegex = new(@"\bstyle\s*=\s*""(?<v>[^""]*)""", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex OutlineLengthRegex = new(@"^\s*(?<v>-?\d*\.?\d+)\s*(?<u>em|px|pt)?\s*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Body size of the UA model the list lays out in (16 px).</summary>
     private const double OutlineBodyEmPt = 12.0;
@@ -55,17 +55,14 @@ internal static partial class HtmlToPdfConverter
     internal static OutlineListDoc? TryParseHtmlOutlineList(string html)
     {
         if (string.IsNullOrEmpty(html) || html.IndexOf("inline-block", StringComparison.OrdinalIgnoreCase) < 0) return null;
-        var styleMatch = OutlineStyleRegex.Match(html);
+        var styleMatch = SafeRegex.Match(OutlineStyleRegex, html);
         if (!styleMatch.Success) return null;
         var rules = ParseOutlineCss(styleMatch.Groups["css"].Value);
-        var body = OutlineStyleRegex.Replace(html, "");
-        body = Regex.Replace(body, @"<!--[\s\S]*?-->", "");
-        body = Regex.Replace(body, @"<head\b[^>]*>[\s\S]*?</head>", "", RegexOptions.IgnoreCase);
+        var body = SafeRegex.Replace(OutlineStyleRegex, html, "");
+        body = SafeRegex.Replace(body, @"<!--[\s\S]*?-->", "");
+        body = SafeRegex.Replace(body, @"<head\b[^>]*>[\s\S]*?</head>", "", RegexOptions.IgnoreCase);
         var op = new OutlineParseState { Rules = rules, Doc = new OutlineListDoc() };
-        foreach (Match t in OutlineTokenRegex.Matches(body))
-        {
-            if (!OutlineStep(op, t.Value)) return null;
-        }
+        if (SafeRegex.Matches(OutlineTokenRegex, body).Any(t => !OutlineStep(op, t.Value))) return null;
         if (op.Phase != OutlinePhase.AfterList || op.Doc.Items.Count == 0) return null;
         op.Doc.Title = CollapseWs(op.Title.ToString());
         return op.Doc;
@@ -101,7 +98,7 @@ internal static partial class HtmlToPdfConverter
         {
             return OutlineText(op, token);
         }
-        var tm = OutlineTagRegex.Match(token);
+        var tm = SafeRegex.Match(OutlineTagRegex, token);
         if (!tm.Success) return token.StartsWith("<!", StringComparison.Ordinal);
         var tag = tm.Groups["tag"].Value.ToLowerInvariant();
         var close = tm.Groups["close"].Value.Length > 0;
@@ -230,13 +227,13 @@ internal static partial class HtmlToPdfConverter
 
     private static string[] OutlineClasses(string attrs)
     {
-        var m = OutlineClassRegex.Match(attrs);
+        var m = SafeRegex.Match(OutlineClassRegex, attrs);
         return m.Success ? m.Groups["v"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries) : Array.Empty<string>();
     }
 
     private static string? OutlineInlineStyle(string attrs, string prop)
     {
-        var m = OutlineStyleAttrRegex.Match(attrs);
+        var m = SafeRegex.Match(OutlineStyleAttrRegex, attrs);
         if (!m.Success) return null;
         foreach (var decl in m.Groups["v"].Value.Split(';'))
         {
@@ -251,7 +248,7 @@ internal static partial class HtmlToPdfConverter
     private static double OutlineLengthPt(string? value)
     {
         if (value is null) return 0;
-        var m = OutlineLengthRegex.Match(value);
+        var m = SafeRegex.Match(OutlineLengthRegex, value);
         if (!m.Success) return 0;
         var v = double.Parse(m.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture);
         return m.Groups["u"].Value.ToLowerInvariant() switch
@@ -267,7 +264,7 @@ internal static partial class HtmlToPdfConverter
     private static List<(List<(string tag, string[] classes)> parts, string prop, string value)> ParseOutlineCss(string css)
     {
         var rules = new List<(List<(string tag, string[] classes)>, string, string)>();
-        css = Regex.Replace(css, @"/\*[\s\S]*?\*/", "");
+        css = SafeRegex.Replace(css, @"/\*[\s\S]*?\*/", "");
         foreach (var block in css.Split('}'))
         {
             var brace = block.IndexOf('{');
@@ -326,15 +323,13 @@ internal static partial class HtmlToPdfConverter
     private static bool OutlineCompoundMatches((string tag, string[] classes) part, (string tag, string[] classes) element)
     {
         if (part.tag.Length > 0 && part.tag != "*" && !string.Equals(part.tag, element.tag, StringComparison.OrdinalIgnoreCase)) return false;
-        foreach (var c in part.classes)
-            if (Array.IndexOf(element.classes, c) < 0) return false;
-        return true;
+        return !part.classes.Any(c => Array.IndexOf(element.classes, c) < 0);
     }
 
     /// <summary>Whitespace collapsed to single spaces with the leading run dropped (a line
     /// start) and a trailing run kept as one space.</summary>
     private static string CollapseWsKeepTrailing(string s)
     {
-        return Regex.Replace(s, @"[^\S\u00A0]+", " ").TrimStart(' ');
+        return SafeRegex.Replace(s, @"[^\S\u00A0]+", " ").TrimStart(' ');
     }
 }

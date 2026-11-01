@@ -23,6 +23,8 @@ public sealed partial class SoftwarePageRenderer
     {
         var annots = ctx.Reader.Resolve(pageDict.Get("Annots")) as PdfArray;
         if (annots is null) return;
+        // Whether the form asks viewers to build its field appearances, read once per page.
+        bool? formNeedsAppearances = null;
         foreach (var item in annots)
         {
             var annot = ctx.Reader.ResolveDict(item);
@@ -36,6 +38,18 @@ public sealed partial class SoftwarePageRenderer
             {
                 DrawHighlightAnnotation(ctx, annot);
                 continue;
+            }
+            // A field value the file carries without a usable appearance is laid out as a viewer
+            // lays it out, instead of the field being painted as an empty box.
+            if (subtype == "Widget")
+            {
+                formNeedsAppearances ??= Aspose.Pdf.Forms.WidgetRenderAppearance.FormNeedsAppearances(ctx.Reader);
+                var valueForm = Aspose.Pdf.Forms.WidgetRenderAppearance.Build(annot, ctx.Reader, formNeedsAppearances.Value);
+                if (valueForm is not null)
+                {
+                    DrawAppearanceForm(ctx, annot, valueForm);
+                    continue;
+                }
             }
             // For everything else, first try the /AP /N appearance stream per
             // PDF 32000-1:2008 §12.5.5. Covers /FreeText, /Stamp, /Widget, /Popup,
@@ -70,6 +84,13 @@ public sealed partial class SoftwarePageRenderer
             {
                 var form = Aspose.Pdf.Annotations.PopupAppearance.BuildOpenPopupForm(annot, ctx.Reader);
                 if (form is not null) DrawAppearanceForm(ctx, annot, form);
+            }
+            // A /FreeText stored without /AP is laid out from its contents and default
+            // appearance (PDF 32000 §12.5.6.6), as a viewer draws it.
+            else if (subtype == "FreeText")
+            {
+                var laidOut = Aspose.Pdf.Annotations.FreeTextAnnotation.WithRenderAppearance(annot, ctx.Reader);
+                if (laidOut is not null) DrawAppearanceAnnotation(ctx, laidOut);
             }
         }
     }
@@ -124,13 +145,13 @@ public sealed partial class SoftwarePageRenderer
         }
         else
         {
-            if (annot.Get("Rect") is not PdfArray rect || rect.Count < 4) return;
+            // The rectangle and its numbers may be indirect objects: a form filler writes them so.
+            if (ctx.Reader.Resolve(annot.Get("Rect")) is not PdfArray rect || rect.Count < 4) return;
+            var r = Aspose.Pdf.Rectangle.FromPdfArray(rect, ctx.Reader);
 
             // Normalise /Rect (some PDFs emit it with corners out of order).
-            double rx1 = NumFrom(rect[0]), ry1 = NumFrom(rect[1]);
-            double rx2 = NumFrom(rect[2]), ry2 = NumFrom(rect[3]);
-            rMinX = Math.Min(rx1, rx2); rMaxX = Math.Max(rx1, rx2);
-            rMinY = Math.Min(ry1, ry2); rMaxY = Math.Max(ry1, ry2);
+            rMinX = Math.Min(r.LLX, r.URX); rMaxX = Math.Max(r.LLX, r.URX);
+            rMinY = Math.Min(r.LLY, r.URY); rMaxY = Math.Max(r.LLY, r.URY);
         }
         var rW = rMaxX - rMinX; var rH = rMaxY - rMinY;
         if (rW <= 0 || rH <= 0) return;
@@ -173,7 +194,7 @@ public sealed partial class SoftwarePageRenderer
         // restore after so subsequent annotations start from a clean state too.
         var savedClip = ctx.ClipMask;
         ctx.ClipMask = null;
-        DrawFormXObject(ctx, formStream, state, null);
+        DrawFormXObject(ctx, formStream, state);
         ctx.ClipMask = savedClip;
     }
 

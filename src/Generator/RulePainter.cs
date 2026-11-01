@@ -39,7 +39,8 @@ internal static partial class RulePainter
     internal static double SideWidth(BorderInfo border, BorderSide flag)
     {
         var (assigned, side) = SideOf(border, flag);
-        return border.Side.HasFlag(flag) || assigned ? Math.Max(0, side?.LineWidth > 0 ? side.LineWidth : border.Width) : 0;
+        if (border.Side.HasFlag(flag) || assigned) return Math.Max(0, side?.LineWidth > 0 ? side.LineWidth : border.Width);
+        return 0;
     }
 
     /// <summary>True when the side asks for a dash pattern of any kind.</summary>
@@ -171,7 +172,9 @@ internal static partial class RulePainter
             if (strip.Horizontal == strip.OuterAtHigh)
                 Stroke(builder, side, colour, strip.Width, x1, y1, x2, y2);
             else
+#pragma warning disable S2234 // the stroke runs clockwise round the box, reversed on purpose
                 Stroke(builder, side, colour, strip.Width, x2, y2, x1, y1);
+#pragma warning restore S2234
             return;
         }
         switch (side?.Style ?? RuleStyle.Solid)
@@ -181,7 +184,9 @@ internal static partial class RulePainter
                 Fill(builder, colour, strip.Part(DoubleInnerBandStart, 1, DoubleInnerBandStart));
                 break;
             case RuleStyle.Groove or RuleStyle.Ridge or RuleStyle.Inset or RuleStyle.Outset:
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
                 var (outer, inner) = Tones(side!.Style, flag, colour);
+#pragma warning restore S8969
                 Fill(builder, outer, strip.Part(0, 0.5, 0));
                 Fill(builder, inner, strip.Part(0.5, 1, 0.5));
                 break;

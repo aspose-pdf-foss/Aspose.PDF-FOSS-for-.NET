@@ -33,10 +33,10 @@ public sealed partial class TextParagraph
         pc.clipWidth = null;
         _remainingLines.Clear();
 
-        if (Rectangle is not null)
+        if (Box is not null)
         {
-            pc.startX = Rectangle.LLX + Margin.Left;
-            pc.clipWidth = Rectangle.Width - Margin.Left - Margin.Right;
+            pc.startX = Box!.LLX + Margin.Left;
+            pc.clipWidth = Box.Width - Margin.Left - Margin.Right;
         }
         else if (Position is not null)
             pc.startX = Position.XIndent;
@@ -51,6 +51,11 @@ public sealed partial class TextParagraph
 
         pc.builder = new ContentStreamBuilder();
         pc.builder.SaveState();
+        // On a page shown turned the rectangle and position are read in the page as shown, as
+        // TextBuilder.AppendText reads a fragment's: the paragraph is drawn through the
+        // shown-to-media matrix, upright where it was placed.
+        if (page.ShownToMediaMatrix() is { } shown)
+            pc.builder.SetMatrix(shown.A, shown.B, shown.C, shown.D, shown.E, shown.F);
 
         pc.wrapMode = FormattingOptions.WrapMode;
 
@@ -73,7 +78,7 @@ public sealed partial class TextParagraph
         // out against the 500pt default paragraph rectangle: glyphs past X+500 are
         // dropped at a character boundary — not wrapped onto a new line, and not
         // drawn on past the box. Lines that fit are left untouched.
-        if (Rectangle is null && Position is not null && !pc.needsWrap)
+        if (Box is null && Position is not null && !pc.needsWrap)
         {
             TrimUnwrappedLinesToBox(pc);
         }
@@ -82,7 +87,7 @@ public sealed partial class TextParagraph
 
         pc.hasRotation = Rotation != 0;
 
-        if (Rectangle is not null)
+        if (Box is not null)
         {
             SeatBlockInRectangle(pc);
         }
@@ -127,9 +132,9 @@ public sealed partial class TextParagraph
     /// <summary>Page-space Y of the block's bottom edge inside <see cref="Rectangle"/>
     /// for the paragraph's <see cref="VerticalAlignment"/>.</summary>
     private double BlockBottom(double blockHeight) =>
-        VerticalAnchor(Rectangle!.URY - Margin.Top - blockHeight,
-            Rectangle.LLY + (Rectangle.Height - blockHeight) / 2,
-            Rectangle.LLY + Margin.Bottom);
+        VerticalAnchor(Box!.URY - Margin.Top - blockHeight,
+            Box!.LLY + (Box.Height - blockHeight) / 2,
+            Box.LLY + Margin.Bottom);
 
     /// <summary>The gap that opens ABOVE visual line <paramref name="li"/>: the
     /// largest TextState.LineSpacing among its chunks and its fragment's own state
@@ -306,7 +311,6 @@ public sealed partial class TextParagraph
         }
 
         var caValue = alpha / 255.0;
-        var caString = caValue.ToString("0.######", CultureInfo.InvariantCulture);
 
         // Reuse existing entry with matching /ca (and no /CA mismatch — we only set fill).
         foreach (var key in extGStateDict.Keys)
@@ -362,9 +366,10 @@ public sealed partial class TextParagraph
             }
             if (lineW > ra.maxLineWidth) ra.maxLineWidth = lineW;
         }
+        ra.maxLaidOutWidth = ra.anyBg ? WidestLaidOutLine(ra) : ra.maxLineWidth;
 
         ra.textY = ra.startY;
-        ra.minY = Rectangle is not null ? Rectangle.LLY + Margin.Bottom : double.NegativeInfinity;
+        ra.minY = Box is { } box ? box.LLY + Margin.Bottom : double.NegativeInfinity;
 
         for (int li = 0; li < ra.visualLines.Count; li++)
         {

@@ -19,11 +19,17 @@ namespace Aspose.Pdf.Tagged;
 ///     flow by exactly s; the clip box around a line is 1.16·s tall with its
 ///     bottom at baseline − d·s.
 ///   - Default fonts: Times New Roman 12 for body text, Arial Bold for headers
-///     (H = 16 pt, H1 = 18 pt) filled 0.3 0.3 0.3.
-///   - Default block margins: P = 2 top / 2 bottom, leveled headers = size/2
-///     top and bottom, everything else 0. An explicit margin (AdjustPosition /
-///     StructureTextState.MarginInfo) replaces the block's defaults. Adjacent
-///     block margins add (no collapsing).
+///     (H = 16 pt, H1..H6 = 18 16 14 12 10 9 pt) filled 0.3 0.3 0.3.
+///   - Default block margins: P = 2 top / 2 bottom, headers H and H1..H6 =
+///     9 9 7 6 5 4 3 top and bottom, everything else 0. An explicit margin
+///     (AdjustPosition / StructureTextState.MarginInfo) replaces the block's
+///     defaults; a paragraph placed through AdjustPosition without one has none.
+///     Adjacent block margins add (no collapsing).
+///   - PositionSettings.HorizontalAlignment: a paragraph's lines are centred,
+///     right-aligned or justified (Justify spares the last line, FullJustify
+///     spreads it too) inside its column; a header, link or figure is centred or
+///     right-aligned as one box, a span likewise (FullJustify spreads its words).
+///     Tables and cells keep the left edge; VerticalAlignment has no effect.
 ///   - Tables: fixed 100 pt columns starting at the content left + margin,
 ///     1 em row pitch, no cell padding; a cell-level margin shifts the cell
 ///     inside its column. Figures: explicit size, or pixels × 72/300 (300 dpi
@@ -67,9 +73,16 @@ internal static partial class TaggedContentRenderer
         private const double ContentBottom = 72.0;
         private const double LineBox = 1.16;      // clip-box height in em
         private const double DefaultColumnWidth = 100.0;
+        private const double DefaultParagraphMargin = 2.0; // P: 2 pt above and below
         // Default margin of an unleveled "H" header (the H1 margin at the 16 pt
         // H size) — probed on the tagged-TOC flow: caption pitch 9+16+9 = 34 pt.
         private const double UnleveledHeaderMargin = 9.0;
+        private const double UnleveledHeaderSize = 16.0;
+        // Font size and the margin above and below of the leveled headers H1..H6 (index =
+        // level), probed: a header between two spans opens m below the first and closes m
+        // above the second, the same margins the table-of-contents entries take per level.
+        private static readonly double[] HeaderSizes = { UnleveledHeaderSize, 18, 16, 14, 12, 10, 9 };
+        private static readonly double[] HeaderMargins = { UnleveledHeaderMargin, 9, 7, 6, 5, 4, 3 };
 
         private readonly Document _doc;
 
@@ -153,9 +166,8 @@ internal static partial class TaggedContentRenderer
             // that page — 4 pages total, not a leading blank plus 4).
             // A table-of-contents page keeps itself: its entries are laid out from the
             // headers that asked for them, after this render has placed those headers.
-            foreach (var page in _doc.Pages)
-                if (page.TocInfo is null && PageHasNoContent(page))
-                    _reusablePages.Enqueue(page);
+            foreach (var page in _doc.Pages.Where(page => page.TocInfo is null && PageHasNoContent(page)))
+                _reusablePages.Enqueue(page);
 
             CollectTitleHeaders(root);
             WalkChildren(root);
@@ -301,7 +313,8 @@ internal static partial class TaggedContentRenderer
         }
 
         /// <summary>Baseline geometry uses the FontDescriptor
-        /// /Descent value: round(hhea descent · 1000 / unitsPerEm) / 1000.</summary>
+        /// /Descent value the embedder writes: the hhea descent · 1000 / unitsPerEm,
+        /// truncated, / 1000 (Arial Bold: 434 / 2048 -> 0.211).</summary>
         private double DescentRatio(FontData font)
         {
             var ttf = font.TtfData!;
@@ -312,9 +325,9 @@ internal static partial class TaggedContentRenderer
                 var parser = new TrueTypeParser(ttf);
                 parser.Parse();
                 if (parser.UnitsPerEm > 0 && parser.Descent != 0)
-                    ratio = Math.Round(Math.Abs((double)parser.Descent) * 1000.0 / parser.UnitsPerEm) / 1000.0;
+                    ratio = Math.Truncate(Math.Abs((double)parser.Descent) * 1000.0 / parser.UnitsPerEm) / 1000.0;
             }
-            catch { }
+            catch { /* a font program that does not parse leaves the fallback metrics in place */ }
             _descentCache[ttf] = ratio;
             return ratio;
         }
@@ -350,9 +363,8 @@ internal static partial class TaggedContentRenderer
         {
             if (!string.IsNullOrEmpty(block.ActualText)) return block.ActualText;
             var sb = new System.Text.StringBuilder();
-            foreach (var child in block.ChildElements)
-                if (!string.IsNullOrEmpty(child.ActualText))
-                    sb.Append(child.ActualText);
+            foreach (var child in block.ChildElements.Where(child => !string.IsNullOrEmpty(child.ActualText)))
+                sb.Append(child.ActualText);
             return sb.ToString();
         }
 
@@ -389,14 +401,14 @@ internal static partial class TaggedContentRenderer
             if (string.IsNullOrEmpty(text)) return;
 
             int level = HeaderLevel(header);
-            double size = level switch { 0 => 16, 1 => 18, 2 => 16, 3 => 14, 4 => 12, 5 => 11, _ => 10 };
-            // Leveled headers carry a default size/2 margin above and below; the
+            double size = HeaderSizes[level];
+            // Every header carries its level's margin above and below; the
             // unleveled "H" carries the H1 margin (9 pt) at its 16 pt size —
             // probed on the tagged-TOC flow: unleveled-H pitch 9+16+9 = 34 pt.
             // Explicit margins replace the defaults.
             var (margin, newPage, _) = Position(header);
-            double mTop = margin?.Top ?? (level > 0 ? size / 2 : UnleveledHeaderMargin);
-            double mBottom = margin?.Bottom ?? (level > 0 ? size / 2 : UnleveledHeaderMargin);
+            double mTop = margin?.Top ?? HeaderMargins[level];
+            double mBottom = margin?.Bottom ?? HeaderMargins[level];
             double mLeft = margin?.Left ?? 0;
 
             BlockStart(newPage);
@@ -410,6 +422,9 @@ internal static partial class TaggedContentRenderer
 
             double d = DescentRatio(_headerFont);
             double x = ContentLeft + mLeft;
+            if (PlacesBox(header._posHAlign))
+                x = AlignedX(header._posHAlign, x, ContentRight - (margin?.Right ?? 0),
+                    Measure(_headerFont, (float)size, text));
             double baseline = _flowTop - (1 - d) * size;
             var mcid = _nextMcid++;
 
@@ -434,11 +449,17 @@ internal static partial class TaggedContentRenderer
         // ── paragraphs (with inline runs + wrapping) ──────────────────
 
         private readonly record struct Run(LS.StructureElement El, string Text, FontData Font, float Size);
-        private readonly record struct Chunk(int RunIdx, double X, double Baseline, string Text);
+        private readonly record struct Chunk(int RunIdx, double X, double Baseline, string Text, int Line);
 
-        /// <summary>A wrapped paragraph: the chunks to show, how many lines they fell on, and
-        /// the baseline the last line sits on.</summary>
-        private readonly record struct WrappedParagraph(List<Chunk> Chunks, int LineCount, double LastBaseline);
+        /// <summary>Where a wrapped line ends: the pen after its last chunk, and the width of
+        /// the spaces it closes with (kept on the line, but not part of a right-aligned or
+        /// justified line's text).</summary>
+        private readonly record struct LineEnd(double Pen, double Trailing);
+
+        /// <summary>A wrapped paragraph: the chunks to show, how many lines they fell on, the
+        /// baseline the last line sits on, and each line's end.</summary>
+        private readonly record struct WrappedParagraph(List<Chunk> Chunks, int LineCount, double LastBaseline,
+            List<LineEnd> Ends);
 
         private void RenderParagraph(LS.StructureElement para)
         {
@@ -450,10 +471,12 @@ internal static partial class TaggedContentRenderer
             if (runs.Count == 0) return;
 
             // Default paragraph margins are 2 pt above and below; an explicit
-            // margin replaces them.
+            // margin replaces them, and a paragraph placed through AdjustPosition
+            // without one has none.
             var (margin, newPage, _) = Position(para);
-            double mTop = margin?.Top ?? 2;
-            double mBottom = margin?.Bottom ?? 2;
+            double unstated = para._posAdjusted ? 0 : DefaultParagraphMargin;
+            double mTop = margin?.Top ?? unstated;
+            double mBottom = margin?.Bottom ?? unstated;
             double left = ContentLeft + (margin?.Left ?? 0);
             double right = ContentRight - (margin?.Right ?? 0);
             if (right <= left + 10) right = left + 10;
@@ -468,8 +491,9 @@ internal static partial class TaggedContentRenderer
             double d = DescentRatio(baseFont);
             double pitch = baseSize; // 1 em leading
             var wrapped = WrapParagraphRuns(runs, left, right, _flowTop - (1 - d) * baseSize, pitch);
+            var (chunks, clipLeft) = AlignParagraphLines(runs, wrapped, left, right, para._posHAlign);
 
-            EmitParagraphChunks(runs, wrapped, left,
+            EmitParagraphChunks(runs, chunks, clipLeft,
                 wrapped.LastBaseline - d * baseSize, wrapped.LineCount * LineBox * baseSize);
 
             _pageHasContent = true;
@@ -504,9 +528,11 @@ internal static partial class TaggedContentRenderer
             double firstBaseline, double pitch)
         {
             var chunks = new List<Chunk>();
+            var ends = new List<LineEnd>();
             var baseline = firstBaseline;
             int lineCount = 1;
             double pen = left;
+            double trailing = 0;
             var sb = new System.Text.StringBuilder();
             int sbRun = -1;
             double sbX = left;
@@ -514,7 +540,7 @@ internal static partial class TaggedContentRenderer
             void FlushChunk()
             {
                 if (sbRun >= 0 && sb.Length > 0)
-                    chunks.Add(new Chunk(sbRun, sbX, baseline, sb.ToString()));
+                    chunks.Add(new Chunk(sbRun, sbX, baseline, sb.ToString(), lineCount - 1));
                 sb.Clear();
             }
 
@@ -535,10 +561,13 @@ internal static partial class TaggedContentRenderer
                         {
                             sb.Append(' ');
                             pen += spaceW;
+                            trailing += spaceW;
                         }
                         else
                         {
                             FlushChunk();
+                            ends.Add(new LineEnd(pen, trailing));
+                            trailing = 0;
                             baseline -= pitch;
                             lineCount++;
                             pen = left;
@@ -554,6 +583,7 @@ internal static partial class TaggedContentRenderer
                     if (pen > left + 0.01 && pen + wordW > right + 0.01)
                     {
                         FlushChunk();
+                        ends.Add(new LineEnd(pen, trailing));
                         baseline -= pitch;
                         lineCount++;
                         pen = left;
@@ -561,23 +591,25 @@ internal static partial class TaggedContentRenderer
                     }
                     sb.Append(word);
                     pen += wordW;
+                    trailing = 0;
                     i = end;
                 }
             }
             FlushChunk();
-            return new WrappedParagraph(chunks, lineCount, baseline);
+            ends.Add(new LineEnd(pen, trailing));
+            return new WrappedParagraph(chunks, lineCount, baseline, ends);
         }
 
         /// <summary>Emit: outer q; first run's BDC; one whole-block clip; each run's chunks inside
         /// its own BDC; the clip closes before the last EMC.</summary>
-        private void EmitParagraphChunks(List<Run> runs, WrappedParagraph wrapped, double left,
+        private void EmitParagraphChunks(List<Run> runs, List<Chunk> chunks, double left,
             double clipBottom, double clipHeight)
         {
             var cs = _cs!;
             cs.SaveState();
             int currentRun = -1;
             bool clipEmitted = false;
-            foreach (var chunk in wrapped.Chunks)
+            foreach (var chunk in chunks)
             {
                 if (chunk.RunIdx != currentRun)
                 {
@@ -632,6 +664,9 @@ internal static partial class TaggedContentRenderer
                 _lineSize = size;
                 _lineOpen = true;
             }
+            var pieces = PlaceSpan(el._posHAlign, new Run(el, text, font, size), x,
+                ContentRight - (margin?.Right ?? 0), _lineBaseline);
+            x = pieces[0].X;
 
             var mcid = _nextMcid++;
             var cs = _cs!;
@@ -640,14 +675,15 @@ internal static partial class TaggedContentRenderer
             cs.SaveState();
             cs.Rectangle(x, _lineBaseline - d * size, ContentRight - x, LineBox * size);
             cs.Clip();
-            EmitTextChunk(font, size, x, _lineBaseline, 0, 0, 0, text);
+            foreach (var piece in pieces)
+                EmitTextChunk(font, size, piece.X, _lineBaseline, 0, 0, 0, piece.Text);
             cs.RestoreState();
             cs.EndMarkedContent();
             cs.RestoreState();
 
             RecordMcid(mcid, el);
             _pageHasContent = true;
-            _penX = x + Measure(font, size, text);
+            _penX = pieces[^1].X + Measure(font, size, pieces[^1].Text);
             _lineBottomMargin += margin?.Bottom ?? 0;
         }
 
@@ -666,9 +702,10 @@ internal static partial class TaggedContentRenderer
             _flowTop -= margin?.Top ?? 0;
             PageBreakIfNeeded(size);
 
-            double x = ContentLeft + (margin?.Left ?? 0);
-            double baseline = _flowTop - (1 - d) * size;
             double width = Measure(font, size, text);
+            double x = AlignedX(link._posHAlign, ContentLeft + (margin?.Left ?? 0),
+                ContentRight - (margin?.Right ?? 0), width);
+            double baseline = _flowTop - (1 - d) * size;
             var mcid = _nextMcid++;
 
             var cs = _cs!;
@@ -739,7 +776,8 @@ internal static partial class TaggedContentRenderer
             _flowTop -= margin?.Top ?? 0;
             PageBreakIfNeeded(h);
 
-            double x = ContentLeft + (margin?.Left ?? 0);
+            double x = AlignedX(fig._posHAlign, ContentLeft + (margin?.Left ?? 0),
+                ContentRight - (margin?.Right ?? 0), w);
             double top = _flowTop;
             var resName = stamp.RegisterXObject(_page!);
             var mcid = _nextMcid++;

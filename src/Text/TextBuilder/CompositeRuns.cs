@@ -18,12 +18,14 @@ public sealed partial class TextBuilder
         if (wordSpacing == 0 || fontSize <= 0 || text.Length == 0) return null;
         var adjustments = new List<double>(text.Length);
         var any = false;
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
             var space = text[i] == ' ';
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) i++;
             adjustments.Add(space ? -wordSpacing * TjUnitsPerEm / fontSize : 0);
             any |= space;
+            i++;
         }
         if (!any || adjustments.Count * 2 != glyphIds.Length) return null;
         return adjustments.ToArray();

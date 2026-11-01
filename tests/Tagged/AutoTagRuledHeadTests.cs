@@ -41,7 +41,7 @@ public class AutoTagRuledHeadTests
     }
 
     private static string Text(double x, double y, string text, double size = 10)
-        => $"BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET\n";
+        => FormattableString.Invariant($"BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET\n");
 
     // The table's column edges: the labels' column, then four columns of figures.
     private static readonly double[] Edges = { 72, 200, 285, 370, 455, 540 };
@@ -60,7 +60,7 @@ public class AutoTagRuledHeadTests
         s.Append(Text(540 - 11 * 6, 640, "May 5, 2026"));
         // The headings' box: a rule over and under it, the rules between its cells short strokes 30 pt thick.
         s.Append("1 w 72 620 m 540 620 l S\n1 w 72 590 m 540 590 l S\n");
-        foreach (var x in Edges.Skip(1).Take(4)) s.Append($"30 w {x - 0.5} 605 m {x + 0.5} 605 l S\n");
+        foreach (var x in Edges.Skip(1).Take(4)) s.Append(FormattableString.Invariant($"30 w {x - 0.5} 605 m {x + 0.5} 605 l S\n"));
         // The headings: the name of the labels' column, and a year over each quarter.
         s.Append(Text(136 - 7 * 3, 599, "Account"));
         for (var c = 1; c < 5; c++)
@@ -139,9 +139,9 @@ public class AutoTagRuledHeadTests
         s.Append(Text(72, 660, "Table 3. Rates by week"));
         // The box: a rule over and under it, uprights between the columns - between the weeks only under the group's rule.
         s.Append("1 w 72 620 m 560 620 l S\n1 w 72 590 m 560 590 l S\n");
-        foreach (var x in edges.Skip(1).Take(3)) s.Append($"30 w {x - 0.5} 605 m {x + 0.5} 605 l S\n");
-        foreach (var x in edges.Skip(4).Take(3)) s.Append($"15 w {x - 0.5} 597.5 m {x + 0.5} 597.5 l S\n");
-        s.Append($"1 w {edges[3]} 605 m {edges[7]} 605 l S\n");
+        foreach (var x in edges.Skip(1).Take(3)) s.Append(FormattableString.Invariant($"30 w {x - 0.5} 605 m {x + 0.5} 605 l S\n"));
+        foreach (var x in edges.Skip(4).Take(3)) s.Append(FormattableString.Invariant($"15 w {x - 0.5} 597.5 m {x + 0.5} 597.5 l S\n"));
+        s.Append(FormattableString.Invariant($"1 w {edges[3]} 605 m {edges[7]} 605 l S\n"));
         s.Append(Text(136 - 7 * 3, 599, "Account"));
         s.Append(Text((edges[1] + edges[2]) / 2 - 12, 608, "2025") + Text((edges[1] + edges[2]) / 2 - 9, 596, "Aug"));
         s.Append(Text((edges[2] + edges[3]) / 2 - 12, 608, "2026") + Text((edges[2] + edges[3]) / 2 - 9, 596, "Feb"));
@@ -167,9 +167,9 @@ public class AutoTagRuledHeadTests
         var s = new System.Text.StringBuilder();
         s.Append(Text(72, 660, "Table 3. Rates by week"));
         s.Append("1 w 72 624 m 560 624 l S\n1 w 72 588 m 560 588 l S\n");
-        foreach (var x in edges.Skip(1).Take(3)) s.Append($"36 w {x - 0.5} 606 m {x + 0.5} 606 l S\n");
-        foreach (var x in edges.Skip(4).Take(3)) s.Append($"19 w {x - 0.5} 597.5 m {x + 0.5} 597.5 l S\n");
-        s.Append($"1 w {edges[3]} 607 m {edges[7]} 607 l S\n");
+        foreach (var x in edges.Skip(1).Take(3)) s.Append(FormattableString.Invariant($"36 w {x - 0.5} 606 m {x + 0.5} 606 l S\n"));
+        foreach (var x in edges.Skip(4).Take(3)) s.Append(FormattableString.Invariant($"19 w {x - 0.5} 597.5 m {x + 0.5} 597.5 l S\n"));
+        s.Append(FormattableString.Invariant($"1 w {edges[3]} 607 m {edges[7]} 607 l S\n"));
         // Baselines 4, 5, 5 and 4 pt apart, as the headings are set.
         s.Append(Text((edges[3] + edges[7]) / 2 - 33, 614, "Week ending"));
         s.Append(Text((edges[1] + edges[2]) / 2 - 12, 610, "2025") + Text((edges[2] + edges[3]) / 2 - 12, 610, "2026"));
@@ -241,8 +241,8 @@ public class AutoTagRuledHeadTests
         var s = new System.Text.StringBuilder();
         s.Append(Text(72, 660, "Table 4. Measures"));
         s.Append("1 w 72 620 m 540 620 l S\n1 w 72 590 m 540 590 l S\n1 w 72 520 m 540 520 l S\n1 w 72 500 m 540 500 l S\n");
-        foreach (var x in Edges.Skip(1).Take(4)) s.Append($"30 w {x - 0.5} 605 m {x + 0.5} 605 l S\n");
-        foreach (var x in new[] { 262, 433 }) s.Append($"20 w {x - 0.5} 510 m {x + 0.5} 510 l S\n");
+        foreach (var x in Edges.Skip(1).Take(4)) s.Append(FormattableString.Invariant($"30 w {x - 0.5} 605 m {x + 0.5} 605 l S\n"));
+        foreach (var x in new[] { 262, 433 }) s.Append(FormattableString.Invariant($"20 w {x - 0.5} 510 m {x + 0.5} 510 l S\n"));
         s.Append(Text(136 - 4 * 3, 602, "Date"));
         var heads = new[] { ("Currency in", "circulation"), ("Reserve", "balances"), ("Monetary", "base"), ("Total", "reserves") };
         for (var c = 1; c < 5; c++)
@@ -313,8 +313,8 @@ public class AutoTagRuledHeadTests
         double[] edges = { 72, 150, 228, 306, 384, 462, 540 };
         var s = new System.Text.StringBuilder(Text(72, 660, "Table 3. Components"));
         s.Append("1 w 72 624 m 540 624 l S\n1 w 306 606 m 540 606 l S\n1 w 72 588 m 540 588 l S\n");
-        foreach (var x in edges.Skip(1).Take(3)) s.Append($"36 w {x - 0.5} 606 m {x + 0.5} 606 l S\n");
-        foreach (var x in edges.Skip(4).Take(2)) s.Append($"18 w {x - 0.5} 597 m {x + 0.5} 597 l S\n");
+        foreach (var x in edges.Skip(1).Take(3)) s.Append(FormattableString.Invariant($"36 w {x - 0.5} 606 m {x + 0.5} 606 l S\n"));
+        foreach (var x in edges.Skip(4).Take(2)) s.Append(FormattableString.Invariant($"18 w {x - 0.5} 597 m {x + 0.5} 597 l S\n"));
         s.Append(Text(423 - 14 * 2.4, 612, "Other deposits", 8));
         var midway = new[] { "Date", "Currency", "Demand" };
         for (var c = 0; c < 3; c++) s.Append(Text((edges[c] + edges[c + 1]) / 2 - midway[c].Length * 2.4, 603, midway[c], 8));
@@ -354,8 +354,8 @@ public class AutoTagRuledHeadTests
         double[] edges = { 72, 150, 228, 306, 384, 462, 540 };
         var s = new System.Text.StringBuilder(Text(72, 660, "Table 4. Components"));
         s.Append("1 w 72 624 m 540 624 l S\n1 w 150 606 m 384 606 l S\n1 w 72 578 m 540 578 l S\n");
-        foreach (var x in new[] { edges[1], edges[4], edges[5] }) s.Append($"46 w {x - 0.5} 601 m {x + 0.5} 601 l S\n");
-        foreach (var x in edges.Skip(2).Take(2)) s.Append($"28 w {x - 0.5} 592 m {x + 0.5} 592 l S\n");
+        foreach (var x in new[] { edges[1], edges[4], edges[5] }) s.Append(FormattableString.Invariant($"46 w {x - 0.5} 601 m {x + 0.5} 601 l S\n"));
+        foreach (var x in edges.Skip(2).Take(2)) s.Append(FormattableString.Invariant($"28 w {x - 0.5} 592 m {x + 0.5} 592 l S\n"));
         void Centred(int from, int to, double y, string text) => s.Append(Text((edges[from] + edges[to]) / 2 - text.Length * 2.4, y, text, 8));
         Centred(1, 4, 612, "Savings deposits");
         Centred(0, 1, 598, "Date");
@@ -501,7 +501,7 @@ public class AutoTagRuledHeadTests
     {
         // The rules between the headings drawn as lines from the box's top to its foot.
         var page = Page();
-        foreach (var x in Edges.Skip(1).Take(4)) page = page.Replace($"30 w {x - 0.5} 605 m {x + 0.5} 605 l S", $"1 w {x} 590 m {x} 620 l S");
+        foreach (var x in Edges.Skip(1).Take(4)) page = page.Replace(FormattableString.Invariant($"30 w {x - 0.5} 605 m {x + 0.5} 605 l S"), FormattableString.Invariant($"1 w {x} 590 m {x} 620 l S"));
         using var doc = Tag(Build(page));
         // The columns are as wide as the rules set them, not as the texts standing in them, flush right 10 pt short of
         // the rules, would.

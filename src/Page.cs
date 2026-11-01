@@ -83,11 +83,12 @@ public sealed partial class Page : IDisposable
     /// <summary>Update the index without creating a new Page object.</summary>
     internal void SetIndex(int index) => _index = index;
 
-    /// <summary>Register a fragment added via TextBuilder for sync on save.</summary>
-    internal void RegisterAttachedFragment(Text.TextFragment fragment)
+    /// <summary>Register a fragment added via TextBuilder for sync on save; <paramref name="inView"/> when it was
+    /// seated in the view of the page turned.</summary>
+    internal void RegisterAttachedFragment(Text.TextFragment fragment, bool inView = false)
     {
         _attachedFragments ??= new();
-        fragment.SourcePage = this;
+        fragment.BindWritten(this, inView);
         _attachedFragments.Add(fragment);
     }
 
@@ -155,10 +156,10 @@ public sealed partial class Page : IDisposable
             var formFields = acroForm is null
                 ? Forms.Form.FromPageWidgets(catalog, _reader)
                 : new Forms.Form(acroForm, _reader);
-            foreach (var field in formFields.Fields)
+            foreach (var formField in formFields.Fields)
             {
-                if (field.PageIndex == pageNumber)
-                    fields.Add(field);
+                if (formField.PageIndex == pageNumber)
+                    fields.Add(formField);
             }
             fields.Sort((a, b) => a.TabOrder.CompareTo(b.TabOrder));
             return fields;
@@ -166,15 +167,14 @@ public sealed partial class Page : IDisposable
     }
 
     /// <summary>
-    /// Page rectangle (defaults to MediaBox). Forwarder for compatibility with the
-    /// public API where Page exposes a top-level Rect property. Setting
-    /// <c>Rect</c> updates MediaBox, CropBox, BleedBox, TrimBox and ArtBox in
-    /// one shot — the property acts as the
-    /// primary page-size accessor.
+    /// Page rectangle: the page as it is shown, which is its crop box (the media
+    /// box where the page has none). Setting <c>Rect</c> updates MediaBox,
+    /// CropBox, BleedBox, TrimBox and ArtBox in one shot — the property acts as
+    /// the primary page-size accessor.
     /// </summary>
     public Rectangle Rect
     {
-        get => MediaBox;
+        get => CropBox;
         set
         {
             MediaBox = value;
@@ -196,6 +196,10 @@ public sealed partial class Page : IDisposable
     }
 
     private PageInfo? _pageInfoCache;
+
+    /// <summary>Whether a caller has reached for this page's descriptor, so it may hold
+    /// authored margins or a text state worth carrying to a copy of the page.</summary>
+    internal bool HasPageInfo => _pageInfoCache is not null;
 
     /// <summary>
     /// Page info container with width/height/margin properties. Forwarder
@@ -281,14 +285,14 @@ public sealed partial class Page : IDisposable
     public Rotation Rotate
     {
         get => (Rotation)(int)_dict.GetInt("Rotate");
-        set => _dict.Set("Rotate", new PdfInteger((int)value % 360));
+        set { NoteRotationChange((int)value); _dict.Set("Rotate", new PdfInteger((int)value % 360)); }
     }
 
     /// <summary>Page rotation in degrees as int (0, 90, 180, 270).</summary>
     public int RotateDegrees
     {
         get => (int)_dict.GetInt("Rotate");
-        set => _dict.Set("Rotate", new PdfInteger(value % 360));
+        set { NoteRotationChange(value); _dict.Set("Rotate", new PdfInteger(value % 360)); }
     }
 
     /// <summary>
@@ -359,6 +363,24 @@ public sealed partial class Page : IDisposable
         Annotations.Accept(visitor);
     }
 
+    /// <summary>
+    /// Accept a TextAbsorber visitor (matching the public API).
+    /// </summary>
+    public void Accept(Text.TextAbsorber visitor) => visitor.Visit(this);
+
+    /// <summary>
+    /// Accept a TextFragmentAbsorber visitor (matching the public API).
+    /// </summary>
+    public void Accept(Text.TextFragmentAbsorber visitor) => visitor.Visit(this);
+
+    /// <summary>
+    /// Accept an ImagePlacementAbsorber visitor (matching the public API).
+    /// </summary>
+    public void Accept(ImagePlacementAbsorber visitor) => visitor.Visit(this);
+
+    /// <summary>True once this page's annotation list was opened: only then can it hold an annotation of this session.</summary>
+    internal bool HasOpenedAnnotations => _annotations is not null;
+
     /// <summary>Annotations on this page.</summary>
     public AnnotationCollection Annotations
     {
@@ -398,8 +420,7 @@ public sealed partial class Page : IDisposable
         get
         {
             var mb = MediaBox;
-            var rot = RotateDegrees % 360;
-            return (rot == 90 || rot == 270) ? mb.Height : mb.Width;
+            return RotationQuarter is 90 or 270 ? mb.Height : mb.Width;
         }
     }
 
@@ -411,18 +432,21 @@ public sealed partial class Page : IDisposable
         get
         {
             var mb = MediaBox;
-            var rot = RotateDegrees % 360;
-            return (rot == 90 || rot == 270) ? mb.Width : mb.Height;
+            return RotationQuarter is 90 or 270 ? mb.Width : mb.Height;
         }
     }
 
-    /// <summary>The generator layout frame's height: the MEDIA box height regardless
-    /// of /Rotate. A rotated page's paragraphs seat against the media edges and paint
-    /// upright in them — the rotation then turns them on screen (measured:
-    /// a table Left/Top-anchored on a /Rotate 90 landscape scan seats at
-    /// the MEDIA top and reads sideways in the displayed page), while
-    /// <see cref="Height"/> answers the rotated DISPLAY frame.</summary>
-    internal double LayoutFrameHeight => MediaBox.Height;
+    /// <summary>The generator layout frame's height: the page as SHOWN - the media box
+    /// with its sides swapped on a page turned a quarter by /Rotate. Paragraphs lay out
+    /// in the shown page and are turned into media space as one when the layout is
+    /// done (<see cref="TurnGeneratedContent"/>), so they read upright where a viewer
+    /// sees the page, as content stamped onto a turned page does.</summary>
+    internal double LayoutFrameHeight => RotationQuarter is 90 or 270 ? MediaBox.Width : MediaBox.Height;
+
+    /// <summary>The generator layout frame's width: the page as shown, the frame
+    /// <see cref="LayoutFrameHeight"/> seats against. Every layout width reads it, so
+    /// lines wrap and tables fit to the width the reader sees.</summary>
+    internal double LayoutFrameWidth => RotationQuarter is 90 or 270 ? MediaBox.Height : MediaBox.Width;
 
     /// <summary>
     /// Gets the color type of this page by analyzing its content stream operators
@@ -436,11 +460,6 @@ public sealed partial class Page : IDisposable
     public PageTransition? Transition => PageTransition.FromPageDict(_dict, _reader);
 
     /// <summary>
-    /// Accept a TextAbsorber visitor (matching the public API).
-    /// </summary>
-    public void Accept(Text.TextAbsorber visitor) => visitor.Visit(this);
-
-    /// <summary>
     /// Extract all text from the page using a TextAbsorber.
     /// </summary>
     public string GetText()
@@ -449,11 +468,6 @@ public sealed partial class Page : IDisposable
         Accept(absorber);
         return absorber.Text;
     }
-
-    /// <summary>
-    /// Accept a TextFragmentAbsorber visitor (matching the public API).
-    /// </summary>
-    public void Accept(Text.TextFragmentAbsorber visitor) => visitor.Visit(this);
 
     /// <summary>
     /// Tally how many text fragments on this page are drawn at each rotation
@@ -473,11 +487,6 @@ public sealed partial class Page : IDisposable
         }
         return stats;
     }
-
-    /// <summary>
-    /// Accept an ImagePlacementAbsorber visitor (matching the public API).
-    /// </summary>
-    public void Accept(ImagePlacementAbsorber visitor) => visitor.Visit(this);
 
     /// <summary>
     /// Add a stamp to this page. The stamp's content stream is appended to the page's content.
@@ -520,7 +529,7 @@ public sealed partial class Page : IDisposable
         get
         {
             var resolved = _reader.Resolve(_dict.Get("Contents"));
-            return resolved is PdfArray arr ? arr.Count : resolved is PdfStream ? 1 : 0;
+            return resolved switch { PdfArray arr => arr.Count, PdfStream => 1, _ => 0 };
         }
     }
 
@@ -586,6 +595,8 @@ public sealed partial class Page : IDisposable
     /// single cm + Do. Used by PdfPageEditor.Zoom.</summary>
     internal void ApplyZoomAsForm(double sx, double sy, double tx, double ty)
     {
+        // Operators held in Contents go in first: written back at save they would replace the zoom.
+        FlushHeldContent();
         var originalContent = CollectContentBytes();
         var q = System.Text.Encoding.ASCII.GetBytes("q\n");
         var endQ = System.Text.Encoding.ASCII.GetBytes("\nQ\n");
@@ -600,6 +611,7 @@ public sealed partial class Page : IDisposable
         var bytes = System.Text.Encoding.ASCII.GetBytes(
             $"q\n{Format(sx)} 0 0 {Format(sy)} {Format(tx)} {Format(ty)} cm\n/{formName} Do\nQ\n");
         SetContentStream(bytes);
+        RecordContentTransform(WrittenMatrix(sx, 0, 0, sy, tx, ty), WrittenUnder(originalContent));
 
         TransformAnnotationRects(sx, sy, tx, ty);
     }
@@ -704,6 +716,11 @@ public sealed partial class Page : IDisposable
     /// </summary>
     public Paragraphs Paragraphs { get; set; } = new();
 
+    /// <summary>Whether the page-number macros <c>$p</c> and <c>$P</c> in this page's
+    /// paragraphs - text fragments and table cells - are replaced by the page number and the
+    /// page count when the page is laid out (the default); false keeps them as literal text.</summary>
+    public bool ProcessSpecialSymbols { get; set; } = true;
+
     /// <summary>Default stroke/fill style used to draw footnote / endnote separator lines.</summary>
     public GraphInfo NoteLineStyle { get; set; } = new();
 
@@ -797,8 +814,10 @@ public sealed partial class Page : IDisposable
         return true;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Diagnostic XML representation of this page. Stored only.</summary>
     public string AsXml() => string.Empty;
+#pragma warning restore S2325
 
     /// <summary>Line-break notifications emitted by the flow layout for this page
     /// when <see cref="Document.EnableNotificationLogging"/> was set before save.</summary>

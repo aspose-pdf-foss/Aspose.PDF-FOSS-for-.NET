@@ -25,7 +25,7 @@ public sealed partial class TextFragmentAbsorber
             RenderingMode = (Aspose.Pdf.Text.TextRenderingMode)run.RenderingMode,
                 LineWidth = run.LineWidth,
             IsBold = run.IsBold,
-            IsItalic = run.IsItalic,
+            IsItalic = IsItalicRun(run),
             Font = run.FontInfoObj ?? FontInfo.DefaultHelvetica,
             TextRise = run.TextRise,
             IsSuperscript = run.TextRise > 0,
@@ -178,9 +178,12 @@ public sealed partial class TextFragmentAbsorber
         seg.TextState.FontName = run.FontName;
         seg.TextState.RenderingMode = (Aspose.Pdf.Text.TextRenderingMode)run.RenderingMode;
         seg.TextState.LineWidth = run.LineWidth;
+        // Captured, not assigned: the segment reports the colour its run was drawn in
+        // without the setter rewriting the page.
+        seg.TextState.SetCapturedForegroundColor(ForegroundColorOf(run));
         seg.TextState.StrokingColor = run.StrokingColor;
         seg.TextState.IsBold = run.IsBold;
-        seg.TextState.IsItalic = run.IsItalic;
+        seg.TextState.IsItalic = IsItalicRun(run);
         seg.TextState.Font = run.FontInfoObj ?? FontInfo.DefaultHelvetica;
         seg.TextState.TextRise = run.TextRise;
         seg.TextState.IsSuperscript = run.TextRise > 0;
@@ -275,7 +278,7 @@ public sealed partial class TextFragmentAbsorber
         if (run.Metrics is not null && run.Metrics.Descent != 0)
             effectiveDescent = run.Metrics.Descent;
         else if (!string.IsNullOrEmpty(run.FontName))
-            effectiveDescent = Standard14Fonts.GetDescent(run.FontName!);
+            effectiveDescent = Standard14Fonts.GetDescent(run.FontName);
         if (effectiveDescent != 0)
             segDescentOff = effectiveDescent * run.FontSize / 1000.0;
         var (px, py) = ApplyCtm(segX + run.TmC * segDescentOff,
@@ -370,6 +373,16 @@ public sealed partial class TextFragmentAbsorber
     /// Compute the page-rotation CTM for a page, matching the TypeScript
     /// <c>pageRotationCtm</c> function.  Returns null for Rotate=0/unset.
     /// </summary>
+    /// <summary>A point of the page's user space as the absorbed fragments of that page
+    /// report it: turned by the page's /Rotate the way every extracted rectangle is, so an
+    /// annotation's quad points can select the characters they cover on a rotated page.</summary>
+    internal static Point ToExtractionSpace(Page page, Point point)
+    {
+        if (PageRotationCtm(page) is not { } rotation) return point;
+        var (x, y) = ApplyCtm(point.X, point.Y, rotation);
+        return new Point(x, y);
+    }
+
     private static Matrix? PageRotationCtm(Page page)
     {
         var rotate = ((page.RotateDegrees % 360) + 360) % 360;

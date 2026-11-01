@@ -39,19 +39,19 @@ internal static class GrayscaleConverter
     private static byte[] ConvertContentBytes(byte[] content)
     {
         var s = Compat.Latin1.GetString(content);
-        s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}rg(?![A-Za-z])", m => Emit(RgbToGray(m), "g"));
-        s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}RG(?![A-Za-z])", m => Emit(RgbToGray(m), "G"));
-        s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}{Num}{Ws}k(?![A-Za-z])", m => Emit(CmykToGray(m), "g"));
-        s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}{Num}{Ws}K(?![A-Za-z])", m => Emit(CmykToGray(m), "G"));
+        s = SafeRegex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}rg(?![A-Za-z])", m => Emit(RgbToGray(m), "g"));
+        s = SafeRegex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}RG(?![A-Za-z])", m => Emit(RgbToGray(m), "G"));
+        s = SafeRegex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}{Num}{Ws}k(?![A-Za-z])", m => Emit(CmykToGray(m), "g"));
+        s = SafeRegex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}{Num}{Ws}K(?![A-Za-z])", m => Emit(CmykToGray(m), "G"));
         // sc/scn (and stroke SC/SCN) set a colour in the current colour space. When the
         // space's resource has been converted to DeviceGray, an RGB (3-operand) or CMYK
         // (4-operand) colour must collapse to a single gray component to stay valid — and
         // so the colour detector no longer classifies the run as RGB/CMYK. Match 4-operand
         // first so a CMYK colour isn't partially consumed by the 3-operand rule. Numeric
         // operands only: a pattern operand (e.g. "/P0 scn") is left untouched.
-        s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}{Num}{Ws}(scn|sc|SCN|SC)(?![A-Za-z])",
+        s = SafeRegex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}{Num}{Ws}(scn|sc|SCN|SC)(?![A-Za-z])",
             m => Emit(CmykToGray(m), m.Groups[5].Value));
-        s = Regex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}(scn|sc|SCN|SC)(?![A-Za-z])",
+        s = SafeRegex.Replace(s, $@"{Num}{Ws}{Num}{Ws}{Num}{Ws}(scn|sc|SCN|SC)(?![A-Za-z])",
             m => Emit(RgbToGray(m), m.Groups[4].Value));
         return Compat.Latin1.GetBytes(s);
     }

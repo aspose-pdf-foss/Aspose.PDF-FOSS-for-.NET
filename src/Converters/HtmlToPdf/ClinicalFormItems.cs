@@ -55,7 +55,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var ga in group) groupW += AtomW(cf, ga);
         var spaceW = cf.pendingSpace ? M(cf, " ", 0, CfFs) : 0;
         if (cf.lineAtoms.Count > 0 && cf.pen + spaceW + groupW > CfInnerX1 && groupW <= CfInnerX1 - CfItemX)
-        { FlushLine(cf, itemNo); spaceW = 0; }
+        { FlushLine(cf, itemNo); }
         else if (cf.pendingSpace && cf.lineAtoms.Count > 0)
         {
             cf.lineAtoms.Add((new CfAtom { Kind = "text", Text = " " }, cf.pen));

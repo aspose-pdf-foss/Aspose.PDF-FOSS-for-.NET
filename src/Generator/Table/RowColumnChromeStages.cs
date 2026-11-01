@@ -48,7 +48,9 @@ public partial class Table
         // content stream via graphSink so the outer table's stream stays untouched.
         if (!_measureOnly && _buildPage is not null
             && rc.slice.Plan.CellTables is { } ctabs && ctabs.TryGetValue(rc.col, out var colTabs))
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
             foreach (var ct in colTabs)
+#pragma warning restore S3267
             {
                 if (!BuildCellInnerTable(rc, cellX, colTabs, ct)) break;
             }
@@ -116,14 +118,15 @@ public partial class Table
                     // Generator dialect: the image sits inside the cell's top rule.
                     - (rc.generatorCell ? rc.borderInsetTop : 0);
                 var box = new Rectangle(imgX, imgTopY - ci.Height, imgX + ci.Width, imgTopY);
-                if (ci.Block is not null) rc.blockSink?.Add((ci.Block, ci.Part!, box));
+                if (ci.Rotated is not null) DrawRotatedCellText(rc, ci.Rotated, box);
+                else if (ci.Block is not null) rc.blockSink?.Add((ci.Block, ci.Part!, box));
                 else rc.imageSink.Add((ci.Data, box));
             }
     }
 
     /// <summary>The height of the cell's lines this slice draws before line
     /// <paramref name="lineOffset"/>, each at its own pitch.</summary>
-    private double OwnStackAbove(RowColumnState rc, int lineOffset)
+    private static double OwnStackAbove(RowColumnState rc, int lineOffset)
     {
         var lines = rc.slice.Plan.CellLines is { } all && rc.col < all.Count ? all[rc.col] : null;
         if (lines is null) return 0;

@@ -37,7 +37,7 @@ internal static class PsFilters
         return name switch
         {
             "ASCIIHexDecode" => TerminatorAt(data, (byte)'>', 1),
-            "ASCII85Decode" => TerminatorAt(data, (byte)'>', 0) is var a && a > 0 ? a : data.Length,
+            "ASCII85Decode" => Ascii85End(data),
             _ => data.Length,
         };
     }
@@ -49,6 +49,16 @@ internal static class PsFilters
         for (var i = 0; i < data.Length; i++)
             if (data[i] == terminator)
                 return Math.Min(data.Length, i + extra);
+        return data.Length;
+    }
+
+    /// <summary>The offset just past the <c>~&gt;</c> that ends a base-85 run, or the whole buffer when there is
+    /// none. A lone '&gt;' is one of the run's digits, not its end.</summary>
+    private static int Ascii85End(byte[] data)
+    {
+        for (var i = 0; i + 1 < data.Length; i++)
+            if (data[i] == (byte)'~' && data[i + 1] == (byte)'>')
+                return i + 2;
         return data.Length;
     }
 

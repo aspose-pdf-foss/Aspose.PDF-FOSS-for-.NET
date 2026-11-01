@@ -12,7 +12,7 @@ internal static partial class AutoTagger
     // Latin Modern, TX, MnSymbol and AMS relatives, and the Symbol face.
     private static readonly Regex MathFace = new(
         @"CMSY|CMMI|CMEX|CMBSY|MSAM|MSBM|rsfs|eufm|wasy|stmary|LMMath|txsy|txmi|txex|MnSymbol|MathJax|Symbol|Math",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
     // A display formula's line sets at least this share of its characters in a math face, or
     // carries at least this many raised or lowered fragments (limits, indices); it runs to at
     // most this share of its column, and a formula stands over at most this many lines.
@@ -45,16 +45,22 @@ internal static partial class AutoTagger
         if (right - left > 0 && Width(line) >= FormulaMaxWidthShare * (right - left)) return false;
         var chars = line.Frags.Sum(f => f.Text.Count(c => !char.IsWhiteSpace(c)));
         if (chars == 0) return false;
-        var math = line.Frags.Where(f => f.Font is not null && MathFace.IsMatch(f.Font)).Sum(f => f.Text.Count(c => !char.IsWhiteSpace(c)));
+        var math = line.Frags.Where(f => f.Font is not null && SafeRegex.IsMatch(MathFace, f.Font)).Sum(f => f.Text.Count(c => !char.IsWhiteSpace(c)));
         if (math >= FormulaMathShare * chars) return true;
-        var raised = line.Frags.Count(f => f.Size > 0 && f.Size <= FormulaRaisedSize * line.Size && !string.IsNullOrWhiteSpace(f.Text));
+        // (a paragraph's number opening the line, a note's number after a word, is no index: the line is prose)
+        var inked = line.Frags.Where(f => !string.IsNullOrWhiteSpace(f.Text)).OrderBy(f => f.X).ToList();
+        var raised = inked.Where(f => f.Size > 0 && f.Size <= FormulaRaisedSize * line.Size)
+            .Count(f => !(RaisedNoteMark(line, f) && (inked.IndexOf(f) == 0 || SafeRegex.IsMatch(WordEnd, inked[inked.IndexOf(f) - 1].Text))));
         return raised >= FormulaRaisedFragments;
     }
 
+    // A fragment ending in a word of a few letters, not a formula's variable.
+    private static readonly Regex WordEnd = new(@"\p{L}{3,}\s*$", RegexOptions.Compiled | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+
     // A sum's sign before its operand: times, plus, minus, divided by (the space between them may be no character).
-    private static readonly Regex SumSign = new(@"^\s*[x\u00D7+\-\u2212\u2013\u00F7]\s*[\d.,$(]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-    // A sum's lines are at most this share of the text round them wide, and stand at most this many of their size apart;
-    // the rule under its operand stands at most this share of the size under that line's baseline.
+    private static readonly Regex SumSign = new(@"^\s*[x\u00D7+\-\u2212\u2013\u00F7]\s*[\d.,$(]", RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+    // A sum's lines are at most this share of the text round them wide, and stand at most this many of their size apart; the
+    // rule under its operand stands at most this share of the size under that line's baseline.
     private const double SumLineShare = 0.5;
     private const double SumPitchEms = 1.8;
     private const double SumRuleEms = 0.6;
@@ -70,7 +76,7 @@ internal static partial class AutoTagger
             // stand apart from the operand, a piece of its own).
             var on = BlocksOf(pa, l => l.Frags.Count > 0 && rule.At <= l.Baseline + 0.5 && l.Baseline - rule.At <= SumRuleEms * l.Size
                                        && l.MinX < rule.To && l.Frags[^1].R > rule.From).OrderBy(s => s.Line.MinX).ToList();
-            if (on.Count == 0 || !SumSign.IsMatch(string.Join(" ", on.Select(s => string.Concat(s.Line.Frags.Select(f => f.Text)))))) continue;
+            if (on.Count == 0 || !SafeRegex.IsMatch(SumSign, string.Join(" ", on.Select(s => string.Concat(s.Line.Frags.Select(f => f.Text)))))) continue;
             var operand = on[^1];
             var sum = new List<(int Block, Line Line)>(on);
             // The lines over it and under it, as near as a sum's lines stand, each short and set in.
@@ -256,8 +262,8 @@ internal static partial class AutoTagger
     {
         for (var i = 0; i < pa.result.Count; i++)
             if (pa.result[i].Kind == BlockKind.Paragraph && pa.result[i].Lines is { } lines)
-                foreach (var l in lines)
-                    if (fit(l)) yield return (i, l);
+                foreach (var l in lines.Where(l => fit(l)))
+                    yield return (i, l);
     }
 
     /// <summary>Whether a line is as short as a sum's and set in: the page's text runs wider round it - a line

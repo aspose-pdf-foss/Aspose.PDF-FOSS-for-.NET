@@ -61,7 +61,12 @@ public sealed partial class Document
 
     private void SaveIncremental(Stream output)
     {
-        FlushFormContentEdits();
+        // The update holds what a whole save would write differently: the content the save lays
+        // out first - on the pages with something to lay out, so a page the session did not change
+        // costs nothing and is not rewritten - then every object the session created or edited.
+        if (_pages is not null) LayOutContentForSave(page => page.HasPendingSaveWork);
+        else FlushFormContentEdits();
+        FinishObjectModelForSave();
         // The original bytes are written by IncrementalWriter.Flush (which rewinds
         // the stream first), so nothing is pre-written here.
 
@@ -71,6 +76,7 @@ public sealed partial class Document
         // Add any new objects registered during the session
         foreach (var (objNum, obj) in _newObjects)
             modified.Add((objNum, obj));
+        AddImportedObjects(modified);
 
         // If metadata was modified, write the updated catalog
         if (_metadataChecked || _taggedContent is not null)
@@ -80,40 +86,36 @@ public sealed partial class Document
                 modified.Add((catalogRef.ObjectNumber, _reader.Catalog));
         }
 
+        // A page added, imported, removed or moved: the page tree as it now stands, every page
+        // under its root (before the edits are collected, as it edits the pages it re-parents).
+        var pageTreeRoot = UpdatePageTreeForIncrementalSave();
+        if (pageTreeRoot is { } root) modified.Add(root);
+
+        AddEditedObjects(modified);
+
         // Include objects explicitly marked as dirty (e.g., form field value changes)
         foreach (var (objNum, obj) in _dirtyObjects)
             modified.Add((objNum, obj));
 
-        // Persist page-tree structural changes (page insert/delete) incrementally.
-        // Pages.Insert/Delete update only the in-memory page list; without rewriting
-        // the /Pages node the appended xref still points at the original /Kids, so a
-        // reopened document shows the pre-edit page count. SyncInMemoryPageTree rebuilds
-        // the catalog's /Pages dict (/Kids + /Count) to the current order — keeping each
-        // surviving page's original indirect reference — and we emit it as a modified
-        // object so the incremental update reflects the deletion/insertion.
-        if (_pages is not null && _pages.IsModified)
-        {
-            SyncInMemoryPageTree();
-            if (_reader.Catalog.Get("Pages") is PdfIndirectRef pagesRef
-                && _reader.ResolveDict(pagesRef) is { } pagesDict)
-                modified.Add((pagesRef.ObjectNumber, pagesDict));
-        }
-
         // Use the real incremental writer
         var xref = _reader.XRefTable;
-        var trailer = _reader.Trailer;
+        var trailer = IncrementalTrailer();
         var size = (int)trailer.GetInt("Size", 1);
         var originalStartXref = XRefTable.FindStartXref(_data);
 
+        // A stream held directly (a page's rewritten content) is numbered as it is written: past every
+        // object the update writes, or it takes the number of an object the session added and hides it.
         var writer = new IncrementalWriter(output, _data,
-            Math.Max(size, xref.Entries.Keys.DefaultIfEmpty(0).Max() + 1),
+            Math.Max(Math.Max(size, xref.Entries.Keys.DefaultIfEmpty(0).Max() + 1),
+                Math.Max(modified.Select(m => m.objectNumber).DefaultIfEmpty(0).Max(), _pages?.ImportSlotHighWater ?? 0) + 1),
             _reader.Decryptor);
 
         foreach (var (objNum, obj) in modified)
-            writer.WriteObject(objNum, obj);
+            writer.WriteObject(objNum, obj, xref.GetEntry(objNum) is { InUse: true } entry ? entry.Generation : 0);
+        if (modified.Count > 0) NumberPagesForIncrementalSave(writer);
 
         writer.Flush(trailer, originalStartXref);
-        output.SetLength(output.Position);
+        if (output.CanSeek) output.SetLength(output.Position);
         output.Flush();
     }
 
@@ -143,17 +145,35 @@ public sealed partial class Document
         _dirtyObjects[objectNumber] = obj;
     }
 
+    /// <summary>The trailer an update repeats: the file's own, pointing at the information
+    /// dictionary this session created when the file had none.</summary>
+    private PdfDictionary IncrementalTrailer()
+    {
+        if (_newInfoObjNum is not { } infoNum) return _reader.Trailer;
+        var trailer = new PdfDictionary();
+        foreach (var key in _reader.Trailer.Keys) trailer.Set(key, _reader.Trailer.Get(key)!);
+        trailer.Set("Info", new PdfIndirectRef(infoNum, 0));
+        return trailer;
+    }
+
+    /// <summary>An edit of the document information dictionary: an incremental save writes it
+    /// again. A dictionary created for a document without one is a new object already.</summary>
+    internal void MarkInfoEdited(PdfDictionary info)
+    {
+        if (InfoEntryOfItsOwn() is PdfIndirectRef infoRef) MarkDirty(infoRef.ObjectNumber, info);
+    }
+
     /// <summary>
     /// Find the object number for a PdfDictionary by scanning xref entries.
     /// Returns -1 if not found.
     /// </summary>
     internal int FindObjectNumber(PdfDictionary dict)
     {
-        foreach (var entry in _reader.XRefTable.Entries.Values)
+        foreach (var objectNumber in _reader.XRefTable.Entries.Values.Select(entry => entry.ObjectNumber))
         {
-            var resolved = _reader.Resolve(new PdfIndirectRef(entry.ObjectNumber, 0));
+            var resolved = _reader.Resolve(new PdfIndirectRef(objectNumber, 0));
             if (ReferenceEquals(resolved, dict))
-                return entry.ObjectNumber;
+                return objectNumber;
         }
         return -1;
     }
@@ -162,9 +182,9 @@ public sealed partial class Document
     {
         var xref = _reader.XRefTable;
         var max = 0;
-        foreach (var entry in xref.Entries.Values)
+        foreach (var objectNumber in xref.Entries.Values.Select(entry => entry.ObjectNumber).Where(objectNumber => objectNumber > max))
         {
-            if (entry.ObjectNumber > max) max = entry.ObjectNumber;
+            max = objectNumber;
         }
         // Also consider already-allocated new objects
         foreach (var (objNum, _) in _newObjects)
@@ -190,6 +210,18 @@ public sealed partial class Document
         // the source xref nor the pending list.
         if (_reservedMetadataObjNum > max) max = _reservedMetadataObjNum;
         return max + 1;
+    }
+
+    /// <summary>The highest number given to an object still waiting to be written (0 when none): a page import
+    /// numbers its copies above it, or a copy would take the number of an object made before the import.</summary>
+    internal int HighestNewObjectNumber()
+    {
+        var max = 0;
+        foreach (var (objNum, _) in _newObjects)
+        {
+            if (objNum > max) max = objNum;
+        }
+        return max;
     }
 
     /// <summary>
@@ -223,7 +255,17 @@ public sealed partial class Document
     }
 
     internal PdfDictionary? ResolveExistingInfoDict()
-        => _reader.ResolveDict(_reader.Trailer.Get("Info")) ?? _pendingInfoDict;
+        => _reader.ResolveDict(InfoEntryOfItsOwn()) ?? _pendingInfoDict;
+
+    /// <summary>The trailer's /Info, unless it names the catalog itself. A file that gives one object as both
+    /// has no information dictionary: read as one, the catalog would take the document's information and lose
+    /// its own entries, the page tree among them, to an edit of it.</summary>
+    private PdfObject? InfoEntryOfItsOwn()
+    {
+        var info = _reader.Trailer.Get("Info");
+        return info is PdfIndirectRef infoRef && _reader.Trailer.Get("Root") is PdfIndirectRef rootRef
+            && infoRef.ObjectNumber == rootRef.ObjectNumber ? null : info;
+    }
 
     /// <summary>True when this document was created from scratch (<c>new Document()</c>)
     /// rather than loaded from existing bytes. A from-scratch document seeds the standard

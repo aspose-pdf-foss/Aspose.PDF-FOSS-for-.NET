@@ -4,7 +4,7 @@ namespace Aspose.Pdf.Text;
 public partial class TextFragment
 {
     /// <summary>The stages of the block translate: one content operator at a time.</summary>
-    private void TranslateBlockOperator(BlockTranslateState bt, Operator op)
+    private static void TranslateBlockOperator(BlockTranslateState bt, Operator op)
     {
         switch (op)
         {

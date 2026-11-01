@@ -9,27 +9,29 @@ public sealed partial class PdfToHtmlConverter
 {
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SaveStateOp(ContentRenderState ct, string op)
+    private static void SaveStateOp(ContentRenderState ct)
     {
-        ct.clipStack.Push(ct.clipD);
+        ct.clipStack.Push((ct.clipD, ct.clipId));
         ct.ctmStack.Push(ct.ctm.Clone());
         // Fill/stroke color are graphics state (PDF 32000 §8.4.2):
         // a color set inside q…Q must not leak to later text.
         ct.colorStack.Push((ct.r, ct.g, ct.b,
             ct.pathState.FillR, ct.pathState.FillG, ct.pathState.FillB,
             ct.pathState.StrokeR, ct.pathState.StrokeG, ct.pathState.StrokeB));
-        // Character/word spacing are text state, which is part
-        // of the graphics state too: a Tc set inside q…Q (and
-        // never reset by the generator) must not leak into the
-        // blocks that follow the Q.
-        ct.textSpacingStack.Push((ct.charSpacing, ct.wordSpacing));
+        // The text state - font and size, spacing, leading, rise, rendering mode - is part
+        // of the graphics state too (PDF 32000 §9.3.1): a Tf or Tc set inside q…Q (and never
+        // reset by the generator) must not leak into the blocks that follow the Q, which draw
+        // in the font set before the q.
+        ct.textStateStack.Push(SavedTextState.Of(ct));
+        ct.blendStack.Push(ct.blendMode);
+        ct.alphaStack.Push(ct.fillAlpha);
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void RestoreStateOp(ContentRenderState ct, string op)
+    private static void RestoreStateOp(ContentRenderState ct)
     {
-        if (ct.clipStack.Count > 0) ct.clipD = ct.clipStack.Pop();
+        if (ct.clipStack.Count > 0) (ct.clipD, ct.clipId) = ct.clipStack.Pop();
         if (ct.ctmStack.Count > 0)
             ct.ctm = ct.ctmStack.Pop();
         if (ct.colorStack.Count > 0)
@@ -39,8 +41,9 @@ public sealed partial class PdfToHtmlConverter
             ct.pathState.FillR = c9.fr; ct.pathState.FillG = c9.fg; ct.pathState.FillB = c9.fb;
             ct.pathState.StrokeR = c9.sr; ct.pathState.StrokeG = c9.sg; ct.pathState.StrokeB = c9.sb;
         }
-        if (ct.textSpacingStack.Count > 0)
-            (ct.charSpacing, ct.wordSpacing) = ct.textSpacingStack.Pop();
+        if (ct.textStateStack.Count > 0) ct.textStateStack.Pop().RestoreTo(ct);
+        if (ct.blendStack.Count > 0) ct.blendMode = ct.blendStack.Pop();
+        if (ct.alphaStack.Count > 0) ct.fillAlpha = ct.alphaStack.Pop();
         // Close scope-bound effect groups in LIFO order (the group
         // opened at the deeper clip depth closes first, keeping the
         // XML nesting valid when both are open).
@@ -64,23 +67,28 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void ApplyGraphicsStateOp(ContentRenderState ct, string op)
+    private static void ApplyGraphicsStateOp(ContentRenderState ct)
     {
-        if (!ct.textOnly && ct.imageSink is not null && ct.resources is not null
-            && ct.operands.Count >= 1 && ct.operands[0] is PdfName gsOpName)
+        if (ct.resources is null || ct.operands.Count < 1 || ct.operands[0] is not PdfName gsOpName) return;
+        var egsDict = ct.reader.ResolveDict(
+            ct.reader.ResolveDict(ct.resources.Get("ExtGState"))?.Get(gsOpName.Value));
+        // The blend mode decides whether a fill paints over what lies beneath it (the
+        // text-layer model's cover test) and rides the painted elements into the SVG;
+        // a state without /BM leaves it as it was.
+        if (ct.reader.Resolve(egsDict?.Get("BM")) is { } blend)
+            ct.blendMode = BlendModeName(blend);
+        // The fill alpha paints text as it paints fills: the text layer carries it in its colour.
+        if (ct.reader.Resolve(egsDict?.Get("ca")) is PdfReal or PdfInteger)
+            ct.fillAlpha = Compat.Clamp(Num(ct.reader.Resolve(egsDict!.Get("ca"))!), 0.0, 1.0);
+        if (!ct.textOnly && ct.imageSink is not null)
         {
-            var egsDict = ct.reader.ResolveDict(
-                ct.reader.ResolveDict(ct.resources.Get("ExtGState"))?.Get(gsOpName.Value));
             var smaskDict = egsDict is not null ? ct.reader.ResolveDict(egsDict.Get("SMask")) : null;
-            if (egsDict is not null && ct.maskGroupOpen)
+            // Any gs that carries an /SMask entry replaces the
+            // soft mask — /None (a name, not a dict) clears it.
+            if (egsDict is not null && ct.maskGroupOpen && egsDict.Get("SMask") is not null && smaskDict is null)
             {
-                // Any gs that carries an /SMask entry replaces the
-                // soft mask — /None (a name, not a dict) clears it.
-                if (egsDict.Get("SMask") is not null && smaskDict is null)
-                {
-                    ct.svgPaths.Append("</g>");
-                    ct.maskGroupOpen = false;
-                }
+                ct.svgPaths.Append("</g>");
+                ct.maskGroupOpen = false;
             }
             // Constant fill alpha (/ca < 1) becomes a <g opacity>
             // group around the painted content (the 0.6-alpha
@@ -132,9 +140,45 @@ public sealed partial class PdfToHtmlConverter
         }
     }
 
+    /// <summary>The blend mode a /BM entry names; an array names the first mode a viewer
+    /// supports, and Compatible is Normal under another name.</summary>
+    private static string BlendModeName(PdfObject blend)
+    {
+        var name = blend is PdfArray { Count: > 0 } arr ? arr[0] as PdfName : blend as PdfName;
+        return name is null || name.Value == "Compatible" ? NormalBlend : name.Value;
+    }
+
+    private const string NormalBlend = "Normal";
+
+    /// <summary>Normal is the only blend mode under which a fill replaces the backdrop.</summary>
+    private static bool BlendPaintsOver(string blendMode) => blendMode == NormalBlend;
+
+    /// <summary>The CSS mix-blend-mode of a PDF blend mode (Multiply -> multiply, HardLight ->
+    /// hard-light), null for Normal, which an element blends by without saying so.</summary>
+    private static string? CssBlendMode(string blendMode)
+    {
+        if (BlendPaintsOver(blendMode)) return null;
+        var css = new StringBuilder(blendMode.Length + 1);
+        foreach (var c in blendMode)
+        {
+            if (char.IsUpper(c) && css.Length > 0) css.Append('-');
+            css.Append(char.ToLowerInvariant(c));
+        }
+        return css.ToString();
+    }
+
+    /// <summary>The attributes a painted SVG element carries from the graphics state: the clip
+    /// path in force and a blend mode other than Normal.</summary>
+    private static string SvgStateAttributes(ContentRenderState ct)
+    {
+        var clip = ct.clipId is null ? "" : $" clip-path=\"url(#{ct.clipId})\"";
+        var blend = CssBlendMode(ct.blendMode);
+        return blend is null ? clip : $"{clip} style=\"mix-blend-mode:{blend}\"";
+    }
+
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void ConcatMatrixOp(ContentRenderState ct, string op)
+    private static void ConcatMatrixOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 6)
         {
@@ -147,45 +191,43 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void BeginMarkedContentOp(ContentRenderState ct, string op)
+    private static void BeginMarkedContentOp(ContentRenderState ct)
     {
+        var hasMcid = ct.operands.Count >= 2
+            && ct.operands[1] is PdfDictionary mcDict
+            && mcDict.Get("MCID") is not null;
+        ct.mcStack.Push(hasMcid);
+        if (hasMcid) ct.mcSeq++;
+        // An /OC region becomes a layer box when the caller asked
+        // for marked content as layers: the div carries the
+        // optional-content group's own name, and a group that
+        // sits under a titled /Order entry nests a second div
+        // for the title. Content-stream nesting is mirrored
+        // as-is, so a region marked inside another produces
+        // nested boxes.
+        var opened = 0;
+        if (ct.ocLayers is not null && ct.operands.Count >= 2
+            && ct.operands[0] is PdfName { Value: "OC" }
+            && ct.operands[1] is PdfName ocName
+            && ct.ocLayers.TryGetValue(ocName.Value, out var layer))
         {
-            var hasMcid = ct.operands.Count >= 2
-                && ct.operands[1] is PdfDictionary mcDict
-                && mcDict.Get("MCID") is not null;
-            ct.mcStack.Push(hasMcid);
-            if (hasMcid) ct.mcSeq++;
-            // An /OC region becomes a layer box when the caller asked
-            // for marked content as layers: the div carries the
-            // optional-content group's own name, and a group that
-            // sits under a titled /Order entry nests a second div
-            // for the title. Content-stream nesting is mirrored
-            // as-is, so a region marked inside another produces
-            // nested boxes.
-            var opened = 0;
-            if (ct.ocLayers is not null && ct.operands.Count >= 2
-                && ct.operands[0] is PdfName { Value: "OC" }
-                && ct.operands[1] is PdfName ocName
-                && ct.ocLayers.TryGetValue(ocName.Value, out var layer))
+            FlushParkedLines(ct, ct.styleReg, ct.sb, ct.pageHeight, ct.pageWidth, ct.textOnly, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, ct.emCompensation);
+            ct.sb.Append($"<div class=\"{ct.classNamer.Cls("layer")}\" " +
+                $"data-pdflayer=\"{EscapeHtml(layer.Name)}\">");
+            opened++;
+            if (layer.GroupTitle is { Length: > 0 } title)
             {
-                FlushParkedLines(ct, ct.styleReg, ct.sb, ct.pageHeight, ct.pageWidth, ct.textOnly, ct.classNamer, ct.linkTargets, ct.rotReg, ct.pageLLX, ct.yTopRef, ct.zCounter, ct.pageTurnedOver, ct.emCompensation);
                 ct.sb.Append($"<div class=\"{ct.classNamer.Cls("layer")}\" " +
-                    $"data-pdflayer=\"{EscapeHtml(layer.Name)}\">");
+                    $"data-pdflayer=\"{EscapeHtml(title)}\">");
                 opened++;
-                if (layer.GroupTitle is { Length: > 0 } title)
-                {
-                    ct.sb.Append($"<div class=\"{ct.classNamer.Cls("layer")}\" " +
-                        $"data-pdflayer=\"{EscapeHtml(title)}\">");
-                    opened++;
-                }
             }
-            ct.ocDepth.Push(opened);
         }
+        ct.ocDepth.Push(opened);
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void EndMarkedContentOp(ContentRenderState ct, string op)
+    private static void EndMarkedContentOp(ContentRenderState ct)
     {
         if (ct.mcStack.Count > 0 && ct.mcStack.Pop()) ct.mcSeq++;
         if (ct.ocDepth.Count > 0 && ct.ocDepth.Pop() is var closing and > 0)
@@ -197,7 +239,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetFontOp(ContentRenderState ct, string op)
+    private static void SetFontOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 2)
         {
@@ -227,26 +269,24 @@ public sealed partial class PdfToHtmlConverter
             // text matrix is reset to it.
             ct.tlm.Concat(1, 0, 0, 1, Num(ct.operands[0]), Num(ct.operands[1]));
             ct.tm.CopyFrom(ct.tlm);
-            ct.tx = ct.tm.E; ct.ty = ct.tm.F;
         }
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetTextMatrixOp(ContentRenderState ct, string op)
+    private static void SetTextMatrixOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 6)
         {
             ct.tlm.Set(Num(ct.operands[0]), Num(ct.operands[1]), Num(ct.operands[2]),
                 Num(ct.operands[3]), Num(ct.operands[4]), Num(ct.operands[5]));
             ct.tm.CopyFrom(ct.tlm);
-            ct.tx = ct.tm.E; ct.ty = ct.tm.F;
         }
     }
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetWordSpacingOp(ContentRenderState ct, string op)
+    private static void SetWordSpacingOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 1)
             ct.wordSpacing = Num(ct.operands[0]);
@@ -254,7 +294,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetFillRgbOp(ContentRenderState ct, string op)
+    private static void SetFillRgbOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 3)
         {
@@ -265,7 +305,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetStrokeRgbOp(ContentRenderState ct, string op)
+    private static void SetStrokeRgbOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 3)
         {
@@ -277,7 +317,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetFillGrayOp(ContentRenderState ct, string op)
+    private static void SetFillGrayOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 1)
         {
@@ -289,7 +329,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetStrokeGrayOp(ContentRenderState ct, string op)
+    private static void SetStrokeGrayOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 1)
         {
@@ -300,7 +340,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetFillCmykOp(ContentRenderState ct, string op)
+    private static void SetFillCmykOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 4)
         {
@@ -317,7 +357,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetStrokeCmykOp(ContentRenderState ct, string op)
+    private static void SetStrokeCmykOp(ContentRenderState ct)
     {
         if (ct.operands.Count >= 4)
         {
@@ -329,7 +369,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetStrokeColorSpaceOp(ContentRenderState ct, string op)
+    private static void SetStrokeColorSpaceOp(ContentRenderState ct)
     {
         ct.strokeTintMap = ct.operands.Count >= 1 && ct.operands[0] is PdfName scs
             ? TryBuildTintMap(ct.resources, scs.Value, ct.reader) : null;
@@ -337,7 +377,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetFillColorOp(ContentRenderState ct, string op)
+    private static void SetFillColorOp(ContentRenderState ct)
     {
         if (ct.fillTintMap is not null && ct.operands.Count == 1
             && ct.operands[0] is PdfInteger or PdfReal)
@@ -355,7 +395,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetStrokeColorOp(ContentRenderState ct, string op)
+    private static void SetStrokeColorOp(ContentRenderState ct)
     {
         if (ct.strokeTintMap is not null && ct.operands.Count == 1
             && ct.operands[0] is PdfInteger or PdfReal)
@@ -371,7 +411,7 @@ public sealed partial class PdfToHtmlConverter
 
     /// <summary>One arm of the enclosing token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void SetLineWidthOp(ContentRenderState ct, string op)
+    private static void SetLineWidthOp(ContentRenderState ct)
     {
         // Stroke width lives in user space: fold in the CTM scale.
         if (ct.operands.Count >= 1)

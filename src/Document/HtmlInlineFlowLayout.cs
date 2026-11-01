@@ -47,7 +47,6 @@ public sealed partial class Document
         st.html = html;
         st.lastPiece = lastPiece;
         if (!ResolveInlineBase(st)) return false;
-        st.items = new List<HtmlInlineItem>();
         var blocks = ParseHtmlFlowBlocks(html, hl, st.basePt, out var firstIsControl, out var firstStyle);
         if (blocks.Count == 0) return false;
         st.defaultColor = hl.htmlColor;
@@ -157,7 +156,7 @@ public sealed partial class Document
                 line.Pen += bw;
                 continue;
             }
-            foreach (Match tm in HtmlFlowTokenRegex.Matches(item.Text))
+            foreach (Match tm in SafeRegex.Matches(HtmlFlowTokenRegex, item.Text))
                 PlaceInlineToken(st, lines, ref line, item, tm.Value, maxW);
         }
         if (line.HasContent || lines.Count == 0) lines.Add(line);
@@ -169,7 +168,7 @@ public sealed partial class Document
     /// as "well-" / "known" and, probed, "0123456789-0123456789" after its hyphen when the
     /// word does not fit); a standalone hyphen run ("issues - opinion") and a run of spaces
     /// alone are tokens too.</summary>
-    private static readonly Regex HtmlFlowTokenRegex = new(@" *(?:-+)?(?:[^ -]+(?:-(?![A-Za-z0-9]))?[^ -]*)+?(?:-(?=[A-Za-z0-9])|(?= )|$)| *-+(?= |$)| +", RegexOptions.Compiled);
+    private static readonly Regex HtmlFlowTokenRegex = new(@" *(?:-+)?(?:[^ -]+(?:-(?![A-Za-z0-9]))?[^ -]*)+?(?:-(?=[A-Za-z0-9])|(?= )|$)| *-+(?= |$)| +", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>The width lines wrap on: the content width rounded UP to whole CSS pixels
     /// (probed: a 483 pt = 644 px width refuses a 0.12 pt overrun, a 523.75 pt = 698.33 px
@@ -238,7 +237,9 @@ public sealed partial class Document
     {
         var above = st.strut.Above(st.basePt);
         var below = st.strut.Below(st.basePt);
+#pragma warning disable S3267 // Select would read the member once, before calls in the body that can change it
         foreach (var c in line.Cells)
+#pragma warning restore S3267
         {
             switch (c.Item.Kind)
             {
@@ -299,7 +300,7 @@ public sealed partial class Document
             switch (c.Item.Kind)
             {
                 case HtmlInlineKind.Text: EmitInlineText(st, c, x0, baseline); break;
-                case HtmlInlineKind.Image: imageBelow = System.Math.Max(imageBelow, EmitInlineImage(st, c, x0, top, baseline)); break;
+                case HtmlInlineKind.Image: imageBelow = System.Math.Max(imageBelow, EmitInlineImage(st, c, x0, baseline)); break;
                 case HtmlInlineKind.Radio: EmitInlineRadio(st, c, x0, baseline); break;
                 case HtmlInlineKind.Checkbox: EmitInlineCheckbox(st, c, x0, top); break;
             }

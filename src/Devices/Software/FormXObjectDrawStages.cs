@@ -32,7 +32,9 @@ public sealed partial class SoftwarePageRenderer
             IsKnockoutGroup = fo.ctx.IsKnockoutGroup,
         };
 
-        RenderContent(fo.formContent, childCtx, fo.formExtGStates, fo.effectiveCtm, fo.formClipMask);
+        // The form draws in the graphics state in force at its Do (ISO 32000-1 8.10.1): the fill and stroke alphas,
+        // the blend mode and the colours carry in, as into a transparency group - not a fresh state at full alpha.
+        RenderContent(fo.formContent, childCtx, fo.formExtGStates, fo.effectiveCtm, fo.formClipMask, inheritState: fo.state);
     }
 
     /// <summary></summary>
@@ -62,7 +64,7 @@ public sealed partial class SoftwarePageRenderer
         // group's result IS the scratch. Only that case is seeded, so the partial-alpha
         // and blended composites keep the behaviour they were measured with.
         var seedBackdrop = !isKnockout
-                           && fo.groupDict!.Get("I") is not PdfBoolean { Value: true }
+                           && fo.groupDict.Get("I") is not PdfBoolean { Value: true }
                            && fo.state.BlendMode == "Normal" && fo.state.FillAlpha >= 1.0
                            && fo.state.SoftMask is null;
 

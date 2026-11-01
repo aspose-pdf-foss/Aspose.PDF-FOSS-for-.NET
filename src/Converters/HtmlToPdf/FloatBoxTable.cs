@@ -16,10 +16,12 @@ internal static partial class HtmlToPdfConverter
         public double[] RowTop = Array.Empty<double>();       // nRows + 1 (the last = the rows' bottom)
         public double[] RowMin = Array.Empty<double>();       // per row: the band its <tr> height declares (0 = none)
         public double B;                                      // the collapsed border width (pt)
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public string Rgb = "0 0 0";
         public double X0, X1;                                 // the table box, the horizontals are clipped to it
         public bool Collapsed;
         public List<FbTableCell>[] Rows = Array.Empty<List<FbTableCell>>();
+#pragma warning restore S3218
         public bool[] ChargedTop = Array.Empty<bool>();       // per row: the boundary border above is in its band
         public bool[] ChargedBottom = Array.Empty<bool>();    // per row: the boundary border below is in its band
         public void Shift(double dx, double dy)
@@ -39,7 +41,7 @@ internal static partial class HtmlToPdfConverter
         public FbBoxProps P = null!;
         public FbStyle St = null!;
         public bool Top, Right, Bottom, Left;
-        public FbBox Box = null!;                             // the cell's content box (lines live here)
+#pragma warning restore S3218
         public bool Bordered => Top || Right || Bottom || Left;
     }
 
@@ -76,7 +78,7 @@ internal static partial class HtmlToPdfConverter
         var rows = FbTableRows(fb, el, box.St, box.W, cellPad, out var rowMins);
         var nCols = 0;
         foreach (var r in rows) foreach (var c in r) nCols = Math.Max(nCols, c.Col + c.Span);
-        if (nCols == 0 || rows.Count == 0) { box.H = box.P.ChromeV; if (box.W <= 0) box.W = box.P.ChromeH; return; }
+        if (nCols == 0 || rows.Count == 0) { box.H = box.P.ChromeV; if (box.W <= 0) { box.W = box.P.ChromeH; } return; }
         var grid = new FbTableGrid { Rows = rows.ToArray(), RowMin = rowMins.ToArray(), Collapsed = collapsed };
         grid.B = collapsed ? FbCollapsedBorderPt(rows) : 0;
         grid.Rgb = FbGridRgb(rows);
@@ -86,17 +88,44 @@ internal static partial class HtmlToPdfConverter
         var sum = 0.0;
         foreach (var v in bases) sum += v;
         // the box: the declared width, else the columns' sum inside the chrome (capped at the container)
-        var chrome = collapsed ? (tb > 0 ? 2 * tb : b) : 2 * tb + (nCols + 1) * spacing;
+        double chrome;
+        if (collapsed) chrome = tb > 0 ? 2 * tb : b;
+        else chrome = 2 * tb + (nCols + 1) * spacing;
         if (box.W <= 0) box.W = Math.Min(sum + chrome, Math.Max(cbW - box.P.Margin.H, chrome));
         var span = box.W - chrome;
+        var widths = FbColumnWidths(rows, bases, sum, span);
         grid.Gx = new double[nCols + 1];
-        grid.Gx[0] = box.X + (collapsed ? (tb > 0 ? tb : b / 2) : tb + spacing);
+        var collapsedLead = tb > 0 ? tb : b / 2;
+        grid.Gx[0] = box.X + (collapsed ? collapsedLead : tb + spacing);
         for (var c = 0; c < nCols; c++)
-            grid.Gx[c + 1] = grid.Gx[c] + (sum > 0 ? bases[c] * span / sum : span / nCols) + (collapsed ? 0 : spacing);
+            grid.Gx[c + 1] = grid.Gx[c] + widths[c] + (collapsed ? 0 : spacing);
         grid.X0 = box.X; grid.X1 = box.X + box.W;
         FbChargeRowBorders(grid);
         FbLayoutTableRows(fb, box, grid, spacing, tb);
         box.Grid = grid;
+    }
+
+    /// <summary>The columns' widths in the table's span: each its share of the bases; when the bases
+    /// overfill the span, a column a cell sizes (a percentage or a length) keeps its width and the
+    /// auto columns share what is left - a long auto cell must not squeeze the sized columns away.</summary>
+    private static double[] FbColumnWidths(List<List<FbTableCell>> rows, double[] bases, double sum, double span)
+    {
+        var n = bases.Length;
+        var widths = new double[n];
+        var sized = new bool[n];
+        foreach (var row in rows)
+            foreach (var cell in row)
+                if (cell.Span == 1 && cell.Col < n && !cell.P.WidthAuto) sized[cell.Col] = true;
+        double sizedSum = 0, autoSum = 0;
+        for (var c = 0; c < n; c++)
+            if (sized[c]) sizedSum += bases[c]; else autoSum += bases[c];
+        var keepSized = sum > span && autoSum > 0 && sizedSum < span;
+        for (var c = 0; c < n; c++)
+        {
+            if (keepSized) widths[c] = sized[c] ? bases[c] : bases[c] * (span - sizedSum) / autoSum;
+            else widths[c] = sum > 0 ? bases[c] * span / sum : span / n;
+        }
+        return widths;
     }
 
     private static double FbTableAttrPx(HtmlNode el, string attr, double fallbackPx)
@@ -114,7 +143,8 @@ internal static partial class HtmlToPdfConverter
         var rows = grid.Rows;
         var b = grid.B;
         grid.RowTop = new double[rows.Length + 1];
-        var y = box.Y + (grid.Collapsed ? (tb > 0 ? tb : 0) : tb + spacing);
+        var collapsedEdge = tb > 0 ? tb : 0;
+        var y = box.Y + (grid.Collapsed ? collapsedEdge : tb + spacing);
         for (var r = 0; r < rows.Length; r++)
         {
             var above = grid.ChargedTop[r] ? b : 0;
@@ -134,7 +164,8 @@ internal static partial class HtmlToPdfConverter
             y += above + band + (grid.ChargedBottom[r] ? b : 0) + (grid.Collapsed ? 0 : spacing);
         }
         grid.RowTop[rows.Length] = y - (grid.Collapsed ? 0 : spacing);
-        box.H = y - box.Y + (grid.Collapsed ? (tb > 0 ? tb : 0) : tb + (rows.Length == 0 ? spacing : 0));
+        var separateTail = tb + (rows.Length == 0 ? spacing : 0);
+        box.H = y - box.Y + (grid.Collapsed ? collapsedEdge : separateTail);
         if (grid.Collapsed && tb == 0 && FbAnyBottomBorder(rows[^1])) box.H += b / 2;
     }
 
@@ -156,7 +187,6 @@ internal static partial class HtmlToPdfConverter
             var contentH = cursor - cb.ContentY;
             if (!cell.P.HeightAuto) contentH = Math.Max(contentH, cell.P.HeightPt);
             cb.H = cell.P.Pad.V + contentH;
-            cell.Box = cb;
             box.Kids.Add(cb);
             band = Math.Max(band, cb.H);
         }
@@ -225,7 +255,7 @@ internal static partial class HtmlToPdfConverter
                         // (probed on the factsheet grid: a cell's PERCENT padding resolves to nothing -
                         //  its rows pitch at the line box plus the collapsed border)
                         else if ((FbDecl(fb, td, "padding") ?? "").Contains('%')) p.Pad.T = p.Pad.R = p.Pad.B = p.Pad.L = 0;
-                        var span = td.Attrs is not null && td.Attrs.TryGetValue("colspan", out var cs) && int.TryParse(cs.Trim(), out var csn) && csn > 1 ? csn : 1;
+                        var span = td.Attrs is not null && td.Attrs.TryGetValue("colspan", out var cs) && int.TryParse(cs.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var csn) && csn > 1 ? csn : 1;
                         cells.Add(new FbTableCell
                         {
                             Col = col, Span = span, Group = g, Node = td, P = p, St = cellSt,
@@ -248,8 +278,8 @@ internal static partial class HtmlToPdfConverter
     {
         var b = 0.0;
         foreach (var row in rows)
-            foreach (var cell in row)
-                b = Math.Max(b, Math.Max(Math.Max(cell.P.Border.L, cell.P.Border.R), Math.Max(cell.P.Border.T, cell.P.Border.B)));
+            foreach (var border in row.Select(cell => cell.P).Select(p => p.Border))
+                b = Math.Max(b, Math.Max(Math.Max(border.L, border.R), Math.Max(border.T, border.B)));
         return b;
     }
 

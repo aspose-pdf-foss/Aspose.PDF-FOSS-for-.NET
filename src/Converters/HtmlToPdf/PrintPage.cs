@@ -52,7 +52,7 @@ internal static partial class HtmlToPdfConverter
             || !pp.css.TryGetValue(".page", out var pageRule)
             || !pageRule.TryGetValue("page-break-after", out var pba)
             || !pba.Contains("always", StringComparison.OrdinalIgnoreCase)
-            || !Regex.IsMatch(pp.html, @"class\s*=\s*['""]page-header-space['""]",
+            || !SafeRegex.IsMatch(pp.html, @"class\s*=\s*['""]page-header-space['""]",
                 RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor("Times New Roman") is not { } fm) return null;
@@ -68,11 +68,14 @@ internal static partial class HtmlToPdfConverter
         pp.canvasBot = pp.pageHeight - PpMarginBottomPt;
 
         // band geometry: the declared heights plus the demo border (1px)
-        pp.hdrH = hdrRule.TryGetValue("height", out var hhV)
-            && TryParseLength(hhV) is { } hhPt ? hhPt
-            : pp.css.TryGetValue(".page-header-space", out var hsRule)
-              && hsRule.TryGetValue("height", out var hsV)
-              && TryParseLength(hsV) is { } hsPt ? hsPt : 75.0;
+        if (hdrRule.TryGetValue("height", out var hhV)
+            && TryParseLength(hhV) is { } hhPt)
+            pp.hdrH = hhPt;
+        else if (pp.css.TryGetValue(".page-header-space", out var hsRule)
+            && hsRule.TryGetValue("height", out var hsV)
+            && TryParseLength(hsV) is { } hsPt)
+            pp.hdrH = hsPt;
+        else pp.hdrH = 75.0;
         pp.ftrH = ftrRule.TryGetValue("height", out var fhV)
             && TryParseLength(fhV) is { } fhPt ? fhPt : 37.5;
         pp.hdrBorder = hdrRule.ContainsKey("border-bottom") ? 0.75 : 0;
@@ -88,7 +91,7 @@ internal static partial class HtmlToPdfConverter
         // ── parse the bands and the content pages ──
         pp.headerText = PrintBandText(pp, "page-header");
         pp.footerText = PrintBandText(pp, "page-footer");
-        pp.headerCentered = Regex.IsMatch(pp.html,
+        pp.headerCentered = SafeRegex.IsMatch(pp.html,
             @"<div\b[^>]*class\s*=\s*['""]page-header['""][^>]*text-align\s*:\s*center",
             RegexOptions.IgnoreCase);
 
@@ -148,9 +151,10 @@ internal static partial class HtmlToPdfConverter
 
     private static Document? TryRenderStepRows(string html,
         IReadOnlyDictionary<string, Dictionary<string, string>> css,
-        double pageHeight)
+        double pageHeight, HtmlLoadOptions? options = null)
     {
         var sw = new StepRowsState();
+        sw.options = options;
         sw.html = html;
         sw.css = css;
         sw.pageHeight = pageHeight;
@@ -158,9 +162,9 @@ internal static partial class HtmlToPdfConverter
             || !srcRule.TryGetValue("width", out var srcW) || !srcW.Contains("490")
             || !sw.css.TryGetValue(".sr-bullet", out var srbRule)
             || !srbRule.ContainsKey("width")
-            || !Regex.IsMatch(sw.html, @"class\s*=\s*['""]step-row",
+            || !SafeRegex.IsMatch(sw.html, @"class\s*=\s*['""]step-row",
                 RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(sw.html, @"class\s*=\s*['""]swdt-table['""]",
+            || !SafeRegex.IsMatch(sw.html, @"class\s*=\s*['""]swdt-table['""]",
                 RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor("Arial") is null) return null;
@@ -180,7 +184,9 @@ internal static partial class HtmlToPdfConverter
         sw.yTd = sw.contentTop;
         RenderStepRowPreamble(sw);
 
-        foreach (Match srM in Regex.Matches(sw.html,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match srM in SafeRegex.Matches(sw.html,
+#pragma warning restore S3267
             @"<div\b[^>]*class\s*=\s*['""]step-row[^'""]*['""][^>]*>", RegexOptions.IgnoreCase))
         {
             if (!RenderStepRow(sw, srM)) break;
@@ -204,29 +210,29 @@ internal static partial class HtmlToPdfConverter
 
         de.colW = new List<double>();
         de.thTexts = new List<string>();
-        foreach (Match thM in Regex.Matches(de.tableHtml,
-            @"<th\b(?<a>[^>]*)>(?<t>[\s\S]*?)</th>", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(de.tableHtml,
+            @"<th\b(?<a>[^>]*)>(?<t>[\s\S]*?)</th>", RegexOptions.IgnoreCase).Select(thM => thM.Groups))
         {
-            var wM = Regex.Match(thM.Groups["a"].Value, @"width\s*=\s*['""]?([\d.]+)");
+            var wM = SafeRegex.Match(groups["a"].Value, @"width\s*=\s*['""]?([\d.]+)");
             de.colW.Add(wM.Success ? double.Parse(wM.Groups[1].Value,
                 System.Globalization.CultureInfo.InvariantCulture) * 0.75 : 75);
-            de.thTexts.Add(Regex.Replace(DecodeEntities(Regex.Replace(
-                thM.Groups["t"].Value, @"<[^>]+>", " ")), @"\s+", " ").Trim());
+            de.thTexts.Add(SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(
+                groups["t"].Value, @"<[^>]+>", " ")), @"\s+", " ").Trim());
         }
         if (de.colW.Count == 0) return de.yTd;
 
         de.rows = new List<List<(bool el, string lbl)>>();
-        foreach (Match trM in Regex.Matches(de.tableHtml, @"<tr\b[^>]*>(?<r>[\s\S]*?)</tr>",
-            RegexOptions.IgnoreCase))
+        foreach (var trMGroups in SafeRegex.Matches(de.tableHtml, @"<tr\b[^>]*>(?<r>[\s\S]*?)</tr>",
+            RegexOptions.IgnoreCase).Select(trM => trM.Groups))
         {
-            if (Regex.IsMatch(trM.Groups["r"].Value, @"<th\b", RegexOptions.IgnoreCase)) continue;
+            if (SafeRegex.IsMatch(trMGroups["r"].Value, @"<th\b", RegexOptions.IgnoreCase)) continue;
             var row = new List<(bool, string)>();
-            foreach (Match tdM in Regex.Matches(trM.Groups["r"].Value,
+            foreach (Match tdM in SafeRegex.Matches(trMGroups["r"].Value,
                 @"<td\b[^>]*>(?<c>[\s\S]*?)</td>", RegexOptions.IgnoreCase))
             {
                 var c = tdM.Groups["c"].Value;
-                var el = Regex.IsMatch(c, @"class\s*=\s*['""]swn-element", RegexOptions.IgnoreCase);
-                var lbl = Regex.Replace(DecodeEntities(Regex.Replace(c, @"<[^>]+>", " ")),
+                var el = SafeRegex.IsMatch(c, @"class\s*=\s*['""]swn-element", RegexOptions.IgnoreCase);
+                var lbl = SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(c, @"<[^>]+>", " ")),
                     @"\s+", " ").Trim();
                 row.Add((el, lbl));
             }
@@ -261,7 +267,9 @@ internal static partial class HtmlToPdfConverter
         de.y = de.top + SrThRowHPt;
         HLine(de.sw, de.tableX, de.tableX + SrDetableWPt, de.y, 0.75);
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var row in de.rows)
+#pragma warning restore S3267
         {
             if (!RenderDetableRow(de, row)) break;
         }
@@ -313,8 +321,7 @@ internal static partial class HtmlToPdfConverter
         }
         foreach (var ch in text)
         {
-            if (ch == ' ') { word.Append(ch); FlushWord(); }
-            else if (ch >= 0x2E80) { word.Append(ch); FlushWord(); }
+            if (ch == ' ' || ch >= 0x2E80) { word.Append(ch); FlushWord(); }
             else word.Append(ch);
         }
         FlushWord();

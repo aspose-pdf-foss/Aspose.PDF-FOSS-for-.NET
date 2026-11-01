@@ -2,8 +2,10 @@ using System.Text;
 
 namespace Aspose.Pdf.Facades;
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Properties for a BDC / DP marked-content operator (/MCID and /Lang).</summary>
 public sealed class BDCProperties
+#pragma warning restore S101
 {
     public int? MCID { get; }
 
@@ -47,7 +49,7 @@ public sealed class BDCProperties
     internal string ToPdf()
     {
         var sb = new StringBuilder("<<");
-        if (MCID.HasValue) sb.Append($" /MCID {MCID.Value}");
+        if (MCID.HasValue) sb.Append($" /MCID {MCID.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
         if (Lang is not null) sb.Append($" /Lang ({Lang})");
         if (E is not null) sb.Append($" /E ({E})");
         if (ActualText is not null) sb.Append($" /ActualText ({Escape(ActualText)})");

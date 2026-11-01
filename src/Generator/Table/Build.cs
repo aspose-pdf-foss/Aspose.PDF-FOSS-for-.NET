@@ -125,20 +125,21 @@ public partial class Table : BaseParagraph
         // is left between the pin and the page's right content margin — a 595 pt page
         // with 90 pt margins gives a table pinned at 440 a 65 pt band, and its
         // declared 85 pt column clamps into it.
-        var leftOff = Left > 0
-            ? Left + (Margin?.Left ?? 0)
-            : (FlowLeftOffset > 0 ? FlowLeftOffset : (Margin?.Left ?? 0));
+        double leftOff;
+        if (Left > 0) leftOff = Left + (Margin?.Left ?? 0);
+        else leftOff = FlowLeftOffset > 0 ? FlowLeftOffset : (Margin?.Left ?? 0);
         // The columns run to the page's RIGHT content margin when the page declares
         // one (a 16.7/13.3 mm margin pair keeps a 510 pt grid whole); a page without
         // an explicit right margin mirrors the flow's left content offset, falling
         // back to the left offset itself. Mirroring the LEFT OFFSET would be wrong
         // for a pinned table, whose offset is a position on the page, not a margin.
-        var rightMargin = page.PageInfo?.Margin is { RightTouched: true } pm
-            ? pm.Right
-            : FlowLeftOffset > 0 ? FlowLeftOffset : leftOff;
-        var usable = page.Width - leftOff - rightMargin;
-        if (usable <= 0) usable = page.Width - leftOff - 36;
-        return usable > 0 ? usable : page.Width;
+        double rightMargin;
+        if (page.PageInfo?.Margin is { RightTouched: true } pm) rightMargin = pm.Right;
+        else if (FlowLeftOffset > 0) rightMargin = FlowLeftOffset;
+        else rightMargin = leftOff;
+        var usable = page.LayoutFrameWidth - leftOff - rightMargin;
+        if (usable <= 0) usable = page.LayoutFrameWidth - leftOff - 36;
+        return usable > 0 ? usable : page.LayoutFrameWidth;
     }
 
     /// <summary>Width a MEASUREMENT (<see cref="GetHeight(Page?)"/>) resolves relative
@@ -153,7 +154,7 @@ public partial class Table : BaseParagraph
         if (UsableWidthOverride > 0) return UsableWidthOverride;
         if (FlowLeftOffset > 0) return GetTableUsableWidth(page);
         var info = page.PageInfo;
-        var band = page.Width - (info?.Margin?.Left ?? 0) - (info?.Margin?.Right ?? 0);
+        var band = page.LayoutFrameWidth - (info?.Margin?.Left ?? 0) - (info?.Margin?.Right ?? 0);
         return band > 0 ? band : GetTableUsableWidth(page);
     }
 
@@ -189,7 +190,6 @@ public partial class Table : BaseParagraph
             var padLeft = padding?.Left ?? 2;
             var padRight = padding?.Right ?? 2;
 
-            var textState = cell.DefaultCellTextState ?? row.DefaultCellTextState ?? DefaultCellTextState;
             var fontSize = ResolveCellFontSize(cell, row);
             var cellWidth = GetCellWidth(colWidths, colIdx, cell.ColSpan);
             var availWidth = cellWidth - padLeft - padRight;
@@ -343,7 +343,9 @@ public partial class Table : BaseParagraph
         {
             if (SubscriptClipEm.TryGetValue(face, out var v)) return v;
             // Styled names ("Helvetica-Bold", "Arial,Bold", "Calibri Bold") share the family's pair.
+#pragma warning disable S3267 // a first-match search over a value type - FirstOrDefault cannot tell no match from a default item
             foreach (var kv in SubscriptClipEm)
+#pragma warning restore S3267
                 if (face.StartsWith(kv.Key, StringComparison.OrdinalIgnoreCase)) return kv.Value;
         }
         return SubscriptClipEm["Helvetica"];
@@ -383,8 +385,8 @@ public partial class Table : BaseParagraph
     // padding. Gated on exactly this shape so all other HtmlFragment cells keep the
     // legacy plain-text path.
 
-    // Installed-face TTF bytes by (family, bold, italic) for HonorCellTtfFaces cells;
-    // a miss is cached too so unavailable faces fall through to the Standard-14 path once.
+    // Installed-face TTF bytes by (family, bold, italic) for HonorCellTtfFaces cells; a
+    // miss is cached too so unavailable faces fall through to the Standard-14 path once.
     private static readonly Dictionary<(string fam, bool bold, bool italic), byte[]?> _cellFaceTtfs = new();
 
     private static byte[]? _serifTtf;          // Times New Roman (root strut face)
@@ -437,7 +439,7 @@ public partial class Table : BaseParagraph
         var underline = false;
         var css = EngineStyleValue(tag);
         if (css is null) return (null, 0, false);
-        var cm = Regex.Match(css, @"(?:^|;)\s*color(?!-)\s*:\s*(?<c>#[0-9a-fA-F]{3,8}|[A-Za-z]+)",
+        var cm = SafeRegex.Match(css, @"(?:^|;)\s*color(?!-)\s*:\s*(?<c>#[0-9a-fA-F]{3,8}|[A-Za-z]+)",
             RegexOptions.IgnoreCase);
         if (cm.Success)
         {
@@ -449,15 +451,15 @@ public partial class Table : BaseParagraph
                     : System.Drawing.Color.FromName(cv);
                 if (Compat.IsKnownColor(sys) || cv.StartsWith('#')) color = Color.FromRgb(sys);
             }
-            catch { }
+            catch { /* an unknown colour name keeps the default colour */ }
         }
-        var fm = Regex.Match(css, @"font-size\s*:\s*(?<n>[\d.]+)\s*(?<u>px|pt)?",
+        var fm = SafeRegex.Match(css, @"font-size\s*:\s*(?<n>[\d.]+)\s*(?<u>px|pt)?",
             RegexOptions.IgnoreCase);
         if (fm.Success && double.TryParse(fm.Groups["n"].Value, NumberStyles.Float,
                 CultureInfo.InvariantCulture, out var fv) && fv > 0)
             size = string.Equals(fm.Groups["u"].Value, "px", StringComparison.OrdinalIgnoreCase)
                 ? fv * 0.75 : fv;
-        if (Regex.IsMatch(css, @"text-decoration\s*:[^;]*underline", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(css, @"text-decoration\s*:[^;]*underline", RegexOptions.IgnoreCase))
             underline = true;
         return (color, size, underline);
     }
@@ -467,16 +469,16 @@ public partial class Table : BaseParagraph
     // literal two-character "\n" sequences (the author escaped them). Measured
     // directly, the whole rendering falls out of
     // parsing the markup exactly as written:
-    //  · the "\n" pairs are TEXT and draw as backslash+n glyph runs;
+    //  · the "\n" pairs are TEXT and draw as backslash+n glyph runs,
     //  · every <style> declaration starts with that "\n" junk, so CSS error
     //    recovery drops them ALL — the serif default (Times 12, 13.5 pt boxes)
-    //    typesets everything;
+    //    typesets everything,
     //  · attribute values written as \"…\" are unquoted values starting with a
     //    backslash — invalid, so colspan and text-align are ignored (the title
-    //    <th> is confined to column 1 and every th centres, the HTML default);
+    //    <th> is confined to column 1 and every th centres, the HTML default),
     //  · stray "\n" text between the table's structural tags foster-parents to
     //    one run ABOVE the table (centred inside <center>, at the band's left
-    //    edge outside it);
+    //    edge outside it),
     //  · columns get the HTML default chrome (cellspacing 2px, cellpadding
     //    1px) across the full band width, distributed min-content plus the
     //    surplus in proportion to (max − min) — all five measured columns

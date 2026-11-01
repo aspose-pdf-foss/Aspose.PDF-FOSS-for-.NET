@@ -21,7 +21,7 @@ internal partial class HtmlToPdfConverter
         mp.pendingLine = false;
     }
 
-    private static void CloseCell(MsoFormParseState mp) { FlushText(mp); if (mp.cell is not null) mp.row!.Cells.Add(mp.cell); mp.cell = null; }
+    private static void CloseCell(MsoFormParseState mp) { FlushText(mp); if (mp.cell is not null) { mp.row!.Cells.Add(mp.cell); } mp.cell = null; }
 
     private static void CloseRow(MsoFormParseState mp)
     {

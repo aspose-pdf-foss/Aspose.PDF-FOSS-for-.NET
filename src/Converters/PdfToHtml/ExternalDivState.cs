@@ -17,8 +17,8 @@ private sealed class ExternalDivState
     // DefaultFontName forces the emitted class family (and, with it, the embedded
     // @font-face) onto the requested face — but only when fonts are actually
     // saved. With FontSavingMode.DontSave nothing is embedded, so the class must
-    // keep each source font's own (friendly) family name for the viewer to match;
-    // the substitute is then not applied.
+    // keep each source font's own (friendly) family name for the viewer to match; the
+    // substitute is then not applied.
     public bool fontsNotSaved;
     public string? effectiveDefaultFont;
     public Dictionary<string, Aspose.Pdf.Converters.PdfToHtmlConverter.HtmlFontRecord> fonts = null!;
@@ -32,11 +32,18 @@ private sealed class ExternalDivState
     public bool pageTurnedOver;
     public System.Text.StringBuilder textBuf = null!;
     public System.Text.StringBuilder svgPaths = null!;
+    // The text layer's geometry gathered by the render and read back when the line
+    // divs are put in reading order.
+    public Converters.PdfToHtmlConverter.TextLayerModel model = null!;
     public Converters.PdfToHtmlConverter.DestAnchorRegistry destAnchors = null!;
     public List<Aspose.Pdf.Converters.PdfToHtmlConverter.LinkTarget>? linkTargets;
-    // Fixed-layout geometry references: x from the MediaBox left edge, page
-    // top from LLY + floor(height). UseZOrder gets a fresh per-page counter.
+    // Fixed-layout geometry references: the box the page shows (its crop box inside the
+    // media box), x from its left edge, page top from LLY + floor(height); the page's
+    // width and height are the box's, swapped for a quarter-turned page.
+    // UseZOrder gets a fresh per-page counter.
     public Rectangle mb = null!;
+    public double pageWidth;
+    public double pageHeight;
     public Converters.PdfToHtmlConverter.ZCounter? zCounter;
     public byte[] content = null!;
     // The dynamic class numbering must be pinned BEFORE the text render issues
@@ -53,6 +60,8 @@ private sealed class ExternalDivState
     // text it also emits as selectable spans.
     public bool emitPngBackground;
     public bool hasBackdrop;
+    // The band the page keeps under RemoveEmptyAreasOnTopAndBottom; null when the page keeps its height.
+    public Converters.PdfToHtmlConverter.ContentBand? band;
     // Text layer classes come from the document-wide counter: after a backdrop
     // wrapper (which took 03/04) the layer is 05/06 and dynamic classes start at
     // 07; with no backdrop the layer itself is 03/04 and fonts start at 05

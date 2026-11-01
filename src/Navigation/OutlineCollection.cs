@@ -16,6 +16,8 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
     private readonly PdfReader _reader;
     private List<OutlineItem>? _items;
     private bool _dirty;
+    // The /Outlines root the last finalize wrote, once one has: the catalog names it, not _dict.
+    private PdfDictionary? _writtenRoot;
 
     /// <summary>Enumerator over the top-level outline items, typed as
     /// <see cref="OutlineItemCollection"/> to match the public
@@ -61,19 +63,13 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
             if (_items is not null) return _items;
             _items = [];
 
-            var first = _reader.ResolveDict(_dict.Get("First"));
-            var current = first;
-            var visited = new HashSet<int>();
-
-            while (current is not null)
+            // A chain that loops back is read with each item once.
+            var seen = new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance);
+            var current = _reader.ResolveDict(_dict.Get("First"));
+            while (current is not null && seen.Add(current))
             {
                 _items.Add(new OutlineItemCollection(current, _reader) { _ownerCollection = this });
-
-                var nextRef = current.Get("Next");
-                if (nextRef is PdfIndirectRef iref && !visited.Add(iref.ObjectNumber))
-                    break;
-
-                current = _reader.ResolveDict(nextRef);
+                current = _reader.ResolveDict(current.Get("Next"));
             }
 
             return _items;
@@ -111,7 +107,9 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
         {
             var items = Items;
             if (index < 1 || index > items.Count)
+#pragma warning disable S112 // public API: the exception type callers catch
                 throw new IndexOutOfRangeException($"Index {index} is out of range. Valid range: 1 to {items.Count}.");
+#pragma warning restore S112
             // Items stores OutlineItemCollection instances (see Items getter).
             return (OutlineItemCollection)items[index - 1];
         }
@@ -125,36 +123,49 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
         _dirty = true;
     }
 
-    /// <summary>Removes the outline item with the specified name (matched
-    /// against <see cref="OutlineItem.Title"/>).</summary>
+    /// <summary>Removes the outline items with the specified name (matched against
+    /// <see cref="OutlineItem.Title"/>): the top-level ones, or else the first one found below them.</summary>
     public void Delete(string name)
     {
         _ = Items;
-        _items!.RemoveAll(item => item.Title == name);
+        if (_items!.RemoveAll(item => item.Title == name) == 0)
+        {
+            foreach (var item in _items)
+            {
+                if (item is OutlineItemCollection kids && kids.DeleteNamed(name)) break;
+            }
+        }
         _dirty = true;
     }
 
+#pragma warning disable S4019 // public API: the published overload
     /// <summary>Adds an outline item to the collection.</summary>
     public void Add(OutlineItem item)
+#pragma warning restore S4019
     {
+        if (item is null) throw new ArgumentNullException(nameof(item));
+        // An item added again moves to the end: listed twice, it would be saved as its own next sibling. An item
+        // of another collection stays there too - callers copy bookmarks from a collection they are enumerating.
         _ = Items;
-        _items!.Add(item);
+        _items!.RemoveAll(existing => ReferenceEquals(existing, item));
+        _items.Add(item);
+        if (item is OutlineItemCollection top) top._ownerCollection = this;
         _dirty = true;
     }
 
+#pragma warning disable S927 // public API: the published parameter name
     /// <summary>Add an item typed as <see cref="OutlineItemCollection"/> (the
     /// public overload signature). Forwards to the OutlineItem-typed
     /// path.</summary>
     public override void Add(OutlineItemCollection outline)
-    {
-        _ = Items;
-        _items!.Add(outline);
-        _dirty = true;
-    }
+#pragma warning restore S927
+        => Add((OutlineItem)outline);
 
+#pragma warning disable S4144 // public API: Clear is the collection-interface name of Delete
     /// <summary>Removes every item from the collection (counterpart to
     /// <see cref="Delete()"/>).</summary>
     public override void Clear()
+#pragma warning restore S4144
     {
         _ = Items;
         _items!.Clear();
@@ -166,14 +177,14 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
     {
         if (item is null) return false;
         _ = Items;
-        foreach (var existing in _items!)
-            if (ReferenceEquals(existing, item)) return true;
-        return false;
+        return (_items!).Any(existing => ReferenceEquals(existing, item));
     }
 
+#pragma warning disable S927 // public API: the published parameter name
     /// <summary>Copy items into <paramref name="array"/> starting at
     /// <paramref name="index"/>.</summary>
     public override void CopyTo(OutlineItemCollection[] array, int index)
+#pragma warning restore S927
     {
         if (array is null) throw new ArgumentNullException(nameof(array));
         _ = Items;
@@ -181,8 +192,10 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
             array[index + i] = (OutlineItemCollection)_items[i];
     }
 
+#pragma warning disable S4019 // public API: the published overload
     /// <summary>Remove the supplied item by reference and report whether it was present.</summary>
     public bool Remove(OutlineItem item)
+#pragma warning restore S4019
     {
         _ = Items;
         var removed = _items!.RemoveAll(i => ReferenceEquals(i, item)) > 0;
@@ -212,8 +225,10 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
     /// <summary>Always false: the collection is mutable.</summary>
     public override bool IsReadOnly => false;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers serialise their own access.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Sentinel object for ICollection.SyncRoot-style locking.</summary>
     public object SyncRoot { get; } = new();
@@ -226,7 +241,9 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
         get
         {
             int count = 0;
+#pragma warning disable S3217 // the collection holds OutlineItemCollection items only
             foreach (OutlineItemCollection item in Items)
+#pragma warning restore S3217
             {
                 count++;
                 if (item.Open)
@@ -255,9 +272,16 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
         if (_items is null || _items.Count == 0)
         {
             // All outlines were deleted — remove /Outlines from catalog
-            _dict.Remove("First");
-            _dict.Remove("Last");
-            _dict.Set("Count", new PdfInteger(0));
+            // An earlier save of this session wrote the tree under a root of its own, and the
+            // catalog names that one now: both are emptied.
+            foreach (var root in new[] { _dict, _writtenRoot })
+            {
+                if (root is null) continue;
+                root.Remove("First");
+                root.Remove("Last");
+                root.Set("Count", new PdfInteger(0));
+            }
+            _dirty = false;
             return;
         }
 
@@ -290,6 +314,7 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
         ol.outlinesDict.Set("Count", new PdfInteger(ol.rootCount));
 
         ol.doc.AddNewObject(ol.outlinesObjNum, ol.outlinesDict);
+        _writtenRoot = ol.outlinesDict;
         ol.doc.Reader.Catalog.Set("Outlines", new PdfIndirectRef(ol.outlinesObjNum, 0));
 
         _dirty = false;
@@ -301,9 +326,8 @@ public sealed partial class OutlineCollection : Outlines, System.Collections.Gen
         {
             foreach (var item in items)
             {
-                foreach (var child in item.Children)
-                    if (ReferenceEquals(child, target)) return item;
-                var found = SearchIn((IReadOnlyList<OutlineItem>)item.Children);
+                if (item.Children.Any(child => ReferenceEquals(child, target))) return item;
+                var found = SearchIn(item.Children);
                 if (found is not null) return found;
             }
             return null;

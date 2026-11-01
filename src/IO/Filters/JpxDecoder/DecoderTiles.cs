@@ -20,12 +20,8 @@ internal static partial class JpxDecoder
                     BuildComponent(ci);
 
                 // Tier-2: a single shared reader walks the tile's interleaved packet
-                // stream. With one precinct per resolution the packet order is governed
-                // by the resolution / layer / component nesting of the progression
-                // (one precinct collapses the position dimension):
-                //   LRCP (0): layer, resolution, component
-                //   RLCP (1): resolution, layer, component
-                //   RPCL (2): resolution, component, layer
+                // stream, one packet per layer, resolution, component and precinct in
+                // the order of the progression (PacketOrder).
                 // Each quality layer adds coding passes to the same code-blocks, so a
                 // block's compressed bytes accumulate across the layers it appears in.
                 var parts = byTile[index];
@@ -35,29 +31,8 @@ internal static partial class JpxDecoder
                 int off = 0;
                 foreach (var p in parts) { int len2 = p.dataEnd - p.dataStart; Array.Copy(_d, p.dataStart, tileData, off, len2); off += len2; }
                 var pr = new PacketReader(tileData);
-                for (int o = 0; o < (_numLevels + 1) * _numLayers * _comps.Length; o++)
-                {
-                    int r, l, ci;
-                    if (_progOrder == 0)        // LRCP
-                    {
-                        ci = o % _comps.Length;
-                        r = (o / _comps.Length) % (_numLevels + 1);
-                        l = o / (_comps.Length * (_numLevels + 1));
-                    }
-                    else if (_progOrder == 1)   // RLCP
-                    {
-                        ci = o % _comps.Length;
-                        l = (o / _comps.Length) % _numLayers;
-                        r = o / (_comps.Length * _numLayers);
-                    }
-                    else                        // RPCL (single precinct)
-                    {
-                        l = o % _numLayers;
-                        ci = (o / _numLayers) % _comps.Length;
-                        r = o / (_numLayers * _comps.Length);
-                    }
-                    ReadResolutionPacket(pr, _comps[ci].Resolutions[r], l);
-                }
+                foreach (var (l, r, ci, p) in PacketOrder())
+                    ReadResolutionPacket(pr, _comps[ci].Resolutions[r], l, p);
 
                 // Tier-1 + dequant + inverse DWT, then scatter the tile into the image.
                 for (int ci = 0; ci < _comps.Length; ci++)

@@ -10,8 +10,8 @@ public sealed partial class TextAbsorber
 // Page-grid scan helpers: the show-x seat and the out-of-bounds test.
     private static void SeeShowX(GridScanState gs, PageGridState pg)
     {
-        // Rotated keeps the projection+cmTx frame (mirrors the runtime);
-        // upright tlmX is already the composed device X.
+        // Rotated keeps the projection+cmTx frame (mirrors the runtime); upright
+        // tlmX is already the composed device X.
         var x = gs.preRot ? gs.tlmX + gs.cmTx : gs.tlmX;
         // A SIDEWAYS page reads along the negative device axis, so its
         // whole grid frame is negative and is kept separately - the

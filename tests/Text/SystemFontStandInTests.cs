@@ -1,3 +1,4 @@
+using Aspose.Pdf.Tests.Helpers;
 using Aspose.Pdf.Text;
 using Xunit;
 
@@ -36,6 +37,32 @@ public class SystemFontStandInTests
         var wide = font.MeasureString("W", 10f);
         Assert.True(narrow < wide, $"{path}: 'i' {narrow} is not narrower than 'W' {wide}");
         Assert.True(wide < 10.0, $"{path}: 'W' {wide} is a whole em or more");
+    }
+
+    [Fact]
+    public void OpenedFont_WhoseOnlyCharacterMapIsAFormat12One_MeasuresEachGlyphByItsOwnAdvance()
+    {
+        // A face that maps its characters through a single format 12 table and no format 4 one,
+        // as macOS Geneva does: its advances are read through that table, not left at the
+        // default for every character.
+        var program = TrueTypeFaceBuilder.WithFormat12CmapOnly(new Dictionary<char, int> { ['i'] = 250, ['W'] = 900 });
+        var font = FontRepository.OpenFont(new MemoryStream(program), FontTypes.TTF);
+
+        Assert.Equal(2.5, font.MeasureString("i", 10f), 3);
+        Assert.Equal(9.0, font.MeasureString("W", 10f), 3);
+    }
+
+    [Fact]
+    public void OpenedFont_WhoseOnlyCharacterMapIsAMacintoshOne_MeasuresEachAsciiGlyphByItsOwnAdvance()
+    {
+        // A face that maps its characters through a single (1,0) table and no Unicode one: the printable
+        // ASCII codes, which Mac Roman shares with Unicode, are measured through that table, not at the
+        // default advance.
+        var program = TrueTypeFaceBuilder.WithMacintoshCmapOnly(new Dictionary<char, int> { ['i'] = 250, ['W'] = 900 });
+        var font = FontRepository.OpenFont(new MemoryStream(program), FontTypes.TTF);
+
+        Assert.Equal(2.5, font.MeasureString("i", 10f), 3);
+        Assert.Equal(9.0, font.MeasureString("W", 10f), 3);
     }
 
     /// <summary>Replaces the first letter of every occurrence of <paramref name="token"/> with Q:

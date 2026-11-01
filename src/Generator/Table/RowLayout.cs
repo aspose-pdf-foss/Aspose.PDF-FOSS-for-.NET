@@ -42,7 +42,6 @@ public partial class Table : BaseParagraph
                 rp.plan.ColToCell = colToCell;
             }
         }
-        rp.defaultPad = row.DefaultCellPadding ?? DefaultCellPadding;
         rp.maxLineHeight = 0;
         rp.tightForMax = 0;
         rp.maxVertPad = 0;
@@ -53,8 +52,8 @@ public partial class Table : BaseParagraph
         for (var col = 0; col < colWidths.Length; col++)
             if (!BuildRowPlanColumn(col, rp, row, colWidths, cellMap, gridToCell, effRowSpan, svgFillHeight)) break;
         foreach (var cellLines2 in rp.plan.CellLines)
-            foreach (var cl2 in cellLines2)
-                if (cl2.Leading > rp.plan.Leading) rp.plan.Leading = cl2.Leading;
+            foreach (var leading in cellLines2.Select(cl2 => cl2.Leading))
+                if (leading > rp.plan.Leading) rp.plan.Leading = leading;
         SettleRowLineHeight(rp);
         FoldRowCellTotals(rp);
         // UA cell boxes: the row's content already stacks on the CSS line-box grid, so
@@ -73,12 +72,11 @@ public partial class Table : BaseParagraph
         // A row holding a line that is a box of its own pitch (a picture under
         // CellPictureBoxesAreExact) stacks exactly too: netting the uniform estimate
         // off the exact stack would hand the box's height back as padding.
-        rp.plan.VertPadding = UaCellBoxes || CssRunBoxes || HonorCellTtfFaces || NestedTableRender
-            || rp.plan.CellLines.Exists(lines => lines.Exists(l => l.OwnPitch > 0))
-            ? rp.maxVertPad
-            : rp.plan.LineCount == 0 || rp.maxCellTotal <= 0
-            ? rp.maxVertPad
-            : Math.Max(0, rp.maxCellTotal - rp.rowContentH);
+        if (UaCellBoxes || CssRunBoxes || HonorCellTtfFaces || NestedTableRender
+            || rp.plan.CellLines.Exists(lines => lines.Exists(l => l.OwnPitch > 0)))
+            rp.plan.VertPadding = rp.maxVertPad;
+        else if (rp.plan.LineCount == 0 || rp.maxCellTotal <= 0) rp.plan.VertPadding = rp.maxVertPad;
+        else rp.plan.VertPadding = Math.Max(0, rp.maxCellTotal - rp.rowContentH);
         rp.plan.CellPadV = rp.maxVertPad;
         rp.plan.RuleBand = rp.maxBorderV;
         rp.plan.TopPad = rp.maxTopPad;
@@ -128,6 +126,16 @@ public partial class Table : BaseParagraph
         || (row?.DefaultCellTextState?.IsBold ?? false)
         || (DefaultCellTextState?.IsBold ?? false);
 
+    private bool DeclaredCellItalic(Cell? cell, Row? row) =>
+        (cell?.DefaultCellTextState?.IsItalic ?? false)
+        || (row?.DefaultCellTextState?.IsItalic ?? false)
+        || (DefaultCellTextState?.IsItalic ?? false);
+
+    private bool DeclaredCellUnderline(Cell? cell, Row? row) =>
+        (cell?.DefaultCellTextState?.IsUnderline ?? false)
+        || (row?.DefaultCellTextState?.IsUnderline ?? false)
+        || (DefaultCellTextState?.IsUnderline ?? false);
+
     /// <summary>The leading a CALLER declared for a cell paragraph, in points.
     /// A <see cref="Aspose.Pdf.Text.TextState.LineSpacing"/> an internal layout path
     /// assigned (the HTML block renderer's 1.2× pitch) is not the caller's and carries
@@ -143,7 +151,9 @@ public partial class Table : BaseParagraph
         if (paragraph is not Aspose.Pdf.Text.TextFragment tf || string.IsNullOrEmpty(tf.Text)) return 0;
         // Cell, row and table each hold a default state (a bare one declares no leading),
         // so the nearest one that DECLARES a leading wins.
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
         foreach (var st in new[] { cell.DefaultCellTextState, row.DefaultCellTextState, DefaultCellTextState })
+#pragma warning restore S3267
             if (st is { LineSpacingSynthetic: false, LineSpacing: > 0 }) return st.LineSpacing;
         return 0;
     }
@@ -158,9 +168,9 @@ public partial class Table : BaseParagraph
         if (string.IsNullOrEmpty(tf.Text)) return 0;
         var st = tf.TextState;
         if (!st.LineSpacingSynthetic && st.LineSpacing > 0) return st.LineSpacing;
-        foreach (var seg in tf.Segments)
-            if (!seg.TextState.LineSpacingSynthetic && seg.TextState.LineSpacing > 0)
-                return seg.TextState.LineSpacing;
+        foreach (var textState in tf.Segments.Select(seg => seg.TextState))
+            if (!textState.LineSpacingSynthetic && textState.LineSpacing > 0)
+                return textState.LineSpacing;
         return 0;
     }
 
@@ -219,9 +229,12 @@ public partial class Table : BaseParagraph
     /// box IS the line's own advance, so a cell keeps its own rhythm beside a
     /// taller neighbour instead of stretching to the row's uniform pitch; a line
     /// that declared none pitches at that uniform height as before.</summary>
-    private static double DeclaredLinePitch(CellLine line, double uniformLineHeight) =>
-        line.OwnPitch > 0 ? line.OwnPitch
-        : DeclaresLineBox(line) ? line.FontSize + line.Leading : uniformLineHeight;
+    private static double DeclaredLinePitch(CellLine line, double uniformLineHeight)
+    {
+        if (line.OwnPitch > 0) return line.OwnPitch;
+        if (DeclaresLineBox(line)) return line.FontSize + line.Leading;
+        return uniformLineHeight;
+    }
 
     /// <summary>How far below its line box's top a declared line box seats the
     /// baseline: half the box's surplus leading, then the ascent. Zero when the
@@ -260,6 +273,21 @@ public partial class Table : BaseParagraph
     /// own named font, else the cell's, row's or table's DefaultCellTextState font —
     /// or null when the effective face is the default Helvetica / a Core-14 name
     /// (those keep the Standard-14 path).</summary>
+    /// <summary>The Standard-14 face a generator-API cell text was given as a font OBJECT - its
+    /// own, or its cell's, row's or table's default state's (a page's default text state seeds the
+    /// table's) - in the weight and slant asked for. The installed-face path leaves a core face to
+    /// the plain path, which used to draw it in the table's Helvetica. Null for the default
+    /// Helvetica, any other face, a face given by name alone, or another dialect's table.</summary>
+    private string? AssignedStandard14Face(TextFragment tf, Cell cell, Row row, bool bold, bool italic)
+    {
+        if (!GeneratorDialect || XmlGeneratorModel) return null;
+        var font = ResolveGeneratorCellFont(tf, cell, row);
+        if (font is null || ReferenceEquals(font, Aspose.Pdf.Text.FontInfo.DefaultHelvetica)
+            || !Aspose.Pdf.Text.Standard14Fonts.IsCoreName(font.FontName)) return null;
+        var face = TextBuilder.MapToStandard14Public(new TextState { FontName = font.FontName, IsBold = bold, IsItalic = italic });
+        return face == "Helvetica" ? null : face;
+    }
+
     private Aspose.Pdf.Text.Font? ResolveGeneratorCellFont(TextFragment tf, Cell cell, Row row)
     {
         // A table's default state names the face of a cell when nothing nearer does (probed:
@@ -281,7 +309,7 @@ public partial class Table : BaseParagraph
     /// measure and for the draw, so a face named but not drawable measures on the default.</summary>
     private byte[]? GeneratorCellTtf(TextFragment tf, Cell cell, Row row, bool bold, bool italic)
     {
-        if (ResolveGeneratorCellFace(tf, cell, row) is not { } name) return null;
+        if (GeneratorCellDrawFace(tf, cell, row) is not { } name) return null;
         return CellFaceTtf(name, bold, italic)
             ?? (bold || italic ? null : tf.TextState.Font?.SourceFontData?.TtfData);
     }
@@ -303,6 +331,19 @@ public partial class Table : BaseParagraph
         if (!TextBuilder.IsStandard14Family(state.FontName)) return null;
         var face = TextBuilder.MapToStandard14Public(new TextState { FontName = state.FontName, IsBold = bold, IsItalic = italic });
         return face == "Helvetica" ? null : face;
+    }
+
+    /// <summary>The installed face a generator cell draws in: the face it resolved, else - for
+    /// a cell left to a Standard-14 face whose encoding cannot carry some character of its
+    /// text - the face that covers the text; written in the core face that text would turn
+    /// into '?'. Null when the cell keeps the plain Standard-14 path.</summary>
+    private string? GeneratorCellDrawFace(TextFragment tf, Cell cell, Row row)
+    {
+        if (ResolveGeneratorCellFace(tf, cell, row) is { } face) return face;
+        var font = ResolveGeneratorCellFont(tf, cell, row);
+        var core = font is null || ReferenceEquals(font, Aspose.Pdf.Text.FontInfo.DefaultHelvetica)
+            ? TextBuilder.MapToStandard14Public(tf.TextState) : font.FontName;
+        return Aspose.Pdf.Text.FontRepository.SubstituteForUnencodableStandard14Text(tf.Text, font, core)?.FontName;
     }
 
     private string? ResolveGeneratorCellFace(TextFragment tf, Cell cell, Row row)
@@ -396,7 +437,8 @@ public partial class Table : BaseParagraph
         if (token.Length == 0) return runs;
         var start = 0;
         var cls = -1;
-        for (var i = 0; i < token.Length; i++)
+        var i = 0;
+        while (i < token.Length)
         {
             int cp = token[i];
             var len = 1;
@@ -412,7 +454,7 @@ public partial class Table : BaseParagraph
                 start = i;
             }
             if (c != 0) cls = c;
-            i += len - 1;
+            i += len;
         }
         runs.Add(token.Substring(start));
         return runs;
@@ -464,7 +506,8 @@ public partial class Table : BaseParagraph
     private static bool NeedsGlyphFallback(string text, byte[]? ttf)
     {
         var gp = ttf is null ? null : GetInlineGlyphParser(ttf);
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
             int cp = text[i];
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
@@ -472,9 +515,10 @@ public partial class Table : BaseParagraph
                 cp = char.ConvertToUtf32(text[i], text[i + 1]);
                 i++;
             }
-            if (cp < 0x80 || char.IsControl((char)Math.Min(cp, 0xFFFF))) continue;
-            if (gp is null) { if (cp > 0xFF) return true; continue; }
+            if (cp < 0x80 || char.IsControl((char)Math.Min(cp, 0xFFFF))) { i++; continue; }
+            if (gp is null) { if (cp > 0xFF) { return true; } i++; continue; }
             if (!gp.CMap.TryGetValue(cp, out var g) || g <= 0) return true;
+            i++;
         }
         return false;
     }
@@ -488,7 +532,7 @@ public partial class Table : BaseParagraph
     {
         if (!NeedsGlyphFallback(token, segTtf)) return (segTtf, segName);
         var probe = new SortedSet<char>();
-        foreach (var c in token) if (c > 0x7F) probe.Add(c);
+        foreach (var c in token.Where(c => c > 0x7F)) probe.Add(c);
         var key = (font?.FontName ?? string.Empty) + "|" + string.Concat(probe);
         if (cache.TryGetValue(key, out var hit)) return hit;
         (byte[]? ttf, string? name) result = (segTtf, segName);
@@ -497,38 +541,25 @@ public partial class Table : BaseParagraph
             var sub = Aspose.Pdf.Text.FontRepository.SubstituteForMissingGlyphs(token, font);
             if (sub?.TtfData is { Length: > 0 } subTtf) result = (subTtf, sub.FontName);
         }
-        catch { }
+        catch { /* a font that cannot be found or read leaves the fallback in place */ }
         cache[key] = result;
         return result;
     }
 
-    /// <summary>Resolve an image's natural size in points for in-cell layout. On Windows
-    /// the platform decoder is used so images without explicit density (JFIF units=0)
-    /// resolve at the 96-DPI default the generator assumes; elsewhere it falls back to the
-    /// header parser (which defaults such images to 72 DPI).</summary>
+    /// <summary>Resolve an image's natural size in points for in-cell layout: its pixels at the
+    /// resolution the file states, 96 DPI where it states none (JFIF units=0, no pHYs) - the
+    /// size the generator assumes, read the same on every OS. Only the Windows codec read it so;
+    /// elsewhere the header parser took an unstated resolution for 72 DPI, a third larger.
+    /// Formats the header readers cannot size go to that parser.</summary>
     private static (double widthPt, double heightPt)? TryGetCellImageSizePt(byte[] data)
     {
-        double widthPt = default;
-        double heightPt = default;
-        widthPt = 0; heightPt = 0;
-        if (Compat.IsWindows())
-        {
-            try
-            {
-#pragma warning disable CA1416
-                using var ms = new MemoryStream(data);
-                using var img = System.Drawing.Image.FromStream(ms, false, false);
-                var dpiX = img.HorizontalResolution > 0 ? img.HorizontalResolution : 96;
-                var dpiY = img.VerticalResolution > 0 ? img.VerticalResolution : 96;
-                widthPt = img.Width * 72.0 / dpiX;
-                heightPt = img.Height * 72.0 / dpiY;
-                if (widthPt > 0 && heightPt > 0) return (widthPt, heightPt);
-#pragma warning restore CA1416
-            }
-            catch { /* fall through to the header parser */ }
-        }
-        return Document.TryGetImageNaturalSizePt(data);
+        var (pixelsWide, pixelsHigh) = ImageDimensions.Read(data);
+        if (pixelsWide <= 0 || pixelsHigh <= 0) return Document.TryGetImageNaturalSizePt(data);
+        var (dpiX, dpiY) = ImageDimensions.Resolution(data);
+        return (pixelsWide * PointsPerInch / dpiX, pixelsHigh * PointsPerInch / dpiY);
     }
+
+    private const double PointsPerInch = 72.0;
 
     /// <summary>Read an <see cref="Image"/> paragraph's bytes from its stream or file,
     /// rewinding a seekable stream so a second build pass still sees the data.</summary>
@@ -558,9 +589,9 @@ public partial class Table : BaseParagraph
         {
             var head = System.Text.Encoding.UTF8.GetString(
                 svgData, 0, System.Math.Min(2048, svgData.Length));
-            var m = System.Text.RegularExpressions.Regex.Match(head, "<svg\\b[^>]*>");
+            var m = SafeRegex.Match(head, "<svg\\b[^>]*>");
             if (!m.Success) return false;
-            return !System.Text.RegularExpressions.Regex.IsMatch(
+            return !SafeRegex.IsMatch(
                 m.Value, "\\s(width|height)\\s*=");
         }
         catch
@@ -578,7 +609,10 @@ public partial class Table : BaseParagraph
         if (data.Length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;
         while (i < data.Length && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
         var head = System.Text.Encoding.ASCII.GetString(data, i, System.Math.Min(512, data.Length - i));
-        return head.StartsWith("<?xml") ? head.Contains("<svg") : head.StartsWith("<svg");
+        // Ordinal: a culture-aware match skips NUL and other ignorable characters on ICU runtimes.
+        return head.StartsWith("<?xml", StringComparison.Ordinal)
+            ? head.Contains("<svg")
+            : head.StartsWith("<svg", StringComparison.Ordinal);
     }
 
     /// <summary>Pages of this table already emitted — the offset from the table's start
@@ -590,11 +624,13 @@ public partial class Table : BaseParagraph
     /// header/footer band, and they resolve PER PAGE: measured, the
     /// page-2 rows of an 80-row table read "row 70 page 2 of 2". The swap is undone
     /// before returning because the same <see cref="CellLine"/> objects are re-emitted
-    /// for the pages that follow.</summary>
+    /// for the pages that follow. The count is the document's once every page exists,
+    /// which the rows are written before: a line naming it is written with the count of
+    /// the moment and rewritten by the document when the flow has finished its pages.</summary>
     private List<(CellLine Line, string Original)>? SubstitutePageMacros(List<RowSlice> slices)
     {
         var doc = _buildPage?.OwnerDocument;
-        if (doc is null) return null;
+        if (doc is null || !_buildPage!.ProcessSpecialSymbols) return null;
         var startNumber = doc.Pages.IndexOf(_buildPage);
         if (startNumber <= 0) return null;
         var pageNumber = startNumber + _emittedPages;
@@ -604,10 +640,11 @@ public partial class Table : BaseParagraph
                 foreach (var cl in cellLines)
                 {
                     if (cl.Text is not { Length: > 0 } t) continue;
-                    if (t.IndexOf("$p", StringComparison.Ordinal) < 0
-                        && t.IndexOf("$P", StringComparison.Ordinal) < 0) continue;
+                    var namesCount = t.IndexOf("$P", StringComparison.Ordinal) >= 0;
+                    if (!namesCount && t.IndexOf("$p", StringComparison.Ordinal) < 0) continue;
                     (swaps ??= new()).Add((cl, t));
                     cl.Text = HeaderFooter.ApplyPageLabelMacros(t, doc, pageNumber);
+                    if (namesCount && !_measureOnly) doc.DeferPageCountLine(pageNumber, t, cl.Text);
                 }
         return swaps;
     }
@@ -625,13 +662,12 @@ public partial class Table : BaseParagraph
         List<(byte[] data, Rectangle rect)>? imageSink = null,
         List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>? optionSink = null,
         List<byte[]>? graphSink = null,
-        List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink = null,
+        List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>? checkboxSink = null,
         Page? page = null,
         List<(Note note, double x, double baseline, double size)>? footnoteSink = null,
         List<(ReservedBlock block, ReservedPart part, Rectangle rect)>? blockSink = null)
     {
         var row = slice.Plan.Row;
-        var defaultPad = row.DefaultCellPadding ?? DefaultCellPadding;
         // (a spaced grid's first box stands one gap inside its edge)
         var cellX = tableX + CellSpacingH;
 
@@ -666,7 +702,6 @@ public partial class Table : BaseParagraph
             builder.Fill();
         }
 
-        var gridToCell = slice.Plan.GridToCell;
         for (var col = 0; col < colWidths.Length; col++)
             cellX = RenderRowSliceColumn(col, cellX, builder, slice, colWidths, fontName, cellMap,
                 links, imageSink, optionSink, graphSink, checkboxSink, page, footnoteSink, blockSink);

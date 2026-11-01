@@ -15,7 +15,7 @@ internal static partial class HtmlToPdfConverter
         var pv = new PrintInvoiceState();
         pv.html = html;
         pv.options = options;
-        pv.bodyPctM = Regex.Match(pv.html,
+        pv.bodyPctM = SafeRegex.Match(pv.html,
             @"body\s*\{[^}]*?width\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase);
         if (!pv.bodyPctM.Success) return null;
         if (!double.TryParse(pv.bodyPctM.Groups[1].Value, System.Globalization.NumberStyles.Float,
@@ -25,7 +25,7 @@ internal static partial class HtmlToPdfConverter
         pv.css = ParseStyleSheet(pv.html);
         try
         {
-            pv.dom = ParseDom(Regex.Replace(Regex.Replace(pv.html,
+            pv.dom = ParseDom(SafeRegex.Replace(SafeRegex.Replace(pv.html,
                 @"<!--[\s\S]*?-->", m => new string(' ', m.Length)),
                 @"<(script|style|head)[^>]*>[\s\S]*?</\1>",
                 m => new string(' ', m.Length), RegexOptions.IgnoreCase));
@@ -71,7 +71,7 @@ internal static partial class HtmlToPdfConverter
         // Trailing dashed hr and the QR bitmap, both anchored on the trailer top.
         if (pv.trailerTop < 0) pv.trailerTop = pv.yTop;
         Dash(pv, pv.x0, pv.bodyR, pv.trailerTop + PrintHrFromTrailerPt);
-        pv.qrM = Regex.Match(pv.html, @"<img[^>]*src\s*=\s*[""'](data:image/[^""']+)[""']",
+        pv.qrM = SafeRegex.Match(pv.html, @"<img[^>]*src\s*=\s*[""'](data:image/[^""']+)[""']",
             RegexOptions.IgnoreCase);
         if (pv.qrM.Success && LoadConverterImage(pv.qrM.Groups[1].Value, pv.options) is { } qrBytes)
         {
@@ -82,7 +82,7 @@ internal static partial class HtmlToPdfConverter
                 pv.page.AddImage(qrBytes, new Rectangle(
                     qx1 - PrintQrSizePt, 842.0 - zTop - PrintQrSizePt, qx1, 842.0 - zTop));
             }
-            catch { }
+            catch { /* an image the page cannot take is left out - the layout carries on */ }
         }
         return pv.doc;
     }
@@ -104,10 +104,12 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>The face the float flow measures a block's lines with — the family it
     /// resolved, in the style the block carries.</summary>
-    private static string FloatFlowMeasureFace(Block block) =>
-        block.FontRes == "F2" || block.EmBold ? block.FontFamily + " Bold"
-        : block.FontRes == "F3" || block.EmItalic ? block.FontFamily + " Italic"
-        : block.FontFamily!;
+    private static string FloatFlowMeasureFace(Block block)
+    {
+        if (block.FontRes == "F2" || block.EmBold) return block.FontFamily + " Bold";
+        if (block.FontRes == "F3" || block.EmItalic) return block.FontFamily + " Italic";
+        return block.FontFamily!;
+    }
 
     // Print-invoice sheet constants — every value measured on the expected
     // render of the @media-print invoice fixture (page 931.25 × 842):

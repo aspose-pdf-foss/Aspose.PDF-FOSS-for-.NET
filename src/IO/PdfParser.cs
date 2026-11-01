@@ -123,7 +123,7 @@ internal sealed class PdfParser
             var token = _lexer.NextToken();
             if (token.Kind == TokenKind.ArrayEnd || token.Kind == TokenKind.Eof)
                 break;
-            array.Add(ParseObjectFromToken(token));
+            array.AddRead(ParseObjectFromToken(token));
         }
         return array;
     }
@@ -151,7 +151,7 @@ internal sealed class PdfParser
                     $"Expected name key in dictionary, got {keyToken.Kind} at {keyToken.Position}");
 
             var value = ParseObject();
-            dict.Set(keyToken.StringValue!, value);
+            dict.SetRead(keyToken.StringValue!, value);
         }
 
         return dict;

@@ -315,9 +315,16 @@ element.ChangeParentElement(newParent, validate: true);
 
 ### Remove an element
 
+`Remove()` takes an element out of the tree together with its children;
+`RemoveAndMoveItsChildObjectsToItsParent` takes out the element alone and keeps
+its children in the tree under its former parent.
+
 ```csharp
 // Detach the element and re-parent its children under its former parent
 element.RemoveAndMoveItsChildObjectsToItsParent(validate: true);
+
+// Or take the element out together with its children
+otherElement.Remove();
 ```
 
 ### Adjusting element positioning
@@ -326,9 +333,11 @@ element.RemoveAndMoveItsChildObjectsToItsParent(validate: true);
 its members, `Margin`, `IsInNewPage` and `IsInLineParagraph` are read when the
 authored tree is laid out on save (left/right margins indent the block,
 top/bottom add space around it, `IsInNewPage` starts a new page,
-`IsInLineParagraph` flows the element inline). `HorizontalAlignment`,
-`VerticalAlignment`, `IsFirstParagraphInColumn` and `IsKeptWithNext` are stored
-on the settings object but not applied.
+`IsInLineParagraph` flows the element inline). `HorizontalAlignment` is applied
+too: a paragraph's lines are centred, right-aligned or justified in its column, and
+a header, link or figure is centred or right-aligned as one box; tables keep their
+left edge. `VerticalAlignment`, `IsFirstParagraphInColumn` and `IsKeptWithNext` are
+stored on the settings object but not applied.
 
 ```csharp
 using Aspose.Pdf;

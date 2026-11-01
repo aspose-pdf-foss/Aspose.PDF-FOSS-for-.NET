@@ -60,7 +60,7 @@ public partial class TextFragment
         _segments.Clear();
     }
 
-    private int DeleteReflowSource(Page page, string oldText)
+    private void DeleteReflowSource(Page page, string oldText)
     {
         var deleted = 0;
         // Counted PER SEGMENT, not summed: one call can remove two runs when the segment's
@@ -82,9 +82,7 @@ public partial class TextFragment
             var r = new TextReplacer();
             if (_position is { } pos) r.TargetY = pos.YIndent;
             r.ReplaceWithCrossOperator(page, oldText, string.Empty);
-            deleted += r.ReplacementCount;
         }
-        return deleted;
     }
 
     /// <summary>Widen every clip rectangle (<c>re</c> followed by <c>W</c>/<c>W*</c>)

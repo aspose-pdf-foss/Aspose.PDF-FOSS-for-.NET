@@ -13,7 +13,7 @@ internal static partial class HtmlToPdfConverter
         if (RenderFormRules(cv, block) is { } renderFormRulesResult) return renderFormRulesResult;
         if (RenderReportRules(cv, rb, block) is { } renderReportRulesResult) return renderReportRulesResult;
         if (SkipEmptyBlock(cv, rb, block) is { } skipEmptyBlockResult) return skipEmptyBlockResult;
-        ApplyBlockTopDrop(cv, rb, options, inlineSvgs, block);
+        ApplyBlockTopDrop(cv, rb, block);
         return true;
     }
 }

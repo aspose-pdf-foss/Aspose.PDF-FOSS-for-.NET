@@ -57,16 +57,18 @@ public sealed partial class Page
         ul.ulDirX = frag.TextDirX;
         ul.ulDirY = frag.TextDirY;
         ul.ulDirLen = Math.Sqrt(ul.ulDirX * ul.ulDirX + ul.ulDirY * ul.ulDirY);
-        if (ul.ulDirLen > 1e-6 && Math.Abs(ul.ulDirY / ul.ulDirLen) > 0.01)
+        // A run turned about (180 degrees) has no vertical direction, but its rule lies along it all the same.
+        if (ul.ulDirLen > 1e-6 && (Math.Abs(ul.ulDirY / ul.ulDirLen) > 0.01 || ul.ulDirX < 0))
         {
             double ux = ul.ulDirX / ul.ulDirLen, uy = ul.ulDirY / ul.ulDirLen;
             double rw;
             try { rw = frag.TextState.Font?.MeasureString(frag.Text, ul.fs) ?? frag.Text.Length * ul.fs * 0.5; }
             catch { rw = frag.Text.Length * ul.fs * 0.5; }
             var fgr = frag.TextState.ForegroundColor;
-            ul.builder.SaveState();
+            // Laid along the run in the page's space as the text was read: the run's own matrix is in that place.
+            SaveDecorationState(ul.builder, RuleMatrix(ul, frag.PositionFrame, TransformsSince(frag.PositionFrame), inRunSpace: false));
             ul.builder.SetFillColor(fgr?.R / 255.0 ?? 0, fgr?.G / 255.0 ?? 0, fgr?.B / 255.0 ?? 0);
-            ul.builder.SetMatrix(ux, uy, -uy, ux, ul.fragPos.XIndent, ul.fragPos.YIndent);
+            SetAlongRun(ul.builder, frag, ux, uy, ul.fragPos.XIndent, ul.fragPos.YIndent);
             ul.builder.Rectangle(0, -ul.ulOffset, rw, ul.ulThick);
             ul.builder.Fill();
             ul.builder.RestoreState();
@@ -95,11 +97,17 @@ public sealed partial class Page
         ul.g = ul.fg?.G / 255.0 ?? 0;
         ul.b = ul.fg?.B / 255.0 ?? 0;
 
-        ul.builder.SaveState();
+        // Written in the run's space, the rule is drawn through the run's matrix (see AppendedDecorationMatrix).
+        SaveDecorationState(ul.builder, RuleMatrix(ul, frag.PositionFrame, FromRunSpace(frag), inRunSpace: true));
         ul.builder.SetFillColor(ul.r, ul.g, ul.b);
         ul.builder.Rectangle(ul.rectX, ul.rectY, ul.w, ul.underlineH);
         ul.builder.Fill();
         ul.builder.RestoreState();
         return true;
     }
+
+    /// <summary>The matrix a rule of the stream being built opens with: appended to the content (see
+    /// AppendedDecorationMatrix), or in a stream its caller seats, drawn under the identity.</summary>
+    private Matrix? RuleMatrix(UnderlineFlushState ul, TextFrame? frame, Matrix? desired, bool inRunSpace)
+        => ul.appended ? AppendedDecorationMatrix(frame, desired, inRunSpace) : DecorationMatrix(frame, desired, null);
 }

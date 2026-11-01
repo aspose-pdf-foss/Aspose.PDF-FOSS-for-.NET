@@ -9,7 +9,7 @@ internal static partial class HtmlToPdfConverter
     /// to <paramref name="s"/> for an element with tag <paramref name="tag"/> and the
     /// given attributes. Type rule first, then each class (left-to-right) — matching the
     /// simple cascade the converter needs for font-family / size.</summary>
-    private static void ApplyCssRules(IReadOnlyDictionary<string, Dictionary<string, string>>? css, string tag, Dictionary<string, string>? attrs, BlockStyle s, bool metricLayout = false, bool coverStyles = false, bool floatFlow = false)
+    private static void ApplyCssRules(IReadOnlyDictionary<string, Dictionary<string, string>>? css, string tag, Dictionary<string, string>? attrs, BlockStyle s, bool metricLayout = false, bool coverStyles = false, bool floatFlow = false, IReadOnlyList<CssElem>? ancestors = null, IReadOnlyList<CssChainRule>? chainRules = null)
     {
         var cq = new CssRulesApplyState();
         cq.css = css;
@@ -18,31 +18,83 @@ internal static partial class HtmlToPdfConverter
         cq.s = s;
         cq.metricLayout = metricLayout;
         cq.coverStyles = coverStyles;
+        cq.cssBoxBody = css is Dictionary<string, Dictionary<string, string>> boxCss && BodyBoxInsetsPt(boxCss) is not null;
         cq.floatFlow = floatFlow;
-        if (cq.css is null || cq.css.Count == 0) return;
+        // (a sheet whose only rules are long chains leaves the flat map empty, and the chains still apply)
+        if (cq.css is null || (cq.css.Count == 0 && chainRules is null)) return;
         cq.tagLower = cq.tag.ToLowerInvariant();
         ApplyCssSelector(cq, cq.tagLower);
-        if (cq.attrs is not null && cq.attrs.TryGetValue("class", out var cls) && !string.IsNullOrWhiteSpace(cls))
-            foreach (var c in cls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            {
-                // Styled-article dialect: the responsive GRID classes model the
-                // SCREEN column system — rows' negative gutters cancel column
-                // paddings exactly, and the print layout nets the
-                // whole family to zero. Skip their box rules rather than
-                // accumulate one side of a pair (content sits at x=90).
-                if (cq.s.ArticleRhythm && Regex.IsMatch(c,
-                        @"^(container(-\w+)?|row|col(-\w+)*|split|[mp][slxeytb]?-(\w+-)?\d)$",
-                        RegexOptions.IgnoreCase))
-                    continue;
-                ApplyCssSelector(cq, "." + c);
-                ApplyCssSelector(cq, cq.tagLower + "." + c); // compound "tag.class" (e.g. h1.page)
-            }
+        var classes = cq.attrs is not null && cq.attrs.TryGetValue("class", out var cls) && !string.IsNullOrWhiteSpace(cls)
+            // (a class attribute is a list on ANY whitespace: the tree view writes its tag class with a line break in it)
+            ? cls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries) : Array.Empty<string>();
+        foreach (var c in classes)
+        {
+            // Styled-article dialect: the responsive GRID classes model the
+            // SCREEN column system — rows' negative gutters cancel column
+            // paddings exactly, and the print layout nets the
+            // whole family to zero. Skip their box rules rather than
+            // accumulate one side of a pair (content sits at x=90).
+            if (cq.s.ArticleRhythm && SafeRegex.IsMatch(c,
+                    @"^(container(-\w+)?|row|col(-\w+)*|split|[mp][slxeytb]?-(\w+-)?\d)$",
+                    RegexOptions.IgnoreCase))
+                continue;
+            ApplyCssSelector(cq, "." + c);
+            ApplyCssSelector(cq, cq.tagLower + "." + c); // compound "tag.class" (e.g. h1.page)
+        }
+        // …then the keys naming several of its classes at once (`.pg.on`), which outrank each one alone.
+        foreach (var (key, _) in MatchedCompoundKeys(cq.css, cq.tagLower, classes)) ApplyCssSelector(cq, key);
+        // …then the two-part descendant rules the open ancestors satisfy, outer to inner (the flat
+        // map keys them "ancestor descendant"): each outranks the bare tag and class rules above, as
+        // a descendant selector carries both its parts' specificity.
+        if (ancestors is not null) ApplyAncestorCssRules(cq, ancestors, classes);
+        var id = cq.attrs is not null && cq.attrs.TryGetValue("id", out var idAttr)
+            && !string.IsNullOrWhiteSpace(idAttr) ? idAttr.Trim() : null;
+        // …and the longer chains the flat map cannot key (three parts and more, a child step), which
+        // outrank the two-part rules - those an id ranks are applied after the element's own id rule.
+        // (the open blocks end with the element itself: the block is pushed before its rules apply)
+        var chained = ancestors is not null && chainRules is not null ? MatchedChainRules(chainRules, ancestors) : null;
+        if (chained is not null)
+            foreach (var r in chained.Where(r => r.Spec < IdSpecificity)) ApplyRuleDeclarations(cq, r.Decls);
         // An id is at least as specific as any class — an "#elem { … }" rule
         // resolves for the element that carries the id, through the same
         // restricted property subset every other selector form gets.
-        if (cq.attrs is not null && cq.attrs.TryGetValue("id", out var idAttr)
-            && !string.IsNullOrWhiteSpace(idAttr))
-            ApplyCssSelector(cq, "#" + idAttr.Trim());
+        if (id is not null) ApplyCssSelector(cq, "#" + id);
+        if (chained is not null)
+            foreach (var r in chained.Where(r => r.Spec >= IdSpecificity)) ApplyRuleDeclarations(cq, r.Decls);
+    }
+
+    /// <summary>The chain rules the chain's last element satisfies through the elements above it, lower
+    /// specificity first and source order breaking ties; null when none does. A descendant CELL rule is
+    /// the flat map's own two-part form, applied above already.</summary>
+    private static List<CssChainRule>? MatchedChainRules(IReadOnlyList<CssChainRule> rules, IReadOnlyList<CssElem> chain)
+    {
+        var hit = rules.Where(r => !r.CellRule && MatchChainAt(r.Segs, r.Segs.Count - 1, chain, chain.Count - 1)).ToList();
+        if (hit.Count == 0) return null;
+        hit.Sort((a, b) => a.Spec != b.Spec ? a.Spec.CompareTo(b.Spec) : a.Order.CompareTo(b.Order));
+        return hit;
+    }
+
+    /// <summary>The flat map's two-part descendant rules for the element under its open ancestors: each
+    /// ancestor's tag, classes and id hook a rule on the element's tag, on each of its classes and on each
+    /// tag.class compound of them.</summary>
+    private static void ApplyAncestorCssRules(CssRulesApplyState cq, IReadOnlyList<CssElem> ancestors, string[] classes)
+    {
+        foreach (var anc in ancestors)
+        {
+            var hooks = new List<string> { anc.Tag };
+            if (anc.Classes is not null) foreach (var ac in anc.Classes) hooks.Add("." + ac);
+            if (anc.Id is { Length: > 0 }) hooks.Add("#" + anc.Id);
+            foreach (var hook in hooks)
+            {
+                ApplyCssSelector(cq, hook + " " + cq.tagLower);
+                foreach (var c in classes)
+                {
+                    ApplyCssSelector(cq, hook + " ." + c);
+                    // (the tag-compound tail, `.report p.TableHead`, outranks the bare class tail)
+                    ApplyCssSelector(cq, hook + " " + cq.tagLower + "." + c);
+                }
+            }
+        }
     }
 
     /// <summary>Parse a tiny subset of CSS from the document's &lt;style&gt; blocks into
@@ -57,9 +109,9 @@ internal static partial class HtmlToPdfConverter
         IReadOnlyDictionary<string, Dictionary<string, string>> css)
     {
         static bool PinsFixed(string? decl) =>
-            decl is not null && Regex.IsMatch(decl, @"position\s*:\s*fixed", RegexOptions.IgnoreCase);
+            decl is not null && SafeRegex.IsMatch(decl, @"position\s*:\s*fixed", RegexOptions.IgnoreCase);
 
-        var styleM = Regex.Match(openTagAttrs, @"style\s*=\s*(['""])(?<v>.*?)\1", RegexOptions.IgnoreCase);
+        var styleM = SafeRegex.Match(openTagAttrs, @"style\s*=\s*(['""])(?<v>.*?)\1", RegexOptions.IgnoreCase);
         if (styleM.Success && PinsFixed(styleM.Groups["v"].Value)) return true;
 
         bool RulePinsFixed(string key) =>
@@ -67,10 +119,8 @@ internal static partial class HtmlToPdfConverter
             && p.Trim().Equals("fixed", StringComparison.OrdinalIgnoreCase);
         if (RulePinsFixed(tagName)) return true;
 
-        var classM = Regex.Match(openTagAttrs, @"class\s*=\s*(['""])(?<v>.*?)\1", RegexOptions.IgnoreCase);
-        if (classM.Success)
-            foreach (var c in classM.Groups["v"].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-                if (RulePinsFixed("." + c)) return true;
+        var classM = SafeRegex.Match(openTagAttrs, @"class\s*=\s*(['""])(?<v>.*?)\1", RegexOptions.IgnoreCase);
+        if (classM.Success && classM.Groups["v"].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Any(c => RulePinsFixed("." + c))) return true;
         return false;
     }
 
@@ -81,7 +131,7 @@ internal static partial class HtmlToPdfConverter
     private static string ResolveCssVars(string value, Dictionary<string, string> vars)
     {
         if (value.IndexOf("var(", StringComparison.OrdinalIgnoreCase) < 0) return value;
-        return Regex.Replace(value, @"var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*?)\s*)?\)",
+        return SafeRegex.Replace(value, @"var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*?)\s*)?\)",
             m =>
             {
                 if (vars.TryGetValue(m.Groups[1].Value, out var v) && v.Length > 0) return v;
@@ -94,7 +144,7 @@ internal static partial class HtmlToPdfConverter
     /// selector as <c>&lt;!-- span.cls_007</c> - the calibrated flows were measured that way. The
     /// absolutely positioned page reads its class rules from a document with the markers removed.</summary>
     private static string StripStyleCommentMarkers(string html)
-        => Regex.Replace(html, @"(<style\b[^>]*>)([\s\S]*?)(</style>)",
+        => SafeRegex.Replace(html, @"(<style\b[^>]*>)([\s\S]*?)(</style>)",
             m => m.Groups[1].Value + m.Groups[2].Value.Replace("<!--", " ").Replace("-->", " ") + m.Groups[3].Value,
             RegexOptions.IgnoreCase);
 
@@ -155,7 +205,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The first class the body tag carries, or null.</summary>
     private static string? BodyClassName(string html)
     {
-        var m = Regex.Match(html, @"<body\b[^>]*\bclass\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(html, @"<body\b[^>]*\bclass\s*=\s*[""']?([\w-]+)", RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value : null;
     }
 
@@ -167,7 +217,7 @@ internal static partial class HtmlToPdfConverter
     /// `.ev-print > div.fields table.text-content tr > td` the text-content grid's cells alone).</summary>
     private static string? FlattenBodyClassChain(string key, string bodyClass, string html)
     {
-        var parts = Regex.Split(key.Trim(), @"\s*>\s*|\s+");
+        var parts = SafeRegex.Split(key.Trim(), @"\s*>\s*|\s+");
         if (parts.Length < 2 || !parts[0].Equals("." + bodyClass, StringComparison.OrdinalIgnoreCase)) return null;
         var kept = new List<string>();
         for (var i = 1; i < parts.Length - 1; i++)
@@ -175,8 +225,8 @@ internal static partial class HtmlToPdfConverter
             var p = parts[i];
             if (p.Equals("div", StringComparison.OrdinalIgnoreCase)
                 || p.ToLowerInvariant() is "tbody" or "thead" or "tfoot" or "tr") continue;
-            if (Regex.Match(p, @"^div\.([\w-]+)$", RegexOptions.IgnoreCase) is { Success: true } wrap
-                && Regex.Matches(html, @"class\s*=\s*[""'][^""']*\b" + Regex.Escape(wrap.Groups[1].Value) + @"\b", RegexOptions.IgnoreCase).Count == 1)
+            if (SafeRegex.Match(p, @"^div\.([\w-]+)$", RegexOptions.IgnoreCase) is { Success: true } wrap
+                && SafeRegex.Matches(html, @"class\s*=\s*[""'][^""']*\b" + Regex.Escape(wrap.Groups[1].Value) + @"\b", RegexOptions.IgnoreCase).Count == 1)
                 continue;
             kept.Add(p);
         }
@@ -184,23 +234,70 @@ internal static partial class HtmlToPdfConverter
         return kept.Count > 2 ? null : string.Join(" ", kept);
     }
 
+    /// <summary>The properties whose winner the hidden-element check resolves by the cascade: specificity, then source order.</summary>
+    private static readonly string[] VisibilityProperties = { "display", "visibility" };
+
+    /// <summary>Per parsed sheet, the source order of the last rule declaring a visibility property, under
+    /// "property selector": the flat map keeps a selector's last value but not where it stood, and an element
+    /// matched by several class rules of one specificity takes the last declared one.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Dictionary<string, Dictionary<string, string>>, Dictionary<string, int>> CascadeOrders = new();
+
+    /// <summary>Per parsed sheet of a standards-mode document, the visibility declarations under each selector as
+    /// the sheet spells it: class and id names match case-sensitively there, where the flat map merges selectors
+    /// that differ in case only (.a2e and .a2E are two classes).</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Dictionary<string, Dictionary<string, string>>, Dictionary<string, Dictionary<string, string>>> SpelledVisibility = new();
+
+    private static readonly List<(string Key, string? Tag, string[] Classes, int Spec)> NoCompoundKeys = new();
+
+    /// <summary>Per parsed sheet, its keys that name two classes or more on one element.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyDictionary<string, Dictionary<string, string>>, List<(string Key, string? Tag, string[] Classes, int Spec)>> CompoundKeysBySheet = new();
+
+    /// <summary>The sheet's compound class keys (`.pg.on`, `div.cf-page.active`) with their specificity: the
+    /// class lookups key one class each, so these are matched against the element's whole class list. Read once
+    /// per sheet.</summary>
+    private static List<(string Key, string? Tag, string[] Classes, int Spec)> CompoundClassKeys(IReadOnlyDictionary<string, Dictionary<string, string>> css)
+        => CompoundKeysBySheet.GetValue(css, sheet =>
+        {
+            var keys = new List<(string Key, string? Tag, string[] Classes, int Spec)>();
+            foreach (var key in sheet.Keys)
+            {
+                var m = SafeRegex.Match(key, @"^([a-zA-Z][\w-]*)?((?:\.[\w-]+){2,})$");
+                if (!m.Success) continue;
+                var classes = m.Groups[2].Value.Split('.', StringSplitOptions.RemoveEmptyEntries);
+                var tag = m.Groups[1].Length > 0 ? m.Groups[1].Value.ToLowerInvariant() : null;
+                keys.Add((key, tag, classes, classes.Length * ClassSpecificity + (tag is null ? 0 : TagSpecificity)));
+            }
+            return keys.Count == 0 ? NoCompoundKeys : keys;
+        });
+
+    /// <summary>The sheet's compound class keys the element satisfies - its tag where the key names one, and
+    /// every class the key names - with their specificity.</summary>
+    private static IEnumerable<(string Key, int Spec)> MatchedCompoundKeys(IReadOnlyDictionary<string, Dictionary<string, string>> css, string tagLower, string[] classes)
+        => CompoundClassKeys(css)
+            .Where(k => (k.Tag is null || k.Tag == tagLower) && k.Classes.All(c => classes.Contains(c, StringComparer.OrdinalIgnoreCase)))
+            .Select(k => (k.Key, k.Spec));
+
     internal static Dictionary<string, Dictionary<string, string>> ParseStyleSheet(string html)
     {
         var result = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        var cascade = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var spelled = ReadsInQuirksMode(html) ? null : new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
+        KeptSheetRules? kept = null;
+        var order = 0;
         // Phase 1: gather all CSS custom properties (--name: value) across every <style>
         // block — including :root and any rule — into a document-global map so var()
         // references resolve regardless of the selector that declared them.
         var vars = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (Match block in Regex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
+        foreach (Match block in SafeRegex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
         {
-            var cssText = Regex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", "");
-            foreach (Match cv in Regex.Matches(cssText, @"(--[\w-]+)\s*:\s*([^;}]+)"))
-                vars[cv.Groups[1].Value] = cv.Groups[2].Value.Trim();
+            var cssText = SafeRegex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", "");
+            foreach (var groups in SafeRegex.Matches(cssText, @"(--[\w-]+)\s*:\s*([^;}]+)").Select(cv => cv.Groups))
+                vars[groups[1].Value] = groups[2].Value.Trim();
         }
         var bodyClass = BodyClassName(html);
-        foreach (Match block in Regex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
+        foreach (Match block in SafeRegex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
         {
-            var css = Regex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", "");
+            var css = SafeRegex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", "");
             // (the legacy HTML comment wrapper round a sheet is not part of its first selector - a
             // rule keyed `<!-- H2` reaches no heading; measured on the enterprise summary, whose
             // `H2 { Arial 18px bold }` drew the UA serif 18)
@@ -210,28 +307,13 @@ internal static partial class HtmlToPdfConverter
             // whole, every other group unwraps in place — its rules then merge in
             // document order (a trailing @media print block overrides the base).
             css = FlattenMediaBlocks(css);
-            foreach (Match rule in Regex.Matches(css, @"([^{}]+)\{([^{}]*)\}"))
+            foreach (var ruleGroups in SafeRegex.Matches(css, @"([^{}]+)\{([^{}]*)\}").Select(rule => rule.Groups))
             {
-                var selectors = rule.Groups[1].Value;
-                var body = rule.Groups[2].Value;
-                var decls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (Match d in StyleDeclRx.Matches(body))
-                {
-                    var prop = d.Groups[1].Value.Trim().ToLowerInvariant();
-                    var val = ResolveCssVars(d.Groups[2].Value.Trim(), vars);
-                    // CSS grammar: a QUOTED value ('MARGIN-LEFT:"10PT"') is a string
-                    // token, invalid for every property whose grammar takes lengths/
-                    // keywords — the declaration is dropped, exactly as the source
-                    // renderer drops it (the legacy quoted-stylesheet corpus then
-                    // renders in pure UA defaults). font-family and content DO take
-                    // strings: a quoted family is ONE literal (unknown names fall
-                    // back to the default face downstream).
-                    if (val.Length >= 2 && (val[0] == '"' || val[0] == '\'') && val[^1] == val[0]
-                        && prop is not ("font-family" or "content"))
-                        continue;
-                    decls[prop] = val;
-                }
+                var selectors = ruleGroups[1].Value;
+                var decls = SheetRuleDeclarations(ruleGroups[2].Value, vars);
                 if (decls.Count == 0) continue;
+                // (…a rule naming a face is also kept as written: see KeptSheetRules)
+                kept = KeepRulesAsWritten(kept, selectors, decls);
                 foreach (var sel in selectors.Split(','))
                 {
                     var key = sel.Trim();
@@ -248,9 +330,14 @@ internal static partial class HtmlToPdfConverter
                     // between a table and its cells. Rewrite those to the descendant form
                     // so the cell grid picks the rule up; every other combinator still
                     // disqualifies the selector.
-                    key = Regex.Replace(key, @"\s*>\s*(tbody|thead|tfoot|tr)\b", " ",
+                    key = SafeRegex.Replace(key, @"\s*>\s*(tbody|thead|tfoot|tr)\b", " ",
                         RegexOptions.IgnoreCase);
-                    key = Regex.Replace(key, @"\s*>\s*(t[dh])\b", " $1", RegexOptions.IgnoreCase);
+                    key = SafeRegex.Replace(key, @"\s*>\s*(t[dh])\b", " $1", RegexOptions.IgnoreCase);
+                    // A negated class on one tagged compound (`h4:not(.remark)`) is kept: the key carries
+                    // the suffix and the simple matcher reads it; any other pseudo-class still drops the
+                    // selector, as does a negation on a bare class or inside a chain.
+                    var negated = SafeRegex.Match(key, @"^([a-zA-Z][^\s:>+~\[]*):not\(\s*\.([\w-]+)\s*\)$");
+                    if (negated.Success) key = negated.Groups[1].Value;
                     if (key.Length == 0 || key.IndexOfAny(bodyChain ? new[] { '>', '+', '~', '[' } : new[] { '>', '+', '~', ':', '[' }) >= 0)
                         continue;
                     // Simple type / class / id selectors, plus two-part descendant
@@ -269,14 +356,50 @@ internal static partial class HtmlToPdfConverter
                         parts = new[] { parts[1], parts[2] };
                     if (parts.Length > 2) continue;
                     key = string.Join(" ", parts);
+                    if (negated.Success) key += ":not(." + negated.Groups[2].Value + ")";
                     if (!result.TryGetValue(key, out var existing))
                         result[key] = new Dictionary<string, string>(decls, StringComparer.OrdinalIgnoreCase);
                     else
                         foreach (var kv in decls) existing[kv.Key] = kv.Value;
+                    foreach (var prop in VisibilityProperties)
+                    {
+                        if (!decls.TryGetValue(prop, out var visibility)) continue;
+                        cascade[prop + " " + key] = order;
+                        if (spelled is null) continue;
+                        if (!spelled.TryGetValue(key, out var asSpelled)) spelled[key] = asSpelled = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        asSpelled[prop] = visibility;
+                    }
                 }
+                order++;
             }
         }
+        CascadeOrders.Add(result, cascade);
+        if (spelled is not null) SpelledVisibility.Add(result, spelled);
+        if (kept is not null) { kept.Body = SheetBodyElement(html); KeptRulesTable.Add(result, kept); }
         return result;
+    }
+
+    /// <summary>The declarations of one sheet rule's body, custom properties resolved, lowercased by name.</summary>
+    private static Dictionary<string, string> SheetRuleDeclarations(string body, Dictionary<string, string> vars)
+    {
+        var decls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var dGroups in SafeRegex.Matches(StyleDeclRx, body).Select(d => d.Groups))
+        {
+            var prop = dGroups[1].Value.Trim().ToLowerInvariant();
+            var val = ResolveCssVars(dGroups[2].Value.Trim(), vars);
+            // CSS grammar: a QUOTED value ('MARGIN-LEFT:"10PT"') is a string
+            // token, invalid for every property whose grammar takes lengths/
+            // keywords — the declaration is dropped, exactly as the source
+            // renderer drops it (the legacy quoted-stylesheet corpus then
+            // renders in pure UA defaults). font-family and content DO take
+            // strings: a quoted family is ONE literal (unknown names fall
+            // back to the default face downstream).
+            if (val.Length >= 2 && (val[0] == '"' || val[0] == '\'') && val[^1] == val[0]
+                && prop is not ("font-family" or "content"))
+                continue;
+            decls[prop] = val;
+        }
+        return decls;
     }
 
     // Inline-box layout constants of the status-report dialect — named per the
@@ -405,12 +528,12 @@ internal static partial class HtmlToPdfConverter
     {
         if (!decls.TryGetValue("background", out var bg)
             && !decls.TryGetValue("background-image", out bg)) return null;
-        var um = Regex.Match(bg, @"url\(\s*[""']?([^""')]+)[""']?\s*\)", RegexOptions.IgnoreCase);
+        var um = SafeRegex.Match(bg, @"url\(\s*[""']?([^""')]+)[""']?\s*\)", RegexOptions.IgnoreCase);
         if (!um.Success) return null;
         var data = LoadConverterImage(um.Groups[1].Value.Trim(), options);
         if (data is null) return null;
-        // GDI+ sampling is Windows-only (the repo-wide System.Drawing convention);
-        // elsewhere the badge simply doesn't render, like any other unloadable asset.
+        // GDI+ sampling is Windows-only (the repo-wide System.Drawing convention); elsewhere
+        // the badge simply doesn't render, like any other unloadable asset.
         if (!Compat.IsWindows()) return null;
         try
         {
@@ -463,7 +586,7 @@ internal static partial class HtmlToPdfConverter
         double pts = 0;
         // Accept "13px" / "10pt" / "1em" / ".875rem" / "6.25in" — CSS permits a
         // bare leading dot. Reject percent / calc / etc.
-        var m = Regex.Match(s, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(px|pt|em|rem|in|cm|mm)?$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(s, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*(px|pt|em|rem|in|cm|mm)?$", RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         var n = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         var unit = m.Groups[2].Success ? m.Groups[2].Value.ToLowerInvariant() : "px";
@@ -487,7 +610,7 @@ internal static partial class HtmlToPdfConverter
     /// one value <see cref="TryParseLength"/> cannot hand back, because its null means
     /// "no usable length" to every caller that reads a default through it.</summary>
     private static bool IsZeroLength(string s) =>
-        Regex.IsMatch(s, @"^-?0+(?:\.0+)?\s*(?:px|pt|em|rem|in|cm|mm|%)?$", RegexOptions.IgnoreCase);
+        SafeRegex.IsMatch(s, @"^-?0+(?:\.0+)?\s*(?:px|pt|em|rem|in|cm|mm|%)?$", RegexOptions.IgnoreCase);
 
     private static void MarkInline(Stack<BlockStyle> stack, string fontRes)
     {
@@ -529,13 +652,13 @@ internal static partial class HtmlToPdfConverter
         Color? color = null;
         if (attrs.TryGetValue("style", out var styleStr) && !string.IsNullOrWhiteSpace(styleStr))
         {
-            foreach (Match m in StyleDeclRx.Matches(styleStr))
+            foreach (var groups in SafeRegex.Matches(StyleDeclRx, styleStr).Select(m => m.Groups))
             {
-                var prop = m.Groups[1].Value.Trim();
+                var prop = groups[1].Value.Trim();
                 if (prop.Equals("font-family", StringComparison.OrdinalIgnoreCase))
-                    fam = FirstFontFamily(m.Groups[2].Value.Trim());
+                    fam = FirstFontFamily(groups[2].Value.Trim());
                 else if (prop.Equals("color", StringComparison.OrdinalIgnoreCase))
-                    color = ParseCssColor(m.Groups[2].Value.Trim());
+                    color = ParseCssColor(groups[2].Value.Trim());
             }
         }
         if (fam is null && attrs.TryGetValue("face", out var face))
@@ -553,7 +676,8 @@ internal static partial class HtmlToPdfConverter
             var digitsEnd = 0;
             while (digitsEnd < st.Length && (char.IsDigit(st[digitsEnd])
                    || (digitsEnd == 0 && (st[0] == '+' || st[0] == '-')))) digitsEnd++;
-            if (digitsEnd > 0 && int.TryParse(st[..digitsEnd], out var sz))
+            if (digitsEnd > 0 && int.TryParse(st[..digitsEnd], System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var sz))
             {
                 // A leading +N/-N is relative to the default size 3.
                 if (st[0] is '+' or '-') sz = 3 + sz;
@@ -581,6 +705,16 @@ internal static partial class HtmlToPdfConverter
     private static bool SimpleSelectorMatches(string sel, HtmlNode el)
     {
         if (el.Tag.Length == 0 || sel.Length == 0) return false;
+        // `tag:not(.c)`: the compound before the suffix must match and the element must not carry c
+        var negated = sel.IndexOf(":not(.", StringComparison.Ordinal);
+        if (negated >= 0)
+        {
+            var excluded = sel.Substring(negated + ":not(.".Length).TrimEnd(')');
+            if (el.Attrs is not null && el.Attrs.TryGetValue("class", out var ownClasses) && !string.IsNullOrEmpty(ownClasses)
+                && ownClasses.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Any(c => c.Equals(excluded, StringComparison.Ordinal)))
+                return false;
+            sel = sel.Substring(0, negated);
+        }
         if (sel[0] == '#')
             return el.Attrs is not null && el.Attrs.TryGetValue("id", out var id)
                    && id.Trim().Equals(sel.Substring(1), StringComparison.Ordinal);
@@ -595,8 +729,7 @@ internal static partial class HtmlToPdfConverter
             if (el.Attrs is null || !el.Attrs.TryGetValue("class", out var cls) || string.IsNullOrEmpty(cls))
                 return false;
             var found = false;
-            foreach (var c in cls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                if (c.Equals(clsPart, StringComparison.Ordinal)) { found = true; break; }
+            if (cls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Any(c => c.Equals(clsPart, StringComparison.Ordinal))) { found = true; }
             if (!found) return false;
         }
         return true;
@@ -617,9 +750,9 @@ internal static partial class HtmlToPdfConverter
         if (el.Attrs is not null && el.Attrs.TryGetValue("style", out var inlineStyle)
             && !string.IsNullOrEmpty(inlineStyle))
         {
-            foreach (Match m in StyleDeclRx.Matches(inlineStyle))
-                if (m.Groups[1].Value.Trim().Equals(prop, StringComparison.OrdinalIgnoreCase))
-                    return Clean(m.Groups[2].Value);
+            var m = SafeRegex.Matches(StyleDeclRx, inlineStyle).FirstOrDefault(m => m.Groups[1].Value.Trim().Equals(prop, StringComparison.OrdinalIgnoreCase));
+            if (m is not null)
+                return Clean(m.Groups[2].Value);
         }
         if (css is null || css.Count == 0) return null;
 
@@ -642,9 +775,11 @@ internal static partial class HtmlToPdfConverter
                 if (!ancMatch) continue;
                 rank = 4;
             }
-            else if (key[0] == '#') { if (!SimpleSelectorMatches(key, el)) continue; rank = 3; }
-            else if (key.IndexOf('.') > 0) { if (!SimpleSelectorMatches(key, el)) continue; rank = 2; }
-            else if (key[0] == '.') { if (!SimpleSelectorMatches(key, el)) continue; rank = 1; }
+            else if (key[0] == '#') { if (!SimpleSelectorMatches(key, el)) { continue; } rank = 3; }
+#pragma warning disable S2692 // a match at index 0 is deliberately excluded here
+            else if (key.IndexOf('.') > 0) { if (!SimpleSelectorMatches(key, el)) { continue; } rank = 2; }
+#pragma warning restore S2692
+            else if (key[0] == '.') { if (!SimpleSelectorMatches(key, el)) { continue; } rank = 1; }
             else { if (!SimpleSelectorMatches(key, el)) continue; rank = 0; }
             if (rank >= bestRank) { bestRank = rank; best = Clean(val); }
         }
@@ -654,11 +789,11 @@ internal static partial class HtmlToPdfConverter
     private static double ParsePxValue(string? v)
     {
         if (string.IsNullOrEmpty(v)) return 0;
-        var m = Regex.Match(v, @"(-?[\d.]+)\s*px", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(v, @"(-?[\d.]+)\s*px", RegexOptions.IgnoreCase);
         if (m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var px))
             return px;
-        var mp = Regex.Match(v, @"(-?[\d.]+)\s*pt", RegexOptions.IgnoreCase);
+        var mp = SafeRegex.Match(v, @"(-?[\d.]+)\s*pt", RegexOptions.IgnoreCase);
         if (mp.Success && double.TryParse(mp.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var pt))
             return pt / 0.75;
@@ -703,7 +838,7 @@ internal static partial class HtmlToPdfConverter
             var f = DomDecl(n, "font", css);
             if (!string.IsNullOrEmpty(f))
             {
-                var m = Regex.Match(f, @"([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
+                var m = SafeRegex.Match(f, @"([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
                 if (m.Success)
                 {
                     var v = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
@@ -724,7 +859,7 @@ internal static partial class HtmlToPdfConverter
             var w = DomDecl(n, "font-weight", css);
             if (!string.IsNullOrEmpty(w))
                 return w.StartsWith("bold", StringComparison.OrdinalIgnoreCase)
-                       || (int.TryParse(w, out var n2) && n2 >= 600);
+                       || (int.TryParse(w, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n2) && n2 >= 600);
         }
         return false;
     }
@@ -771,7 +906,9 @@ internal static partial class HtmlToPdfConverter
     /// margin when it overrides the general one.</summary>
     private readonly struct CssPageRule
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double WidthPt { get; init; }
+#pragma warning restore S3218
         public double HeightPt { get; init; }
         public double? MarginLeftPt { get; init; }
         public double? MarginRightPt { get; init; }
@@ -811,28 +948,28 @@ internal static partial class HtmlToPdfConverter
         double w = 0, h = 0;
         double? ml = null, mr = null, mt = null, mb = null, firstTop = null;
 
-        foreach (Match styleBlock in Regex.Matches(html, @"<style\b([^>]*)>([\s\S]*?)</style\s*>",
-                     RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(html, @"<style\b([^>]*)>([\s\S]*?)</style\s*>",
+                     RegexOptions.IgnoreCase).Select(styleBlock => styleBlock.Groups))
         {
-            var mediaM = Regex.Match(styleBlock.Groups[1].Value, @"\bmedia\s*=\s*[""']?([^""'>]*)",
+            var mediaM = SafeRegex.Match(groups[1].Value, @"\bmedia\s*=\s*[""']?([^""'>]*)",
                 RegexOptions.IgnoreCase);
-            if (mediaM.Success && !Regex.IsMatch(mediaM.Groups[1].Value, @"\b(all|print)\b",
+            if (mediaM.Success && !SafeRegex.IsMatch(mediaM.Groups[1].Value, @"\b(all|print)\b",
                     RegexOptions.IgnoreCase))
                 continue;
             // `@page <pseudo>? { … }` — the pseudo-page selector (:first / :left /
             // :right / a named page) decides which sheets the block applies to; only
             // the un-pseudo'd rule and `:first` are modelled.
-            foreach (Match pageAt in Regex.Matches(styleBlock.Groups[2].Value,
-                         @"@page\s*(?<sel>[^{]*)\{(?<body>[^{}]*)\}", RegexOptions.IgnoreCase))
+            foreach (var pageAtGroups in SafeRegex.Matches(groups[2].Value,
+                         @"@page\s*(?<sel>[^{]*)\{(?<body>[^{}]*)\}", RegexOptions.IgnoreCase).Select(pageAt => pageAt.Groups))
             {
-                var sel = pageAt.Groups["sel"].Value.Trim();
-                var body = pageAt.Groups["body"].Value;
+                var sel = pageAtGroups["sel"].Value.Trim();
+                var body = pageAtGroups["body"].Value;
                 var isFirst = sel.StartsWith(":first", StringComparison.OrdinalIgnoreCase);
                 if (sel.Length > 0 && !isFirst) continue;
 
                 if (!isFirst)
                 {
-                    var sizeM = Regex.Match(body, @"\bsize\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
+                    var sizeM = SafeRegex.Match(body, @"\bsize\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
                     if (sizeM.Success)
                     {
                         var tokens = sizeM.Groups[1].Value.Trim()
@@ -855,14 +992,14 @@ internal static partial class HtmlToPdfConverter
 
                 double? Side(string prop)
                 {
-                    var m = Regex.Match(body, @"\bmargin-" + prop + @"\s*:\s*([^;}]+)",
+                    var m = SafeRegex.Match(body, @"\bmargin-" + prop + @"\s*:\s*([^;}]+)",
                         RegexOptions.IgnoreCase);
                     return m.Success && TryParseLength(m.Groups[1].Value.Trim()) is { } v ? v : null;
                 }
                 // The `margin` shorthand's 1-to-4 values seed every side the longhands
                 // do not restate (CSS top / right / bottom / left order).
                 double? sT = null, sR = null, sB = null, sL = null;
-                var shorthand = Regex.Match(body, @"(?<![-\w])margin\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
+                var shorthand = SafeRegex.Match(body, @"(?<![-\w])margin\s*:\s*([^;}]+)", RegexOptions.IgnoreCase);
                 if (shorthand.Success)
                 {
                     var parts = shorthand.Groups[1].Value.Trim()
@@ -877,7 +1014,7 @@ internal static partial class HtmlToPdfConverter
                     else if (vals.Count is 4) { sT = vals[0]; sR = vals[1]; sB = vals[2]; sL = vals[3]; }
                 }
                 var top = Side("top") ?? sT;
-                if (isFirst) { if (top is not null) firstTop = top; continue; }
+                if (isFirst) { if (top is not null) { firstTop = top; } continue; }
                 if (top is not null) mt = top;
                 if ((Side("right") ?? sR) is { } rv) mr = rv;
                 if ((Side("bottom") ?? sB) is { } bv) mb = bv;

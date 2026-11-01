@@ -29,7 +29,9 @@ public sealed partial class Document
         if (hb.blockIndex + 1 >= hb.blocks.Count || b.IsListItem || string.IsNullOrWhiteSpace(b.Text)) return false;
         var next = hb.blocks[hb.blockIndex + 1];
         return !next.IsHardBreak && !next.IsListItem && !next.IsImage && !string.IsNullOrWhiteSpace(next.Text)
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             && next.MarginTop <= 0 && b.MarginBottom <= 0 && next.LeftIndent == b.LeftIndent;
+#pragma warning restore S1244
     }
 
     /// <summary>HTML blocks: one parsed block rendered into the flow.</summary>
@@ -43,9 +45,10 @@ public sealed partial class Document
             var cand = SafeFindFontStyled(sf, stl);
             if (cand?.SourceFontData?.TtfData is { Length: > 0 }) rb.styledFace = cand;
         }
-        rb.fontSize = hb.legacyDialect && b.LegacyFontPt > 0 ? b.LegacyFontPt
-            : rb.styledFace is not null ? (b.FontSize > 11.0 ? b.FontSize : 12.0)
-            : b.FontSize > 0 ? b.FontSize : 11.0;
+        if (hb.legacyDialect && b.LegacyFontPt > 0) rb.fontSize = b.LegacyFontPt;
+        else if (rb.styledFace is not null) rb.fontSize = b.FontSize > 11.0 ? b.FontSize : 12.0;
+        else if (b.FontSize > 0) rb.fontSize = b.FontSize;
+        else rb.fontSize = 11.0;
         rb.legacyLead = hb.legacyDialect ? rb.fontSize * 0.25 : 0.0;
         // Entering or leaving a list spends the list box's margin (collapsed with the
         // neighbouring block's own); the items inside sit at the plain line pitch.

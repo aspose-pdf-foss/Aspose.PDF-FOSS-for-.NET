@@ -63,7 +63,11 @@ public sealed partial class Document
             if (existing.ContainsKey(code)) continue;
             int gid;
             if (composite)
-                gid = cidToGid is null ? code : code * 2 + 1 < cidToGid.Length ? (cidToGid[code * 2] << 8) | cidToGid[code * 2 + 1] : 0;
+            {
+                if (cidToGid is null) gid = code;
+                else if (code * 2 + 1 < cidToGid.Length) gid = (cidToGid[code * 2] << 8) | cidToGid[code * 2 + 1];
+                else gid = 0;
+            }
             else
             {
                 // A standard glyph name already says which character the code is; another name
@@ -132,8 +136,8 @@ public sealed partial class Document
             for (var cid = 1; cid * 2 + 1 < map.Length; cid++)
                 if (map[cid * 2] != 0 || map[cid * 2 + 1] != 0) codes.Add(cid);
         }
-        foreach (var code in codes)
-            if (code is > 0 and <= 0xFFFF) yield return code;
+        foreach (var code in codes.Where(code => code is > 0 and <= 0xFFFF))
+            yield return code;
     }
 
     /// <summary>A Type 1 font whose /Differences give codes names of the producer's own
@@ -185,7 +189,7 @@ public sealed partial class Document
         var start = text.IndexOf("begincodespacerange", StringComparison.Ordinal);
         var end = text.IndexOf("endcodespacerange", StringComparison.Ordinal);
         if (start < 0 || end < start) return true;
-        var ranges = System.Text.RegularExpressions.Regex.Matches(text.Substring(start, end - start), "<([0-9A-Fa-f]+)>\\s*<([0-9A-Fa-f]+)>");
+        var ranges = SafeRegex.Matches(text.Substring(start, end - start), "<([0-9A-Fa-f]+)>\\s*<([0-9A-Fa-f]+)>");
         var whole = composite ? ("0000", "FFFF") : ("00", "FF");
         return ranges.Cast<System.Text.RegularExpressions.Match>().Any(m =>
             string.Equals(m.Groups[1].Value, whole.Item1, StringComparison.OrdinalIgnoreCase)
@@ -197,7 +201,7 @@ public sealed partial class Document
         && text.All(c => c >= 0x20 && c != '�' && c != '￾' && c != '﻿' && !(c >= '' && c <= ''));
 
     /// <summary>A ToUnicode CMap of <paramref name="byteWidth"/>-byte codes.</summary>
-    private static byte[] ToUnicodeCMap(Dictionary<int, string> map, int byteWidth)
+    internal static byte[] ToUnicodeCMap(Dictionary<int, string> map, int byteWidth)
     {
         var codeFormat = byteWidth == 1 ? "X2" : "X4";
         var sb = new StringBuilder();

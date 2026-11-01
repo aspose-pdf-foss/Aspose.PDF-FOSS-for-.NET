@@ -109,8 +109,8 @@ public sealed partial class Page
     {
         if (elements is null || elements.Count == 0 || rectangle is null) return;
         var inside = new GraphicElementCollection();
-        foreach (var element in elements)
-            if (ElementLiesInside(element, rectangle)) inside.Add(element);
+        foreach (var element in elements.Where(element => ElementLiesInside(element, rectangle)))
+            inside.Add(element);
         AddGraphics(inside);
     }
 
@@ -122,10 +122,12 @@ public sealed partial class Page
             && box.LLY >= area.LLY && box.URY <= area.URY;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Remove the given absorbed elements from their source page: the
     /// content is rewritten without the elements' own operators; text and other
     /// non-vector content stays.</summary>
     public void DeleteGraphics(GraphicElementCollection elementsToDelete)
+#pragma warning restore S2325
     {
         if (elementsToDelete is null) return;
         // Batch: a bulk delete rewrites the source page ONCE at the end, not per

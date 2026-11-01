@@ -9,7 +9,8 @@ public sealed partial class Document
     /// PDF/UA-1 clause 7.21.4.2: a CIDFont that ships a /CIDSet must account for every glyph
     /// of its embedded program. A set that names fewer is rewritten to name them all - the
     /// program is kept as it is, so every glyph it defines is one the set has to admit. The
-    /// log already names the defect; this is the repair a UA conversion makes for it.
+    /// log already names the defect; this is the repair a UA conversion makes for it, the one
+    /// a PDF/A conversion makes too.
     /// </summary>
     private void RepairCidSets()
     {
@@ -22,7 +23,7 @@ public sealed partial class Document
                     continue;
                 var cidFont = _reader.ResolveDict(descendants[0]);
                 var descriptor = cidFont is null ? null : _reader.ResolveDict(cidFont.Get("FontDescriptor"));
-                if (descriptor is null || _reader.ResolveStream(descriptor.Get("CIDSet")) is not { } cidSet)
+                if (descriptor is null || _reader.ResolveStream(descriptor.Get("CIDSet")) is null)
                     continue;
                 // A CFF program numbers its glyphs by CIDs of its own charset, not by glyph
                 // index: the set cannot be restated from a glyph count. It is optional, so a
@@ -32,27 +33,7 @@ public sealed partial class Document
                     descriptor.Remove("CIDSet");
                     continue;
                 }
-                var program = _reader.ResolveStream(descriptor.Get("FontFile2"));
-                if (program is null) continue;
-
-                int glyphs;
-                byte[] marked;
-                try
-                {
-                    glyphs = Optimization.PdfAValidator.EmbeddedGlyphCount(_reader.DecodeStream(program));
-                    marked = _reader.DecodeStream(cidSet);
-                }
-                catch { continue; }
-                if (glyphs <= 0) continue;
-
-                var named = 0;
-                foreach (var b in marked) named += Compat.PopCount(b);
-                if (named == glyphs) continue;
-
-                var all = new byte[(glyphs + 7) / 8];
-                for (var glyph = 0; glyph < glyphs; glyph++)
-                    all[glyph / 8] |= (byte)(0x80 >> (glyph % 8));
-                descriptor.Set("CIDSet", new PdfStream(new PdfDictionary(), all));
+                WriteSubsetCidSet(font, addMissing: false);
             }
     }
 
@@ -89,8 +70,8 @@ public sealed partial class Document
             try { subtables = Text.TrueTypeAdvances.CmapSubtables(_reader.DecodeStream(stream)); }
             catch { continue; }
 
-            // Only a program that maps symbol codes alone is read the same without the /Encoding;
-            // one that also maps Unicode may be read through the encoding's glyph names, and
+            // Only a program that maps symbol codes alone is read the same without the /Encoding; one
+            // that also maps Unicode may be read through the encoding's glyph names, and
             // is left as it is - and logged, since the file keeps what the standard forbids.
             if (!subtables.Contains((3, 0)) || subtables.Contains((3, 1)))
             {
@@ -198,7 +179,11 @@ public sealed partial class Document
         // A CID /W does not list takes /DW (1000 when absent, PDF 32000-1 §9.7.4.3).
         var defaultWidth = StatedWidth(cidFont.Get("DW")) ?? 1000;
         var cidCount = map is not null ? map.Length / 2 : glyphCount;
-        int GlyphOf(int cid) => map is not null ? cid * 2 + 1 < map.Length ? (map[cid * 2] << 8) | map[cid * 2 + 1] : 0 : cid;
+        int GlyphOf(int cid)
+        {
+            if (map is not null) return cid * 2 + 1 < map.Length ? (map[cid * 2] << 8) | map[cid * 2 + 1] : 0;
+            return cid;
+        }
         var advances = new Dictionary<int, int>();
         // The CIDs /W names come first: two CIDs may share a glyph (a symbol font keys it at
         // both 0x3F and 0xF03F), and the one the file states a width for is the one it shows.
@@ -239,31 +224,7 @@ public sealed partial class Document
 
     /// <summary>The glyph name each code of a simple font names through its /Encoding (a
     /// base encoding, WinAnsi when none, under its /Differences).</summary>
-    private string?[] EncodingGlyphNames(PdfDictionary font)
-    {
-        var names = new string?[256];
-        var encoding = _reader.Resolve(font.Get("Encoding"));
-        var baseName = encoding is PdfName n ? n.Value
-            : (encoding as PdfDictionary)?.GetName("BaseEncoding") ?? "WinAnsiEncoding";
-        for (var code = 0; code < 256; code++)
-            names[code] = baseName switch
-            {
-                "MacRomanEncoding" => Text.PdfEncodings.MacRomanName(code),
-                "StandardEncoding" => Text.Type1StandardEncoding.GetName(code),
-                _ => Text.PdfEncodings.WinAnsiName(code),
-            };
-        if (encoding is PdfDictionary dict && _reader.Resolve(dict.Get("Differences")) is PdfArray differences)
-        {
-            var code = 0;
-            foreach (var item in differences)
-                switch (_reader.Resolve(item))
-                {
-                    case PdfInteger start: code = (int)start.Value; break;
-                    case PdfName glyph when code is >= 0 and < 256: names[code++] = glyph.Value; break;
-                }
-        }
-        return names;
-    }
+    private string?[] EncodingGlyphNames(PdfDictionary font) => Optimization.FontSubsetter.EncodingGlyphNames(font, _reader);
 
     /// <summary>Store the program with the advances set, when any of them changes it.</summary>
     private static void ReplaceProgram(PdfStream stream, byte[] program, Dictionary<int, int> advances)
@@ -405,15 +366,21 @@ public sealed partial class Document
     private void RepairCidToGidMaps()
     {
         foreach (var (_, font, _) in DocumentFonts())
-        {
-            if (font.GetName("Subtype") != "Type0"
-                || _reader.Resolve(font.Get("DescendantFonts")) is not PdfArray { Count: > 0 } descendants
-                || _reader.ResolveDict(descendants[0]) is not { } cidFont
-                || cidFont.GetName("Subtype") != "CIDFontType2"
-                || cidFont.Get("CIDToGIDMap") is not null)
-                continue;
-            if (_reader.ResolveDict(cidFont.Get("FontDescriptor"))?.Get("FontFile2") is null) continue;
-            cidFont.Set("CIDToGIDMap", new PdfName("Identity"));
-        }
+            StateIdentityCidToGidMap(font);
+    }
+
+    /// <summary>PDF/UA-1 clause 7.21.3.2, ISO 19005-1 clause 6.3.3.2, 19005-2/-3 clause
+    /// 6.2.11.3.2: a composite font's embedded CIDFontType2 that names no /CIDToGIDMap is given
+    /// /Identity, the mapping a reader applies when the entry is absent.</summary>
+    private void StateIdentityCidToGidMap(PdfDictionary font)
+    {
+        if (font.GetName("Subtype") != "Type0"
+            || _reader.Resolve(font.Get("DescendantFonts")) is not PdfArray { Count: > 0 } descendants
+            || _reader.ResolveDict(descendants[0]) is not { } cidFont
+            || cidFont.GetName("Subtype") != "CIDFontType2"
+            || cidFont.Get("CIDToGIDMap") is not null)
+            return;
+        if (_reader.ResolveDict(cidFont.Get("FontDescriptor"))?.Get("FontFile2") is null) return;
+        cidFont.Set("CIDToGIDMap", new PdfName("Identity"));
     }
 }

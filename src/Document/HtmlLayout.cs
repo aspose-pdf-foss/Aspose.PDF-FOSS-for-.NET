@@ -53,8 +53,8 @@ public sealed partial class Document
         // default above all — routes through the Arabic-capable host Arial.
         var own = tf.TextState.Font;
         var arabicChars = new System.Text.StringBuilder();
-        foreach (var c in tf.Text)
-            if (Text.ArabicTextShaper.ContainsArabic(c.ToString())) arabicChars.Append(c);
+        foreach (var c in tf.Text.Where(c => Text.ArabicTextShaper.ContainsArabic(c.ToString())))
+            arabicChars.Append(c);
         // A face that cannot show the Arabic is traded for the one the
         // repository's substitution picks for it (a Standard-14 fragment moves
         // to the host serif; a face short of a few letters to the face that

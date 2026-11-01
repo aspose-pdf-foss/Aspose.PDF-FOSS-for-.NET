@@ -8,13 +8,13 @@ internal static partial class HtmlToPdfConverter
     /// <summary>An image element: its box under the current (axis-aligned) transform, the bytes loaded from the href (absolute or beside the SVG), placed through the page under the current effect state.</summary>
     private static void ReplaySvgImage(SvgReplayState sr, string attrs)
     {
-        var href = Regex.Match(attrs, @"(?:xlink:)?href=""(?<v>[^""]+)""");
+        var href = SafeRegex.Match(attrs, @"(?:xlink:)?href=""(?<v>[^""]+)""");
         if (!href.Success) return;
         double ix = 0, iy = 0, iw = 0, ih = 0;
-        var xm = Regex.Match(attrs, @"(?<![\w-])x=""(?<v>-?[\d.]+)""");
-        var ym = Regex.Match(attrs, @"(?<![\w-])y=""(?<v>-?[\d.]+)""");
-        var wm = Regex.Match(attrs, @"width=""(?<v>[\d.]+)""");
-        var hm = Regex.Match(attrs, @"height=""(?<v>[\d.]+)""");
+        var xm = SafeRegex.Match(attrs, @"(?<![\w-])x=""(?<v>-?[\d.]+)""");
+        var ym = SafeRegex.Match(attrs, @"(?<![\w-])y=""(?<v>-?[\d.]+)""");
+        var wm = SafeRegex.Match(attrs, @"width=""(?<v>[\d.]+)""");
+        var hm = SafeRegex.Match(attrs, @"height=""(?<v>[\d.]+)""");
         if (xm.Success) ix = Num(sr, xm.Groups["v"].Value);
         if (ym.Success) iy = Num(sr, ym.Groups["v"].Value);
         if (wm.Success) iw = Num(sr, wm.Groups["v"].Value);
@@ -53,11 +53,11 @@ internal static partial class HtmlToPdfConverter
     {
         // The boundary keeps this from matching the tail of `id="…"`
         // (the inline dialect's paths carry an id attribute).
-        var d = Regex.Match(attrs, @"(?<![\w-])d=""(?<d>[^""]*)""");
+        var d = SafeRegex.Match(attrs, @"(?<![\w-])d=""(?<d>[^""]*)""");
         if (!d.Success) return;
-        var fillM = Regex.Match(attrs, @"fill=""(?<v>[^""]*)""");
-        var strokeM = Regex.Match(attrs, @"stroke=""(?<v>[^""]*)""");
-        var widthM = Regex.Match(attrs, @"stroke-width=""(?<v>[-\d.]+)""");
+        var fillM = SafeRegex.Match(attrs, @"fill=""(?<v>[^""]*)""");
+        var strokeM = SafeRegex.Match(attrs, @"stroke=""(?<v>[^""]*)""");
+        var widthM = SafeRegex.Match(attrs, @"stroke-width=""(?<v>[-\d.]+)""");
         var fill = ParseSvgRgb(fillM.Success ? fillM.Groups["v"].Value : "rgb(0,0,0)");
         var stroke = ParseSvgRgb(strokeM.Success ? strokeM.Groups["v"].Value : "none");
         if (fill is null && stroke is null) return;
@@ -67,7 +67,7 @@ internal static partial class HtmlToPdfConverter
         // The inline dialect leaves the y flip to each path's own
         // transform matrix rather than the wrapper's.
         var pathTotal = sr.total;
-        var ptm = Regex.Match(attrs, @"transform=""matrix\((?<m>[-\d.eE ]+)\)""");
+        var ptm = SafeRegex.Match(attrs, @"transform=""matrix\((?<m>[-\d.eE ]+)\)""");
         if (ptm.Success)
         {
             var pparts = ptm.Groups["m"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -92,7 +92,7 @@ internal static partial class HtmlToPdfConverter
             sr.sb.Append($"{Math.Abs(wRaw).ToString("F3", sr.inv)} w ");
         }
         sr.sb.Append(ops);
-        sr.sb.AppendLine(fill is not null && stroke is not null ? "B" : fill is not null ? "f" : "S");
+        sr.sb.AppendLine((fill, stroke) switch { (not null, not null) => "B", (not null, _) => "f", _ => "S" });
         sr.sb.AppendLine("Q");
     }
 
@@ -100,7 +100,7 @@ internal static partial class HtmlToPdfConverter
     private static void ReplaySvgGroup(SvgReplayState sr, string attrs)
     {
         sr.stack.Push((sr.total, sr.alpha, sr.maskId));
-        var tm = Regex.Match(attrs,
+        var tm = SafeRegex.Match(attrs,
             @"transform=""matrix\((?<m>[-\d.eE ]+)\)""");
         if (tm.Success)
         {
@@ -112,9 +112,9 @@ internal static partial class HtmlToPdfConverter
                 sr.total = MulM(g, sr.total);
             }
         }
-        var om = Regex.Match(attrs, @"opacity=""(?<v>[\d.]+)""");
+        var om = SafeRegex.Match(attrs, @"opacity=""(?<v>[\d.]+)""");
         if (om.Success) sr.alpha *= Num(sr, om.Groups["v"].Value);
-        var km = Regex.Match(attrs, @"mask=""url\(#(?<v>[^)]+)\)""");
+        var km = SafeRegex.Match(attrs, @"mask=""url\(#(?<v>[^)]+)\)""");
         if (km.Success) sr.maskId = km.Groups["v"].Value;
         if (attrs.TrimEnd().EndsWith("/", StringComparison.Ordinal)) (sr.total, sr.alpha, sr.maskId) = sr.stack.Pop();
     }

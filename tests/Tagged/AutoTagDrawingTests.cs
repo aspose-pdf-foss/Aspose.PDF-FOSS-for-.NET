@@ -46,7 +46,7 @@ public class AutoTagDrawingTests
     };
 
     private static string Body(double top)
-        => $"BT /F1 12 Tf 72 {top} Td " + string.Join(" 0 -14 Td ", BodyLines.Select(l => $"({l}) Tj")) + " ET\n";
+        => FormattableString.Invariant($"BT /F1 12 Tf 72 {top} Td ") + string.Join(" 0 -14 Td ", BodyLines.Select(l => $"({l}) Tj")) + " ET\n";
 
     /// <summary>A bar chart 200 x 150 pt at (100, 400): an axis, six bars, two labels.</summary>
     private const string Chart =
@@ -99,8 +99,8 @@ public class AutoTagDrawingTests
     private static string Circle(double x, double y, double r)
     {
         var k = 0.5523 * r;
-        return $"{x + r} {y} m {x + r} {y + k} {x + k} {y + r} {x} {y + r} c {x - k} {y + r} {x - r} {y + k} {x - r} {y} c "
-               + $"{x - r} {y - k} {x - k} {y - r} {x} {y - r} c {x + k} {y - r} {x + r} {y - k} {x + r} {y} c h ";
+        return FormattableString.Invariant($"{x + r} {y} m {x + r} {y + k} {x + k} {y + r} {x} {y + r} c {x - k} {y + r} {x - r} {y + k} {x - r} {y} c ")
+               + FormattableString.Invariant($"{x - r} {y - k} {x - k} {y - r} {x} {y - r} c {x + k} {y - r} {x + r} {y - k} {x + r} {y} c h ");
     }
 
     [Fact]
@@ -126,5 +126,54 @@ public class AutoTagDrawingTests
         var root = doc.TaggedContent.StructTreeRootElement;
         Assert.Empty(root.FindElements<FigureElement>(true));
         Assert.Contains(root.FindElements<ParagraphElement>(true), p => Text(p).StartsWith("Amber meadows"));
+    }
+
+    /// <summary>A box ruled with its four sides each filled as a 1 pt mitred band, as a report writer draws them.</summary>
+    private static string RuledBox(double x0, double y0, double x1, double y1)
+        => FormattableString.Invariant($"{x0 - 0.5} {y0 - 0.5} m {x0 - 0.5} {y1 + 0.5} l {x0 + 0.5} {y1 - 0.5} l {x0 + 0.5} {y0 + 0.5} l h f* ")
+           + FormattableString.Invariant($"{x1 + 0.5} {y0 - 0.5} m {x1 + 0.5} {y1 + 0.5} l {x1 - 0.5} {y1 - 0.5} l {x1 - 0.5} {y0 + 0.5} l h f* ")
+           + FormattableString.Invariant($"{x0 - 0.5} {y0 - 0.5} m {x1 + 0.5} {y0 - 0.5} l {x1 - 0.5} {y0 + 0.5} l {x0 + 0.5} {y0 + 0.5} l h f* ")
+           + FormattableString.Invariant($"{x0 - 0.5} {y1 + 0.5} m {x1 + 0.5} {y1 + 0.5} l {x1 - 0.5} {y1 - 0.5} l {x0 + 0.5} {y1 - 0.5} l h f*\n");
+
+    private static readonly (string Label, string Value)[] FieldFacts =
+    {
+        ("Grower", "Farms Ryan"), ("Farm Name", "Ryan Farm Partnership"), ("Farm Size", "1562.2 acres"),
+        ("Field Name", "Matter"), ("Field Size", "145.8 acres"), ("Crop", "Corn"), ("Hybrid", "DKC62-97RIB"),
+    };
+
+    private static readonly string[] SoilCodes = { "86", "L84A", "L163A", "L201A", "421B", "423", "954B2", "L83A" };
+
+    [Fact]
+    public void BoxesRuledRoundAPagesHeadingMapAndLegendAreNoFigure()
+    {
+        // A map report's page: a heading grid of three ruled boxes - the title, a logo's, the field's facts on white
+        // grounds - 4.7 pt over a box for the map and one for its legend, coloured squares with a soil code beside each;
+        // a ruled footer. The boxes touch within a drawing's gap, the squares stand inside their union: still text.
+        var page = new System.Text.StringBuilder("0 0.498 0.125 rg ");
+        page.Append(RuledBox(72, 654.8, 307.3, 720)).Append(RuledBox(72, 620.8, 307.3, 654.8)).Append(RuledBox(312.9, 620.8, 539.7, 720));
+        page.Append(RuledBox(72, 280.6, 417.8, 615.1)).Append(RuledBox(417.8, 280.6, 539.7, 615.1)).Append(RuledBox(72, 79.1, 540, 101.8));
+        page.Append("BT /F1 22 Tf 143 680 Td (Soil Map) Tj ET\n");
+        for (var i = 0; i < FieldFacts.Length; i++)
+        {
+            var y = 702 - i * 11.6;
+            page.Append(FormattableString.Invariant($"1 1 1 rg 398 {y - 2} 136.3 11.5 re f 0 0 0 rg "))
+                .Append(FormattableString.Invariant($"BT /F1 10 Tf 319 {y} Td ({FieldFacts[i].Label}) Tj 79 0 Td ({FieldFacts[i].Value}) Tj ET\n"));
+        }
+        page.Append("BT /F1 9 Tf 460 598 Td (MUSYM) Tj ET\n");
+        for (var i = 0; i < SoilCodes.Length; i++)
+        {
+            var y = 554.5 - i * 26.6;
+            page.Append(FormattableString.Invariant($"0.75 0.4 0.29 rg 449 {y} 19.3 26.6 re f 1 1 1 rg 449 {y - 8.5} 19.3 17 re f 0 0 0 rg "))
+                .Append(FormattableString.Invariant($"BT /F1 9 Tf 485 {y + 12.5} Td ({SoilCodes[i]}) Tj ET\n"));
+        }
+        page.Append("BT /F1 10 Tf 197 86 Td (Prepared on 05/16/2016 by Tom Ryan) Tj ET\n");
+
+        using var doc = Tag(Build(page.ToString()));
+        var root = doc.TaggedContent.StructTreeRootElement;
+        Assert.DoesNotContain(root.FindElements<FigureElement>(true), f => f.GetMarkedContent(true).Any(i => i.Kind == MarkedContentKind.Drawing));
+        var text = string.Concat(root.FindElements<StructureElement>(true).Where(e => e is ParagraphElement or TableTDElement).Select(Text));
+        Assert.Contains("Soil Map", text);
+        Assert.Contains("Ryan Farm Partnership", text);
+        Assert.All(SoilCodes, code => Assert.Contains(code, text));
     }
 }

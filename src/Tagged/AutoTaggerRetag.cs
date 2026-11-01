@@ -115,7 +115,7 @@ internal static partial class AutoTagger
             var op = pw.Ops[i];
             // The old tree is keyed by the page's MCIDs: a mark inside a form said nothing it kept.
             if (op.Kind == ContentOpKind.BeginMark) { stack.Push(op.Stream == 0 ? CarriedFor(op, pw.Page.Dict, carried) : null); continue; }
-            if (op.Kind == ContentOpKind.EndMark) { if (stack.Count > 0) stack.Pop(); continue; }
+            if (op.Kind == ContentOpKind.EndMark) { if (stack.Count > 0) { stack.Pop(); } continue; }
             if (op.Kind is not (ContentOpKind.Image or ContentOpKind.InlineImage or ContentOpKind.Form)) continue;
             var t = targets[i];
             if (t < 0 || t >= run.Slots.Count || run.Slots[t].Kind != SlotKind.Figure) continue;
@@ -124,8 +124,9 @@ internal static partial class AutoTagger
             foreach (var props in stack)
             {
                 if (props is null) continue;
-                var text = props.TryGetValue("Alt", out var alt) && alt.Value.Length > 0 ? alt
-                    : props.TryGetValue("ActualText", out var at) && at.Value.Length > 0 ? at : null;
+                PdfString? text = null;
+                if (props.TryGetValue("Alt", out var alt) && alt.Value.Length > 0) text = alt;
+                else if (props.TryGetValue("ActualText", out var at) && at.Value.Length > 0) text = at;
                 if (text is null) continue;
                 figure.AlternativeText = text.ToText();
                 break;

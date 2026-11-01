@@ -234,6 +234,15 @@ internal static partial class Standard14Fonts
         };
     }
 
+    /// <summary>The core PostScript name <paramref name="name"/> stands for (Helvetica for ArialMT,
+    /// for instance), or null when it names no Standard-14 face.</summary>
+    internal static string? CanonicalName(string name) => ResolveAlias(name);
+
+    /// <summary>Whether a core face draws symbols through its own built-in encoding
+    /// rather than text through WinAnsi.</summary>
+    internal static bool IsSymbolic(string baseFontName) =>
+        ResolveAlias(baseFontName) is "Symbol" or "ZapfDingbats";
+
     private static string? ResolveAlias(string name)
     {
         if (string.IsNullOrEmpty(name)) return null;

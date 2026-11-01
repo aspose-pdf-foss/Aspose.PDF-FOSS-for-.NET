@@ -32,8 +32,8 @@ internal static partial class HtmlToPdfConverter
     private const double InputBoxAboveBaselinePt = 11.34;
     // The UA text input beside an inline-block label column (measured on the
     // label/input form's expected render): a 21px box whose own text baseline sits on
-    // the line's baseline, so its bottom edge hangs UaInputBoxBelowBaselinePt under it;
-    // one UA-serif space separates it from the column; its border is black.
+    // the line's baseline, so its bottom edge hangs UaInputBoxBelowBaselinePt under it; one
+    // UA-serif space separates it from the column; its border is black.
     private const double UaInputBoxHeightPt = 15.75;
     private const double UaInputBoxBelowBaselinePt = 4.2;
     private const double UaColumnGapPt = 3.0;
@@ -223,7 +223,7 @@ internal static partial class HtmlToPdfConverter
     {
         int Attr(string n, int dflt) =>
             attrs is not null && attrs.TryGetValue(n, out var raw)
-            && int.TryParse(UnescapeAttrValue(raw), out var v) && v > 0 ? v : dflt;
+            && int.TryParse(UnescapeAttrValue(raw), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var v) && v > 0 ? v : dflt;
         var cols = multiline ? Attr("cols", 20) + 1 : Attr("size", 20);
         var rows = multiline ? Attr("rows", 2) : 1;
         var extra = (rows - 1) * ControlNextRowPt;
@@ -231,17 +231,11 @@ internal static partial class HtmlToPdfConverter
                 ControlFirstRowAdvancePt + extra);
     }
 
-    /// <summary>Read width:/height: pixel lengths from an inline style string.</summary>
+    /// <summary>Read a control's width:/height: from an inline style string, in CSS px whatever the unit.</summary>
     private static (double w, double h) ParseInputSize(string? styleAttr)
     {
-        double w = 0, h = 0;
-        if (string.IsNullOrEmpty(styleAttr)) return (w, h);
-        var ci = System.Globalization.CultureInfo.InvariantCulture;
-        var wm = Regex.Match(styleAttr, @"(?:^|[;\s])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
-        if (wm.Success) double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, ci, out w);
-        var hm = Regex.Match(styleAttr, @"(?:^|[;\s])height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
-        if (hm.Success) double.TryParse(hm.Groups[1].Value, System.Globalization.NumberStyles.Float, ci, out h);
-        return (w, h);
+        if (string.IsNullOrEmpty(styleAttr)) return (0, 0);
+        return (ControlLengthPx(styleAttr!, "width"), ControlLengthPx(styleAttr!, "height"));
     }
 
     /// <remarks>Dialect switches whose meaning is not obvious from the name:
@@ -305,6 +299,7 @@ internal static partial class HtmlToPdfConverter
         pb.bodyBoxRhythm = bodyBoxRhythm;
         pb.containerBoxIndents = containerBoxIndents;
         pb.coverStyles = coverStyles;
+        pb.cssBoxBody = css is Dictionary<string, Dictionary<string, string>> boxCss && BodyBoxInsetsPt(boxCss) is not null;
         pb.inlineBlockCols = inlineBlockCols;
         pb.absSpanLedger = absSpanLedger;
         pb.spanClassTypography = spanClassTypography;
@@ -316,6 +311,14 @@ internal static partial class HtmlToPdfConverter
         pb.divBandBg = divBandBg;
         pb.dwFlow = dwFlow;
         pb.floatFlow = floatFlow;
+        // Controls stand in their line of text in the two base flows (the UA serif flow and the
+        // plain calibrated one) and in the sheet-typography flow, which sets the plain flow's blocks
+        // in the sheet's faces: every other dialect keeps the control layout it was measured on.
+        pb.controlLines = cv is not null && !(controlBoxes || formDialect || bandDialect || uaGridBlocks
+            || uaBlockRhythm || articleRhythm || bodyBoxRhythm || containerBoxIndents || coverStyles
+            || inlineBlockCols || absSpanLedger || spanClassTypography || fieldsetBoxes || uaPMargins
+            || msoParagraphs || spanPtTypography || divBandBg || dwFlow || floatFlow
+            || wordMail || wordExport || inlineEmphasisRuns);
         pb.tokens = Tokenize(html);
 
         pb.blocks = new List<Block>();
@@ -339,6 +342,7 @@ internal static partial class HtmlToPdfConverter
         // layout lays out with a pen (shared wrapping line boxes). A run that ended up
         // with a single member keeps its ordinary standalone layout.
         if (MergeControlBoxBlocks(pb) is { } mergeControlBoxBlocksResult) return mergeControlBoxBlocksResult;
+        if (pb.controlLines) BuildControlLines(pb.blocks, loneControls: cv!.profile.uaStdSerif);
         return pb.blocks;
     }
 
@@ -346,23 +350,24 @@ internal static partial class HtmlToPdfConverter
     private static void ParseBlockToken(ParseBlocksState pb, Token tok)
     {
         if (!HandleHiddenTextAndRowTokens(pb, tok)) return;
+        if (pb.ctlLineId != 0 && ControlLineEdgeTags.Contains(pb.tag)) EndControlLine(pb);
 
         // fieldsetBoxes mode: a <fieldset> opens a bordered box — marker
         // blocks bracket its content (the frame draws at the close) and its
         // padding indents everything inside; a <legend> is its own bold
         // 1.2em block riding the frame's top edge.
         if (!HandleFieldsetAndCenterTags(pb, tok)) return;
-        if (pb.tag.Equals("br", StringComparison.OrdinalIgnoreCase)) { HandleBlockBr(pb, tok, pb.tag); return; }
-        if (pb.tag.Equals("hr", StringComparison.OrdinalIgnoreCase)) { HandleBlockHr(pb, tok, pb.tag); return; }
+        if (pb.tag.Equals("br", StringComparison.OrdinalIgnoreCase)) { HandleBlockBr(pb); return; }
+        if (pb.tag.Equals("hr", StringComparison.OrdinalIgnoreCase)) { HandleBlockHr(pb, tok); return; }
 
         // <img>: emit an in-flow image block (drawn at layout time). A display:none image
         // is not part of the rendering — skip it entirely (no draw, no reserved space).
-        if (pb.tag.Equals("img", StringComparison.OrdinalIgnoreCase)) { HandleBlockImg(pb, tok, pb.tag); return; }
+        if (pb.tag.Equals("img", StringComparison.OrdinalIgnoreCase)) { HandleBlockImg(pb, tok); return; }
 
         // <button>: its inner text is the caption of a push-button box, not flow
         // content (control-box dialect only; other dialects keep it as text).
         if (!HandleFormControlTags(pb, tok)) return;
-        if (pb.tag.Equals("input", StringComparison.OrdinalIgnoreCase)) { HandleBlockInput(pb, tok, pb.tag); return; }
+        if (pb.tag.Equals("input", StringComparison.OrdinalIgnoreCase)) { HandleBlockInput(pb, tok); return; }
 
         if (BlockTags.Contains(pb.tag)) { HandleBlockOpen(pb, tok, pb.tag); return; }
 

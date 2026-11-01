@@ -90,14 +90,14 @@ internal static partial class XmlBinding
                 && !HasElementChild(child, "TextSegment"))
             { pf.hasFragState = true; break; }
 
-        pf.fragState = pf.hasFragState
-            ? new XmlTextStyle { FontSize = 10, FontSizeSet = true }
-            : new XmlTextStyle
-            {
-                FontSize = pf.defaults.FontSize > 0 ? pf.defaults.FontSize : 10,
-                FontSizeSet = true, // a page fragment always resolves a concrete size
-                FontName = pf.defaults.FontName,
-                Foreground = pf.defaults.Foreground,
-            };
+        if (pf.hasFragState) pf.fragState = new XmlTextStyle { FontSize = 10, FontSizeSet = true };
+        else
+            pf.fragState = new XmlTextStyle
+                {
+                    FontSize = pf.defaults.FontSize > 0 ? pf.defaults.FontSize : 10,
+                    FontSizeSet = true, // a page fragment always resolves a concrete size
+                    FontName = pf.defaults.FontName,
+                    Foreground = pf.defaults.Foreground,
+                };
     }
 }

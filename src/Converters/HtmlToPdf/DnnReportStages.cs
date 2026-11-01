@@ -57,7 +57,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>Render one report block by its kind: headings, paragraphs, lists, grids, images and sub-modules, each advancing the page.</summary>
-    private static bool RenderDnnBlock(DnnReportState dn, DnnBlock b)
+    private static bool RenderDnnBlock(DnnReportState dn, IDnnBlock b)
     {
         switch (b)
         {
@@ -154,28 +154,28 @@ internal static partial class HtmlToPdfConverter
         dn.moduleR = dn.contentR - DnnModuleInsetPt + 0.9;
         dn.bodyL = dn.moduleL + 0.375 + DnnBodyPadPt;
 
-        html = Regex.Replace(html, @"<script[\s\S]*?</script>", " ", RegexOptions.IgnoreCase);
-        html = Regex.Replace(html, @"<!--[\s\S]*?-->", " ");
+        html = SafeRegex.Replace(html, @"<script[\s\S]*?</script>", " ", RegexOptions.IgnoreCase);
+        html = SafeRegex.Replace(html, @"<!--[\s\S]*?-->", " ");
 
         dn.logoUrl = null; dn.logoWpx = 115;
         dn.logoHpx = 48;
-        dn.logoM = Regex.Match(html,
+        dn.logoM = SafeRegex.Match(html,
             @"<img[^>]*id\s*=\s*[""'][^""']*imgLogo[""'][^>]*>", RegexOptions.IgnoreCase);
         if (dn.logoM.Success)
         {
             dn.logoUrl = DtpAttr(dn.logoM.Value, "src");
             var st = DtpAttr(dn.logoM.Value, "style") ?? "";
-            var wm = Regex.Match(st, @"width\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
-            var hm = Regex.Match(st, @"height\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
+            var wm = SafeRegex.Match(st, @"width\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
+            var hm = SafeRegex.Match(st, @"height\s*:\s*([\d.]+)px", RegexOptions.IgnoreCase);
             if (wm.Success) dn.logoWpx = DtpNum(wm.Groups[1].Value);
             if (hm.Success) dn.logoHpx = DtpNum(hm.Groups[1].Value);
         }
-        dn.dateM = Regex.Match(html,
+        dn.dateM = SafeRegex.Match(html,
             @"DateTimeCmnLabel[""'][^>]*>([^<]*)<", RegexOptions.IgnoreCase);
         dn.dateText = dn.dateM.Success ? EdgarHtmlRenderer.DecodeEntities(dn.dateM.Groups[1].Value).Trim() : "";
 
-        dn.blocks = new List<DnnBlock>();
-        foreach (Match mc in Regex.Matches(html,
+        dn.blocks = new List<IDnnBlock>();
+        foreach (Match mc in SafeRegex.Matches(html,
                      @"<div\b[^>]*class\s*=\s*[""'][^""']*\bModuleContainer\b[^""']*[""'][^>]*>",
                      RegexOptions.IgnoreCase))
         {

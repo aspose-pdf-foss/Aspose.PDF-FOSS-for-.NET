@@ -8,10 +8,14 @@ namespace Aspose.Pdf.Converters;
 public sealed partial class PdfToHtmlConverter
 {
     /// <summary>The advance map, the substitute-face verdict and the record itself, added under the resource's key.</summary>
-    private static void FinishFontRecord(FontRecordState fr, string key, PdfReader reader, string family, string weight, string style, Dictionary<string, HtmlFontRecord> result)
+    private static void FinishFontRecord(FontRecordState fr, string key, PdfReader reader, string family, string weight, string style, Dictionary<string, HtmlFontRecord> result, bool programServed)
     {
         fr.advanceMap = BuildAdvanceMap(fr.font, reader, fr.isCid);
-        if (fr.embeddedAdvMilli is null && fr.ascSfnt is null && fr.advanceMap is not null
+        // The program is served whether or not an installed face carries its name: a print
+        // driver names its subsets after the installed faces, whose advances differ, so a
+        // line the solver would measure by that face measures by the program instead.
+        if (fr.embeddedAdvMilli is null && fr.advanceMap is not null
+            && (fr.ascSfnt is null || (programServed && HtmlToPdfConverter.ResolveStlFace(family) is not null))
             && (GetEmbeddedBareCff(fr.font, reader) is not null
                 || GetEmbeddedType1(fr.font, reader) is not null))
         {
@@ -33,6 +37,16 @@ public sealed partial class PdfToHtmlConverter
             foreach (var (c3, u3) in uniAll) u2codeAll.TryAdd(u3, c3);
             fr.programCharAdvMilli = ch =>
                 u2codeAll.TryGetValue(ch, out var cc2) ? advAny(cc2) : null;
+        }
+
+        // A code drawing a character through another glyph than the primary face holds for it
+        // is served from an overflow face, named like the one the export ships.
+        Func<int, string?>? overflowFamily = null;
+        if (programServed && GetEmbeddedBareCff(fr.font, reader) is not null
+            && OverflowLevels(fr.font, reader) is { } levels)
+        {
+            var familyOfLevel = family;
+            overflowFamily = code => levels.TryGetValue(code, out var level) ? OverflowFamilyName(familyOfLevel, level) : null;
         }
 
         fr.substituteFace = false;
@@ -77,6 +91,7 @@ public sealed partial class PdfToHtmlConverter
             ProgramAdvMilli = fr.programAdvMilli,
             ProgramCharAdvMilli = fr.programCharAdvMilli,
             SubstituteFace = fr.substituteFace,
+            OverflowFamily = overflowFamily,
         };
     }
 
@@ -87,7 +102,7 @@ public sealed partial class PdfToHtmlConverter
         fr.lineHeightEm = 0.0;
         fr.ascSfnt = GetEmbeddedTtf(fr.font, reader) ?? GetEmbeddedOpenType(fr.font, reader);
         if (fr.ascSfnt is null && !friendlyFamilies)
-            try { fr.ascSfnt = Text.SystemFontResolver.Resolve(fr.baseFont); } catch { }
+            try { fr.ascSfnt = Text.SystemFontResolver.Resolve(fr.baseFont); } catch { /* a font that cannot be found or read leaves the fallback in place */ }
         if (fr.ascSfnt is not null)
         {
             var wa = SfntWinAscentFactor(fr.ascSfnt);
@@ -235,6 +250,17 @@ public sealed partial class PdfToHtmlConverter
                     else fr.toUnicodeMap.Remove(code);
                 }
             }
+
+            // A code of a simple font that the CMap leaves out reads as the character its /Differences glyph
+            // name stands for, as the page text reads it - a producer's CMap that maps the base Arabic letters
+            // but none of the contextual shapes the font names afii62xxx; a name that stands for nothing keeps
+            // the base decode.
+            if (fr.font.GetName("Subtype") != "Type0" && RawDifferencesNames(fr.font, reader) is { } names)
+            {
+                foreach (var (code, name) in names)
+                    if (!fr.toUnicodeMap.ContainsKey(code) && Text.TextAbsorber.ResolveGlyphName(name) is { Length: > 0 } named)
+                        fr.toUnicodeMap[code] = named;
+            }
         }
 
         fr.fontSubtype = fr.font.GetName("Subtype");
@@ -262,9 +288,7 @@ public sealed partial class PdfToHtmlConverter
 
         fr.isIdentity = fr.font.GetName("Encoding") is "Identity-H" or "Identity-V";
         fr.hasMultiDst = false;
-        if (fr.toUnicodeMap is not null)
-            foreach (var dst in fr.toUnicodeMap.Values)
-                if (CodePointCount(dst) > 1) { fr.hasMultiDst = true; break; }
+        if (fr.toUnicodeMap is not null && fr.toUnicodeMap.Values.Any(dst => CodePointCount(dst) > 1)) { fr.hasMultiDst = true; }
 
         fr.c2gStream = null;
         if (fr.isCid && fr.isIdentity)
@@ -320,11 +344,9 @@ public sealed partial class PdfToHtmlConverter
             var cgProg = cgBytes;
             fr.programAdvMilli = code =>
             {
-                var gid = cgProg is null
-                    ? code
-                    : code * 2 + 1 < cgProg.Length
-                        ? (cgProg[code * 2] << 8) | cgProg[code * 2 + 1]
-                        : 0;
+                int gid = 0;
+                if (cgProg is null) gid = code;
+                else if (code * 2 + 1 < cgProg.Length) gid = (cgProg[code * 2] << 8) | cgProg[code * 2 + 1];
                 if (gid <= 0) return null;
                 var w = parserProg.GetAdvanceWidth(gid);
                 return w > 0 ? w * 1000.0 / upmProg : null;
@@ -351,6 +373,12 @@ public sealed partial class PdfToHtmlConverter
         // a multi-char ligature glyph) render in the CSS
         // fallback face.
         MapFontGlyphsToUnicode(fr, parser, cgBytes, defaultFontName);
+        // A program with no /ToUnicode shows nothing but stand-in characters, each drawn by
+        // the shipped subset itself: its own advances are the browser's. Without them the
+        // face had no advance model, and a line that began with its bullet fell back to one
+        // span in the bullet's face for every run of the line.
+        if (fr.toUnicodeMap is null && fr.embeddedAdvMilli is null && string.IsNullOrEmpty(defaultFontName))
+            fr.embeddedAdvMilli = fr.programAdvMilli;
     }
 
     /// <summary>Each mapped glyph's Unicode, and whether the program's cmap covers the components a ligature would expand into.</summary>
@@ -358,11 +386,12 @@ public sealed partial class PdfToHtmlConverter
     {
         if (fr.toUnicodeMap is not null)
         {
-            int GidOf(int code) => cgBytes is null
-                ? code
-                : code * 2 + 1 < cgBytes.Length
-                    ? (cgBytes[code * 2] << 8) | cgBytes[code * 2 + 1]
-                    : 0;
+            int GidOf(int code)
+            {
+                if (cgBytes is null) return code;
+                if (code * 2 + 1 < cgBytes.Length) return (cgBytes[code * 2] << 8) | cgBytes[code * 2 + 1];
+                return 0;
+            }
             var touForMapped = fr.toUnicodeMap;
             var slotWinner = new Dictionary<int, int>();
             var cmapUnis = new HashSet<int>(parser.CMap.Keys);
@@ -381,8 +410,8 @@ public sealed partial class PdfToHtmlConverter
                 }
             }
             // The whole variant/fallback machinery only exists for
-            // subsets that actually carry GID-only variant glyphs;
-            // ordinary subsets (or substituted fonts whose
+            // subsets that actually carry GID-only variant glyphs; ordinary
+            // subsets (or substituted fonts whose
             // ToUnicode merely exceeds the cmap) keep the plain
             // single-face model.
             fr.glyphMapped = !anyVariant ? null : code =>

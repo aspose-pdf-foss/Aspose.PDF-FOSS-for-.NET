@@ -20,14 +20,14 @@ internal static partial class HtmlToPdfConverter
     //  - the canvas is the declared px geometry at 0.75 pt/px, anchored at
     //    the page's own left margin plus the .pdf-widget-container padding
     //    (96 pt + 20 px = 111 pt; the first widget's own left:5px puts its
-    //    border box at 114.75, and its stroke centre lands at 115.1);
+    //    border box at 114.75, and its stroke centre lands at 115.1),
     //  - a widget BOX hugs its content instead of taking the li's declared
     //    height: caption band (29 px) + the nested control rows + the body's
-    //    20 px padding-bottom;
+    //    20 px padding-bottom,
     //  - control rows pace on their own declared tops (5/35/65/95 px → the
-    //    22.5 pt ladder drawn at y 146/168.5/191/213.5);
+    //    22.5 pt ladder drawn at y 146/168.5/191/213.5),
     //  - the red .pdf-widget-control-box fills the VALUE half of the control
-    //    box — the control's own width less the 120 px label column;
+    //    box — the control's own width less the 120 px label column,
     //  - label 16 px Arial, value 10.5 pt Arial seated 0.84 pt below it,
     //    caption 18 px Arial Bold.
     private const double GridsterPxPt = 0.75;
@@ -121,28 +121,28 @@ internal static partial class HtmlToPdfConverter
     private static List<GridsterItem> ParseGridsterItems(string html)
     {
         var result = new List<GridsterItem>();
-        var openRx = new Regex(@"<li\b[^>]*\bclass=""[^""]*\bgs-w\b[^""]*""[^>]*>", RegexOptions.IgnoreCase);
-        var anyRx = new Regex(@"<(?<c>/?)li\b[^>]*>", RegexOptions.IgnoreCase);
+        var openRx = new Regex(@"<li\b[^>]*\bclass=""[^""]*\bgs-w\b[^""]*""[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        var anyRx = new Regex(@"<(?<c>/?)li\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var pos = 0;
         while (pos < html.Length)
         {
-            var m = openRx.Match(html, pos);
+            var m = SafeRegex.Match(openRx, html, pos);
             if (!m.Success) break;
             // The item runs to the close MATCHING its open, so a nested gridster
             // stays inside this item rather than reading as a sibling.
             var depth = 1;
             var end = -1;
-            for (var scan = anyRx.Match(html, m.Index + m.Length); scan.Success;
-                 scan = anyRx.Match(html, scan.Index + scan.Length))
+            for (var scan = SafeRegex.Match(anyRx, html, m.Index + m.Length); scan.Success;
+                 scan = SafeRegex.Match(anyRx, html, scan.Index + scan.Length))
             {
                 depth += scan.Groups["c"].Length > 0 ? -1 : 1;
                 if (depth == 0) { end = scan.Index; break; }
             }
             if (end < 0) break;
-            var style = Regex.Match(m.Value, @"style=""(?<s>[^""]*)""").Groups["s"].Value;
+            var style = SafeRegex.Match(m.Value, @"style=""(?<s>[^""]*)""").Groups["s"].Value;
             double Len(string prop)
             {
-                var pm = Regex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)\s*px",
+                var pm = SafeRegex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)\s*px",
                     RegexOptions.IgnoreCase);
                 return pm.Success ? double.Parse(pm.Groups[1].Value,
                     System.Globalization.CultureInfo.InvariantCulture) : 0;
@@ -166,12 +166,12 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Text of the first element carrying <paramref name="cls"/>.</summary>
     private static string FirstClassText(string html, string cls)
     {
-        var m = Regex.Match(html,
+        var m = SafeRegex.Match(html,
             @"<(?<t>\w[\w-]*)\b[^>]*\bclass=""[^""]*\b" + Regex.Escape(cls) + @"\b[^""]*""[^>]*>(?<b>[\s\S]*?)</\k<t>\s*>",
             RegexOptions.IgnoreCase);
         if (!m.Success) return "";
-        var text = Regex.Replace(m.Groups["b"].Value, "<!--[\\s\\S]*?-->", "");
-        text = Regex.Replace(text, "<[^>]+>", "");
-        return Regex.Replace(DecodeEntities(text), @"\s+", " ").Trim();
+        var text = SafeRegex.Replace(m.Groups["b"].Value, "<!--[\\s\\S]*?-->", "");
+        text = SafeRegex.Replace(text, "<[^>]+>", "");
+        return SafeRegex.Replace(DecodeEntities(text), @"\s+", " ").Trim();
     }
 }

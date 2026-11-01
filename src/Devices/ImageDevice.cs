@@ -50,53 +50,65 @@ public abstract class ImageDevice
     {
     }
 
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     /// <summary>
     /// Initializes a new ImageDevice with a Resolution using the built-in SoftwarePageRenderer.
     /// </summary>
     public ImageDevice(Resolution resolution)
+#pragma warning restore S3442
         : this(DefaultRenderer(), resolution)
     {
     }
 
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     /// <summary>
     /// Initializes a new ImageDevice with default resolution and built-in SoftwarePageRenderer.
     /// </summary>
     public ImageDevice()
+#pragma warning restore S3442
         : this(DefaultRenderer(), new Resolution(150))
     {
     }
 
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     /// <summary>
     /// Initializes a new ImageDevice with explicit output pixel dimensions using the built-in SoftwarePageRenderer
     /// at default resolution (150 DPI). The rendered page is bilinearly resampled to <paramref name="width"/>×<paramref name="height"/>.
     /// </summary>
     public ImageDevice(int width, int height)
+#pragma warning restore S3442
         : this(DefaultRenderer(), new Resolution(150))
     {
         TargetWidth = width;
         TargetHeight = height;
     }
 
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     /// <summary>
     /// Initializes a new ImageDevice with explicit output pixel dimensions and rendering resolution using the built-in SoftwarePageRenderer.
     /// The page is rendered at <paramref name="resolution"/> DPI for glyph/vector quality, then bilinearly resampled to <paramref name="width"/>×<paramref name="height"/>.
     /// </summary>
     public ImageDevice(int width, int height, Resolution resolution)
+#pragma warning restore S3442
         : this(DefaultRenderer(), resolution)
     {
         TargetWidth = width;
         TargetHeight = height;
     }
 
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     /// <summary>Initialize from a PageSize (in points; converted to integer pixel dimensions at the default 150 DPI).</summary>
     public ImageDevice(Aspose.Pdf.PageSize pageSize)
+#pragma warning restore S3442
         : this(PointsToPixels(pageSize?.Width  ?? 0, 150),
                PointsToPixels(pageSize?.Height ?? 0, 150))
     {
     }
 
+#pragma warning disable S3442 // public API: the published constructor of an abstract base
     /// <summary>Initialize from a PageSize and rendering Resolution.</summary>
     public ImageDevice(Aspose.Pdf.PageSize pageSize, Resolution resolution)
+#pragma warning restore S3442
         : this(PointsToPixels(pageSize?.Width  ?? 0, resolution?.X ?? 150),
                PointsToPixels(pageSize?.Height ?? 0, resolution?.Y ?? 150),
                resolution!)
@@ -210,12 +222,30 @@ public abstract class ImageDevice
     /// <summary>The page rendered at this device's resolution, as the RGBA rows the renderer answers.</summary>
     internal RgbaBuffer Render(Page page) => RenderPage(page, transparentBackground: false);
 
+    /// <summary>Like <see cref="Render(Page)"/>; with <paramref name="transparentBackground"/> the bare
+    /// paper stays transparent.</summary>
+    internal RgbaBuffer Render(Page page, bool transparentBackground) => RenderPage(page, transparentBackground);
+
     protected RgbaBuffer RenderPage(Page page) => RenderPage(page, transparentBackground: false);
+
+    /// <summary>Paragraphs a save has not laid out yet are laid out before the page is drawn,
+    /// once: the document's layout pass is gated per page. Every entry that draws a page - the
+    /// image devices, the renderers a printer and the SVG device reach directly - goes through
+    /// here; without it a page built in code and not yet saved printed and exported blank.</summary>
+    internal static void LayOutPendingParagraphs(Page page)
+    {
+        // A stamp added before the layout waits for it too.
+        if ((!page.LayoutApplied && page.Paragraphs is { Count: > 0 }) || page.HasDeferredStamps)
+            page.ProcessParagraphs();
+    }
 
     /// <summary>Like <see cref="RenderPage(Page)"/>; with <paramref name="transparentBackground"/>
     /// the bare paper stays transparent instead of being flattened onto white.</summary>
     protected RgbaBuffer RenderPage(Page page, bool transparentBackground)
     {
+        // A form a viewer has to build from XFA packets is laid out before its first page is drawn.
+        page = Document.PageToRead(page);
+        LayOutPendingParagraphs(page);
         if (Compat.IsWindows() && _renderer is GdiPlusPageRenderer gdiPaper)
             gdiPaper.TransparentBackground = transparentBackground;
         else if (_renderer is SoftwarePageRenderer swPaper)
@@ -255,25 +285,7 @@ public abstract class ImageDevice
             }
         }
 
-        // Out-of-memory guard: when the page's natural
-        // pixel count at the requested DPI exceeds 40M pixels (~160 MB RGBA), halve
-        // the effective resolution until it fits. Oversized-page renders (wall-plot
-        // pages at 300 DPI: 13200px → 6600, 16500px → 8250) come back at half/quarter
-        // scale instead of exhausting memory; explicitly pinned TargetWidth/Height
-        // outputs are never affected. The bound is bracketed so that
-        // 16500×8850 halves to 8250×4425 (36.5M px allowed) while
-        // 13200×3300 (43.6M px) halves to 6600×1650.
-        int dpiX = Resolution.X, dpiY = Resolution.Y;
-        if (TargetWidth <= 0 && TargetHeight <= 0)
-        {
-            const long maxPixels = 40_000_000;
-            while (dpiX > 1 &&
-                   (long)(page.Width / 72.0 * dpiX) * (long)(page.Height / 72.0 * dpiY) > maxPixels)
-            {
-                dpiX = Math.Max(1, dpiX / 2);
-                dpiY = Math.Max(1, dpiY / 2);
-            }
-        }
+        var (dpiX, dpiY) = RenderResolution(page);
 
         RgbaBuffer rendered;
         if (_renderer is SoftwarePageRenderer sw)
@@ -287,6 +299,37 @@ public abstract class ImageDevice
         if (rendered.Width == TargetWidth && rendered.Height == TargetHeight) return rendered;
 
         return ResampleBilinear(rendered, TargetWidth, TargetHeight);
+    }
+
+    // Out-of-memory guard: a page whose natural pixel count at the requested DPI
+    // exceeds this (~160 MB RGBA) is drawn at half the resolution, again and again
+    // until it fits. Oversized-page renders (wall-plot pages at 300 DPI: 13200px →
+    // 6600, 16500px → 8250) come back at half/quarter scale instead of exhausting
+    // memory. The bound is bracketed so that 16500×8850 halves to 8250×4425
+    // (36.5M px allowed) while 13200×3300 (43.6M px) halves to 6600×1650.
+    private const long MaxRenderPixels = 40_000_000;
+
+    /// <summary>The resolution a page is drawn at: the requested one, halved while the
+    /// drawn area would exceed <see cref="MaxRenderPixels"/>. The area is the crop box the
+    /// renderers size their canvas to, not the media box, so a cropped strip of a large
+    /// page is not cut down for pixels it never draws. Explicitly pinned
+    /// TargetWidth/Height outputs are never reduced. The image writers tag this
+    /// resolution, so a reduced image still declares the page's physical size.</summary>
+    internal (int X, int Y) RenderResolution(Page page)
+    {
+        int dpiX = Resolution.X, dpiY = Resolution.Y;
+        if (TargetWidth > 0 || TargetHeight > 0)
+            return (dpiX, dpiY);
+        var crop = SoftwarePageRenderer.EffectiveCropRect(page);
+        var quarterTurn = page.RotationQuarter is 90 or 270;
+        var visW = quarterTurn ? crop.Height : crop.Width;
+        var visH = quarterTurn ? crop.Width : crop.Height;
+        while (dpiX > 1 && (long)(visW / 72.0 * dpiX) * (long)(visH / 72.0 * dpiY) > MaxRenderPixels)
+        {
+            dpiX = Math.Max(1, dpiX / 2);
+            dpiY = Math.Max(1, dpiY / 2);
+        }
+        return (dpiX, dpiY);
     }
 
     /// <summary>

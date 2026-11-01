@@ -30,7 +30,8 @@ public sealed partial class TextAbsorber
                 xs.cmFullStack.Push((xs.cmLa, xs.cmLb, xs.cmLc, xs.cmLd, xs.cmLe, xs.cmLf));
                 xs.gsStack.Push((xs.fontSet, xs.fontSize, xs.currentFontName, xs.currentFontDict,
                     xs.currentToUnicode, xs.currentMetrics, xs.currentFontNonAgl,
-                    xs.charSpacing, xs.wordSpacing, xs.leading, xs.textRenderMode, xs.horizScale));
+                    xs.charSpacing, xs.wordSpacing, xs.leading, xs.textRenderMode, xs.horizScale,
+                    xs.currentFontMissing));
                 break;
             case "Q":
                 if (xs.cmStack.Count > 0) (xs.localCmTx, xs.localCmTy, xs.localCmD) = xs.cmStack.Pop();
@@ -38,7 +39,7 @@ public sealed partial class TextAbsorber
                 if (xs.gsStack.Count > 0)
                     (xs.fontSet, xs.fontSize, xs.currentFontName, xs.currentFontDict, xs.currentToUnicode,
                      xs.currentMetrics, xs.currentFontNonAgl, xs.charSpacing, xs.wordSpacing, xs.leading,
-                     xs.textRenderMode, xs.horizScale) = xs.gsStack.Pop();
+                     xs.textRenderMode, xs.horizScale, xs.currentFontMissing) = xs.gsStack.Pop();
                 break;
         }
     }
@@ -153,9 +154,9 @@ public sealed partial class TextAbsorber
                 if (xobjs is not null)
                 {
                     var xstr = xs.reader.ResolveStream(xobjs.Get(doName.Value));
-                    if (xstr is not null && xs.reader.ResolveName(xstr.Dict, "Subtype") == "Form")
+                    if (xstr is not null && xs.reader.ResolveName(xstr.Dict, "Subtype") == "Form"
+                        && FormContentWithText(xstr, xs.reader) is { } xbytes)
                     {
-                        var xbytes = xs.reader.DecodeStream(xstr);
                         // A form XObject inherits the graphics state (incl. font) at the Do.
                         ExtractTextFromContentStream(xbytes, xstr.Dict, xs.reader, xs.depth + 1,
                             xs.pageBounds, xs.localCmTx, xs.localCmTy, xs.fontSet, xs.localCmD,
@@ -165,6 +166,41 @@ public sealed partial class TextAbsorber
                 break;
             }
         }
+    }
+
+    // Whether each form drawn so far can show text, while its stream holds the same bytes. A
+    // drawing of ten million operators and no text, placed on every page, was walked in full
+    // at every placement; the walk takes only text, state and matrix operators, so a form
+    // whose bytes hold no text-showing operator and no Do or BI contributes nothing.
+    private readonly Dictionary<PdfStream, (byte[] Raw, bool ShowsText)> _formShowsText = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The form's decoded content, or null when the form cannot show text.</summary>
+    private byte[]? FormContentWithText(PdfStream form, PdfReader reader)
+    {
+        if (_formShowsText.TryGetValue(form, out var known) && ReferenceEquals(known.Raw, form.RawData) && !known.ShowsText)
+            return null;
+        var content = reader.DecodeStream(form);
+        var showsText = ContentMayShowText(content);
+        _formShowsText[form] = (form.RawData, showsText);
+        return showsText ? content : null;
+    }
+
+    // A byte scan, not a lex: any Tj, TJ, ', ", Do or BI anywhere - a string or a name
+    // included - counts as text, so the answer errs towards walking the form.
+    private static bool ContentMayShowText(byte[] content)
+    {
+        for (var i = 0; i < content.Length; i++)
+        {
+            var b = content[i];
+            if (b == (byte)'\'' || b == (byte)'"') return true;
+            if (i + 1 == content.Length) break;
+            var next = content[i + 1];
+            if ((b == (byte)'T' && (next == (byte)'j' || next == (byte)'J'))
+                || (b == (byte)'D' && next == (byte)'o')
+                || (b == (byte)'B' && next == (byte)'I'))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>The render mode and the font selection, with the metrics the font brings.</summary>
@@ -196,10 +232,17 @@ public sealed partial class TextAbsorber
                         xs.currentMetrics = null;
                         xs.currentFontNonAgl = false;
                     }
+                    xs.currentFontMissing = FontKeyMissing(xs, tfFontName.Value);
                 }
                 break;
         }
     }
+
+    /// <summary>Whether a font key set by Tf names no font in the page's Resources
+    /// hierarchy at all (page level only; a form's keys are its own).</summary>
+    private static bool FontKeyMissing(ExtractState xs, string key)
+        => xs.currentFontDict is null && xs.depth == 0
+           && !FontResourceKeyExists(xs.pageDict, xs.reader, key);
 
     /// <summary>The extractor's starting state for one content stream: its fonts, lexer, text state, CTM stacks and run trackers.</summary>
     private void OpenExtractState(ExtractState xs)
@@ -229,8 +272,6 @@ public sealed partial class TextAbsorber
         xs.lastRunStartPageX = double.NaN;
         xs.pendingReorderSpaceY = double.NaN;
         xs.rawInlineScripts = ExtractionOptions?.FormattingMode == TextExtractionOptions.TextFormattingMode.Raw;
-        xs.lastDecodedLength = 0;
-        xs.lastRunEstWidth = 0;
         xs.lastHadMetrics = false;
         xs.prevTmY = double.NaN;
         xs.currentMetrics = null;
@@ -250,7 +291,6 @@ public sealed partial class TextAbsorber
         xs.textRenderMode = 0;
         xs.lastRenderedY = double.NaN;
         xs.lastRenderedCmTy = double.NaN;
-        xs.lastRenderedFs = 0;
         xs.dedupPrevText = string.Empty;
         xs.dedupPrevOffset = -1;
         xs.dedupPrevLlx = 0;
@@ -287,7 +327,7 @@ public sealed partial class TextAbsorber
         xs.gsStack = new Stack<(bool fontSet, double fontSize, string? fontName,
             PdfDictionary? fontDict, Dictionary<int, string>? toUnicode, FontMetrics? metrics,
             bool nonAgl, double charSpacing, double wordSpacing, double leading,
-            int renderMode, double horizScale)>();
+            int renderMode, double horizScale, bool fontMissing)>();
     }
 
     /// <summary>The stream, its owner, the recursion depth and the inherited matrix the extractor was called with.</summary>
@@ -311,7 +351,7 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>The font selection and the text-showing operators of the actual-text pass.</summary>
-    private void ProcessFontAndShowOperator(ExtractState xs, bool useFontEngine, List<PdfObject> operands, Dictionary<string, PdfDictionary> fonts, PdfReader reader, string? actualText, double fontSize, string op)
+    private void ProcessFontAndShowOperator(ExtractState xs, bool useFontEngine, List<PdfObject> operands, Dictionary<string, PdfDictionary> fonts, PdfReader reader, string? actualText, string op)
     {
         switch (op)
         {
@@ -345,7 +385,7 @@ public sealed partial class TextAbsorber
                     }
                     else
                     {
-                        AppendShowText(NormalizeDecoded(DecodeString(str.Value, xs.currentToUnicode, xs.currentFontDict, reader, useFontEngine)));
+                        AppendShowText(NormalizeDecoded(DecodeString(str.Value, xs.currentToUnicode, xs.currentFontDict, reader)));
                     }
                 }
                 break;
@@ -364,24 +404,21 @@ public sealed partial class TextAbsorber
                     else
                     {
                         // Use font-size-relative threshold: 25% of font size in thousandths
-                        var spaceThreshold = -(fontSize * 250 / fontSize); // -250 units (normalized)
+                        // -250 units (normalized)
                         // Simplified: -250 works well for most fonts at any size
                         foreach (var item in arr)
                         {
                             if (item is PdfString s)
                             {
-                                AppendShowText(NormalizeDecoded(DecodeString(s.Value, xs.currentToUnicode, xs.currentFontDict, reader, useFontEngine)));
+                                AppendShowText(NormalizeDecoded(DecodeString(s.Value, xs.currentToUnicode, xs.currentFontDict, reader)));
                             }
                             else if (item is PdfInteger adj && adj.Value < -200)
                             {
                                 if (_text.Length == 0 || _text[^1] != ' ')
                                     _text.Append(' ');
                             }
-                            else if (item is PdfReal adjR && adjR.Value < -200)
-                            {
-                                if (_text.Length == 0 || _text[^1] != ' ')
-                                    _text.Append(' ');
-                            }
+                            else if (item is PdfReal adjR && adjR.Value < -200 && (_text.Length == 0 || _text[^1] != ' '))
+                                _text.Append(' ');
                         }
                     }
                 }
@@ -401,7 +438,7 @@ public sealed partial class TextAbsorber
                     }
                     else if (actualText is null)
                     {
-                        AppendShowText(NormalizeDecoded(DecodeString(str2.Value, xs.currentToUnicode, xs.currentFontDict, reader, useFontEngine)));
+                        AppendShowText(NormalizeDecoded(DecodeString(str2.Value, xs.currentToUnicode, xs.currentFontDict, reader)));
                     }
                 }
                 break;

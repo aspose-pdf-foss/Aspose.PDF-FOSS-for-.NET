@@ -6,14 +6,13 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     private static void RenderMetricRows(MetricParseState mps, List<List<MetricCell>> rows, double[] colW, int nCols,
-        double availW, double s, double lineH, string face, string boldFace, double hheaSum, (double asc, double sum) fm,
+        double availW, double s, double lineH, string face, string boldFace, (double asc, double sum) fm,
         double p, double pageWidth, double pageHeight, double marginTop, double marginBottom,
-        double tableWpt, double tablePct, double baseFontSize, bool paragraphCells, string tableHtml,
+        double tableWpt, double tablePct, double baseFontSize, bool paragraphCells,
         double symInsetPt, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc,
         Core.PdfDictionary docFontDict, HtmlLoadOptions? loadOptions, System.Globalization.CultureInfo invc,
-        Dictionary<string, string> flatRes, bool reportCells, bool serifReportCells, bool stdSerif, bool wrapperStacks,
-        double collapseBoxW, double[] rowSpanExtra, bool tableHasText, bool tableRuleFace, double tableX,
-        double marginLeft, double contentWidth, List<CssSiblingCellRule>? siblingCellRules, FlowPosition cursor)
+        Dictionary<string, string> flatRes, bool serifReportCells, bool stdSerif, bool wrapperStacks,
+        double collapseBoxW, double[] rowSpanExtra, bool tableHasText, bool tableRuleFace, double tableX, List<CssSiblingCellRule>? siblingCellRules, FlowPosition cursor)
     {
         var mr = new MetricRowsState();
         mr.mps = mps;
@@ -25,7 +24,6 @@ internal static partial class HtmlToPdfConverter
         mr.lineH = lineH;
         mr.face = face;
         mr.boldFace = boldFace;
-        mr.hheaSum = hheaSum;
         mr.fm = fm;
         mr.p = p;
         mr.pageWidth = pageWidth;
@@ -33,10 +31,8 @@ internal static partial class HtmlToPdfConverter
         mr.marginTop = marginTop;
         mr.marginBottom = marginBottom;
         mr.tableWpt = tableWpt;
-        mr.tablePct = tablePct;
         mr.baseFontSize = baseFontSize;
         mr.paragraphCells = paragraphCells;
-        mr.tableHtml = tableHtml;
         mr.symInsetPt = symInsetPt;
         mr.css = css;
         mr.doc = doc;
@@ -44,7 +40,6 @@ internal static partial class HtmlToPdfConverter
         mr.loadOptions = loadOptions;
         mr.invc = invc;
         mr.flatRes = flatRes;
-        mr.reportCells = reportCells;
         mr.serifReportCells = serifReportCells;
         mr.stdSerif = stdSerif;
         mr.wrapperStacks = wrapperStacks;
@@ -53,8 +48,6 @@ internal static partial class HtmlToPdfConverter
         mr.tableHasText = tableHasText;
         mr.tableRuleFace = tableRuleFace;
         mr.tableX = tableX;
-        mr.marginLeft = marginLeft;
-        mr.contentWidth = contentWidth;
         mr.siblingCellRules = siblingCellRules;
         mr.cursor = cursor;
         var frameTopY = cursor.y;
@@ -77,7 +70,10 @@ internal static partial class HtmlToPdfConverter
         // box it laid out - a natural box hugs its columns, a declared one fills its width.
         var naturalW = (nCols + 1) * s;
         foreach (var w in colW) naturalW += w + 2 * p;
-        var boxW = tableWpt > 0 ? tableWpt : tablePct > 0 ? availW : Math.Min(mr.availW, naturalW);
+        double boxW;
+        if (tableWpt > 0) boxW = tableWpt;
+        else if (tablePct > 0) boxW = availW;
+        else boxW = Math.Min(mr.availW, naturalW);
         // (a UA form grid declared narrower than its columns grows to them - measured on the
         // test request: the 506 px container draws 400 wide around its 506 px comment table)
         if (mps.uaFormCells && tableWpt > 0 && naturalW > boxW) boxW = naturalW;

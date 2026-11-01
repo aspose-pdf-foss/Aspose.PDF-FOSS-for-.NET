@@ -26,7 +26,11 @@ internal static partial class HtmlToPdfConverter
 
     private static double FaRowH(FormAreasState fa) => FaLineH(fa) + 2 * FaCellPad;
 
-    private static double FaMeasure(string s, bool bold) => s.Length == 0 ? 0 : MeasureFaceText(bold ? FaBoldFace : FaFace, s, FaFs);
+    private static double FaMeasure(string s, bool bold)
+    {
+        if (s.Length == 0) return 0;
+        return MeasureFaceText(bold ? FaBoldFace : FaFace, s, FaFs);
+    }
 
     private static Document FaRender(FormAreasState fa)
     {
@@ -46,7 +50,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>The page holding slice <paramref name="index"/> of the document space, opened
     /// with every earlier one when the flow has not reached it yet.</summary>
-    private static Page FaPageAt(FormAreasState fa, int index)
+    private static void FaPageAt(FormAreasState fa, int index)
     {
         while (fa.pages.Count <= index)
         {
@@ -57,7 +61,6 @@ internal static partial class HtmlToPdfConverter
             fa.pages.Add(page);
             fa.streams.Add(new StringBuilder());
         }
-        return fa.pages[index];
     }
 
     /// <summary>The page index and page-space top of a document-space top.</summary>

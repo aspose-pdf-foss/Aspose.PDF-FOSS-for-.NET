@@ -6,7 +6,7 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>Transparency regions: each region's composite drawn back onto the page.</summary>
-    private void CompositeTransparencyRegions(TransparencyRegionState ts)
+    private static void CompositeTransparencyRegions(TransparencyRegionState ts)
     {
         foreach (var (r, mulColor) in ts.regions)
         {
@@ -73,7 +73,7 @@ public sealed partial class Document
     }
 
     /// <summary>Transparency regions: the nested forms' transparent paints turned into no-ops.</summary>
-    private void ApplyTransparentFormRewrites(TransparencyRegionState ts)
+    private static void ApplyTransparentFormRewrites(TransparencyRegionState ts)
     {
         // Original appearance captured — the nested forms' transparent paints can now
         // become no-ops (the region composites drawn below carry their look).
@@ -89,7 +89,7 @@ public sealed partial class Document
     }
 
     /// <summary>Transparency regions: the content regions merged, or collapsed to one bounding box when there are too many.</summary>
-    private void CollectTransparencyRegions(TransparencyRegionState ts)
+    private static void CollectTransparencyRegions(TransparencyRegionState ts)
     {
         ts.maxDiscreteRegions = 400;
         if (ts.recolorConstantAlpha && ts.contentRegions.Count > ts.maxDiscreteRegions)

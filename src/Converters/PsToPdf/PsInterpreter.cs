@@ -108,16 +108,16 @@ internal sealed partial class PsInterpreter
         {
             ExecuteObject(value);
         }
-        catch (PsQuitSignal)
+        catch (PsQuitException)
         {
             return false;
         }
-        catch (PsStopSignal)
+        catch (PsStopException)
         {
             // A `stop` with no `stopped` to catch it terminates the program.
             return false;
         }
-        catch (PsErrorSignal e)
+        catch (PsErrorException e)
         {
             // An error nothing caught ends the program, as the language's own default
             // handler does: a source with a mistake in it yields the marks it made
@@ -136,7 +136,7 @@ internal sealed partial class PsInterpreter
         if (++_steps > StepBudget)
         {
             BudgetExhausted = true;
-            throw new PsQuitSignal();
+            throw new PsQuitException();
         }
 
         if (!value.IsExecutable)
@@ -183,7 +183,7 @@ internal sealed partial class PsInterpreter
     /// <summary>Look a name up and execute what it is bound to.</summary>
     private void ExecuteName(PsValue name)
     {
-        if (!TryResolve(name, out var bound)) throw new PsErrorSignal("undefined");
+        if (!TryResolve(name, out var bound)) throw new PsErrorException("undefined");
         if (bound.Type == PsType.Array && bound.IsExecutable) ExecuteProcedure(bound.AsArray);
         else ExecuteObject(bound);
     }
@@ -192,7 +192,7 @@ internal sealed partial class PsInterpreter
     public void ExecuteProcedure(PsArray? body)
     {
         if (body is null) return;
-        if (_execStack.Count > 0 && _execStack.Count > OperandLimit) throw new PsErrorSignal("execstackoverflow");
+        if (_execStack.Count > 0 && _execStack.Count > OperandLimit) throw new PsErrorException("execstackoverflow");
         _execStack.Add(new PsFrame(body));
         try
         {
@@ -248,12 +248,13 @@ internal sealed partial class PsInterpreter
     }
 }
 
+#pragma warning disable S3871 // internal control-flow signal: caught inside the interpreter, never escapes
 /// <summary>Raised by an operator that cannot proceed; carries the PostScript error
 /// name so that <c>stopped</c> and the error dictionary see the right one.</summary>
-internal sealed class PsErrorSignal : Exception
+internal sealed class PsErrorException : Exception
 {
     /// <summary>Raise a PostScript error.</summary>
-    public PsErrorSignal(string errorName) : base(errorName)
+    public PsErrorException(string errorName) : base(errorName)
     {
         ErrorName = errorName;
     }
@@ -263,16 +264,17 @@ internal sealed class PsErrorSignal : Exception
 }
 
 /// <summary>Raised by <c>stop</c>, and caught by the nearest <c>stopped</c>.</summary>
-internal sealed class PsStopSignal : Exception
+internal sealed class PsStopException : Exception
 {
 }
 
 /// <summary>Raised by <c>quit</c>, and by the step budget running out.</summary>
-internal sealed class PsQuitSignal : Exception
+internal sealed class PsQuitException : Exception
 {
 }
 
 /// <summary>Raised by <c>exit</c>, and caught by the innermost enclosing loop.</summary>
-internal sealed class PsExitSignal : Exception
+internal sealed class PsExitException : Exception
 {
 }
+#pragma warning restore S3871

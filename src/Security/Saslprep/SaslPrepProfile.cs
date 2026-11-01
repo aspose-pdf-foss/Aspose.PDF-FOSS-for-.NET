@@ -70,7 +70,8 @@ internal static class SaslPrepProfile
 
     private static IEnumerable<int> CodePoints(string s)
     {
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             var c = s[i];
             if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
@@ -83,6 +84,7 @@ internal static class SaslPrepProfile
                 // Lone surrogates fall through as their raw value (Table C.5 catches them).
                 yield return c;
             }
+            i++;
         }
     }
 

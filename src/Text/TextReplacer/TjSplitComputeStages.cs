@@ -19,8 +19,8 @@ public sealed partial class TextReplacer
         int glyphs = js.isCid ? bytes.Length / 2 : bytes.Length;
         w += glyphs * js.tc;
         if (!js.isCid && js.tw != 0)
-            foreach (var b in bytes)
-                if (b == 0x20) w += js.tw;
+            foreach (var b in bytes.Where(b => b == 0x20))
+                w += js.tw;
         return w;
     }
 
@@ -38,7 +38,7 @@ public sealed partial class TextReplacer
     }
 
     /// <summary></summary>
-    private bool MapTjMatchToElements(TjSplitComputeState js)
+    private static bool MapTjMatchToElements(TjSplitComputeState js)
     {
         js.startEl = -1;
         js.endEl = -1;

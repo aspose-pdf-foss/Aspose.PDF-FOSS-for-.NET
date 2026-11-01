@@ -22,7 +22,8 @@ public sealed partial class SoftwarePageRenderer
             {
                 ScanlineFiller.StrokeLine(dp.ctx.Pixels, dp.ctx.PixelW, dp.ctx.PixelH,
                     ex0, ey0, ex1, ey1, dp.r, dp.g, dp.b, dp.strokeA, dp.lw, dp.clip,
-                    blendMode: dp.ctx.CurrentBlendMode, knockout: dp.ctx.IsKnockoutGroup, softMask: dp.ctx.SoftMaskAlpha);
+                    blendMode: dp.ctx.CurrentBlendMode, knockout: dp.ctx.IsKnockoutGroup, softMask: dp.ctx.SoftMaskAlpha,
+                    strokeCentredOnPath: PixelCentreOrigin);
                 return;
             }
             var segDx = ex1 - ex0; var segDy = ey1 - ey0;
@@ -37,7 +38,8 @@ public sealed partial class SoftwarePageRenderer
                     ScanlineFiller.StrokeLine(dp.ctx.Pixels, dp.ctx.PixelW, dp.ctx.PixelH,
                         ex0 + ux * t, ey0 + uy * t, ex0 + ux * (t + take), ey0 + uy * (t + take),
                         dp.r, dp.g, dp.b, dp.strokeA, dp.lw, dp.clip,
-                        blendMode: dp.ctx.CurrentBlendMode, knockout: dp.ctx.IsKnockoutGroup, softMask: dp.ctx.SoftMaskAlpha);
+                        blendMode: dp.ctx.CurrentBlendMode, knockout: dp.ctx.IsKnockoutGroup, softMask: dp.ctx.SoftMaskAlpha,
+                        strokeCentredOnPath: PixelCentreOrigin);
                 t += take;
                 dp.dashPos += take;
                 if (dp.dashPos >= dp.dashPx[dp.dashIdx] - 1e-9)

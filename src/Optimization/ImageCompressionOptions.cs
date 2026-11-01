@@ -21,11 +21,11 @@ public class ImageCompressionOptions
 
     /// <summary>If this flag set to true and <see cref="CompressImages"/> is true images
     /// will be resized if image resolution is greater then specified <see cref="MaxResolution"/>.</summary>
-    public bool ResizeImages
-    {
-        get => MaxResolution > 0;
-        set { if (!value) MaxResolution = 0; }
-    }
+    public bool ResizeImages { get; set; }
+
+    /// <summary>The resolution images are brought down to: <see cref="MaxResolution"/> when
+    /// <see cref="CompressImages"/> and <see cref="ResizeImages"/> both ask for it, 0 (none) otherwise.</summary>
+    internal int ResizeResolution => CompressImages && ResizeImages ? MaxResolution : 0;
 
     /// <summary>Gets or sets encoding used to store images. Stored only;
     /// the original encoding is preserved regardless of the value.</summary>

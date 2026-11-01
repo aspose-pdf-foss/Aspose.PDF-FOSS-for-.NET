@@ -10,7 +10,7 @@ namespace Aspose.Pdf.Facades;
 /// appends the resulting pages to the output. Useful for mail-merge-style
 /// production of per-record PDFs from a single template.
 /// </summary>
-public sealed class AutoFiller : ISaveableFacade, IDisposable
+public sealed class AutoFiller : ISaveableFacade
 {
     private Document? _input;
     private Document? _output;
@@ -43,11 +43,13 @@ public sealed class AutoFiller : ISaveableFacade, IDisposable
 
     private string[]? _unFlattenFields;
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>Field names to leave editable (i.e. NOT flatten) in the output.
     /// All other fields are flattened. Null/empty = flatten everything. Set-only
     /// to match the public reflection shape; readers go through
     /// <see cref="UnFlattenFieldsValue"/> internally.</summary>
     public string[] UnFlattenFields { set => _unFlattenFields = value; }
+#pragma warning restore S2376
 
     internal string[]? UnFlattenFieldsValue => _unFlattenFields;
 

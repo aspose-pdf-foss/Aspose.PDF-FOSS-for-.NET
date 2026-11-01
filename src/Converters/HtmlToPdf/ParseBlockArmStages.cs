@@ -25,7 +25,7 @@ internal static partial class HtmlToPdfConverter
             && !(pb.popped.ListKind != 0 && InsideList(pb))
             ? UaBlockMarginEmOf(tag) * pb.popped.FontSize : 0;
         pb.closingElement = true;
-        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, true,pb.popped);
+        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography,pb.popped);
         pb.closingElement = false;
         if (pb.cv?.profile.fieldListDoc == true)
         {
@@ -62,7 +62,7 @@ internal static partial class HtmlToPdfConverter
         // it emitted nothing (the empty cover-separator <p>): the break
         // carries to whatever block flushes next.
         if (pb.popped.PageBreakAfter) pb.pendingPageBreak = true;
-        pb.inlineRunId = 0; pb.runPrevWasControl = false;
+        pb.inlineRunId = 0; pb.runPrevWasControl = false; pb.ctlLineId = 0;
         // The box's bottom margin lands on its LAST line, whatever the
         // <br>s inside it split off (see the flush).
         if (pb.closingMarginBottom > 0 && pb.blocks.Count > 0)
@@ -143,10 +143,12 @@ internal static partial class HtmlToPdfConverter
             // no colour) closes without breaking its line: the text after it continues
             // the run (probed: the literal line break after `</FONT>` sits on the last
             // line of the font's text, not on a line of its own).
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             var restores = fTop.FontSize != sFs || !Equals(fTop.ForeColor, sFore)
+#pragma warning restore S1244
                 || !string.Equals(fTop.FontFamily, sFam, StringComparison.Ordinal);
             if (restores)
-                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, fTop);
+                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, fTop);
             if (pb.wordMail && Environment.GetEnvironmentVariable("ASPOSE_TRACE_SEAT") == "1") Console.Error.WriteLine($"[restore] tag={tag} depth={pb.spanDepth} was={fTop.FontSize}/{fTop.FontFamily} -> {sFs}/{sFam} text='{(pb.currentText.Length > 20 ? pb.currentText.ToString(0, 20) : pb.currentText.ToString())}'");
             fTop.FontSize = sFs;
             fTop.ForeColor = sFore;
@@ -173,7 +175,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (tag.Equals("center", StringComparison.OrdinalIgnoreCase))
         {
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             if (pb.centerDepth > 0) pb.centerDepth--;
             return false;
         }
@@ -224,7 +226,8 @@ internal static partial class HtmlToPdfConverter
                 });
                 pb.runPrevWasControl = true;
             }
-            else if (chosen.Length > 0) { pb.currentText.Append(chosen); Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, true, pb.styleStack.Peek()); }
+            else if (pb.controlLines) pb.blocks.Add(ComboBlock(pb, chosen));
+            else if (chosen.Length > 0) { pb.currentText.Append(chosen); Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek()); }
             pb.selectOptions.Clear();
             pb.selectName = null;
             return false;
@@ -237,6 +240,14 @@ internal static partial class HtmlToPdfConverter
                 pb.curOptionText.Clear();
             }
             pb.inSelectedOption = false;
+            return false;
+        }
+        if (pb.controlLines && pb.inButton && tag.Equals("button", StringComparison.OrdinalIgnoreCase))
+        {
+            pb.inButton = false;
+            pb.blocks.Add(PushButtonBlock(pb, pb.buttonAttrs, "button", CollapseWs(pb.buttonText.ToString())));
+            pb.buttonText.Clear();
+            pb.buttonAttrs = null;
             return false;
         }
         if (pb.controlBoxes && tag.Equals("button", StringComparison.OrdinalIgnoreCase))
@@ -262,7 +273,7 @@ internal static partial class HtmlToPdfConverter
             if (pb.pOpenDepth > 0) pb.pOpenDepth--;
             else
             {
-                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
                 // Word-filtered idiom: the stray </p> is an EMPTY
                 // MsoNormal paragraph — one full base-size line box
                 // (the sheet reset its margins to zero), not a
@@ -286,13 +297,13 @@ internal static partial class HtmlToPdfConverter
         else if (pb.metricLayout && pb.uaPMargins && tag.Equals("p", StringComparison.OrdinalIgnoreCase))
         {
             // only the flushed block's bottom margin — the NEXT
-            // paragraph's own open-margin covers text-to-text collapse;
-            // a following TABLE reads MarginBottom alone. The margin is
+            // paragraph's own open-margin covers text-to-text collapse; a
+            // following TABLE reads MarginBottom alone. The margin is
             // 1.12 em of the p's INHERITED size (the block style's own
             // FontSize carries the legacy flow default, not the CSS one).
             var pMb = UaBlockMarginEm * (pb.styleStack.Peek().ParentFontSize > 0
                 ? pb.styleStack.Peek().ParentFontSize : pb.styleStack.Peek().FontSize);
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             if (pb.blocks.Count > 0)
                 pb.blocks[^1].MarginBottom = Math.Max(pb.blocks[^1].MarginBottom, pMb);
         }
@@ -349,7 +360,7 @@ internal static partial class HtmlToPdfConverter
             // Declarations repeat in this dialect, so the LAST wins as CSS says.
             static double SideMarginPt(string style, string prop)
             {
-                var ms = Regex.Matches(style,
+                var ms = SafeRegex.Matches(style,
                     @"(?<![-\w])" + prop + @"\s*:\s*(\d+(?:\.\d+)?)px",
                     RegexOptions.IgnoreCase);
                 return ms.Count > 0 && double.TryParse(ms[ms.Count - 1].Groups[1].Value,
@@ -366,17 +377,16 @@ internal static partial class HtmlToPdfConverter
             }
         }
         pb.blocks.Add(new Block { IsImage = true, ImageSrc = pb.src!, ImageWidth = pb.iw, ImageHeight = pb.ih,
-            ImageMaxWFrac = pb.imgMaxWFrac,
+            ImageMaxWFrac = pb.imgMaxWFrac, ImageWidthFrac = pb.imgWFrac,
             // An image inside an absolute chain seats where the chain resolved it, from the PAGE's own
             // margin box (the options' 90 / 72), not the calibrated flow's inset - the reference lays
             // an absolute box against the page margins (probed: 90 + 273.75 / 72 + 6 for a dashboard tile).
             ImageAbsPos = pb.imgAbsPos || AbsChainSeated(pb),
-            ImageAbsLeftPt = pb.imgAbsPos ? pb.imgAbsLeftPt
-                : AbsChainSeated(pb) ? pb.styleStack.Peek().AbsOriginLeftPt - (pb.cv!.marginLeft - PageMarginLeftPt(pb.cv)) : 0,
-            ImageAbsTopPt = pb.imgAbsPos ? pb.imgAbsTopPt
-                : AbsChainSeated(pb) ? pb.styleStack.Peek().AbsOriginTopPt - (pb.cv!.marginTop - PageMarginTopPt(pb.cv)) : 0,
+            ImageAbsLeftPt = AbsImageLeftPt(pb),
+            ImageAbsTopPt = AbsImageTopPt(pb),
             PageBandHeightPt = pb.imgPageBandPt,
             ImageAlt = pb.alt, PageBreakBefore = pb.pendingPageBreak,
+            ImageLinkUrl = pb.openAnchors.Count > 0 ? pb.openAnchors.Peek().url : null,
             // Centered inside <center> or an ALIGN="center" block (a legacy
             // <P ALIGN="center"><IMG> centers the image line).
             ImageCentered = pb.centerDepth > 0 || pb.styleStack.Peek().AlignCenterAttr,
@@ -410,6 +420,23 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>Whether the image sits inside a resolved absolute containing box (an ancestor chain that
     /// AbsOriginWidthPt records) without being absolutely positioned itself.</summary>
+    /// <summary>An absolutely placed image's left: its own, or the absolute chain's origin moved from the
+    /// page margin to the content box, or 0 outside both.</summary>
+    private static double AbsImageLeftPt(ParseBlocksState pb)
+    {
+        if (pb.imgAbsPos) return pb.imgAbsLeftPt;
+        if (AbsChainSeated(pb)) return pb.styleStack.Peek().AbsOriginLeftPt - (pb.cv!.marginLeft - PageMarginLeftPt(pb.cv));
+        return 0;
+    }
+
+    /// <summary>An absolutely placed image's top, as <see cref="AbsImageLeftPt"/>.</summary>
+    private static double AbsImageTopPt(ParseBlocksState pb)
+    {
+        if (pb.imgAbsPos) return pb.imgAbsTopPt;
+        if (AbsChainSeated(pb)) return pb.styleStack.Peek().AbsOriginTopPt - (pb.cv!.marginTop - PageMarginTopPt(pb.cv));
+        return 0;
+    }
+
     private static bool AbsChainSeated(ParseBlocksState pb)
         => !pb.imgAbsPos && pb.cv is not null && pb.styleStack.Peek().InAbsoluteChain;
 
@@ -418,7 +445,7 @@ internal static partial class HtmlToPdfConverter
     private static bool ImageDisplaysAsBlock(ParseBlocksState pb, Token tok)
     {
         if (tok.Attributes is { } ia && ia.TryGetValue("style", out var ist) && ist is not null
-            && Regex.IsMatch(ist, @"(?<![-\w])display\s*:\s*block", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(ist, @"(?<![-\w])display\s*:\s*block", RegexOptions.IgnoreCase))
             return true;
         return pb.css is not null && pb.css.TryGetValue("img", out var imgRule)
             && imgRule.TryGetValue("display", out var idisp) && idisp is not null
@@ -431,7 +458,7 @@ internal static partial class HtmlToPdfConverter
         if (tok.Attributes is not null && tok.Attributes.TryGetValue("style", out var ist)
             && !string.IsNullOrEmpty(ist))
         {
-            var pm = Regex.Match(ist, @"padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            var pm = SafeRegex.Match(ist, @"padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
             if (pm.Success)
             {
                 var parts = pm.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -443,7 +470,7 @@ internal static partial class HtmlToPdfConverter
         pb.rotSrc = null;
         if (tok.Attributes is not null && tok.Attributes.TryGetValue("style", out var rst)
             && !string.IsNullOrEmpty(rst)
-            && Regex.Match(rst, @"(?<![-\w])transform\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
+            && SafeRegex.Match(rst, @"(?<![-\w])transform\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
                 is { Success: true } rim)
             pb.rotSrc = rim.Groups[1].Value;
         else if (pb.css is not null && tok.Attributes is not null
@@ -454,7 +481,7 @@ internal static partial class HtmlToPdfConverter
                 { pb.rotSrc = rv; break; }
         if (pb.rotSrc is not null)
         {
-            var rm = Regex.Match(pb.rotSrc, @"rotate\(\s*(-?[\d.]+)\s*deg\s*\)", RegexOptions.IgnoreCase);
+            var rm = SafeRegex.Match(pb.rotSrc, @"rotate\(\s*(-?[\d.]+)\s*deg\s*\)", RegexOptions.IgnoreCase);
             if (rm.Success) double.TryParse(rm.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out pb.imgRotDeg);
@@ -462,7 +489,7 @@ internal static partial class HtmlToPdfConverter
         pb.imgMaxWFrac = 0;
         if (tok.Attributes is not null && tok.Attributes.TryGetValue("style", out var mwSt)
             && mwSt is not null
-            && Regex.Match(mwSt, @"max-width\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase)
+            && SafeRegex.Match(mwSt, @"max-width\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase)
                 is { Success: true } mwM
             && double.TryParse(mwM.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -474,9 +501,9 @@ internal static partial class HtmlToPdfConverter
         if (tok.Attributes is not null && tok.Attributes.TryGetValue("style", out var flSt)
             && flSt is not null)
         {
-            if (Regex.IsMatch(flSt, @"float\s*:\s*left", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(flSt, @"float\s*:\s*left", RegexOptions.IgnoreCase))
                 pb.imgFloatLeft = true;
-            else if (Regex.IsMatch(flSt, @"float\s*:\s*right", RegexOptions.IgnoreCase))
+            else if (SafeRegex.IsMatch(flSt, @"float\s*:\s*right", RegexOptions.IgnoreCase))
                 pb.imgFloatRight = true;
         }
     }
@@ -486,51 +513,31 @@ internal static partial class HtmlToPdfConverter
     {
         if (tok.Attributes is not null)
         {
-            if (tok.Attributes.TryGetValue("width", out var ws)) double.TryParse(
-                Regex.Match(ws, @"[\d.]+").Value, System.Globalization.NumberStyles.Float,
+            // A percentage width ("100%") is a share of the containing block, not a
+            // pixel count; it is resolved at layout, where that block's width is known.
+            if (tok.Attributes.TryGetValue("width", out var ws) && !ReadPercentImageWidth(pb, ws)) double.TryParse(
+                SafeRegex.Match(ws, @"[\d.]+").Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out pb.iw);
             if (tok.Attributes.TryGetValue("height", out var hs)) double.TryParse(
-                Regex.Match(hs, @"[\d.]+").Value, System.Globalization.NumberStyles.Float,
+                SafeRegex.Match(hs, @"[\d.]+").Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out pb.ih);
-            if (tok.Attributes.TryGetValue("style", out var st2) && !string.IsNullOrEmpty(st2))
-            {
-                // Property-name anchored: "border-width: 0px" must not
-                // satisfy the width lookup (nor min-height the height one).
-                // A unitless value is CSS quirks px ("width:500;").
-                var wm = Regex.Match(st2, @"(?<![-\w])width\s*:\s*([\d.]+)\s*(?:px)?\s*(?:;|$)", RegexOptions.IgnoreCase);
-                if (wm.Success) double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out pb.iw);
-                var hm = Regex.Match(st2, @"(?<![-\w])height\s*:\s*([\d.]+)\s*(?:px)?\s*(?:;|$)", RegexOptions.IgnoreCase);
-                if (hm.Success) double.TryParse(hm.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out pb.ih);
-            }
-            // A CLASS rule sizing the image (".auto-style1 { width: 453px;
-            // height: 271px }") beats the width/height attributes, as CSS
-            // beats presentational hints (the licensing letter's broken
-            // photo box is the CLASS size).
-            if (pb.css is not null
-                && tok.Attributes.TryGetValue("class", out var imgCls)
-                && !string.IsNullOrWhiteSpace(imgCls))
-                foreach (var cn in imgCls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                {
-                    if (!pb.css.TryGetValue("." + cn, out var imgClsRule)) continue;
-                    if (imgClsRule.TryGetValue("width", out var cwv))
-                    {
-                        var cwm = Regex.Match(cwv, @"([\d.]+)\s*px", RegexOptions.IgnoreCase);
-                        if (cwm.Success) double.TryParse(cwm.Groups[1].Value,
-                            System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture, out pb.iw);
-                    }
-                    if (imgClsRule.TryGetValue("height", out var chv))
-                    {
-                        var chm = Regex.Match(chv, @"([\d.]+)\s*px", RegexOptions.IgnoreCase);
-                        if (chm.Success) double.TryParse(chm.Groups[1].Value,
-                            System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture, out pb.ih);
-                    }
-                }
+            // CSS beats the presentational attributes: the sheet's type, descendant, class and id rules, then
+            // the style attribute, each length in its own unit.
+            ReadImageCssSize(pb, tok.Attributes);
         }
         ReadAbsoluteImageSeat(pb, tok);
+    }
+
+    /// <summary>A width given as a percentage ("100%", "50 %"): recorded as the share of the
+    /// containing block it names; false when the value is not a percentage.</summary>
+    private static bool ReadPercentImageWidth(ParseBlocksState pb, string value)
+    {
+        var pm = SafeRegex.Match(value, @"^\s*([\d.]+)\s*%\s*$");
+        if (!pm.Success || !double.TryParse(pm.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var pct) || pct <= 0)
+            return false;
+        pb.imgWFrac = pct / 100.0;
+        return true;
     }
 
     /// <summary>Text pending before the image flushes or, when it is only whitespace, drops; false when a control box took the image.</summary>
@@ -549,7 +556,7 @@ internal static partial class HtmlToPdfConverter
             {
                 var lst = pb.styleStack.Peek();
                 var leadFace = !string.IsNullOrEmpty(lst.FontFamily)
-                    && PosFace(lst.FontFamily!).ttf is not null ? lst.FontFamily! : "Arial";
+                    && PosFace(lst.FontFamily).ttf is not null ? lst.FontFamily : "Arial";
                 pb.imgIndentPt = MeasureFaceText(leadFace, leadTxt, lst.FontSize);
             }
             pb.currentText.Clear();

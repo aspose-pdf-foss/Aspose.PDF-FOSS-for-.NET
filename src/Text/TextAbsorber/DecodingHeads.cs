@@ -88,18 +88,11 @@ public sealed partial class TextAbsorber
             // the high range (0xC1 is the grave ACCENT in Standard, Á in WinAnsi),
             // so only bytes in Standard's high range take this path; the ASCII
             // range keeps the established default below.
-            if (IsStandardLatinType1(fontDict) && bytes.Any(b => b >= 0xA1))
+            if (IsStandardLatinType1(fontDict))
             {
                 var sb = new StringBuilder(bytes.Length);
                 foreach (var b in bytes)
-                {
-                    string? uni = null;
-                    if (b >= 0xA1 && Type1StandardEncoding.GetName(b) is { } gname
-                        && GlyphNameToUnicode.TryGetValue(gname, out var mapped))
-                        uni = mapped;
-                    if (uni is not null) sb.Append(uni);
-                    else sb.Append(DecodeByteWithEncoding(b, "WinAnsiEncoding"));
-                }
+                    sb.Append(BuiltInStandardCharacter(b, fontDict) ?? DecodeByteWithEncoding(b, "WinAnsiEncoding").ToString());
                 return sb.ToString();
             }
         }
@@ -107,7 +100,7 @@ public sealed partial class TextAbsorber
     }
 
     /// <summary>A Type0 font: Identity and UCS2/UTF16 CMaps decode as CIDs through the ordering or the glyph map, a legacy CJK CMap through its byte-length and code tables; null for other encodings.</summary>
-    private static string? DecodeType0String(byte[] bytes, Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader, bool useFontEngineEncoding)
+    private static string? DecodeType0String(byte[] bytes, Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader)
     {
         if (fontDict?.GetName("Subtype") == "Type0")
         {
@@ -125,15 +118,11 @@ public sealed partial class TextAbsorber
                 var isUnicodeCMap = cidEncoding.Contains("-UCS2-") || cidEncoding.Contains("-UTF16-");
                 // Try to get Adobe CID collection ordering for predefined table lookup
                 var cidOrdering = isUnicodeCMap ? null : GetCidOrdering(fontDict, reader);
-                // A CID font without /ToUnicode: for a NON-embedded font, recover Unicode by
-                // inverting the installed system face's cmap — the producer assigned glyph
-                // ids from that same face, so these documents stay decodable. For an
-                // EMBEDDED program the raw-code fallback is kept (the
-                // "NoToUnicode_UseRawCode" behaviour), so cmap inversion there stays opt-in
-                // via TextSearchOptions.UseFontEngineEncoding.
-                var gidToUnicode = isUnicodeCMap
-                    ? null
-                    : GetGidToUnicode(fontDict, reader, allowEmbedded: useFontEngineEncoding);
+                // A CID font without /ToUnicode: its codes are glyph ids (through
+                // /CIDToGIDMap), so the font's cmap inverted names their characters - the
+                // embedded program's, or for a non-embedded font the installed face's, from
+                // which the producer took the ids. A raw glyph id is no character.
+                var gidToUnicode = isUnicodeCMap ? null : GetGidToUnicode(fontDict, reader);
                 return DecodeCidString(bytes, toUnicode, cidOrdering, gidToUnicode);
             }
 

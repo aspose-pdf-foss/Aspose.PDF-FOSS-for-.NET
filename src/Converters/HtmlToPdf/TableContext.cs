@@ -9,7 +9,7 @@ internal static partial class HtmlToPdfConverter
     /// and chain rules, settles the dialect config, builds the empty Table and the
     /// token stream, and hands back the five context objects the parse loop works on.</summary>
     private static (TableStyleConfig cfg, TableParseState ps, TableColumnModel colModel, Table table, List<Token> tokens, string? cssRunFace)
-        BuildTableParseContext(string html, double availWidthPt, HtmlLoadOptions? options, List<byte[]>? inlineSvgs, IReadOnlyDictionary<string, Dictionary<string, string>>? docCss, bool bandDialect, bool widenProbe, double cellLineHeightPt, double defaultCellFontPt, bool tightExtras, bool liftNestedTables, bool uaCellBoxes, string? cssRunFace, Color? bodyTextColor, bool uaSerifMin, bool authoredCellChrome, bool formGridDialect, bool ptCellWidths, bool redlineCells, bool dwFormCells, double formGridStrutPt, double formGridStrutDropPt, string? defaultCellFace, bool docElementGrid, bool fullWidthCjkMin, bool pinnedBodyGrid, bool overDeclaredDraw, List<CssChainRule>? chainRules, List<CssElem>? cssAncestors, Func<string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio, bool wordMailCells = false, Func<bool, Aspose.Pdf.Forms.CheckboxField>? makeCheckbox = null, bool nestedGrid = false, double uaLineFactor = 0, bool uaSheetGrid = false)
+        BuildTableParseContext(string html, double availWidthPt, HtmlLoadOptions? options, List<byte[]>? inlineSvgs, IReadOnlyDictionary<string, Dictionary<string, string>>? docCss, bool bandDialect, bool widenProbe, double cellLineHeightPt, double defaultCellFontPt, bool tightExtras, bool liftNestedTables, bool uaCellBoxes, string? cssRunFace, Color? bodyTextColor, bool uaSerifMin, bool authoredCellChrome, bool formGridDialect, bool ptCellWidths, bool redlineCells, bool dwFormCells, double formGridStrutPt, double formGridStrutDropPt, string? defaultCellFace, bool docElementGrid, bool fullWidthCjkMin, bool pinnedBodyGrid, bool overDeclaredDraw, List<CssChainRule>? chainRules, List<CssElem>? cssAncestors, Func<string, string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio, bool wordMailCells = false, Func<bool, Aspose.Pdf.Forms.CheckboxField>? makeCheckbox = null, bool nestedGrid = false, double uaLineFactor = 0, bool uaSheetGrid = false, List<CssElem>? hostChain = null, string? hostBodyFace = null, bool bodyFaceGrid = false, bool fieldCells = false)
     {
         var cfg = new TableStyleConfig();
         cfg.options = options;
@@ -30,7 +30,7 @@ internal static partial class HtmlToPdfConverter
         cfg.uaSerifMin = uaSerifMin;
         cfg.authoredCellChrome = authoredCellChrome;
         cfg.chainRules = chainRules;
-        cfg.cssAncestors = cssAncestors;
+        cfg.cssAncestors = cssAncestors; cfg.hostChain = hostChain; cfg.hostBodyFace = hostBodyFace; cfg.bodyFaceGrid = bodyFaceGrid;
         cfg.defaultCellFace = defaultCellFace;
         cfg.docElementGrid = docElementGrid;
         cfg.dwFormCells = dwFormCells;
@@ -41,6 +41,7 @@ internal static partial class HtmlToPdfConverter
         cfg.fullWidthCjkMin = fullWidthCjkMin;
         cfg.makeRadio = makeRadio;
         cfg.makeCheckbox = makeCheckbox;
+        cfg.fieldCells = fieldCells;
         cfg.overDeclaredDraw = overDeclaredDraw;
         cfg.pinnedBodyGrid = pinnedBodyGrid;
         cfg.ptCellWidths = ptCellWidths;
@@ -51,12 +52,12 @@ internal static partial class HtmlToPdfConverter
         // …and its `a { font-weight: bold }` rule weights every anchor's text.
         cfg.docAnchorBold = cfg.docCss is not null && cfg.docCss.TryGetValue("a", out var docABold)
             && docABold.TryGetValue("font-weight", out var docAW)
-            && Regex.IsMatch(docAW, "^\\s*(bold|[7-9]00)\\s*$", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(docAW, "^\\s*(bold|[7-9]00)\\s*$", RegexOptions.IgnoreCase);
         if (cfg.docCss is not null && cfg.docCss.TryGetValue("a", out var docARule)
             && docARule.TryGetValue("color", out var docACol))
             cfg.docAnchorColor = ParseCssColor(docACol);
 
-        cfg.tblTag = Regex.Match(html, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        cfg.tblTag = SafeRegex.Match(html, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
         cfg.tblStyle = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         cfg.tblBorderAttr = null; cfg.tblCellPadAttr = null; cfg.tblBorderColorAttr = null;
         var colModel = new TableColumnModel();
@@ -96,7 +97,7 @@ internal static partial class HtmlToPdfConverter
         // pills) or — inside an open box — a background-image badge whose text
         // becomes the badge letter.
         if (ps.cellFamily is not null)
-            try { ps.measureFont = Text.FontRepository.TryFindFont(ps.cellFamily); } catch { }
+            try { ps.measureFont = Text.FontRepository.TryFindFont(ps.cellFamily); } catch { /* a font that cannot be found or read leaves the fallback in place */ }
         // Width of a run in the document's real SERIF face. The cells render through the
         // Standard-14 sans stand-in, which runs ~5% wide, so a box wrap measured with it
         // breaks a token one line earlier than the browser does. Wrapping is decided on
@@ -115,7 +116,7 @@ internal static partial class HtmlToPdfConverter
     private static string? TableClassRuleValue(TableStyleConfig cfg, string prop)
     {
         if (cfg.tblTag is not { Success: true }) return null;
-        var cm = Regex.Match(cfg.tblTag.Value, @"\bclass\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+        var cm = SafeRegex.Match(cfg.tblTag.Value, @"\bclass\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
         if (!cm.Success) return null;
         // The document's sheet first, the table segment's own style block over it.
         string? found = null;
@@ -136,7 +137,7 @@ internal static partial class HtmlToPdfConverter
     private static string? TableClassCellRuleValue(TableStyleConfig cfg, string prop)
     {
         if (cfg.tblTag is not { Success: true }) return null;
-        var cm = Regex.Match(cfg.tblTag.Value, @"\bclass\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+        var cm = SafeRegex.Match(cfg.tblTag.Value, @"\bclass\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
         if (!cm.Success) return null;
         string? found = null;
         foreach (var sheet in new[] { cfg.docCss, cfg.css })
@@ -153,10 +154,10 @@ internal static partial class HtmlToPdfConverter
     private static bool IsResetSheetGrid(IReadOnlyDictionary<string, Dictionary<string, string>>? css)
     {
         if (css is null || !css.TryGetValue("*", out var star)
-            || !star.TryGetValue("margin", out var m) || !m.Trim().StartsWith("0")) return false;
+            || !star.TryGetValue("margin", out var m) || !m.Trim().StartsWith('0')) return false;
         foreach (var key in new[] { "table td", "td" })
             if (css.TryGetValue(key, out var cell) && cell.TryGetValue("border", out var b)
-                && !b.Trim().StartsWith("0") && b.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0) return true;
+                && !b.Trim().StartsWith('0') && b.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0) return true;
         return false;
     }
 
@@ -170,13 +171,13 @@ internal static partial class HtmlToPdfConverter
     private static Match FirstOwnCellStyleBorder(string html)
     {
         var depth = 0;
-        foreach (Match m in Regex.Matches(html, @"<(/?)(table|t[dh])\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match m in SafeRegex.Matches(html, @"<(/?)(table|t[dh])\b[^>]*>", RegexOptions.IgnoreCase))
         {
             var close = m.Groups[1].Value.Length > 0;
             var tag = m.Groups[2].Value.ToLowerInvariant();
             if (tag == "table") { depth += close ? -1 : 1; continue; }
             if (close || depth > 1) continue;
-            var sm = Regex.Match(m.Value, @"style\s*=\s*[""'][^""']*border\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+            var sm = SafeRegex.Match(m.Value, @"style\s*=\s*[""'][^""']*border\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
             if (sm.Success) return sm;
         }
         return Match.Empty;
@@ -187,7 +188,7 @@ internal static partial class HtmlToPdfConverter
     /// the frame's sides into dashes.</summary>
     private static void ApplyTableFrameStyle(Table table, TableStyleConfig cfg, string? borderAttr)
     {
-        var attrPx = borderAttr is not null && double.TryParse(Regex.Match(borderAttr, @"\d+(?:\.\d+)?").Value,
+        var attrPx = borderAttr is not null && double.TryParse(SafeRegex.Match(borderAttr, @"\d+(?:\.\d+)?").Value,
             System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var apx) ? apx : 0;
         if (attrPx >= ThickFrameAttrPx && table.Border is null)
         {
@@ -205,7 +206,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (!cfg.tblStyle.TryGetValue(prop, out var sv) || BorderStyleKeywordOf(sv) is not { } kw || kw is "none" or "hidden") continue;
             if (TryParseBorderShorthand(prop + ":" + sv, prop) is not (var w, var c)) continue;
-            shSides |= side; if (w > shW) shW = w; shCol ??= c; shDash[side] = kw;
+            shSides |= side; if (w > shW) { shW = w; } shCol ??= c; shDash[side] = kw;
         }
         // (…and the longhands - `border-top-width: 2px; border-top-style: dashed` - on a UA-boxed grid: the
         //  mailing's remittance form rules its top and bottom)
@@ -216,7 +217,7 @@ internal static partial class HtmlToPdfConverter
                     || BorderStyleKeywordOf(lsv) is not { } lkw || lkw is "none" or "hidden") continue;
                 var lw = cfg.tblStyle.TryGetValue(prop + "-width", out var lwv) && TryParseLength(lwv.Trim()) is { } lwPt && lwPt > 0 ? lwPt : UaMediumBorderPt;
                 var lc = cfg.tblStyle.TryGetValue(prop + "-color", out var lcv) ? ParseCssColor(lcv.Trim()) : null;
-                shSides |= side; if (lw > shW) shW = lw; shCol ??= lc; shDash[side] = lkw;
+                shSides |= side; if (lw > shW) { shW = lw; } shCol ??= lc; shDash[side] = lkw;
             }
         if (shSides != 0 && table.Border is null)
             table.Border = new BorderInfo(shSides, shW, shCol ?? Color.Black);
@@ -239,8 +240,10 @@ internal static partial class HtmlToPdfConverter
     private static string? BorderStyleKeywordOf(string value)
     {
         foreach (var tok in value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-            foreach (var k in BorderStyleKeywords)
-                if (string.Equals(k, tok, StringComparison.OrdinalIgnoreCase)) return k;
+        {
+            var k = BorderStyleKeywords.FirstOrDefault(k => string.Equals(k, tok, StringComparison.OrdinalIgnoreCase));
+            if (k is not null) return k;
+        }
         return value.IndexOf("none", StringComparison.OrdinalIgnoreCase) >= 0 ? "none" : null;
     }
 
@@ -251,9 +254,9 @@ internal static partial class HtmlToPdfConverter
     private static double? TableInlineFontSizeKeywordPt(Match tblTag)
     {
         if (!tblTag.Success) return null;
-        var sm = Regex.Match(tblTag.Value, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+        var sm = SafeRegex.Match(tblTag.Value, @"style\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
         if (!sm.Success) return null;
-        var fm = Regex.Match(sm.Groups[1].Value, @"(?<![-\w])font-size\s*:\s*([a-z-]+)\s*(?:;|$)", RegexOptions.IgnoreCase);
+        var fm = SafeRegex.Match(sm.Groups[1].Value, @"(?<![-\w])font-size\s*:\s*([a-z-]+)\s*(?:;|$)", RegexOptions.IgnoreCase);
         return fm.Success && TryParseCssFontSize(fm.Groups[1].Value.Trim()) is { } pt && pt > 0 ? pt : null;
     }
 

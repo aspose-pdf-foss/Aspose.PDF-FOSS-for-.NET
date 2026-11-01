@@ -123,8 +123,10 @@ public class XmpPdfAExtensionValueType
     /// <summary>Remove the given field.</summary>
     public void Remove(XmpPdfAExtensionField field) => _fields.Remove(field);
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Render this value type as XML elements.</summary>
     public List<XmlElement> GetXml(XmlDocument xmlDocument) => new();
+#pragma warning restore S2325
 }
 
 /// <summary>
@@ -136,35 +138,45 @@ public class XmpPdfAExtensionSchema
     /// <summary>Default prefix used for the extension namespace declaration.</summary>
     public const string DefaultExtensionNamespacePrefix = "pdfaExtension";
 
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
     /// <summary>Default URI used for the extension namespace declaration.</summary>
     public const string DefaultExtensionNamespaceUri = "http://www.aiim.org/pdfa/ns/extension/";
+#pragma warning restore S1075
 
     /// <summary>Default prefix used for the extension-field namespace declaration.</summary>
     public const string DefaultFieldNamespacePrefix = "pdfaField";
 
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
     /// <summary>Default URI used for the extension-field namespace declaration.</summary>
     public const string DefaultFieldNamespaceUri = "http://www.aiim.org/pdfa/ns/field#";
+#pragma warning restore S1075
 
     /// <summary>Default prefix used for the extension-property namespace declaration.</summary>
     public const string DefaultPropertyNamespacePrefix = "pdfaProperty";
 
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
     /// <summary>Default URI used for the extension-property namespace declaration.</summary>
     public const string DefaultPropertyNamespaceUri = "http://www.aiim.org/pdfa/ns/property#";
+#pragma warning restore S1075
 
     /// <summary>Default prefix used for the extension-schema namespace declaration.</summary>
     public const string DefaultSchemaNamespacePrefix = "pdfaSchema";
 
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
     /// <summary>Default URI used for the extension-schema namespace declaration.</summary>
     public const string DefaultSchemaNamespaceUri = "http://www.aiim.org/pdfa/ns/schema#";
 
     /// <summary>Default URI used for value-type values.</summary>
     public const string DefaultValueNamespaceUri = "http://www.aiim.org/pdfa/ns/type#";
+#pragma warning restore S1075
 
     /// <summary>Default prefix used for value-type declarations.</summary>
     public const string DefaultValueTypeNamespacePrefix = "pdfaType";
 
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
     /// <summary>URI for the RDF namespace used to wrap PDF/A extension metadata.</summary>
     public const string RdfNamespaceURI = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+#pragma warning restore S1075
 
     /// <summary>Prefix conventionally bound to <see cref="RdfNamespaceURI"/>.</summary>
     public const string RdfPrefix = "rdf";
@@ -202,11 +214,13 @@ public class XmpPdfAExtensionSchema
         return null;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Render the schema header (description + namespaces) as XML.</summary>
     public XmlElement GetSchemaXml(XmlDocument xmlDocument) => null;
+#pragma warning restore S2325
 
     /// <summary>Render the schema values (property/field entries) into <paramref name="rootElement"/>.</summary>
-    public void GetValuesXml(XmlDocument xmlDocument, XmlElement rootElement) { }
+    public void GetValuesXml(XmlDocument xmlDocument, XmlElement rootElement) { /* the schema values are not rendered in this library */ }
 }
 
 /// <summary>Human-readable description of a PDF/A XMP extension schema.</summary>
@@ -229,6 +243,8 @@ public class XmpPdfAExtensionSchemaDescription
     /// <summary>Namespace prefix bound to <see cref="NamespaceURI"/>.</summary>
     public string Prefix { get; }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Render this description as XML elements.</summary>
     public List<XmlElement> GetXml(XmlDocument xmlDocument) => new();
+#pragma warning restore S2325
 }

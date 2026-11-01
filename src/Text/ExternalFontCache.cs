@@ -20,8 +20,10 @@ public sealed class ExternalFontCache
 
     public ExternalFontCache() { }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>The platform's default font folders (existing directories only).</summary>
     public string[] GetDefaultFontsFolders()
+#pragma warning restore S2325
     {
         var dirs = new List<string>();
         if (Compat.IsWindows())
@@ -60,19 +62,20 @@ public sealed class ExternalFontCache
         return existing.Length > 0 ? existing : new[] { Directory.GetCurrentDirectory() };
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Register the given folders as font sources so their faces resolve by family name.
     /// When <paramref name="reset"/> is true the previously-registered folder sources are
     /// dropped first (the built-in system source is always retained).
     /// </summary>
     public void SetFontsFolders(string[] folders, bool reset)
+#pragma warning restore S2325
     {
         if (reset)
         {
             var keep = new List<FontSource>();
-            foreach (var src in FontRepository.Sources)
-                if (src is not FolderFontSource)
-                    keep.Add(src);
+            foreach (var src in FontRepository.Sources.Where(src => src is not FolderFontSource))
+                keep.Add(src);
             FontRepository.Sources.Clear();
             foreach (var src in keep)
                 FontRepository.Sources.Add(src);

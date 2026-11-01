@@ -35,7 +35,6 @@ private sealed class SlipInvoiceState
     public double y;
     public bool drewAny;
     public string html = default!;
-    public HtmlLoadOptions? options = null;
     public IReadOnlyDictionary<string, Dictionary<string, string>> css = default!;
     public double pageWidth = 0;
     public double pageHeight = 0;

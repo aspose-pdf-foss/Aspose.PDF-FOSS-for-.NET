@@ -10,6 +10,26 @@ namespace Aspose.Pdf;
 
 public sealed partial class Page
 {
+    /// <summary>Write the decorations registered on the page's text - highlights, underlines,
+    /// strike-outs and the source rules they replace - into its content. Run at save: each is
+    /// placed from where its text was read, through the redraws of the content since, out of the
+    /// matrix the stream it goes into is drawn under.</summary>
+    internal void FlushTextDecorations()
+    {
+        // The content's end matrix is read again for this flush, by the first decoration appended.
+        _appendedBaseRead = false;
+        FlushBgColorRectangles();
+        FlushUnderlineRectangles();
+        // Removal LAST: its own write-back is what folds a prepended or appended
+        // decoration stream into the page's single operator list, which is the list a
+        // caller reads after save.
+        FlushUnderlineRemovals();
+        FlushBgColorOverlay();
+        FlushStrikeOutRectangles();
+        _appendedBase = null;
+        _appendedBaseRead = false;
+    }
+
     /// <summary>
     /// Emit thin filled rectangles below text for every registered underline fragment.
     /// Called during save after content stream operators are written.
@@ -26,7 +46,10 @@ public sealed partial class Page
         _underlineRedrawn = new HashSet<Text.TextFragment>(_underlineFragments);
         var ul = new UnderlineFlushState();
         ul.builder = new Content.ContentStreamBuilder();
+        ul.appended = true;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var frag in _underlineFragments)
+#pragma warning restore S3267
         {
             if (!FlushUnderlineFragment(ul, frag)) break;
         }

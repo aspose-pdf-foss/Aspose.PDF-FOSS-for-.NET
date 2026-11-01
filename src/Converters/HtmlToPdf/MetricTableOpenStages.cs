@@ -11,10 +11,10 @@ internal static partial class HtmlToPdfConverter
         // table width:N% (inline style or attribute): the column grid
         // scales up to fill the declared share of the content box.
         var twm = ta.TryGetValue("style", out var tst)
-            ? Regex.Match(tst, @"width\s*:\s*(\d+(?:\.\d+)?)\s*%")
+            ? SafeRegex.Match(tst, @"width\s*:\s*(\d+(?:\.\d+)?)\s*%")
             : Match.Empty;
         if (!twm.Success && ta.TryGetValue("width", out var twa))
-            twm = Regex.Match(twa, @"^\s*(\d+(?:\.\d+)?)\s*%");
+            twm = SafeRegex.Match(twa, @"^\s*(\d+(?:\.\d+)?)\s*%");
         if (twm.Success)
             double.TryParse(twm.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -31,14 +31,14 @@ internal static partial class HtmlToPdfConverter
         // (measured on the band: style="width:482px" lands
         // the 361.5 pt grid with the surplus shared ∝ content).
         if (mt.tableWpt <= 0 && mt.tablePct <= 0 && ta.TryGetValue("style", out var tst2)
-            && Regex.Match(tst2, @"(?<![-\w])width\s*:\s*(\d+(?:\.\d+)?)\s*px",
+            && SafeRegex.Match(tst2, @"(?<![-\w])width\s*:\s*(\d+(?:\.\d+)?)\s*px",
                 RegexOptions.IgnoreCase) is { Success: true } tswm)
             mt.tableWpt = DtpNum(tswm.Groups[1].Value) * PxPt;
         // (…and a UA grid's inline width in POINTS - the Words export's `width:341.25pt` - is the
         // same declared box: probed on the Words letter, the address grid's columns fill it, its
         // nbsp column standing 3 pt wide at the right edge)
         if (mt.tableWpt <= 0 && mt.tablePct <= 0 && mt.stdSerif && ta.TryGetValue("style", out var tstPt)
-            && Regex.Match(tstPt, @"(?<![-\w])width\s*:\s*([\d.]+\s*(?:pt|in|cm|mm))", RegexOptions.IgnoreCase) is { Success: true } tswPt
+            && SafeRegex.Match(tstPt, @"(?<![-\w])width\s*:\s*([\d.]+\s*(?:pt|in|cm|mm))", RegexOptions.IgnoreCase) is { Success: true } tswPt
             && TryParseLength(tswPt.Groups[1].Value.Replace(" ", "")) is { } tswPtV && tswPtV > 0)
             mt.tableWpt = tswPtV;
         // …and so does the sheet's rule on the table's class (`table.AdvTbl { width:
@@ -60,17 +60,17 @@ internal static partial class HtmlToPdfConverter
         // their content (probed: a 135px single-row band centres
         // the cell baselines on the band's middle)…
         if (ta.TryGetValue("style", out var tst3)
-            && Regex.Match(tst3, @"(?<![-\w])height\s*:\s*(\d+(?:\.\d+)?)\s*px",
+            && SafeRegex.Match(tst3, @"(?<![-\w])height\s*:\s*(\d+(?:\.\d+)?)\s*px",
                 RegexOptions.IgnoreCase) is { Success: true } tshm)
             mt.mps.tableStyleHPt = DtpNum(tshm.Groups[1].Value) * PxPt;
         // …its `white-space` inherits into every cell it holds (probed: a
         // `<table style="white-space:nowrap">` keeps its sentence on one line and pages 639.74).
         if (ta.TryGetValue("style", out var tst5)
-            && Regex.IsMatch(tst5, @"white-space\s*:\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(tst5, @"white-space\s*:\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
             mt.mps.tableNoWrap = true;
         // …and its background fills the whole band rectangle.
         if (ta.TryGetValue("style", out var tst4)
-            && Regex.Match(tst4, @"background(?:-color)?\s*:\s*([^;]+)",
+            && SafeRegex.Match(tst4, @"background(?:-color)?\s*:\s*([^;]+)",
                 RegexOptions.IgnoreCase) is { Success: true } tsbm
             && ParseCssColor(tsbm.Groups[1].Value.Trim()) is { } tsbg)
             mt.mps.tableStyleBg = tsbg;
@@ -79,7 +79,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A CSS font-size declaration in an absolute unit (pt/px/cm/mm/in), as against a
     /// percent, em or keyword that resolves against the flow base.</summary>
     private static bool CssSizeIsAbsolute(string decl)
-        => Regex.IsMatch(decl.Trim(), @"^\d*\.?\d+\s*(pt|px|cm|mm|in)$", RegexOptions.IgnoreCase);
+        => SafeRegex.IsMatch(decl.Trim(), @"^\d*\.?\d+\s*(pt|px|cm|mm|in)$", RegexOptions.IgnoreCase);
 
     /// <summary>Metric table open: the sheet class read off the table tag.</summary>
     private static void ReadMetricTableClass(MetricTableState mt, Dictionary<string, string> ta)
@@ -122,7 +122,7 @@ internal static partial class HtmlToPdfConverter
                     && mt.css.TryGetValue("." + c, out var tclsBag))
                 {
                     var tProbe = new MetricCell();
-                    ApplyCellClassBag(mt.mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, tProbe, tclsBag);
+                    ApplyCellClassBag(mt.mps, mt.stdSerif, tProbe, tclsBag);
                     if (tProbe.FontSize is { } tpFs)
                     {
                         mt.mps.fontSize = tpFs; mt.mps.tableClassFont = true;
@@ -146,9 +146,9 @@ internal static partial class HtmlToPdfConverter
                             mt.s = 0;
                         if (shT.TryGetValue("padding", out var shPad))
                         {
-                            // TryParseLength treats 0 as "no length";
-                            // padding: 0 is a real declaration here
-                            if (Regex.IsMatch(shPad.Trim(), @"^0(px)?$"))
+                            // TryParseLength treats 0 as "no length"; padding:
+                            // 0 is a real declaration here
+                            if (SafeRegex.IsMatch(shPad.Trim(), @"^0(px)?$"))
                                 mt.p = 0;
                             else if (TryParseLength(shPad.Trim()) is { } shPadPt)
                                 mt.p = shPadPt;
@@ -173,7 +173,7 @@ internal static partial class HtmlToPdfConverter
         // …and the table's own CSS background is the same band (the e-mail cards'
         // `style="background: #fff; border: 1px solid #ccc"` paint white on the grey body).
         if (mt.mps.tableBg is null && ta.TryGetValue("style", out var tbgSt) && tbgSt is not null
-            && Regex.Match(tbgSt, @"(?<![-\w])background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } tbgM
+            && SafeRegex.Match(tbgSt, @"(?<![-\w])background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } tbgM
             && ParseCssColor(tbgM.Groups[1].Value.Trim()) is { } tbgc)
             mt.mps.tableBg = tbgc;
         // (a collapsed grid has no spacing whatever its attribute says)
@@ -182,11 +182,11 @@ internal static partial class HtmlToPdfConverter
         // an inline `border-spacing` is CSS's cellspacing
         // The table's own inline margin-left indents it, as a class rule's does.
         if (ta.TryGetValue("style", out var tmlSt) && tmlSt is not null
-            && Regex.Match(tmlSt, @"margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } tmlM
+            && SafeRegex.Match(tmlSt, @"margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } tmlM
             && TryParseLength(tmlM.Groups[1].Value.Trim()) is { } tmlPt && tmlPt > 0)
             mt.indent += tmlPt;
         if (ta.TryGetValue("style", out var bspSt) && bspSt is not null
-            && Regex.Match(bspSt, @"border-spacing\s*:\s*([\d.]+)\s*(px|pt)",
+            && SafeRegex.Match(bspSt, @"border-spacing\s*:\s*([\d.]+)\s*(px|pt)",
                 RegexOptions.IgnoreCase) is { Success: true } bspM
             && double.TryParse(bspM.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -198,7 +198,7 @@ internal static partial class HtmlToPdfConverter
             // style themselves inline: rows pitch on their OWN
             // content (the 11 pt label ladder), not the table's
             // 12 pt strut.
-            if (mt.stdSerif && Regex.IsMatch(mt.tableHtml,
+            if (mt.stdSerif && SafeRegex.IsMatch(mt.tableHtml,
                     @"<td[^>]*style\s*=\s*[""][^""]*font-size",
                     RegexOptions.IgnoreCase))
                 mt.mps.inlineStatementGrid = true;
@@ -218,7 +218,7 @@ internal static partial class HtmlToPdfConverter
         // `table.list td { padding: 5px }` heads seat 104.8 = 103.5 + the rule + 0.75, the data
         // cells 107.8, the head row 15.3 tall against the data rows' 21.3)
         if (mt.stdSerif && sheetPad > UaCellPaddingPt && SheetTdPaddingAlone(mt.css)
-            && Regex.IsMatch(mt.tableHtml, @"<th\b", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(mt.tableHtml, @"<th\b", RegexOptions.IgnoreCase))
         {
             mt.p = UaCellPaddingPt;
             mt.mps.tdPadExtraPt = sheetPad - UaCellPaddingPt;
@@ -235,14 +235,14 @@ internal static partial class HtmlToPdfConverter
     {
         if (!(mt.stdSerif && !mt.mps.bordered && ta.TryGetValue("style", out var wtst)
         && wtst is not null
-        && Regex.IsMatch(wtst, @"border-collapse\s*:\s*collapse",
+        && SafeRegex.IsMatch(wtst, @"border-collapse\s*:\s*collapse",
             RegexOptions.IgnoreCase)
-        && (Regex.IsMatch(mt.tableHtml,
+        && (SafeRegex.IsMatch(mt.tableHtml,
                 @"<td\b[^>]*style\s*=\s*[""'][^""']*border-bottom\s*:[^;""']*solid",
                 RegexOptions.IgnoreCase)
             // …or the triplet spelling (`border-width: 1pt 1pt
             // 2.25pt; border-style: solid`) on the cells
-            || Regex.IsMatch(mt.tableHtml,
+            || SafeRegex.IsMatch(mt.tableHtml,
                 @"<td\b[^>]*style\s*=\s*[""][^""]*border-style\s*:\s*solid",
                 RegexOptions.IgnoreCase)))) return;
         mt.mps.bordered = true;
@@ -253,7 +253,7 @@ internal static partial class HtmlToPdfConverter
         mt.s = 0;
         // The table's own inline width is the grid's
         // declared border box.
-        var wtw = Regex.Match(wtst,
+        var wtw = SafeRegex.Match(wtst,
             @"(?<![-\w])width\s*:\s*([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
         if (wtw.Success && double.TryParse(wtw.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -264,7 +264,7 @@ internal static partial class HtmlToPdfConverter
         ReadMetricCellPadding(mt);
         // The cells' declared border width (each row boundary
         // advances the grid by exactly one shared border).
-        var wtbwM = Regex.Match(mt.tableHtml,
+        var wtbwM = SafeRegex.Match(mt.tableHtml,
             @"<td[^>]*style\s*=\s*[""'][^""']*border-(?:bottom|width)\s*:[^;""']*?([\d.]+)\s*(px|pt)",
             RegexOptions.IgnoreCase);
         if (wtbwM.Success && double.TryParse(wtbwM.Groups[1].Value,
@@ -274,7 +274,7 @@ internal static partial class HtmlToPdfConverter
             mt.mps.wtBw = wtbwM.Groups[2].Value.Equals("px",
                 StringComparison.OrdinalIgnoreCase) ? wtbwV * PxPt : wtbwV;
         // An in-cell <p>'s margin-bottom is cell content height.
-        var wtpm = Regex.Match(mt.tableHtml,
+        var wtpm = SafeRegex.Match(mt.tableHtml,
             @"<p\s+style\s*=\s*[""']margin:\s*[\d.]+px\s+[\d.]+px\s+([\d.]+)px",
             RegexOptions.IgnoreCase);
         if (wtpm.Success)
@@ -284,20 +284,12 @@ internal static partial class HtmlToPdfConverter
         // keeps the UA 1em bottom margin inside its cell
         // (probed: the email grid's rows run one em taller
         // than their line).
-        else if (Regex.IsMatch(mt.tableHtml,
+        else if (SafeRegex.IsMatch(mt.tableHtml,
                 @"<td[^>]*>\s*(?:<[^>]+>\s*)*<p\b(?![^>]*margin)",
                 RegexOptions.IgnoreCase))
         {
             mt.mps.wtPMarginB = 12.0;
             mt.mps.wtPMarginDefaulted = true;
-            // the grid's BOTTOM border (the triplet's third
-            // value) and the top pad still close the last row
-            var wtb3 = Regex.Match(mt.tableHtml,
-                @"border-width\s*:\s*[\d.]+pt\s+[\d.]+pt\s+([\d.]+)pt",
-                RegexOptions.IgnoreCase);
-            if (wtb3.Success)
-                mt.mps.wtBwBottom = double.Parse(wtb3.Groups[1].Value,
-                    System.Globalization.CultureInfo.InvariantCulture);
         }
     }
 
@@ -316,7 +308,7 @@ internal static partial class HtmlToPdfConverter
             for (var i = 0; i < segs.Length - 1 && structural; i++)
                 structural = segs[i].ToLowerInvariant() is "table" or "tbody" or "thead" or "tfoot" or "tr";
             if (!structural) continue;
-            if (kv.Value.TryGetValue("border", out var b) && !Regex.IsMatch(b, @"^\s*(0\w*|none)\b", RegexOptions.IgnoreCase))
+            if (kv.Value.TryGetValue("border", out var b) && !SafeRegex.IsMatch(b, @"^\s*(0\w*|none)\b", RegexOptions.IgnoreCase))
                 bordered = true;
             if (kv.Value.TryGetValue("width", out var w) && !w.Contains('%') && TryParseLength(w.Trim()) is > 0)
                 sized = true;
@@ -340,7 +332,7 @@ internal static partial class HtmlToPdfConverter
             if (bavN >= ThickFrameAttrPx) mt.mps.frameW = bavN * PxPt;
             // …and the tag's own border-style dashes or dots that frame.
             if (ta.TryGetValue("style", out var fst) && fst is not null
-                && Regex.Match(fst, @"border-style\s*:\s*(dashed|dotted)", RegexOptions.IgnoreCase) is { Success: true } fdm)
+                && SafeRegex.Match(fst, @"border-style\s*:\s*(dashed|dotted)", RegexOptions.IgnoreCase) is { Success: true } fdm)
                 mt.mps.frameDash = fdm.Groups[1].Value.ToLowerInvariant();
         }
         // …and a sheet whose td/th rule borders the cells (bare, or through the grid's own chain:
@@ -352,7 +344,7 @@ internal static partial class HtmlToPdfConverter
             mt.mps.borderHugs = true;
         }
         if (mt.mps.bordered && ta.TryGetValue("style", out var tcst)
-            && Regex.IsMatch(tcst, @"border-collapse\s*:\s*collapse",
+            && SafeRegex.IsMatch(tcst, @"border-collapse\s*:\s*collapse",
                 RegexOptions.IgnoreCase))
             mt.mps.attrCollapse = true;
         // Excel-fragment grid: border=0 but the CELLS carry inline

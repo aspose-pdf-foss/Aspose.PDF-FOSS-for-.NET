@@ -14,13 +14,13 @@ internal static partial class HtmlToPdfConverter
         var div = new FixedPageDiv { SrcW = 612.0, SrcH = 842.0 };
 
         // Page box from the container's stylesheet class (width/height em).
-        var clsAttr = Regex.Match(fx.pageDivs[p].Value, @"class=""(?<c>[^""]+)""");
+        var clsAttr = SafeRegex.Match(fx.pageDivs[p].Value, @"class=""(?<c>[^""]+)""");
         var boxResolved = false;
         if (clsAttr.Success)
         {
             foreach (var cls in clsAttr.Groups["c"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
-                var box = Regex.Match(fx.css,
+                var box = SafeRegex.Match(fx.css,
                     @"\." + Regex.Escape(cls) + @"\s*\{[^}]*width:\s*(?<w>[\d.]+)em[^}]*height:\s*(?<h>[\d.]+)em",
                     RegexOptions.Singleline);
                 if (box.Success)
@@ -34,7 +34,7 @@ internal static partial class HtmlToPdfConverter
         }
         if (!boxResolved) return false;   // container box not in the stylesheet → reflow
 
-        var bg = Regex.Match(seg, @"<img\s+(?=[^>]*class=""stl_04"")[^>]*src=""(?<src>[^""]*)""|<img\s+(?=[^>]*src=""(?<src2>[^""]*)"")[^>]*class=""stl_04""");
+        var bg = SafeRegex.Match(seg, @"<img\s+(?=[^>]*class=""stl_04"")[^>]*src=""(?<src>[^""]*)""|<img\s+(?=[^>]*src=""(?<src2>[^""]*)"")[^>]*class=""stl_04""");
         if (bg.Success)
         {
             var src = bg.Groups["src"].Success ? bg.Groups["src"].Value : bg.Groups["src2"].Value;
@@ -50,9 +50,9 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Read the page's positioned span divs into the page div: class fonts, word spacing and the running x advance.</summary>
     private static void ReadStlFixedDivSpans(FixedDivReadState fx, string seg, FixedPageDiv div)
     {
-        foreach (Match dm in Regex.Matches(seg,
+        foreach (var groups in SafeRegex.Matches(seg,
             @"<div class=""[^""]*"" style=""left:(?<l>-?[\d.]+)em;\s*top:(?<t>-?[\d.]+)em;?[^""]*"">(?<body>.*?)</div>",
-            RegexOptions.Singleline))
+            RegexOptions.Singleline).Select(dm => dm.Groups))
         {
             double Num(string s) => double.Parse(s,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture);
@@ -62,18 +62,18 @@ internal static partial class HtmlToPdfConverter
             // after another from the div's left edge: each becomes its own
             // FixedSpan at the accumulated x, advanced by the segment's
             // measured width with its pinned letter/word-spacing applied.
-            var x = Num(dm.Groups["l"].Value) * StlEmPt;
-            var top = Num(dm.Groups["t"].Value) * StlEmPt;
-            foreach (Match m in Regex.Matches(dm.Groups["body"].Value,
+            var x = Num(groups["l"].Value) * StlEmPt;
+            var top = Num(groups["t"].Value) * StlEmPt;
+            foreach (var mGroups in SafeRegex.Matches(groups["body"].Value,
                 @"<span class=""(?<cls>[^""]*)""(?:\s+style=""(?<sst>[^""]*)"")?[^>]*>(?<stext>.*?)</span>",
-                RegexOptions.Singleline))
+                RegexOptions.Singleline).Select(m => m.Groups))
             {
-                var text = DecodeEntities(Regex.Replace(m.Groups["stext"].Value, "<[^>]+>", ""));
+                var text = DecodeEntities(SafeRegex.Replace(mGroups["stext"].Value, "<[^>]+>", ""));
                 if (text.Length == 0) continue;
                 double fsEm = 1.0, lsEm = 0.0;
                 string fam = "sans-serif";
                 string? col = null;
-                foreach (var cls in m.Groups["cls"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                foreach (var cls in mGroups["cls"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 {
                     if (!fx.clsFont.TryGetValue(cls, out var e)) continue;
                     if (e.fs is not null && e.fam is not null) { fsEm = e.fs.Value; fam = e.fam; col ??= e.col; }
@@ -81,7 +81,7 @@ internal static partial class HtmlToPdfConverter
                     if (e.ls is not null) lsEm = e.ls.Value;
                     if (e.col is not null && e.fs is not null) col = e.col;
                 }
-                var wsM = Regex.Match(m.Groups["sst"].Value ?? "", @"word-spacing:\s*(-?[\d.]+)em");
+                var wsM = SafeRegex.Match(mGroups["sst"].Value ?? "", @"word-spacing:\s*(-?[\d.]+)em");
                 var wsEm = wsM.Success ? Num(wsM.Groups[1].Value) : 0.0;
                 var famKey = fam.Split(',')[0].Trim().Trim('"', '\'');
                 var span = new FixedSpan
@@ -113,7 +113,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The page's svg object, else the ruled backdrop the stylesheet draws.</summary>
     private static void ReadStlFixedDivObject(string seg, FixedPageDiv div)
     {
-        var objM = Regex.Match(seg, @"<object\s[^>]*data=""(?<u>[^""]*)""");
+        var objM = SafeRegex.Match(seg, @"<object\s[^>]*data=""(?<u>[^""]*)""");
         if (objM.Success)
         {
             div.HasObjectGraphic = true;
@@ -132,7 +132,7 @@ internal static partial class HtmlToPdfConverter
             // The self-contained dialect carries the page SVG as INLINE
             // markup instead of an <object> sidecar reference; the markup
             // itself is the replay source (its rasters are data: URIs).
-            var inlineSvgM = Regex.Match(seg, @"<svg\b[\s\S]*?</svg\s*>");
+            var inlineSvgM = SafeRegex.Match(seg, @"<svg\b[\s\S]*?</svg\s*>");
             if (inlineSvgM.Success)
             {
                 div.HasObjectGraphic = true;

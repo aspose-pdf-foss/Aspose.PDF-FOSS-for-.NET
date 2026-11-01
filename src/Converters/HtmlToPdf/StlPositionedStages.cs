@@ -14,7 +14,7 @@ internal static partial class HtmlToPdfConverter
     // baseline rule.
     private const double EmGridPageBreakReservePt = 19.6;
 // STL positioned-page helpers: the invariant number parser and the page index of a run.
-    private static double Num(StlPositionedState sp, string s) => double.Parse(s,
+    private static double Num(string s) => double.Parse(s,
         System.Globalization.NumberStyles.Float,
         System.Globalization.CultureInfo.InvariantCulture);
 
@@ -53,9 +53,11 @@ internal static partial class HtmlToPdfConverter
             }
         }
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var r in sp.runs)
+#pragma warning restore S3267
         {
-            if (!RenderStlRun(sp, p, r)) break;
+            if (!RenderStlRun(sp, r)) break;
         }
         return true;
     }
@@ -69,7 +71,7 @@ internal static partial class HtmlToPdfConverter
         sp.runs = new List<StlRun>();
 
         sp.boxW = 0;
-        sp.pdCls = Regex.Match(sp.pageDivs[p].Value, @"class=""(?<c>[^""]+)""");
+        sp.pdCls = SafeRegex.Match(sp.pageDivs[p].Value, @"class=""(?<c>[^""]+)""");
         if (sp.pdCls.Success)
             foreach (var c in sp.pdCls.Groups["c"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 if (sp.classProps.TryGetValue(c, out var cpBox) && cpBox.WidthEm is { } weBox)
@@ -78,7 +80,9 @@ internal static partial class HtmlToPdfConverter
                     break;
                 }
 
-        foreach (Match dm in Regex.Matches(sp.seg,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match dm in SafeRegex.Matches(sp.seg,
+#pragma warning restore S3267
             @"<div class=""[^""]*"" style=""left:(?<l>-?[\d.]+)em;\s*top:(?<t>-?[\d.]+)em;?""[^>]*>(?<body>.*?)</div>",
             RegexOptions.Singleline))
         {
@@ -87,14 +91,14 @@ internal static partial class HtmlToPdfConverter
         sp.pagesRuns.Add(sp.runs);
 
         sp.bg = null;
-        sp.img = Regex.Match(sp.seg, @"<img src=""(?<src>[^""]+)""");
+        sp.img = SafeRegex.Match(sp.seg, @"<img src=""(?<src>[^""]+)""");
         if (sp.img.Success)
         {
             var bytes = LoadConverterImage(DecodeEntities(sp.img.Groups["src"].Value), options);
             if (bytes is not null && !IsSvgBytes(bytes))
             {
                 double bw = 0, bh = 0;
-                var pd = Regex.Match(sp.pageDivs[p].Value, @"class=""(?<c>[^""]+)""");
+                var pd = SafeRegex.Match(sp.pageDivs[p].Value, @"class=""(?<c>[^""]+)""");
                 if (pd.Success)
                     foreach (var c in pd.Groups["c"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                         if (sp.classProps.TryGetValue(c, out var cp) && cp.WidthEm is { } we && cp.HeightEm is { } he)
@@ -112,15 +116,14 @@ internal static partial class HtmlToPdfConverter
     /// <summary>One positioned span: its left/top position, class properties, face, size, colour and text become a run of the page.</summary>
     private static bool ParseStlSpan(StlPositionedState sp, Match dm)
     {
-        sp.leftPt = Num(sp, dm.Groups["l"].Value) * StlEmPt;
-        sp.topPt = Num(sp, dm.Groups["t"].Value) * StlEmPt;
+        sp.leftPt = Num(dm.Groups["l"].Value) * StlEmPt;
+        sp.topPt = Num(dm.Groups["t"].Value) * StlEmPt;
         sp.x = sp.leftPt;
         sp.sentinelAdv = 0.0;
         sp.lineHasBox = false;
-        sp.lsBudget = 0.0;
         sp.gridBudget = sp.leftPt;
 
-        sp.spanMatches = Regex.Matches(dm.Groups["body"].Value,
+        sp.spanMatches = SafeRegex.Matches(dm.Groups["body"].Value,
             @"<span class=""(?<scls>[^""]*)""(?:\s+style=""(?<sst>[^""]*)"")?[^>]*>(?<stext>.*?)</span>",
             RegexOptions.Singleline);
         for (var spanIdx = 0; spanIdx < sp.spanMatches.Count; spanIdx++)
@@ -145,11 +148,10 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>One run drawn on its page: the em-grid or absolute seat, the font resource and the text show.</summary>
-    private static bool RenderStlRun(StlPositionedState sp, int p, StlRun r)
+    private static bool RenderStlRun(StlPositionedState sp, StlRun r)
     {
         var rr = new StlRunRenderState();
         rr.sp = sp;
-        rr.p = p;
         rr.r = r;
         rr.k = PageOf(rr.sp, rr.r);
         rr.pg = rr.sp.outPages[rr.k];
@@ -218,7 +220,7 @@ internal static partial class HtmlToPdfConverter
     {
         var sm = sp.spanMatches[spanIdx];
         var isLastSpan = spanIdx == sp.spanMatches.Count - 1;
-        var raw = DecodeEntities(Regex.Replace(sm.Groups["stext"].Value, "<[^>]+>", ""));
+        var raw = DecodeEntities(SafeRegex.Replace(sm.Groups["stext"].Value, "<[^>]+>", ""));
         if (raw.Length == 0) return true;
         sp.lineHasBox = true;
 
@@ -239,8 +241,8 @@ internal static partial class HtmlToPdfConverter
         if (color is not null) run.Color = color;
         // letter-spacing / word-spacing em are relative to the span's own font size
         if (lsEm is { } l0) run.LetterSpacingPt = l0 * run.FontSizePt;
-        var ws = Regex.Match(sm.Groups["sst"].Value ?? "", @"word-spacing:\s*(-?[\d.]+)em");
-        if (ws.Success) run.WordSpacingPt = Num(sp, ws.Groups[1].Value) * run.FontSizePt;
+        var ws = SafeRegex.Match(sm.Groups["sst"].Value ?? "", @"word-spacing:\s*(-?[\d.]+)em");
+        if (ws.Success) run.WordSpacingPt = Num(ws.Groups[1].Value) * run.FontSizePt;
 
         // The raw text (nbsp sentinel included) measures in the stl_
         // model — nbsp advances as the space glyph and takes a
@@ -251,7 +253,6 @@ internal static partial class HtmlToPdfConverter
         run.Text = measureText.TrimEnd();
         if (run.Text.Length > 0) sp.runs.Add(run);
         sp.x += run.WidthPt;
-        sp.lsBudget += run.LetterSpacingPt * raw.Length;
         // ── The em-compensation dialect's own sheet budget ──
         // The budget sums, per span:
         //   · glyph advances of the visible text INCLUDING its trailing

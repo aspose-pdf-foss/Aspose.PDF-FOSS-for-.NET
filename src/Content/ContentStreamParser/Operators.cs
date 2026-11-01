@@ -19,6 +19,28 @@ internal sealed partial class ContentStreamParser
         if (_reader.ResolveStream(streamRef) is not { } icc) return false;
         var n = (_reader.Resolve(icc.Dict.Get("N")) as PdfInteger)?.Value ?? 0;
         if (n != 3) return false;
+        // Every parse registers the colour spaces in scope - a Type 3 font parses one per
+        // glyph shown - so the answer is kept per profile while its stream holds the same bytes.
+        var slot = LabIccAnswers.GetValue(icc, static _ => new LabIccSlot());
+        var answer = slot.Answer;
+        if (answer is not null && ReferenceEquals(answer.Raw, icc.RawData)) return answer.IsLab;
+        var isLab = ReadsAsLabEncoded(icc);
+        slot.Answer = new LabIccAnswer(icc.RawData, isLab);
+        return isLab;
+    }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfStream, LabIccSlot> LabIccAnswers = new();
+
+    // The answer is replaced whole, never edited, so another thread reads one consistent answer.
+    private sealed class LabIccSlot
+    {
+        public LabIccAnswer? Answer { get; set; }
+    }
+
+    private sealed record LabIccAnswer(byte[] Raw, bool IsLab);
+
+    private bool ReadsAsLabEncoded(PdfStream icc)
+    {
         byte[] bytes;
         try { bytes = _reader.DecodeStream(icc); }
         catch { return false; }
@@ -151,6 +173,10 @@ internal sealed partial class ContentStreamParser
         if ((cs == "Pattern" || (cs is not null && _patternColorSpaces.Contains(cs)))
             && operands.Count >= 1 && operands[^1] is PdfName patName)
         {
+            // The components before an uncoloured pattern's name are the colour its cell
+            // is painted in (PDF 32000 §8.7.3.3), given in the pattern space's base space:
+            // they become the solid colour, which the renderer hands the cell as its starting state.
+            if (operands.Count > 1) ApplyUnderSpace(cs + BaseSpaceSuffix, operands.GetRange(0, operands.Count - 1), isFill);
             if (isFill) _state.FillPatternName = patName.Value;
             else _state.StrokePatternName = patName.Value;
             return;
@@ -204,7 +230,7 @@ internal sealed partial class ContentStreamParser
             }
             if (outOfRange)
             {
-                double Ch(int i) { var v = Num(operands[i]); return v < 0 ? 0 : v > 1 ? 1 : v; }
+                double Ch(int i) { var v = Num(operands[i]); return v switch { < 0 => 0, > 1 => 1, _ => v }; }
                 var (lr, lg, lb) = LabColor.ToRgb(Ch(0) * 100.0, Ch(1) * 255.0 - 128.0, Ch(2) * 255.0 - 128.0);
                 if (isFill) { _state.FillR = lr; _state.FillG = lg; _state.FillB = lb; }
                 else { _state.StrokeR = lr; _state.StrokeG = lg; _state.StrokeB = lb; }
@@ -213,6 +239,12 @@ internal sealed partial class ContentStreamParser
             // fall through: ordinary components, ApplyColorOperands maps them as RGB
         }
 
+        if (cs is not null && _indexedColorSpaces.TryGetValue(cs, out var indexed)
+            && operands.Count >= 1 && operands[0] is not PdfName)
+        {
+            ApplyIndexedComponent(indexed, (int)Math.Round(Num(operands[0])), isFill);
+            return;
+        }
         if (cs is not null && _tintColorSpaces.TryGetValue(cs, out var tintInfo))
         {
             var inputs = new double[operands.Count];
@@ -228,6 +260,36 @@ internal sealed partial class ContentStreamParser
             Console.Error.WriteLine($"[scn] cs={cs ?? "null"} NO-TINT operands={operands.Count} fill={isFill}");
 
         ApplyColorOperands(operands, isFill);
+    }
+
+    /// <summary>Apply <paramref name="operands"/> as an scn under <paramref name="space"/> - the base of a pattern
+    /// or Indexed space - and restore the colour space the state had.</summary>
+    private void ApplyUnderSpace(string space, List<PdfObject> operands, bool isFill)
+    {
+        var saved = isFill ? _state.FillColorSpace : _state.StrokeColorSpace;
+        if (isFill) _state.FillColorSpace = space; else _state.StrokeColorSpace = space;
+        try { ApplyPatternOrColor(operands, isFill); }
+        finally { if (isFill) _state.FillColorSpace = saved; else _state.StrokeColorSpace = saved; }
+    }
+
+    /// <summary>An index into an /Indexed space's table: the entry it names, read in the base space.</summary>
+    private void ApplyIndexedComponent((byte[] lookup, int components, string baseSpace) indexed, int index, bool isFill)
+    {
+        var at = Math.Max(0, index) * indexed.components;
+        if (at + indexed.components > indexed.lookup.Length) return;
+        var entry = new double[indexed.components];
+        for (var i = 0; i < entry.Length; i++) entry[i] = indexed.lookup[at + i] / 255.0;
+        if (indexed.baseSpace.EndsWith(BaseSpaceSuffix, StringComparison.Ordinal))
+        {
+            var operands = new List<PdfObject>(entry.Length);
+            foreach (var component in entry) operands.Add(new PdfReal(component));
+            ApplyUnderSpace(indexed.baseSpace, operands, isFill);
+            return;
+        }
+        // A Lab entry's bytes span the space's ranges: L over 0..100, a and b over -128..127.
+        if (indexed.baseSpace == "Lab" && entry.Length >= 3)
+            entry = [entry[0] * 100, entry[1] * 255 - 128, entry[2] * 255 - 128];
+        ApplyAltSpaceComponents(entry, indexed.baseSpace, isFill);
     }
 
     // True when the named pattern resolves to a pattern the renderer can rasterise:
@@ -352,7 +414,7 @@ internal sealed partial class ContentStreamParser
             case "LabEnc" when comp.Length >= 3:
             {
                 // Lab-encoded scanner ICC channels (see IsLabEncodedIcc).
-                double C(double v) => v < 0 ? 0 : v > 1 ? 1 : v;
+                double C(double v) => v switch { < 0 => 0, > 1 => 1, _ => v };
                 (r, g, b) = LabColor.ToRgb(C(comp[0]) * 100.0, C(comp[1]) * 255.0 - 128.0, C(comp[2]) * 255.0 - 128.0);
                 break;
             }

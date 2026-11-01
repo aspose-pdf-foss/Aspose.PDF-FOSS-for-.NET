@@ -2,6 +2,7 @@
 using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
+using Aspose.Pdf.IO.Filters;
 
 namespace Aspose.Pdf;
 
@@ -9,16 +10,18 @@ namespace Aspose.Pdf;
 /// Converts all RGB color operators and image color spaces on a page to DeviceGray.
 /// Uses the standard luminance formula: gray = 0.299*R + 0.587*G + 0.114*B.
 /// </summary>
-public sealed class RgbToDeviceGrayConversionStrategy
+public sealed partial class RgbToDeviceGrayConversionStrategy
 {
     /// <summary>Creates a conversion strategy; call <c>Convert</c> for each page to convert.</summary>
     public RgbToDeviceGrayConversionStrategy() { }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Convert all RGB colors to DeviceGray on the given page.
     /// This rewrites the content stream and converts RGB image XObjects to grayscale.
     /// </summary>
     public void Convert(Page page)
+#pragma warning restore S2325
     {
         var reader = page.Reader;
 
@@ -211,77 +214,128 @@ public sealed class RgbToDeviceGrayConversionStrategy
         output.Append(op).Append('\n');
     }
 
+    /// <summary>Copy an inline image through; an RGB one whose samples can be decoded is written
+    /// with gray samples, unfiltered. The colour space alone is never rewritten: three components
+    /// per pixel read as gray draw three noise pixels for each one of the picture.</summary>
     private static void WriteInlineImage(PdfLexer lexer, StringBuilder output)
     {
-        output.Append("BI\n");
-
-        // Parse key-value pairs until ID
+        // The dictionary as written, and with its keys and names expanded as the filters read it.
+        var written = new List<(string key, PdfObject value)>();
+        var expanded = new PdfDictionary();
         while (true)
         {
             var keyToken = lexer.NextToken();
             if (keyToken.Kind == TokenKind.Eof) return;
-            if (keyToken.Kind == TokenKind.Keyword && keyToken.StringValue == "ID")
-            {
-                output.Append("ID ");
-                break;
-            }
+            if (keyToken.Kind == TokenKind.Keyword && keyToken.StringValue == "ID") break;
             if (keyToken.Kind != TokenKind.Name) continue;
 
-            var key = keyToken.StringValue!;
-
             var valToken = lexer.NextToken();
-            if (valToken.Kind == TokenKind.Keyword && valToken.StringValue == "ID")
-            {
-                output.Append('/').Append(key).Append('\n');
-                output.Append("ID ");
-                break;
-            }
-
-            // Convert color space if it's RGB
-            var expandedKey = key switch { "CS" => "CS", _ => key };
-            if (expandedKey is "CS" or "ColorSpace")
-            {
-                var csValue = valToken.Kind == TokenKind.Name ? valToken.StringValue : null;
-                if (csValue is "RGB" or "DeviceRGB")
-                {
-                    output.Append('/').Append(key).Append(" /G\n");
-                    continue;
-                }
-            }
-
-            // Write key and value as-is
-            output.Append('/').Append(key).Append(' ');
-            AppendTokenValue(output, valToken);
-            output.Append('\n');
+            if (valToken.Kind == TokenKind.Keyword && valToken.StringValue == "ID") break;
+            var key = keyToken.StringValue!;
+            var value = ReadInlineValue(lexer, valToken);
+            written.Add((key, value));
+            expanded.Set(Content.ContentStreamParser.ExpandInlineImageKey(key),
+                value is PdfName name ? new PdfName(Content.ContentStreamParser.ExpandInlineImageValue(name.Value)) : value);
         }
 
-        // Read inline image data and write it through
         var imageData = lexer.ReadInlineImageData();
+        var gray = GrayInlineSamples(expanded, imageData);
+
+        output.Append("BI\n");
+        foreach (var (key, value) in written)
+        {
+            var expandedKey = Content.ContentStreamParser.ExpandInlineImageKey(key);
+            // The gray samples are written unfiltered: the filter, its parameters and an RGB
+            // decode array describe the data they replaced.
+            if (gray is not null && expandedKey is "Filter" or "DecodeParms" or "Decode") continue;
+            output.Append('/').Append(key).Append(' ');
+            if (gray is not null && expandedKey == "ColorSpace")
+                output.Append("/G");
+            else
+                AppendInlineValue(output, value);
+            output.Append('\n');
+        }
+        output.Append("ID ");
         // Write raw bytes as Latin-1
-        foreach (var b in imageData)
+        foreach (var b in gray ?? imageData)
             output.Append((char)b);
         output.Append("\nEI\n");
     }
 
-    private static void AppendTokenValue(StringBuilder output, Token token)
+    /// <summary>The gray samples of an 8-bit RGB inline image, or null when the image is not
+    /// one or its samples cannot be decoded (a JPEG or JPEG 2000 codestream stays as it is).</summary>
+    private static byte[]? GrayInlineSamples(PdfDictionary image, byte[] data)
+    {
+        if (image.GetName("ColorSpace") is not ("DeviceRGB" or "CalRGB")) return null;
+        if (image.GetInt("BitsPerComponent", 8) != 8 || IsCodestream(image.Get("Filter"))) return null;
+        var pixelCount = (int)(image.GetInt("Width") * image.GetInt("Height"));
+        if (pixelCount <= 0) return null;
+        byte[] decoded;
+        try { decoded = StreamFilter.Decode(data, image); }
+        catch (Exception) { return null; }
+        return decoded.Length >= pixelCount * 3 ? GraySamples(decoded, pixelCount) : null;
+    }
+
+    private static bool IsCodestream(PdfObject? filter) => filter switch
+    {
+        PdfName name => name.Value is "DCTDecode" or "DCT" or "JPXDecode" or "JPX",
+        PdfArray filters => filters.Any(IsCodestream),
+        _ => false,
+    };
+
+    /// <summary>One inline-image value: a number, name, string, boolean, array or dictionary.</summary>
+    private static PdfObject ReadInlineValue(PdfLexer lexer, Token token)
     {
         switch (token.Kind)
         {
-            case TokenKind.Integer:
-                output.Append(token.IntValue.ToString(CultureInfo.InvariantCulture));
+            case TokenKind.Integer: return new PdfInteger(token.IntValue);
+            case TokenKind.Real: return new PdfReal(token.RealValue);
+            case TokenKind.Name: return new PdfName(token.StringValue!);
+            case TokenKind.Boolean: return token.BoolValue ? PdfBoolean.True : PdfBoolean.False;
+            case TokenKind.LiteralString: return new PdfString(token.BytesValue!);
+            case TokenKind.HexString: return new PdfString(token.BytesValue!, isHex: true);
+            case TokenKind.ArrayStart:
+            {
+                var array = new PdfArray();
+                for (var item = lexer.NextToken(); item.Kind is not (TokenKind.ArrayEnd or TokenKind.Eof); item = lexer.NextToken())
+                    array.Add(ReadInlineValue(lexer, item));
+                return array;
+            }
+            case TokenKind.DictStart:
+            {
+                var dict = new PdfDictionary();
+                for (var key = lexer.NextToken(); key.Kind is not (TokenKind.DictEnd or TokenKind.Eof); key = lexer.NextToken())
+                {
+                    if (key.Kind != TokenKind.Name) continue;
+                    dict.Set(key.StringValue!, ReadInlineValue(lexer, lexer.NextToken()));
+                }
+                return dict;
+            }
+            default: return PdfNull.Instance;
+        }
+    }
+
+    private static void AppendInlineValue(StringBuilder output, PdfObject value)
+    {
+        switch (value)
+        {
+            case PdfInteger i: output.Append(i.Value.ToString(CultureInfo.InvariantCulture)); break;
+            case PdfReal r: output.Append(FormatDouble(r.Value)); break;
+            case PdfName n: output.Append('/').Append(n.Value); break;
+            case PdfBoolean b: output.Append(b.Value ? "true" : "false"); break;
+            case PdfString s when s.IsHex: output.Append('<').Append(BitConverter.ToString(s.Value).Replace("-", "")).Append('>'); break;
+            case PdfString s: output.Append('(').Append(EscapeString(s.Value)).Append(')'); break;
+            case PdfArray array:
+                output.Append('[');
+                foreach (var item in array) { AppendInlineValue(output, item); output.Append(' '); }
+                output.Append(']');
                 break;
-            case TokenKind.Real:
-                output.Append(FormatDouble(token.RealValue));
+            case PdfDictionary dict:
+                output.Append("<< ");
+                foreach (var key in dict.Keys) { output.Append('/').Append(key).Append(' '); AppendInlineValue(output, dict.Get(key)!); output.Append(' '); }
+                output.Append(">>");
                 break;
-            case TokenKind.Name:
-                output.Append('/').Append(token.StringValue);
-                break;
-            case TokenKind.Boolean:
-                output.Append(token.BoolValue ? "true" : "false");
-                break;
-            default:
-                output.Append("null");
-                break;
+            default: output.Append("null"); break;
         }
     }
 
@@ -290,6 +344,7 @@ public sealed class RgbToDeviceGrayConversionStrategy
         var resources = reader.ResolveDict(page.Dict.Get("Resources"));
         if (resources is null) return;
 
+        ConvertShadingsAndPatterns(resources, reader);
         var xobjectDict = reader.ResolveDict(resources.Get("XObject"));
         if (xobjectDict is null) return;
 
@@ -342,80 +397,8 @@ public sealed class RgbToDeviceGrayConversionStrategy
 
             // Convert color space resources in the form
             ConvertColorSpaceDict(formResources, reader);
+            ConvertShadingsAndPatterns(formResources, reader);
         }
-    }
-
-    private static void ConvertImageToGray(PdfStream imageStream, PdfReader reader)
-    {
-        var csObj = reader.Resolve(imageStream.Dict.Get("ColorSpace"));
-        bool isRgb = false;
-
-        if (csObj is PdfName n)
-        {
-            isRgb = n.Value is "DeviceRGB" or "CalRGB";
-        }
-        else if (csObj is PdfArray arr && arr.Count > 0)
-        {
-            var baseName = arr[0] is PdfName bn ? bn.Value : null;
-            if (baseName == "DeviceRGB" || baseName == "CalRGB")
-            {
-                isRgb = true;
-            }
-            else if (baseName == "ICCBased" && arr.Count >= 2)
-            {
-                var iccStream = reader.ResolveStream(arr[1]);
-                if (iccStream is not null && iccStream.Dict.GetInt("N", 3) == 3)
-                    isRgb = true;
-            }
-            else if (baseName == "Indexed" && arr.Count >= 2)
-            {
-                // Check base color space of indexed
-                var baseCs = reader.Resolve(arr[1]);
-                if (baseCs is PdfName ibn && ibn.Value is "DeviceRGB" or "CalRGB")
-                    isRgb = true;
-                else if (baseCs is PdfArray iba && iba.Count >= 2 && iba[0] is PdfName iban2
-                         && iban2.Value == "ICCBased")
-                {
-                    var iccStream = reader.ResolveStream(iba[1]);
-                    if (iccStream is not null && iccStream.Dict.GetInt("N", 3) == 3)
-                        isRgb = true;
-                }
-            }
-        }
-
-        if (!isRgb) return;
-
-        // Try to convert pixel data if possible (uncompressed or FlateDecode RGB images)
-        var filter = imageStream.Dict.GetName("Filter");
-        var bpc = (int)imageStream.Dict.GetInt("BitsPerComponent", 8);
-        var width = (int)imageStream.Dict.GetInt("Width");
-        var height = (int)imageStream.Dict.GetInt("Height");
-        var pixelCount = width * height;
-
-        if (bpc == 8 && filter is null or "FlateDecode")
-        {
-            var decoded = reader.DecodeStream(imageStream);
-            if (decoded.Length >= pixelCount * 3)
-            {
-                var grayData = new byte[pixelCount];
-                for (var i = 0; i < pixelCount; i++)
-                {
-                    var srcIdx = i * 3;
-                    var r = decoded[srcIdx] / 255.0;
-                    var g = decoded[srcIdx + 1] / 255.0;
-                    var b = decoded[srcIdx + 2] / 255.0;
-                    grayData[i] = (byte)(RgbToGray(r, g, b) * 255.0 + 0.5);
-                }
-
-                imageStream.ReplaceData(grayData);
-                imageStream.Dict.Remove("Filter");
-                imageStream.Dict.Remove("DecodeParms");
-                imageStream.Dict.Set("Length", new PdfInteger(grayData.Length));
-            }
-        }
-
-        // Always update the color space to DeviceGray
-        imageStream.Dict.Set("ColorSpace", new PdfName("DeviceGray"));
     }
 
     private static void ConvertColorSpaceResources(Page page, PdfReader reader)
@@ -448,6 +431,11 @@ public sealed class RgbToDeviceGrayConversionStrategy
                 {
                     csDict.Set(key, new PdfName("DeviceGray"));
                 }
+                else if (GrayIndexedSpace(csArr, reader) is { } grayIndexed)
+                {
+                    // The fill indices stay; their palette turns grey.
+                    csDict.Set(key, grayIndexed);
+                }
             }
             else if (csObj is PdfName name && name.Value is "DeviceRGB" or "CalRGB")
             {
@@ -461,6 +449,21 @@ public sealed class RgbToDeviceGrayConversionStrategy
     /// </summary>
     private static double RgbToGray(double r, double g, double b) =>
         0.299 * r + 0.587 * g + 0.114 * b;
+
+    /// <summary>One gray byte per pixel from 8-bit RGB triples.</summary>
+    private static byte[] GraySamples(byte[] rgb, int pixelCount)
+    {
+        var gray = new byte[pixelCount];
+        for (var i = 0; i < pixelCount; i++)
+        {
+            var srcIdx = i * 3;
+            var r = rgb[srcIdx] / 255.0;
+            var g = rgb[srcIdx + 1] / 255.0;
+            var b = rgb[srcIdx + 2] / 255.0;
+            gray[i] = (byte)(RgbToGray(r, g, b) * 255.0 + 0.5);
+        }
+        return gray;
+    }
 
     private static string FormatDouble(double v) =>
         v.ToString("0.######", CultureInfo.InvariantCulture);
@@ -496,7 +499,7 @@ public sealed class RgbToDeviceGrayConversionStrategy
             var t = lexer.NextToken();
             if (t.Kind == TokenKind.Eof) break;
             if (t.Kind == TokenKind.ArrayStart) { depth++; sb.Append('['); continue; }
-            if (t.Kind == TokenKind.ArrayEnd) { depth--; if (depth > 0) sb.Append(']'); continue; }
+            if (t.Kind == TokenKind.ArrayEnd) { depth--; if (depth > 0) { sb.Append(']'); } continue; }
             if (sb.Length > 1) sb.Append(' ');
             AppendTokenToStringBuilder(sb, t);
         }
@@ -513,7 +516,7 @@ public sealed class RgbToDeviceGrayConversionStrategy
             var t = lexer.NextToken();
             if (t.Kind == TokenKind.Eof) break;
             if (t.Kind == TokenKind.DictStart) { depth++; sb.Append("<< "); continue; }
-            if (t.Kind == TokenKind.DictEnd) { depth--; if (depth > 0) sb.Append(">> "); continue; }
+            if (t.Kind == TokenKind.DictEnd) { depth--; if (depth > 0) { sb.Append(">> "); } continue; }
             AppendTokenToStringBuilder(sb, t);
             sb.Append(' ');
         }

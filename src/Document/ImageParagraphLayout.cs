@@ -34,7 +34,8 @@ public sealed partial class Document
 
         if (!TryEmitBilevelFrames(ip)) return;
 
-        if (!SplitImageFrames(ip)) return;
+        // Bytes no decoder reads as an image are an error the caller hears of, not a picture left out.
+        if (!SplitImageFrames(ip)) throw new ImageLoadException();
 
         ip.embedBlackWhite = ip.img.IsBlackWhite || ImageStamp.IsBilevelSource(ip.imgData);
 
@@ -48,8 +49,8 @@ public sealed partial class Document
             ip.flow.PlaceImageFrame(ip.frames![0], fixedAt, fixedPaint, ip.embedBlackWhite);
             return;
         }
-        ip.availW = ip.page.Width - ip.marginLeft - ip.marginRight;
-        ip.availH = ip.page.Height - ip.marginTop - ip.marginBottom;
+        ip.availW = ip.page.LayoutFrameWidth - ip.marginLeft - ip.marginRight;
+        ip.availH = ip.page.LayoutFrameHeight - ip.marginTop - ip.marginBottom;
         // The image's own top margin is space reserved above it: the cursor
         // drops by it before the image seats (measured: a 50 pt Margin.Top
         // puts the image 50 pt under the preceding paragraph); the bottom

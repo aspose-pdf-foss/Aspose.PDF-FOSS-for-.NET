@@ -35,7 +35,7 @@ internal sealed class KeccakP
     /// KECCAK-p[<paramref name="b"/>, <paramref name="nr"/>] applied to
     /// <paramref name="s"/>, which must be the b bits the permutation is defined over.
     /// </summary>
-    internal BitString Execute(int b, int nr, BitString s)
+    internal static BitString Execute(int b, int nr, BitString s)
     {
         if (s.Length != b)
             throw new ArgumentException($"KECCAK-p[{b}] needs {b} bits, got {s.Length}.", nameof(s));

@@ -35,7 +35,6 @@ private sealed class GraphicsWalkState
     public IO.PdfReader reader = default!;
     public GraphicElementCollection elements = default!;
     public int depth = 0;
-    public GraphicsEditState? editState = null;
     public Aspose.Pdf.Matrix? baseCtm = null;
 }
 }

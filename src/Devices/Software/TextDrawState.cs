@@ -28,7 +28,7 @@ private sealed class TextDrawState
     // `0.163 0 0 10 cm` - then draws the glyphs at their vertical size in both
     // directions, so a band of crushed text came out as inch-high letters running off
     // the page. Carry the ratio of the two axes as a horizontal factor; the rotated
-    // path below builds its own matrix from trm and already has it.
+    // path below builds its glyph shapes from trm, and takes the factor for its advances.
     public double trmXLen;
     public double trmYLen;
     public double anisotropy;

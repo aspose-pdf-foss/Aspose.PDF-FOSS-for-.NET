@@ -29,9 +29,8 @@ internal sealed class PsFontProgram
         _outlines = outlines;
         _byUnicode = byUnicode;
         _widths = widths ?? new int[0];
-        foreach (var pair in names)
-            if (!string.IsNullOrEmpty(pair.Value) && !_byName.ContainsKey(pair.Value))
-                _byName[pair.Value] = pair.Key;
+        foreach (var pair in names.Where(pair => !string.IsNullOrEmpty(pair.Value) && !_byName.ContainsKey(pair.Value)))
+            _byName[pair.Value] = pair.Key;
     }
 
     /// <summary>The font's design units per em.</summary>
@@ -118,9 +117,8 @@ internal sealed class PsFontProgram
         var cff = CffGlyphSource.TryLoad(data);
         if (cff is null) return null;
         var names = new Dictionary<int, string>();
-        foreach (var pair in cff.NameToGid)
-            if (!names.ContainsKey(pair.Value))
-                names[pair.Value] = pair.Key;
+        foreach (var pair in cff.NameToGid.Where(pair => !names.ContainsKey(pair.Value)))
+            names[pair.Value] = pair.Key;
         return new PsFontProgram(cff, names, new Dictionary<int, int>(cff.CMap), null);
     }
 

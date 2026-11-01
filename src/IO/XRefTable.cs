@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Linq;
+using System.Text;
 using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO;
@@ -120,8 +121,22 @@ internal sealed partial class XRefTable
         {
             ScanTrailersForRoot(data, trailer);
         }
+        // A catalog inside an object stream is not seen above; the cross-reference stream
+        // dictionaries of such a file name it, as they name the trailer keys below.
+        var text = System.Text.Encoding.ASCII.GetString(data);
+        if (!trailer.ContainsKey("Root"))
+        {
+            foreach (var xrefDict in ScanXrefStreamDictionaries(data, text))
+            {
+                if (xrefDict.Get("Root") is PdfIndirectRef root && _entries.ContainsKey(root.ObjectNumber))
+                {
+                    trailer.Set("Root", root);
+                    break;
+                }
+            }
+        }
 
-        AdoptScannedTrailerKeys(data, trailer);
+        AdoptScannedTrailerKeys(data, text, trailer);
         _trailer = trailer;
     }
 
@@ -129,9 +144,25 @@ internal sealed partial class XRefTable
     // document information, the file identifier and the encryption, which the recovered table cannot.
     private static readonly string[] ScannedTrailerKeys = { "Info", "ID", "Encrypt" };
 
-    private void AdoptScannedTrailerKeys(byte[] data, PdfDictionary trailer)
+    private void AdoptScannedTrailerKeys(byte[] data, string text, PdfDictionary trailer)
     {
-        var text = System.Text.Encoding.ASCII.GetString(data);
+        foreach (var scanned in ScanTrailerDictionaries(data, text).Concat(ScanXrefStreamDictionaries(data, text)))
+        {
+            // A trailer that lost its Root is damaged: the keys come from the revision before it.
+            if (!scanned.ContainsKey("Root")) continue;
+            foreach (var key in ScannedTrailerKeys)
+            {
+                if (trailer.ContainsKey(key) || scanned.Get(key) is not { } value) continue;
+                if (value is PdfIndirectRef reference && !_entries.ContainsKey(reference.ObjectNumber)) continue;
+                trailer.Set(key, value);
+            }
+            return;
+        }
+    }
+
+    /// <summary>The dictionaries after the file's trailer keywords, the last one first; a malformed one is left out.</summary>
+    private static IEnumerable<PdfDictionary> ScanTrailerDictionaries(byte[] data, string text)
+    {
         for (var pos = text.LastIndexOf("trailer", StringComparison.Ordinal); pos >= 0;
              pos = pos == 0 ? -1 : text.LastIndexOf("trailer", pos - 1, StringComparison.Ordinal))
         {
@@ -145,15 +176,35 @@ internal sealed partial class XRefTable
                 parser.Lexer.Position = at;
                 scanned = parser.ParseObject() as PdfDictionary;
             }
-            catch { continue; /* a malformed trailer: try an earlier one */ }
-            if (scanned is null) continue;
-            foreach (var key in ScannedTrailerKeys)
+            catch { continue; }
+            if (scanned is not null) yield return scanned;
+        }
+    }
+
+    /// <summary>The dictionaries of the file's cross-reference streams, the last one first: a file
+    /// written with them has no trailer keyword, its trailer keys live here. Each "/XRef" in the
+    /// file is tried as the type of the object whose header precedes it; a malformed one is left out.</summary>
+    private static IEnumerable<PdfDictionary> ScanXrefStreamDictionaries(byte[] data, string text)
+    {
+        for (var pos = text.LastIndexOf("/XRef", StringComparison.Ordinal); pos > 0;
+             pos = text.LastIndexOf("/XRef", pos - 1, StringComparison.Ordinal))
+        {
+            var header = text.LastIndexOf("obj", pos, StringComparison.Ordinal);
+            if (header < 0) continue;
+            var start = header - 1;
+            while (start >= 0 && PdfLexer.IsWhitespace(data[start])) start--;
+            while (start >= 0 && data[start] >= '0' && data[start] <= '9') start--;
+            while (start >= 0 && PdfLexer.IsWhitespace(data[start])) start--;
+            while (start >= 0 && data[start] >= '0' && data[start] <= '9') start--;
+            PdfDictionary? scanned;
+            try
             {
-                if (trailer.ContainsKey(key) || scanned.Get(key) is not { } value) continue;
-                if (value is PdfIndirectRef reference && !_entries.ContainsKey(reference.ObjectNumber)) continue;
-                trailer.Set(key, value);
+                var parser = new PdfParser(data);
+                parser.Lexer.Position = start + 1;
+                scanned = parser.ParseIndirectObject().Value is PdfStream stream ? stream.Dict : null;
             }
-            return;
+            catch { continue; }
+            if (scanned?.GetName("Type") == "XRef") yield return scanned;
         }
     }
 

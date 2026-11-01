@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 internal sealed partial class TextStateModifier
 {
     /// <summary>The text-object, text-matrix and spacing operators the target-position test reads.</summary>
-    private void TrackColorTextMatrix(ForegroundColorState fc, string op)
+    private static void TrackColorTextMatrix(ForegroundColorState fc, string op)
     {
         switch (op)
         {
@@ -62,7 +62,7 @@ internal sealed partial class TextStateModifier
     }
 
     /// <summary>The q/Q stack, the CTM, the font, the fill colour and the render mode.</summary>
-    private void TrackColorGraphicsState(ForegroundColorState fc, int endPos, byte[] streamBytes, PdfReader reader, string op)
+    private static void TrackColorGraphicsState(ForegroundColorState fc, int endPos, byte[] streamBytes, PdfReader reader, string op)
     {
         switch (op)
         {
@@ -184,7 +184,7 @@ internal sealed partial class TextStateModifier
     }
 
     /// <summary>The Tj, ' and " operators: recolour the shown string when it carries the target.</summary>
-    private byte[]? RecolorShownString(ForegroundColorState fc, int endPos, byte[] streamBytes, string text, Color color, double? targetX, bool nearestX, int? renderingMode, string op)
+    private static byte[]? RecolorShownString(ForegroundColorState fc, int endPos, byte[] streamBytes, string text, Color color, double? targetX, bool nearestX, int? renderingMode, string op)
     {
         switch (op)
         {
@@ -222,6 +222,9 @@ internal sealed partial class TextStateModifier
                                 fc.operands[^1].startPos, fc.operands[^1].endPos,
                                 text, color, (fc.fillR, fc.fillG, fc.fillB), occ,
                                 renderingMode, fc.trMode)
+                                // A string the byte-for-byte split cannot address - escaped, in
+                                // hex, of two-byte codes - is cut at the match's codes.
+                                ?? SplitColorAtCodes(fc, streamBytes, endPos, decoded, text, occ, color, renderingMode, piecesAsTj: true)
                                 // Whole-run recolour: wrap the show operator with the new
                                 // fill colour AND a trailing restore to the colour that was
                                 // active before it, so the recolour doesn't leak onto the
@@ -246,8 +249,24 @@ internal sealed partial class TextStateModifier
         return null;
     }
 
+    /// <summary>Recolour only the matched characters of a show operator whose strings the byte-for-byte splits
+    /// cannot address: cut at the match's codes, the match shown in <paramref name="color"/> (and the requested
+    /// rendering mode), the active fill and mode put back after it; the pieces of a Tj stay Tj operators
+    /// (<paramref name="piecesAsTj"/>). Null when the match is the whole show - the caller wraps the operator - or
+    /// cannot be cut on code boundaries.</summary>
+    private static byte[]? SplitColorAtCodes(ForegroundColorState fc, byte[] streamBytes, int endPos, string decoded,
+        string text, int occurrence, Color color, int? renderingMode, bool piecesAsTj)
+    {
+        var at = occurrence >= 0 ? occurrence : decoded.IndexOf(text, StringComparison.Ordinal);
+        if (at < 0 || (at == 0 && text.Length == decoded.Length)) return null;
+        return SplitShowAtCodes(streamBytes, fc.operands[^1].startPos, endPos, fc.currentToUnicode, at, at + text.Length,
+            RgOps(color) + TrOps(renderingMode),
+            TrOps(renderingMode is null ? null : fc.trMode) + RestoreFillOps(fc.fillR, fc.fillG, fc.fillB), decoded.Length,
+            piecesAsTj);
+    }
+
     /// <summary>The TJ operator: recolour the concatenated array when it carries the target.</summary>
-    private byte[]? RecolorShownArray(ForegroundColorState fc, int endPos, byte[] streamBytes, string text, Color color, double? targetX, bool nearestX, int? renderingMode, string op)
+    private static byte[]? RecolorShownArray(ForegroundColorState fc, int endPos, byte[] streamBytes, string text, Color color, double? targetX, bool nearestX, int? renderingMode, string op)
     {
         switch (op)
         {
@@ -273,6 +292,7 @@ internal sealed partial class TextStateModifier
                                 fc.operands[^1].startPos, fc.operands[^1].endPos,
                                 text, RgOps(color), RestoreFillOps(fc.fillR, fc.fillG, fc.fillB),
                                 fc.currentToUnicode, tjOcc)
+                                ?? SplitColorAtCodes(fc, streamBytes, endPos, decoded, text, tjOcc, color, renderingMode, piecesAsTj: false)
                                 ?? InjectColorAround(streamBytes, fc.operands[^1].startPos,
                                     endPos, color, (fc.fillR, fc.fillG, fc.fillB), fc.fillOpText,
                                     renderingMode, fc.trMode);

@@ -21,8 +21,9 @@ public partial class TextMarkupAnnotation : MarkupAnnotation
     /// each quad (each highlighted line) separated by <see cref="System.Environment.NewLine"/>.</summary>
     public string GetMarkedText()
     {
-        if (Page is not { } page || QuadPoints is not { Length: >= 4 } quads)
+        if (Page is not { } page || QuadPoints is not { Length: >= 4 } quadPoints)
             return string.Empty;
+        var quads = QuadsInExtractionSpace(page, quadPoints);
         var fragments = AbsorbFragments(page);
         var parts = new System.Collections.Generic.List<string>();
         for (var i = 0; i + 3 < quads.Length; i += 4)
@@ -30,7 +31,7 @@ public partial class TextMarkupAnnotation : MarkupAnnotation
             var (minX, minY, maxX, maxY) = QuadBounds(quads, i);
             var sb = new System.Text.StringBuilder();
             foreach (var f in fragments)
-                CollectChars(f, minX, minY, maxX, maxY, sb, null);
+                CollectChars(f, minX, minY, maxX, maxY, sb);
             parts.Add(sb.ToString());
         }
         return string.Join(System.Environment.NewLine, parts);
@@ -42,8 +43,9 @@ public partial class TextMarkupAnnotation : MarkupAnnotation
     {
         var mt = new MarkedTextState();
         mt.result = new Aspose.Pdf.Text.TextFragmentCollection();
-        if (Page is not { } page || QuadPoints is not { Length: >= 4 } quads)
+        if (Page is not { } page || QuadPoints is not { Length: >= 4 } quadPoints)
             return mt.result;
+        var quads = QuadsInExtractionSpace(page, quadPoints);
         mt.fragments = AbsorbFragments(page);
 
         mt.boxes = new System.Collections.Generic.List<(double minX, double minY, double maxX, double maxY)>();
@@ -97,6 +99,18 @@ public partial class TextMarkupAnnotation : MarkupAnnotation
         return list;
     }
 
+    /// <summary>The quad points in the space the absorbed fragments are measured in: the
+    /// annotation stores them in the page's user space, while the absorber reports its
+    /// rectangles on the page as it is viewed, so under a /Rotate they must turn with it
+    /// before they can select characters.</summary>
+    private static Point[] QuadsInExtractionSpace(Page page, Point[] quads)
+    {
+        var rotated = new Point[quads.Length];
+        for (var i = 0; i < quads.Length; i++)
+            rotated[i] = Aspose.Pdf.Text.TextFragmentAbsorber.ToExtractionSpace(page, quads[i]);
+        return rotated;
+    }
+
     private static (double minX, double minY, double maxX, double maxY) QuadBounds(Point[] q, int i)
     {
         double minX = Math.Min(Math.Min(q[i].X, q[i + 1].X), Math.Min(q[i + 2].X, q[i + 3].X));
@@ -112,7 +126,7 @@ public partial class TextMarkupAnnotation : MarkupAnnotation
     /// (so a glyph that only just touches the boundary is excluded) and its vertical
     /// centre is within the quad's Y band.</summary>
     private static void CollectChars(Aspose.Pdf.Text.TextFragment fragment,
-        double minX, double minY, double maxX, double maxY, System.Text.StringBuilder sb, object? _)
+        double minX, double minY, double maxX, double maxY, System.Text.StringBuilder sb)
     {
         const double grazeTolerance = 0.1; // points: ignore sub-0.1pt boundary overlaps
         foreach (Aspose.Pdf.Text.TextSegment seg in fragment.Segments)

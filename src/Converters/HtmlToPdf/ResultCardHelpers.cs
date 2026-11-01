@@ -10,7 +10,7 @@ internal static partial class HtmlToPdfConverter
 // The result-card render helpers: the Arial line box, its baseline drop, the run emitter and the horizontal rule.
     private static double ArialLine(ResultCardState rc, double fs) => Math.Round(fs / PxPt * rc.arial.sum, MidpointRounding.AwayFromZero) * PxPt;
 
-    private static double Drop(ResultCardState rc, double fs, double box, (double asc, double sum) fm)
+    private static double Drop(double fs, double box, (double asc, double sum) fm)
         => (box - fs * fm.sum) / 2 + fs * fm.asc;
 
     private static void Run(ResultCardState rc, string res, double fs, double x, double yTd, string text, Color? col = null)

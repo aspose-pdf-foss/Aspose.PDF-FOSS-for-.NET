@@ -18,6 +18,11 @@ internal static class TypedOperatorParser
 {
     internal static Operator Parse(string text)
     {
+        // Inline image data follows the ID keyword on its line and is anything at all,
+        // so it is taken before the last-token split below can read a name out of it.
+        if (text.StartsWith(ID.Keyword, StringComparison.Ordinal)
+            && (text.Length == ID.Keyword.Length || char.IsWhiteSpace(text[ID.Keyword.Length])))
+            return new ID { Data = text[ID.Keyword.Length..] };
         var trimmed = text.TrimEnd();
         var lastSpace = trimmed.LastIndexOf(' ');
         var op = lastSpace >= 0 ? trimmed[(lastSpace + 1)..] : trimmed;
@@ -97,16 +102,18 @@ internal static class TypedOperatorParser
     private static string UnescapeLiteral(string body)
     {
         var sb = new System.Text.StringBuilder(body.Length);
-        for (int i = 0; i < body.Length; i++)
+        int i = 0;
+        while (i < body.Length)
         {
             var c = body[i];
             if (c == '\r')
             {
                 if (i + 1 < body.Length && body[i + 1] == '\n') i++;
                 sb.Append('\n');
+                i++;
                 continue;
             }
-            if (c != '\\' || i + 1 >= body.Length) { sb.Append(c); continue; }
+            if (c != '\\' || i + 1 >= body.Length) { sb.Append(c); i++; continue; }
             var e = body[++i];
             switch (e)
             {
@@ -130,6 +137,7 @@ internal static class TypedOperatorParser
                     else sb.Append(e);
                     break;
             }
+            i++;
         }
         return sb.ToString();
     }
@@ -501,9 +509,9 @@ internal static class TypedOperatorParser
                 if (dictIdx >= 0)
                 {
                     var dictText = operandText[dictIdx..];
-                    var mMcid = System.Text.RegularExpressions.Regex.Match(dictText, "/MCID\\s+(\\d+)");
-                    var mLang = System.Text.RegularExpressions.Regex.Match(dictText, "/Lang\\s*\\(([^)]*)\\)");
-                    var mExp = System.Text.RegularExpressions.Regex.Match(dictText, "/E\\s*\\(([^)]*)\\)");
+                    var mMcid = SafeRegex.Match(dictText, "/MCID\\s+(\\d+)");
+                    var mLang = SafeRegex.Match(dictText, "/Lang\\s*\\(([^)]*)\\)");
+                    var mExp = SafeRegex.Match(dictText, "/E\\s*\\(([^)]*)\\)");
                     // ANY inline dict yields a properties object - an artifact BDC
                     // (<</BBox .../Type /Pagination>>) has no MCID, but consumers
                     // walking page.Contents read bdc.Properties on every BDC and a

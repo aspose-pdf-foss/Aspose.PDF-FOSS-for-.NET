@@ -87,12 +87,17 @@ internal static partial class AutoTagger
         public List<Block> Blocks = [];
         public List<(double y, double x, double w, double h, int op)> Figures = [];
         public List<(Aspose.Pdf.Rectangle region, int rows, int cols, List<double> colX, List<double> rowY)> Tables = [];
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<(int Rows, bool Col)> TableHeaders = []; // per table: its header rows / a header column
+#pragma warning restore S3218
         public List<(int Row, int Col)[,]> TableCells = []; // per table: the cell each grid cell belongs to (MergedCells)
         public List<Aspose.Pdf.Rectangle> RuledBoxes = []; // the boxes the page's rules draw, tables or not
+        public List<(Aspose.Pdf.Rectangle region, List<double> colX, List<double> rowY)> RuledGrids = []; // those boxes with their lines down and across
         public List<PageContentScan.Rule> Rules = []; // the page's rules (a table cell's edges are drawn where one runs)
         public Dictionary<int, int> RepeatedHeaders = []; // table blocks going on with a table -> how many of its header rows they repeat
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public HashSet<int> SideBySide = []; // tables that are one half of a table set in two halves side by side
+#pragma warning restore S3218
         public HashSet<int> Decorative = []; // image operations that are decoration: artifacts, no Figure
         public List<FormWork> Forms = []; // the form XObjects looked into: ContentOp.Stream - 1 indexes them
         public List<Drawing> Drawings = []; // clusters of painted paths read as figures: ContentOp.Drawing indexes them
@@ -236,7 +241,7 @@ internal static partial class AutoTagger
         // HeaderElement; otherwise it becomes an image-only paragraph interleaved by Y.
         MergeFigures(pa.result, pa.blockLines, pw.Figures.Where(f => !pw.Decorative.Contains(f.op)).ToList(), run,
             Math.Max(pa.pitch - pa.bodySize, 0));
-        AttachLinks(pa, pw);
+        AttachLinks(pa);
         MarkFormulas(pa);
         MarkSums(pa, pw);
         MarkFractions(pa, pw);
@@ -266,6 +271,7 @@ internal static partial class AutoTagger
         pw.Figures = CollectFigures(pw.Ops);
         var ruled = DetectTables(rules, ShadeEdges(pw, null, rows).ToList());
         pw.RuledBoxes = ruled.Select(t => t.region).ToList();
+        pw.RuledGrids = ruled.Select(t => (t.region, t.colX, t.rowY)).ToList();
         // Rows inside a ruled table are the table's, even where they recur at the top of every page
         // (a long table's header rows): the header repeated after a page break is marked when the
         // table joins across it.
@@ -460,7 +466,9 @@ internal static partial class AutoTagger
             {
                 if (blockLines[i] is not { Count: > 0 } ls) return false;
                 var right = ls[0].ColumnRight;
+#pragma warning disable S1244 // both sides copy one stored value - exact equality is the grouping
                 var left = blockLines.Where(o => o is { Count: > 0 } && o[0].ColumnRight == right).SelectMany(o => o!).Min(l => l.MinX);
+#pragma warning restore S1244
                 return middle >= left - PictureGap && (right <= 0 || middle <= right + PictureGap);
             }
             var segIdx = Enumerable.Range(0, blocks.Count).Where(i => blocks[i].Kind == BlockKind.Heading && blocks[i].Y > bottom && (InColumn(i) || HeadsColumn(i)))
@@ -618,11 +626,12 @@ internal static partial class AutoTagger
         // stands at both ends of the row lines bounding it, separates two tables; each is a
         // table of its own, its columns found over its own height. (A row across an open-sided
         // table, or across a framed one whose frame runs on, keeps the table whole.)
-        // A column rule crosses a band when its pieces (a rule drawn cell by cell) cover the band.
+        // A column rule crosses a band when its pieces (a rule drawn cell by cell) cover the band - a band a few points
+        // high (the gap between two boxes set one over the other) to within a quarter of its height at each end.
         bool Crossed(double bottom, double top, double? at = null) => (at is { } x ? [x] : colCand)
             .Any(c => Union(v.Where(r => Math.Abs(r.At - c) <= 3.0 && r.To > bottom && r.From < top)
                     .Select(r => (Math.Max(r.From, bottom), Math.Min(r.To, top)))).Sum(iv => iv.R - iv.L)
-                >= top - bottom - 2 * 3.0);
+                >= top - bottom - 2 * Math.Min(3.0, (top - bottom) / 4));
         (double L, double R) Extent(double y)
         {
             var at = h.Where(r => Math.Abs(r.At - y) <= 3.0).ToList();
@@ -665,8 +674,8 @@ internal static partial class AutoTagger
             var within = v.Where(r => r.From < top - 3.0 && r.To > bottom + 3.0)
                 .Select(r => r with { From = Math.Max(r.From, bottom), To = Math.Min(r.To, top) }).ToList();
             // A column edge rules most of the table's height, or the whole of one of its rows (a
-            // table whose label rows run across it rules its columns only in its data rows);
-            // cells with no rule between them merge again (MergedCells).
+            // table whose label rows run across it rules its columns only in its data rows); cells
+            // with no rule between them merge again (MergedCells).
             bool RulesARow(double x) => Enumerable.Range(0, tableRows.Count - 1).Any(i =>
             {
                 var (lo, hi) = (tableRows[i], tableRows[i + 1]);
@@ -793,8 +802,8 @@ internal static partial class AutoTagger
         var minHeadingLevel = tg.blocks.Where(b => b.Kind == BlockKind.Heading)
             .Select(b => b.Level).DefaultIfEmpty(0).Min();
 
-        // A heading hierarchy (two or more headings) is wrapped in a Part with nested sections;
-        // a document with at most one heading stays flat, its content (including any lone
+        // A heading hierarchy (two or more headings) is wrapped in a Part with nested sections; a
+        // document with at most one heading stays flat, its content (including any lone
         // heading) directly under the Document root.
         // The blocks of one frame, one after another, are grouped under its Div.
         (LogicalStructure.StructureElement Div, Frame Frame, LogicalStructure.StructureElement Parent)? framed = null;
@@ -893,7 +902,9 @@ internal static partial class AutoTagger
             if (string.IsNullOrWhiteSpace(f.Text)) continue;
             var rect = f.Rectangle;
             if (rect is null) continue;
-            var size = f.TextState?.FontSize ?? 0;
+            // (a negative size turns the glyphs over - under a mirroring scale, on a flipped page: it sets the line as its
+            // magnitude does)
+            var size = Math.Abs(f.TextState?.FontSize ?? 0);
             var glyph = new Glyph(rect.LLY, rect.LLX, size, f.BaselinePosition?.YIndent ?? rect.LLY, rect.URX, rect.URY, f.Text, f.TextState?.Font?.FontName);
             if (Turn(f.TextState?.Rotation ?? 0) is { } turn) sideways.Add((glyph, turn));
             else
@@ -1017,28 +1028,74 @@ internal static partial class AutoTagger
         => marks.Frags.Count > 0 && marks.Frags.All(f => f.Text.Trim().Length is > 0 and <= MaxMarkChars
                                                          && host.Frags.Any(h => Math.Abs(f.X - h.R) <= TouchTolerance));
 
-    // A mark opening a line ends at most this share of the line's size before the line's text starts.
+    /// <summary>Whether every fragment of <paramref name="words"/> stands within the span of <paramref name="host"/>'s
+    /// text, in a gap of it - over no word of the line, which a line of text a part of a size apart could not stand -
+    /// words set in full size and raised over the line, as a law's article suffixes are (260ter, 305bis); the first
+    /// perhaps a number hanging before the line's text, a paragraph's. No line of their own, however long. (a line read
+    /// with a column's line beside it spans the page: a line over the other column's words is that column's)</summary>
+    private static bool Interleaved(Line words, Line host)
+    {
+        var set = words.Frags.Where(f => !string.IsNullOrWhiteSpace(f.Text)).ToList();
+        if (set.Count == 0) return false;
+        var (left, right) = (host.MinX - TouchTolerance, host.Frags[^1].R + TouchTolerance);
+        bool Hangs((double X, double R, string Text, double Y, double Base, double Size, string? Font) f)
+            => f.Text.Trim().All(char.IsDigit) && f.R <= host.MinX + TouchTolerance && f.R >= host.MinX - HangingNumberGap * host.Size;
+        // (a fragment running under the word on both sides left the gap for it; one that merely overlaps it is a line's)
+        bool InGap((double X, double R, string Text, double Y, double Base, double Size, string? Font) f)
+            => f.X >= left && f.R <= right
+               && !host.Frags.Any(h => !string.IsNullOrWhiteSpace(h.Text) && h.X < f.R - TouchTolerance && h.R > f.X + TouchTolerance
+                                       && !(h.X < f.X - TouchTolerance && h.R > f.R + TouchTolerance));
+        return set.Select((f, k) => InGap(f) || (k == 0 && Hangs(f))).All(x => x);
+    }
+
+    // A mark opening a line ends at most this share of the line's size before the line's text starts; a number, at most
+    // this share: a footnote's number hangs a tab before its text, out in the margin of the notes.
     private const double OpeningMarkGap = 0.5;
+    private const double HangingNumberGap = 2.0;
+
+    /// <summary>Whether the label opening <paramref name="label"/> ends before <paramref name="host"/>'s text starts, within
+    /// a hanging number's gap of it.</summary>
+    private static bool HangsBefore(Line label, Line host)
+        => label.Frags[0].R <= host.MinX + TouchTolerance && label.Frags[0].R >= host.MinX - HangingNumberGap * host.Size;
 
     /// <summary>Whether <paramref name="marks"/> are short marks, the first ending where <paramref name="host"/>'s text
-    /// starts: a footnote's number raised at the start of its first line (and marks raised further along it).</summary>
+    /// starts - or hanging a tab before it, a number: a footnote's number raised at the start of its first line (and marks
+    /// raised further along it).</summary>
     private static bool OpensLine(Line marks, Line host)
-        => marks.Frags.Count > 0 && marks.Frags.All(f => f.Text.Trim().Length is > 0 and <= MaxMarkChars)
-           && marks.Frags[0].R <= host.MinX + TouchTolerance && marks.Frags[0].R >= host.MinX - OpeningMarkGap * host.Size;
+    {
+        if (marks.Frags.Count == 0 || !marks.Frags.All(f => f.Text.Trim().Length is > 0 and <= MaxMarkChars)) return false;
+        var gap = marks.Frags.All(f => f.Text.Trim().All(char.IsDigit)) ? HangingNumberGap : OpeningMarkGap;
+        return marks.Frags[0].R <= host.MinX + TouchTolerance && marks.Frags[0].R >= host.MinX - gap * host.Size;
+    }
+
+    // A list item's label drawn a little over or under the item's first line - within this share of the line's size -
+    // hangs before it within HangingNumberGap sizes of its text.
+    private const double LabelRiseFactor = 0.35;
+
+    /// <summary>Whether <paramref name="line"/> holds a list item's label and nothing but marks raised beside it (a note's
+    /// number, a suffix of the line's text the label was read with): a label drawn a little off its item's first line.</summary>
+    private static bool LabelLine(Line line)
+    {
+        var inked = line.Frags.Where(f => !string.IsNullOrWhiteSpace(f.Text)).ToList();
+        return inked.Count > 0 && SafeRegex.IsMatch(LabelOnly, inked[0].Text)
+               && inked.Skip(1).All(f => f.Size <= RaisedSizeFactor * inked[0].Size);
+    }
 
     /// <summary>Fold a line of smaller text raised or lowered a little beside a line (a
     /// superscript note call, a subscript) into that line: it is part of the line's text, not
-    /// a line of its own.</summary>
+    /// a line of its own. So is a list item's label drawn a little off its item's first line.</summary>
     private static List<Line> MergeRaisedFragments(List<Line> lines)
     {
         for (var i = lines.Count - 1; i >= 0; i--)
         {
             var small = lines[i];
-            var host = lines.Where(l => l != small
-                    && ((small.Size <= RaisedSizeFactor * l.Size && Math.Abs(small.Y - l.Y) <= RaisedRiseFactor * l.Size)
-                        || (Math.Abs(small.Y - l.Y) <= AttachedRiseFactor * l.Size && MarksAttached(small, l)))
-                    && l.Frags.Count > 0 && (small.MinX >= l.MinX - 1 || OpensLine(small, l))
-                    && small.MinX <= l.Frags[^1].R + l.Size)
+            var labelled = LabelLine(small);
+            bool Raised(Line l) => (small.Size <= RaisedSizeFactor * l.Size && Math.Abs(small.Y - l.Y) <= RaisedRiseFactor * l.Size)
+                                   || (Math.Abs(small.Y - l.Y) <= AttachedRiseFactor * l.Size && MarksAttached(small, l));
+            var host = lines.Where(l => l != small && l.Frags.Count > 0 && small.MinX <= l.Frags[^1].R + l.Size
+                    && ((Raised(l) && (small.MinX >= l.MinX - 1 || OpensLine(small, l) || (labelled && HangsBefore(small, l))))
+                        || (Math.Abs(small.Y - l.Y) <= RaisedRiseFactor * l.Size && Interleaved(small, l))
+                        || (labelled && Math.Abs(small.Y - l.Y) <= LabelRiseFactor * l.Size && HangsBefore(small, l))))
                 .OrderBy(l => Math.Abs(small.Y - l.Y)).FirstOrDefault();
             if (host is null) continue;
             host.Frags = host.Frags.Concat(small.Frags).OrderBy(f => f.X).ToList();

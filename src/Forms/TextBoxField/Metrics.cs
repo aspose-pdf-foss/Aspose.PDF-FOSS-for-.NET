@@ -19,11 +19,8 @@ public partial class TextBoxField
     /// CJK ideographs, kana, and the full-width punctuation that travels with them?</summary>
     private static bool ContainsIdeograph(string run)
     {
-        foreach (var c in run)
-            if (c >= '⺀' && c <= '鿿' || c >= '豈' && c <= '﫿'
-                || c >= '＀' && c <= '￯')
-                return true;
-        return false;
+        return run.Any(c => c >= '⺀' && c <= '鿿' || c >= '豈' && c <= '﫿'
+                || c >= '＀' && c <= '￯');
     }
 
     /// <summary>Greedy word-wrap of a multiline field value into lines no wider than
@@ -33,7 +30,7 @@ public partial class TextBoxField
         string text, string fontName, double fontSize, double availWidth)
     {
         var lines = new System.Collections.Generic.List<string>();
-        double spaceW = GetGlyphWidthEm(' ', fontName) * fontSize;
+        _ = GetGlyphWidthEm(' ', fontName) * fontSize;
         // Normalise every hard line break to '\n' first: a field value may separate lines
         // with '\r' or '\r\n' (the PDF form convention, e.g. FillField) as well as '\n'.
         var normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
@@ -99,7 +96,7 @@ public partial class TextBoxField
         // when it soft-wraps onto several display lines.
         int hardLines = 1;
         var normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
-        foreach (var ch in normalized) if (ch == '\n') hardLines++;
+        foreach (var ch in normalized.Where(ch => ch == '\n')) hardLines++;
         double cap = hardLines >= 2 ? 12.0 : 1525.0 / 128.0;
 
         // The display-line count N(s) grows as s grows (more soft-wraps), so N(s)·perLine·s
@@ -266,7 +263,7 @@ public partial class TextBoxField
     /// values are reproduced as measured. Each was read at two or more sizes and is exact:
     /// Arial at 5 / 10 / 20 / 30 pt seats at 34.3165 / 32.633 / 29.266 / 25.899, i.e.
     /// h/2 - 0.3367*fs to four decimals.</summary>
-    private static double? NamedFaceSingleLineBoxPerMille(string family, bool bold) => family switch
+    private static double? NamedFaceSingleLineBoxPerMille(string family) => family switch
     {
         "Arial" => 673.4,
         "Arial Narrow" => 665,
@@ -276,12 +273,45 @@ public partial class TextBoxField
         _ => null,
     };
 
+    /// <summary>Depth of a MULTILINE style-named appearance's first baseline under the
+    /// border inset, as per-mille of the font size, for the classic families - the third
+    /// name-keyed table. Measured against the reference's restored top margin, each at
+    /// the tenth of a point the reference reports a flattened first line's top at: Arial
+    /// at 10 and 20 pt seats 56.62 / 43.34 in a 72 pt box, i.e. h - 2 - 1.333 fs at both
+    /// sizes; Times New Roman and Courier differ bold from regular, as Courier's pitch
+    /// does; Courier New seats a full 0.65 em deeper than Courier, which no metric of
+    /// either program explains, so the values are reproduced as measured. A family
+    /// outside the table keeps the one-font-size seat below.</summary>
+    private static double? NamedFaceMultilineSeatPerMille(string family, bool bold) => family switch
+    {
+        "Arial" => 1333,
+        "Arial Narrow" => 1398,
+        "Tahoma" => 1254,
+        "Helvetica" => 1163,
+        "Times New Roman" => bold ? 1334 : 1314,
+        "Courier New" => 1710,
+        "Courier" => bold ? 1053 : 1063,
+        _ => null,
+    };
+
+    /// <summary>The first baseline of a multiline style-named appearance: the pinned depth
+    /// under the border inset when the family is in the table above, otherwise one font
+    /// size below the box top (measured 62 / 52 / 65 in a 72 pt box at 10 / 20 / 7 pt,
+    /// identical across every other face probed).</summary>
+    private double StyleFaceFirstBaseline(string fontName, double fontSize, double boxHeight)
+    {
+        var family = (DefaultAppearance?.FontName ?? fontName) ?? string.Empty;
+        if (NamedFaceMultilineSeatPerMille(family, StyleFaceBold) is { } pinned)
+            return boxHeight - WidgetBorderInset - fontSize * pinned / 1000.0;
+        return boxHeight - fontSize;
+    }
+
     /// <summary>The box a single-line style-named appearance centres in: the table above
     /// when the name is in it, otherwise the face's own line pitch.</summary>
     private double StyleFaceSingleLineBoxEm(string fontName, double fontSize)
     {
         var family = (DefaultAppearance?.FontName ?? fontName) ?? string.Empty;
-        if (NamedFaceSingleLineBoxPerMille(family, StyleFaceBold) is { } pinned) return pinned / 1000.0;
+        if (NamedFaceSingleLineBoxPerMille(family) is { } pinned) return pinned / 1000.0;
         return StyleFacePitchEm(fontName, fontSize);
     }
 
@@ -308,7 +338,7 @@ public partial class TextBoxField
                     if (asc + desc > 0) return (asc + desc) / 1000.0;
                 }
             }
-            catch { }
+            catch { /* a face that does not parse falls back to the standard-font height below */ }
         }
         var baseName = NormalizeStdFontName(family);
         if (Std14BboxHeight(baseName) is { } bb) return bb / 1000.0;
@@ -327,7 +357,7 @@ public partial class TextBoxField
                 if (ff2 is not null && HeadBboxHeightEm(Reader.DecodeStream(ff2)) is { } em)
                     return fontSize * em;
             }
-            catch { }
+            catch { /* a stream that does not decode is skipped, as if absent */ }
         }
         var baseName = NormalizeStdFontName(fontName);
         if ((dr is null || dr.GetName("Subtype") == "Type1") && Std14BboxHeight(baseName) is { } bb)
@@ -356,8 +386,41 @@ public partial class TextBoxField
                 if (d != 0) return System.Math.Abs(d);
             }
         }
-        catch { }
+        catch { /* a descriptor that does not read falls back to the standard-font descent below */ }
         return Std14Descent(NormalizeStdFontName(fontName));
+    }
+
+    /// <summary>The faces tried, in order, for a value of East Asian script that the face its script calls for
+    /// cannot show whole (Han characters a Japanese face lacks, beside kana).</summary>
+    private static readonly string[] CjkCoveringFaces =
+        { "SimSun", "Microsoft YaHei", "MS Gothic", "Yu Gothic", "Malgun Gothic", "SimSun-ExtB", "MingLiU-ExtB" };
+
+    /// <summary>The smallest program the resolvers hand back that is a font: a shorter one is no face.</summary>
+    private const int MinFontProgramLength = 12;
+
+    /// <summary>The face a value beyond Latin-1 is drawn in, with its name: the /DA face when it shows every
+    /// character - Arial standing in for one the system resolver does not list, unless Arial lacks some of the
+    /// value and the library's font lookup finds the face - else the face the value's script calls for, else the first East Asian face that shows
+    /// the whole value, else the script's face, which shows what it can.</summary>
+    private static (byte[]? ttf, string family) ResolveUnicodeFace(string family, string text)
+    {
+        var ttf = Aspose.Pdf.Text.SystemFontResolver.Resolve(family);
+        if (ttf is { Length: > MinFontProgramLength } && CoversBeyondAnsi(ttf, text)) return (ttf, family);
+        if (TextStamp.TryResolveCjkTtf(text) is not { } cjk)
+        {
+            if (ttf is not null) return (ttf, family);
+            // The library's font lookup walks the installed faces: it is asked only for what Arial cannot show.
+            var standIn = Aspose.Pdf.Text.SystemFontResolver.Resolve("Arial");
+            if (standIn is { Length: > MinFontProgramLength } && CoversBeyondAnsi(standIn, text)) return (standIn, family);
+            return (Aspose.Pdf.Text.FontRepository.TryFindFont(family)?.SourceFontData?.TtfData ?? standIn, family);
+        }
+        if (CoversBeyondAnsi(cjk.ttf, text)) return cjk;
+        foreach (var name in CjkCoveringFaces)
+        {
+            var face = Aspose.Pdf.Text.SystemFontResolver.Resolve(name);
+            if (face is { Length: > MinFontProgramLength } && CoversBeyondAnsi(face, text)) return (face, name);
+        }
+        return cjk;
     }
 
     /// <summary>True when <paramref name="ttf"/> has a real glyph for every
@@ -368,7 +431,8 @@ public partial class TextBoxField
         {
             var parser = _uniWidthParsers.GetValue(ttf, static t => new Aspose.Pdf.Text.GlyphOutlineParser(t));
             var checked_ = 0;
-            for (var i = 0; i < text.Length && checked_ < 64; i++)
+            var i = 0;
+            while (i < text.Length && checked_ < 64)
             {
                 int cp = text[i];
                 if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
@@ -376,9 +440,10 @@ public partial class TextBoxField
                     cp = char.ConvertToUtf32(text[i], text[i + 1]);
                     i++;
                 }
-                if (cp <= 0xFF) continue;
+                if (cp <= 0xFF) { i++; continue; }
                 checked_++;
                 if (!parser.CMap.TryGetValue(cp, out var gid) || gid == 0) return false;
+                i++;
             }
             return true;
         }

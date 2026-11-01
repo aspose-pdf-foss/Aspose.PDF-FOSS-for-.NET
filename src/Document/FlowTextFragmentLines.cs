@@ -151,20 +151,24 @@ public sealed partial class Document
             // line height below the previous baseline (same rule as the
             // embedded branch below).
             // A CALLER-set LineSpacing adds its leading above the first
-            // line too (23 pt drop for 10 pt + 13);
-            // synthetic (layout-assigned) leading keeps the plain drop.
-            var firstLineBaseline = _lastBodyBaseline.HasValue
-                ? _lastBodyBaseline.Value - wtf.lineHeight
-                : _curY - (tf.TextState.LineSpacing > 0 && !tf.TextState.LineSpacingSynthetic
+            // line too (23 pt drop for 10 pt + 13); synthetic
+            // (layout-assigned) leading keeps the plain drop.
+            double firstLineBaseline;
+            if (_lastBodyBaseline.HasValue) firstLineBaseline = _lastBodyBaseline.Value - wtf.lineHeight;
+            else
+                firstLineBaseline = _curY - (tf.TextState.LineSpacing > 0 && !tf.TextState.LineSpacingSynthetic
                     ? wtf.lineHeight : wtf.fontSize);
             CaptureFirstLine(firstLineBaseline);
             for (var j = 0; j < chunk.Count; j++)
             {
                 var lineBaseline = firstLineBaseline - j * wtf.lineHeight;
+                // The line's indent (first line or the hanging one) narrows what it stretches to
+                // and moves its start, as it does the plain lines'.
+                var lineIndent = wtf.idx + j == 0 ? wtf.firstLineIndent : wtf.subsequentLinesIndent;
                 // A justified (not full-justified) paragraph leaves its last line at its natural width.
-                var stretchTo = wtf.justify && wtf.idx + j == wtf.allLines.Count - 1 ? 0 : CurWidth;
+                var stretchTo = wtf.justify && wtf.idx + j == wtf.allLines.Count - 1 ? 0 : wtf.contentWidth - lineIndent;
                 foreach (var (token, xOffset) in JustifyLineTokens(chunk[j], wtf.justifyMeasurer, stretchTo))
-                    _pendingEmbeddedRenders.Add((_currentSlot, CurLeft + xOffset, _curY,
+                    _pendingEmbeddedRenders.Add((_currentSlot, CurLeft + wtf.marginLeft + lineIndent + xOffset, _curY,
                         token, tf.TextState, wtf.fontSize, lineBaseline));
             }
             _lastBodyBaseline = firstLineBaseline - (chunk.Count - 1) * wtf.lineHeight;
@@ -213,10 +217,11 @@ public sealed partial class Document
             // lower line's metrics. Same-size runs are unaffected.
             // Caller-set LineSpacing: leading above the first line too
             // (see the fullJustify branch above).
-            var firstBaseline = _lastBodyBaseline.HasValue
-                ? _lastBodyBaseline.Value - wtf.lineHeight
-                : FullSizeFirstBaseline(wtf.fullSize ? wtf.fontTtf : null, wtf.lineHeight)
-                  ?? DeferredFirstSeat(tf.TextState, wtf.fontSize, wtf.lineHeight);
+            double firstBaseline;
+            if (_lastBodyBaseline.HasValue) firstBaseline = _lastBodyBaseline.Value - wtf.lineHeight;
+            else
+                firstBaseline = FullSizeFirstBaseline(wtf.fullSize ? wtf.fontTtf : null, wtf.lineHeight)
+                    ?? DeferredFirstSeat(tf.TextState, wtf.fontSize, wtf.lineHeight);
             wtf.fragFirstBaseline ??= firstBaseline;
             CaptureFirstLine(firstBaseline + DeferredWriterLift(tf.TextState, wtf.fontSize));
             // What follows an embedded-face paragraph defers too, so the page's content stream
@@ -248,7 +253,7 @@ public sealed partial class Document
                         lineState.Font = fbFont;
                     }
                     if (spacings is not null) _pendingRenderSpacing[_pendingEmbeddedRenders.Count] = spacings[j];
-                    _pendingEmbeddedRenders.Add((_currentSlot, CurLeft + LineAlignOffset(wtf, tf, chunk[j]),
+                    _pendingEmbeddedRenders.Add((_currentSlot, CurLeft + wtf.marginLeft + LineAlignOffset(wtf, tf, chunk[j]),
                         _curY - ChunkDrop(wtf, j), chunk[j], lineState, wtf.fontSize,
                         firstBaseline - ChunkDrop(wtf, j)));
                     _pendingRenderPitch[_pendingEmbeddedRenders.Count - 1] = HeightOfLine(wtf, wtf.idx + j);
@@ -262,7 +267,7 @@ public sealed partial class Document
             }
             else
             {
-                _pendingEmbeddedRenders.Add((_currentSlot, CurLeft, _curY,
+                _pendingEmbeddedRenders.Add((_currentSlot, CurLeft + wtf.marginLeft, _curY,
                     string.Join("\n", chunk), tf.TextState, wtf.fontSize, firstBaseline));
                 // The chunk's lines advance by the pitch the paginator reserved.
                 _pendingRenderPitch[_pendingEmbeddedRenders.Count - 1] = wtf.lineHeight;
@@ -292,23 +297,22 @@ public sealed partial class Document
             // the face).
             var fontResName = Table.RegisterFont(_startPage, wtf.baseFont);
             var options = tf.TextState.FormattingOptions;
-            var alphaGsName = options?.Opacity is { } opacity
-                ? Text.TextParagraph.EnsureAlphaExtGState(_startPage, opacity, strokeToo: true)
-                : options?.FillOpacity is { } fillOpacity
-                ? Text.TextParagraph.EnsureAlphaExtGState(_startPage, fillOpacity, strokeToo: false)
-                : tf.TextState.ForegroundColor is { } fg
-                ? Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, fg.AByte)
-                : null;
+            string? alphaGsName = null;
+            if (options?.Opacity is { } opacity) alphaGsName = Text.TextParagraph.EnsureAlphaExtGState(_startPage, opacity, strokeToo: true);
+            else if (options?.FillOpacity is { } fillOpacity)
+                alphaGsName = Text.TextParagraph.EnsureAlphaExtGState(_startPage, fillOpacity, strokeToo: false);
+            else if (tf.TextState.ForegroundColor is { } fg) alphaGsName = Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, fg.AByte);
             // TextState.BackgroundColor draws a filled highlight behind each
             // wrapped line (its own /ca alpha, independent of the foreground's),
             // emitted before the glyphs so the text sits on top.
             // (a bordered block's background is painted over its whole box, bands
             // included, by the bordered writer)
             var bgColor = _blockBackgroundTaken ? null : tf.TextState.BackgroundColor;
-            var bgAlphaGsName = bgColor is null ? null
-                : options?.BackgroundOpacity is { } bgOpacity
-                ? Text.TextParagraph.EnsureAlphaExtGState(_startPage, bgOpacity, strokeToo: false)
-                : Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, bgColor.AByte);
+            string? bgAlphaGsName;
+            if (bgColor is null) bgAlphaGsName = null;
+            else if (options?.BackgroundOpacity is { } bgOpacity)
+                bgAlphaGsName = Text.TextParagraph.EnsureAlphaExtGState(_startPage, bgOpacity, strokeToo: false);
+            else bgAlphaGsName = Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, bgColor.AByte);
             var plainSeat = PlainFirstBaseline(tf.TextState, wtf.baseFont, wtf.fontSize, wtf.lineHeight);
             CaptureFirstLine(plainSeat);
             double[]? lineOffsets = null;
@@ -319,7 +323,7 @@ public sealed partial class Document
             }
             var lineSpacings = wtf.spacingJustify ? JustifyingSpacings(wtf, tf, chunk) : null;
             var content = BuildWrappedTextStream(chunk, fontResName, wtf.fontSize,
-                CurLeft, _curY, wtf.lineHeight, tf.TextState.ForegroundColor,
+                CurLeft + wtf.marginLeft, _curY, wtf.lineHeight, tf.TextState.ForegroundColor,
                 tf.TextState.IsStrikeOut, tf.TextState.IsUnderline, wtf.baseFont, alphaGsName,
                 wtf.idx == 0 ? wtf.firstLineIndent : 0, wtf.subsequentLinesIndent, wtf.idx == 0,
                 bgColor, bgAlphaGsName, tf.TextState.Rotation, plainSeat, lineOffsets,
@@ -335,8 +339,8 @@ public sealed partial class Document
             // The chunk's last baseline, so a note marker can attach to
             // the end of its last line.
             wtf.nonEmbeddedLastBaseline = plainSeat - (chunk.Count - 1) * wtf.lineHeight;
-            // The non-embedded path positions baselines independently;
-            // don't let a following embedded paragraph chain onto a
+            // The non-embedded path positions baselines independently; don't
+            // let a following embedded paragraph chain onto a
             // stale baseline from before it.
             _lastBodyBaseline = null;
         }

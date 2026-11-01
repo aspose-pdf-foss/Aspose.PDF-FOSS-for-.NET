@@ -37,7 +37,7 @@ internal static partial class HtmlToPdfConverter
                 && decls.TryGetValue("border-spacing", out var bs) && bs.Trim().StartsWith('0'))
             { rq.gridCls = sel[1..]; break; }
         if (rq.gridCls is null) return null;
-        rq.tblM = Regex.Match(rq.html,
+        rq.tblM = SafeRegex.Match(rq.html,
             @"<table\b[^>]*class\s*=\s*[""'][^""']*\b" + Regex.Escape(rq.gridCls)
             + @"\b[^""']*[""'][^>]*>([\s\S]*?)</table\s*>", RegexOptions.IgnoreCase);
         if (!rq.tblM.Success) return null;
@@ -46,9 +46,7 @@ internal static partial class HtmlToPdfConverter
 
         // the header cells' own background, wherever the sheet declares it
         foreach (var (sel, decls) in rq.css)
-            if (decls.TryGetValue("background-color", out var bgv) || decls.TryGetValue("background", out bgv))
-                if (sel.Contains(rq.gridCls, StringComparison.OrdinalIgnoreCase) || sel.StartsWith('.'))
-                    if (ParseCssColor(bgv) is { } bc) { rq.band = bc; break; }
+            if ((decls.TryGetValue("background-color", out var bgv) || decls.TryGetValue("background", out bgv)) && (sel.Contains(rq.gridCls, StringComparison.OrdinalIgnoreCase) || sel.StartsWith('.')) && ParseCssColor(bgv) is { } bc) { rq.band = bc; break; }
 
         rq.rows = new List<List<(string Text, int Span, int RowSpan, bool Head)>>();
         ReadRadiusGridRows(rq);

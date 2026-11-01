@@ -13,6 +13,9 @@ public sealed partial class TextParagraph
 {
     private readonly List<TextFragment> _lines = new();
 
+    /// <summary>The z-order the paragraph is written at on its page: the highest ZIndex of its lines.</summary>
+    internal int ZIndex => _lines.Count == 0 ? 0 : _lines.Max(l => l.ZIndex);
+
     /// <summary>The <c>lineSpacing</c> argument of the AppendLine overloads, per
     /// fragment: a gap that opens BELOW the fragment's last line (between it and
     /// the next fragment). Distinct from <see cref="TextState.LineSpacing"/>, which
@@ -22,6 +25,10 @@ public sealed partial class TextParagraph
     /// <summary>The fragment each visual line of the last <see cref="BuildVisualLines"/>
     /// came from (parallel to its result).</summary>
     private readonly List<TextFragment> _visualLineFragments = new();
+
+    /// <summary>Whether each visual line of the last <see cref="BuildVisualLines"/> was ended by a wrap - its
+    /// text goes on on the next line - rather than by the end of its text or a hard break (parallel to its result).</summary>
+    private readonly List<bool> _visualLineWrapped = new();
 
     // Per-paragraph cache of glyph-outline parsers, keyed by the font's raw TTF
     // bytes, so non-Standard-14 fonts (e.g. MS Gothic) can be measured and drawn
@@ -64,17 +71,50 @@ public sealed partial class TextParagraph
         return gp.GetAdvanceWidth(gid) * fontSize / upm;
     }
 
+    private Rectangle? _rectangle;
+    // The box handed out before one is set: at the paragraph's position, of no size, for a caller to grow.
+    private Rectangle? _defaultBox;
+    private Position? _position;
+
     /// <summary>
     /// The bounding rectangle where the paragraph is rendered on the page.
-    /// Text starts at the top of the rectangle and flows downward.
+    /// Text starts at the top of the rectangle and flows downward. A paragraph
+    /// given none has an empty box at its position, whose edges a caller may set.
     /// </summary>
-    public Rectangle? Rectangle { get; set; }
+    public Rectangle? Rectangle
+    {
+        get
+        {
+            if (_rectangle is not null) return _rectangle;
+            var x = _position?.XIndent ?? 0;
+            var y = _position?.YIndent ?? 0;
+            return _defaultBox ??= new Rectangle(x, y, x, y);
+        }
+        set
+        {
+            _rectangle = value;
+            _defaultBox = null;
+        }
+    }
+
+    /// <summary>The rectangle the paragraph is laid out in: the one set, or the default box once given a size;
+    /// null while the paragraph is placed by its <see cref="Position"/> alone.</summary>
+    internal Rectangle? Box => _rectangle ?? (_defaultBox is { } box && (box.Width > 0 || box.Height > 0) ? box : null);
 
     /// <summary>
     /// The absolute position for the paragraph. When set, text begins at this position.
     /// If <see cref="Rectangle"/> is also set, <see cref="Rectangle"/> takes precedence.
     /// </summary>
-    public Position? Position { get; set; }
+    public Position? Position
+    {
+        get => _position;
+        set
+        {
+            _position = value;
+            // An untouched default box follows the position it was made at.
+            if (_defaultBox is { Width: <= 0, Height: <= 0 }) _defaultBox = null;
+        }
+    }
 
     /// <summary>
     /// Formatting options for the paragraph, including word wrap mode.
@@ -245,6 +285,7 @@ public sealed partial class TextParagraph
         return -d * fontSize / 1000.0;
     }
 
+
     /// <summary>Pick a value by the paragraph's vertical alignment within its
     /// rectangle: <paramref name="top"/> for Top, centre, or the default bottom.</summary>
     private double VerticalAnchor(double top, double center, double bottom) =>
@@ -268,17 +309,17 @@ public sealed partial class TextParagraph
     /// (a rectangle too short for one line reports an EMPTY text rectangle).</summary>
     private List<TextFragment> SeatedLines()
     {
-        if (!LimitWithBounds || Rectangle is null || _lines.Count == 0) return _lines;
+        if (!LimitWithBounds || Box is null || _lines.Count == 0) return _lines;
 
         var wrapMode = FormattingOptions.WrapMode;
-        double clipWidth = Rectangle.Width - Margin.Left - Margin.Right;
+        double clipWidth = Box!.Width - Margin.Left - Margin.Right;
         bool needsWrap = wrapMode != TextFormattingOptions.WordWrapMode.NoWrap && clipWidth > 0;
         var visualLines = BuildVisualLines(needsWrap ? clipWidth : 0, wrapMode);
         if (visualLines.Count == 0) return _lines;
 
         double blockHeight = BlockHeight(visualLines);
         double textY = BlockBottom(blockHeight) + blockHeight;
-        double minY = Rectangle.LLY + Margin.Bottom;
+        double minY = Box!.LLY + Margin.Bottom;
 
         var seated = new List<TextFragment>();
         _remainingLines.Clear();
@@ -300,18 +341,18 @@ public sealed partial class TextParagraph
 
     private void UpdatePositioning()
     {
-        if (_lines.Count == 0 || Rectangle is null) return;
+        if (_lines.Count == 0 || Box is null) return;
         var lastFrag = _lines[_lines.Count - 1];
         if (lastFrag.Segments.Count == 0) return;
 
         var wrapMode = FormattingOptions.WrapMode;
-        double clipWidth = Rectangle.Width - Margin.Left - Margin.Right;
+        double clipWidth = Box!.Width - Margin.Left - Margin.Right;
         bool needsWrap = wrapMode != TextFormattingOptions.WordWrapMode.NoWrap && clipWidth > 0;
         var visualLines = BuildVisualLines(needsWrap ? clipWidth : 0, wrapMode);
         if (visualLines.Count == 0) return;
 
         double blockHeight = BlockHeight(visualLines);
-        double startX = Rectangle.LLX + Margin.Left;
+        double startX = Box!.LLX + Margin.Left;
         double textY = BlockBottom(blockHeight) + blockHeight;
 
         // Walk to the final visual line — its baseline and right edge.
@@ -341,19 +382,20 @@ public sealed partial class TextParagraph
     /// Stored only.</summary>
     public float SubsequentLinesIndent { get; set; }
 
-    /// <summary>When true, paragraph lines fill the rectangle width by
-    /// adjusting word spacing. Stored only — the FOSS line writer uses
-    /// the configured HorizontalAlignment instead.</summary>
+    /// <summary>When true, every line a wrap ends fills the band the paragraph is laid in (the
+    /// rectangle's content width, else its widest line) by widening its word gaps, as
+    /// <see cref="HorizontalAlignment.Justify"/> does; the last line of a text keeps its left seat,
+    /// whatever the alignment says.</summary>
     public bool Justify { get; set; }
 
     /// <summary>Begin a batched edit window. An attached paragraph is laid out
     /// once when appended and again only at save time if it changed, so there is
     /// no per-edit work to batch — kept for symmetry with the flush model.</summary>
-    public void BeginEdit() { }
+    public void BeginEdit() { /* no per-edit work to batch */ }
 
     /// <summary>End a batched edit window started by <see cref="BeginEdit"/>.
     /// No-op (see <see cref="BeginEdit"/>).</summary>
-    public void EndEdit() { }
+    public void EndEdit() { /* no per-edit work to batch */ }
 
     /// <summary>
     /// Append a text fragment as a new line in the paragraph.
@@ -427,6 +469,7 @@ public sealed partial class TextParagraph
         vl.wrap = wrapMode != TextFormattingOptions.WordWrapMode.NoWrap && maxWidth > 0;
         vl.result = new List<List<(string, TextState)>>();
         _visualLineFragments.Clear();
+        _visualLineWrapped.Clear();
         vl.current = null;
         foreach (var fragment in _lines)
         {
@@ -446,8 +489,8 @@ public sealed partial class TextParagraph
             // seed) is still one run — keep it on the per-run path so hyphenation
             // works; only genuinely multi-run fragments need the cross-segment flow.
             var realSegs = new List<TextSegment>();
-            foreach (var s in fragment.Segments)
-                if (!string.IsNullOrEmpty(s.Text)) realSegs.Add(s);
+            foreach (var s in fragment.Segments.Where(s => !string.IsNullOrEmpty(s.Text)))
+                realSegs.Add(s);
 
             if (realSegs.Count <= 1)
             {
@@ -482,6 +525,7 @@ public sealed partial class TextParagraph
 
             // Split on hard '\n' breaks, word-wrapping each hard line within maxWidth.
             var ranges = new List<(int start, int len)>();
+            var wrapped = new List<bool>();
             int pos = 0;
             while (true)
             {
@@ -489,13 +533,15 @@ public sealed partial class TextParagraph
                 int hardEnd = nl < 0 ? logical.Length : nl;
                 if (vl.wrap) WrapRange(logical, charTs, pos, hardEnd, vl.maxWidth, ranges);
                 else ranges.Add((pos, hardEnd - pos));
+                // Every line of this hard line but its last was ended by the wrap.
+                while (wrapped.Count < ranges.Count) wrapped.Add(wrapped.Count < ranges.Count - 1);
                 if (nl < 0) break;
                 pos = nl + 1;
                 if (pos > logical.Length) break;
             }
 
-            foreach (var (start, len) in ranges)
-                Emit(vl, BuildChunks(logical, charTs, start, len, fragment.TextState));
+            for (var ri = 0; ri < ranges.Count; ri++)
+                Emit(vl, BuildChunks(logical, charTs, ranges[ri].start, ranges[ri].len, fragment.TextState), wrapped[ri]);
         }
 
         return vl.result;

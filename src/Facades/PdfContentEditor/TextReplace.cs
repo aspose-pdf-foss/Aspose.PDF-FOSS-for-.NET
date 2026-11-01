@@ -66,6 +66,7 @@ public sealed partial class PdfContentEditor
                 && TextReplaceOptions.ReplaceAdjustmentAction
                 == TextReplaceOptions.ReplaceAdjustment.None,
         };
+        replacer.ReflowLineOnReplace = !replacer.AnchorTrailingOnReplace;
         replacer.Replace(doc, srcString, destString, ReplaceTextStrategy.IsRegularExpressionUsed);
         return replacer.ReplacementCount > 0;
     }
@@ -96,8 +97,81 @@ public sealed partial class PdfContentEditor
                 && TextReplaceOptions.ReplaceAdjustmentAction
                 == TextReplaceOptions.ReplaceAdjustment.None,
         };
+        replacer.ReflowLineOnReplace = !replacer.AnchorTrailingOnReplace;
         replacer.Replace(doc.Pages.At(thePage), srcString, destString, IsRegexSearch);
         return replacer.ReplacementCount > 0;
+    }
+
+    /// <summary>Replace text with explicit <see cref="TextState"/> formatting (font/size/colour).</summary>
+    public bool ReplaceText(string srcString, string destString, TextState textState)
+    {
+        var doc = EnsureBound();
+        if (!ReplaceText(srcString, destString)) return false;
+        ApplyReplacementState(doc, null, destString, textState);
+        return true;
+    }
+
+    /// <summary>Replace text on a specific page with explicit <see cref="TextState"/>.</summary>
+    public bool ReplaceText(string srcString, int thePage, string destString, TextState textState)
+    {
+        var doc = EnsureBound();
+        if (!ReplaceText(srcString, thePage, destString)) return false;
+        ApplyReplacementState(doc, thePage, destString, textState);
+        return true;
+    }
+
+    /// <summary>Replace text and override the font size of the replacement run.</summary>
+    public bool ReplaceText(string srcString, string destString, int fontSize)
+    {
+        var doc = EnsureBound();
+        if (!ReplaceText(srcString, destString)) return false;
+        ApplyReplacementState(doc, null, destString, new TextState { FontSize = fontSize });
+        return true;
+    }
+
+#pragma warning disable S2325 // public API: the published instance member
+    /// <summary>
+    /// Replace all occurrences of text across all pages.
+    /// Returns the modified PDF bytes.
+    /// </summary>
+    public byte[] ReplaceText(byte[] input, string searchText, string replaceText)
+#pragma warning restore S2325
+    {
+        using var doc = Document.Open(input);
+        var replacer = new TextReplacer();
+        replacer.Replace(doc, searchText, replaceText);
+        return doc.ToArray();
+    }
+
+#pragma warning disable S2325 // public API: the published instance member
+    /// <summary>
+    /// Replace all occurrences of text across all pages using search options.
+    /// Returns the modified PDF bytes.
+    /// </summary>
+    public byte[] ReplaceText(byte[] input, string searchText, string replaceText, TextSearchOptions options)
+#pragma warning restore S2325
+    {
+        using var doc = Document.Open(input);
+        var absorber = new TextFragmentAbsorber(searchText, options);
+        absorber.Visit(doc);
+
+        // For each found fragment, do a content-stream level replacement
+        // We use TextReplacer for actual stream modification, building the effective pattern
+        var pattern = options.IsRegularExpression ? searchText : Regex.Escape(searchText);
+        if (options.WholeWord)
+            pattern = @"\b" + pattern + @"\b";
+        var regexOptions = options.CaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase;
+
+        foreach (var page in doc.Pages)
+        {
+            var text = ExtractPageText(page);
+            if (Regex.IsMatch(text, pattern, regexOptions, RegexManager.MatchTimeout))
+            {
+                var replacer = new TextReplacer();
+                replacer.Replace(page, searchText, replaceText);
+            }
+        }
+        return doc.ToArray();
     }
 
     /// <summary>
@@ -133,8 +207,8 @@ public sealed partial class PdfContentEditor
             // line while excluding others on the same baseline, so a Y-only scope
             // (as used by the generic TextFragment.Text setter) would bleed into the
             // neighbouring out-of-rectangle word.
-            // Cross-operator ON so a word drawn glyph-by-glyph (one Tj per glyph) is matched;
-            // TargetY/TargetX (set below) keep the cross-op replacement scoped to this fragment.
+            // Cross-operator ON so a word drawn glyph-by-glyph (one Tj per glyph) is matched; TargetY/TargetX
+            // (set below) keep the cross-op replacement scoped to this fragment.
             var replacer = new TextReplacer { AllowSubsetGlyphFallback = true, AllowCrossOperator = true };
             if (frag.PositionOrNull is { } pos)
             {
@@ -146,33 +220,6 @@ public sealed partial class PdfContentEditor
             if (replaceFirst && count > 0) break;
         }
         return count > 0;
-    }
-
-    /// <summary>Replace text with explicit <see cref="TextState"/> formatting (font/size/colour).</summary>
-    public bool ReplaceText(string srcString, string destString, TextState textState)
-    {
-        var doc = EnsureBound();
-        if (!ReplaceText(srcString, destString)) return false;
-        ApplyReplacementState(doc, null, destString, textState);
-        return true;
-    }
-
-    /// <summary>Replace text on a specific page with explicit <see cref="TextState"/>.</summary>
-    public bool ReplaceText(string srcString, int thePage, string destString, TextState textState)
-    {
-        var doc = EnsureBound();
-        if (!ReplaceText(srcString, thePage, destString)) return false;
-        ApplyReplacementState(doc, thePage, destString, textState);
-        return true;
-    }
-
-    /// <summary>Replace text and override the font size of the replacement run.</summary>
-    public bool ReplaceText(string srcString, string destString, int fontSize)
-    {
-        var doc = EnsureBound();
-        if (!ReplaceText(srcString, destString)) return false;
-        ApplyReplacementState(doc, null, destString, new TextState { FontSize = fontSize });
-        return true;
     }
 
     /// <summary>Whether the current search/replace should treat the source as a regex —
@@ -203,8 +250,8 @@ public sealed partial class PdfContentEditor
         {
             var pg = frag.Page;
             if (pg is null || !done.Add(pg)) continue;
-            // Apply colour and size first (they match the run by its current encoding);
-            // the font change re-encodes the run, so it must run last or the colour/size
+            // Apply colour and size first (they match the run by its current encoding); the
+            // font change re-encodes the run, so it must run last or the colour/size
             // text-match would no longer find the run.
             // The replacement run is written in the state's own rendering mode and the
             // mode in effect before it is restored afterwards — a recoloured run inside
@@ -227,8 +274,8 @@ public sealed partial class PdfContentEditor
                 // (e.g. Times + Bold -> Times-Bold, Courier + Italic -> Courier-Oblique).
                 // Prefer a host TrueType so the swap carries a glyph program ModifyFont can
                 // embed; the metric-only Standard-14 stub has none and would no-op.
-                var resolved = Aspose.Pdf.Text.FontRepository.FindEmbeddableStyledFont(textState.FontName!, textState.FontStyle)
-                           ?? Aspose.Pdf.Text.FontRepository.TryFindFont(textState.FontName!, textState.FontStyle);
+                var resolved = Aspose.Pdf.Text.FontRepository.FindEmbeddableStyledFont(textState.FontName, textState.FontStyle)
+                           ?? Aspose.Pdf.Text.FontRepository.TryFindFont(textState.FontName, textState.FontStyle);
                 var font = resolved ?? textState.Font;
                 if (font is not null)
                 {
@@ -242,58 +289,19 @@ public sealed partial class PdfContentEditor
         }
     }
 
-    /// <summary>
-    /// Replace all occurrences of text across all pages.
-    /// Returns the modified PDF bytes.
-    /// </summary>
-    public byte[] ReplaceText(byte[] input, string searchText, string replaceText)
-    {
-        using var doc = Document.Open(input);
-        var replacer = new TextReplacer();
-        replacer.Replace(doc, searchText, replaceText);
-        return doc.ToArray();
-    }
-
-    /// <summary>
-    /// Replace all occurrences of text across all pages using search options.
-    /// Returns the modified PDF bytes.
-    /// </summary>
-    public byte[] ReplaceText(byte[] input, string searchText, string replaceText, TextSearchOptions options)
-    {
-        using var doc = Document.Open(input);
-        var absorber = new TextFragmentAbsorber(searchText, options);
-        absorber.Visit(doc);
-
-        // For each found fragment, do a content-stream level replacement
-        // We use TextReplacer for actual stream modification, building the effective pattern
-        var pattern = options.IsRegularExpression ? searchText : Regex.Escape(searchText);
-        if (options.WholeWord)
-            pattern = @"\b" + pattern + @"\b";
-        var regexOptions = options.CaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase;
-
-        foreach (var page in doc.Pages)
-        {
-            var text = ExtractPageText(doc, page);
-            if (Regex.IsMatch(text, pattern, regexOptions))
-            {
-                var replacer = new TextReplacer();
-                replacer.Replace(page, searchText, replaceText);
-            }
-        }
-        return doc.ToArray();
-    }
-
-    private static string ExtractPageText(Document doc, Page page)
+    private static string ExtractPageText(Page page)
     {
         var absorber = new TextAbsorber();
         absorber.Visit(page);
         return absorber.Text;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Replace text on a specific page (1-based).
     /// </summary>
     public byte[] ReplaceTextOnPage(byte[] input, int pageNumber, string searchText, string replaceText)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (pageNumber < 1 || pageNumber > doc.PageCount)
@@ -304,10 +312,12 @@ public sealed partial class PdfContentEditor
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Extract text from a specific page.
     /// </summary>
     public string ExtractText(byte[] input, int pageNumber)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (pageNumber < 1 || pageNumber > doc.PageCount)
@@ -318,10 +328,12 @@ public sealed partial class PdfContentEditor
         return absorber.Text;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Extract text from all pages.
     /// </summary>
     public string ExtractText(byte[] input)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         var absorber = new TextAbsorber();

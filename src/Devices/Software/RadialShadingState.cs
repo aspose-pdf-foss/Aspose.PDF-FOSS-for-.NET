@@ -44,6 +44,8 @@ private sealed class RadialShadingState
     public byte alpha;
     public string csName = null!;
     public double[] input = null!;
+    // The function's outputs, evaluated in place once the first evaluation has sized it.
+    public double[] output = [];
     public RenderContext ctx = default!;
     public RadialShading radial = default!;
     public GraphicsState state = default!;

@@ -82,8 +82,6 @@ private sealed class ExtractState
     // or fraction move ~0.6 em+) continues the current output line instead of
     // breaking it ("L" + subscript "DF" extracts as one line "𝐿𝐷𝐹 = …").
     public bool rawInlineScripts;
-    public int lastDecodedLength;
-    public double lastRunEstWidth;
     public bool lastHadMetrics;
     public double prevTmY;
     public FontMetrics? currentMetrics;
@@ -119,10 +117,6 @@ private sealed class ExtractState
     // rows purely with q/cm translations (identical Tm every BT block) changes rows
     // only here, so the Tm row-break test must include this delta.
     public double lastRenderedCmTy;
-    // Font size in effect when the last text-showing operator rendered — the
-    // blank-line rule measures the vertical gap from the PREVIOUS line's bottom,
-    // approximated as its baseline minus ~0.2·fs of descent.
-    public double lastRenderedFs;
     // Later-ink duplicate dedup (duplicate-stack scope):
     // a run whose ink covers ≥55% of the IMMEDIATELY-PRECEDING run's glyph box
     // and draws the IDENTICAL text replaces that run in the output — only
@@ -180,12 +174,16 @@ private sealed class ExtractState
     // operator with no font set means the content stream is malformed (no preceding
     // Tf) — throw IncorrectFontUsageException unless IgnoreResourceFontErrors is set.
     public bool fontSet;
+    // The current font key names no font anywhere in the page's Resources hierarchy
+    // (page level only): the runs shown under it yield no text, as in the fragment
+    // absorber. A key that is present but does not resolve keeps the plain decode.
+    public bool currentFontMissing;
     // The TEXT state is graphics state (PDF 32000-1 Table 52): Tf's font AND size, Tc,
     // Tw, Tz, TL and Tr all live there, so `q`/`Q` save and restore them along with the
     // CTM. Restoring only the font-set flag left a `q /F 1 Tf ... Q` block's size in
     // force for everything that followed it, which is how a 12.48 pt column came back
     // as 1 pt text (a document draws its right-hand column that way).
-    public Stack<(bool fontSet, double fontSize, string? fontName, Aspose.Pdf.Core.PdfDictionary? fontDict, Dictionary<int, string>? toUnicode, Aspose.Pdf.Text.FontMetrics? metrics, bool nonAgl, double charSpacing, double wordSpacing, double leading, int renderMode, double horizScale)> gsStack = null!;
+    public Stack<(bool fontSet, double fontSize, string? fontName, Aspose.Pdf.Core.PdfDictionary? fontDict, Dictionary<int, string>? toUnicode, Aspose.Pdf.Text.FontMetrics? metrics, bool nonAgl, double charSpacing, double wordSpacing, double leading, int renderMode, double horizScale, bool fontMissing)> gsStack = null!;
     // The render inputs, captured from the method parameters.
     public byte[] streamBytes = null!;
     public PdfDictionary pageDict = null!;

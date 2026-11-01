@@ -56,6 +56,15 @@ public partial class StampAnnotation : MarkupAnnotation
         }
     }
 
+    /// <summary>A rotation set after the image, or on a stamp read from a file, turns the image appearance too:
+    /// it is drawn again from the image, the one the stamp was given or the one its appearance shows.</summary>
+    private protected override void OnCharacteristicsRotated()
+    {
+        if ((_image ?? ExtractAppearanceImage()) is not { } image) return;
+        _image = image;
+        BuildImageAppearance(image);
+    }
+
     /// <summary>The stamp's image. When set programmatically the stored stream is
     /// returned; otherwise, for a stamp loaded from a document, the image is extracted
     /// from the normal appearance (/AP /N) — the first image XObject in its resources —
@@ -96,6 +105,11 @@ public partial class StampAnnotation : MarkupAnnotation
         catch { return; } // not a decodable image — leave the stored stream untouched
 
         static string F(double v) => v.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+        // A rotation asked for through the characteristics turns the appearance: the image
+        // is drawn into a box of the swapped size, and the form's /Matrix turns that box
+        // onto the rectangle. A quarter turn leaves the box's bounds the rectangle's size.
+        var rotation = ((int)Characteristics.Rotate % 360 + 360) % 360;
+        if (rotation is 90 or 270) (w, h) = (h, w);
         // Map the unit image space into the BBox: q w 0 0 h 0 0 cm /Im0 Do Q - under the
         // stamp's opacity, selected as the TransGs graphics state, when it is not opaque.
         var opacity = Opacity;
@@ -110,6 +124,7 @@ public partial class StampAnnotation : MarkupAnnotation
         bb.Add(new Core.PdfReal(0)); bb.Add(new Core.PdfReal(0));
         bb.Add(new Core.PdfReal(w)); bb.Add(new Core.PdfReal(h));
         form.Set("BBox", bb);
+        if (rotation != 0) TurnAppearance(form, rotation);
 
         var xobjs = new Core.PdfDictionary();
         xobjs.Set("Im0", imgXObject);
@@ -131,6 +146,27 @@ public partial class StampAnnotation : MarkupAnnotation
         var ap = InternalReader.ResolveDict(Dict.Get("AP")) ?? new Core.PdfDictionary();
         ap.Set("N", new Core.PdfStream(form, content));
         Dict.Set("AP", ap);
+    }
+
+    /// <summary>Give the appearance form the /Matrix of a quarter, half or three-quarter turn
+    /// counterclockwise and record the turn in the annotation's /MK /R, so a viewer that draws
+    /// its own appearance turns it the same way.</summary>
+    private void TurnAppearance(Core.PdfDictionary form, int rotation)
+    {
+        double[] values = rotation switch
+        {
+            90 => [0, 1, -1, 0, 0, 0],
+            180 => [-1, 0, 0, -1, 0, 0],
+            270 => [0, -1, 1, 0, 0, 0],
+            _ => [1, 0, 0, 1, 0, 0],
+        };
+        var matrix = new Core.PdfArray();
+        foreach (var v in values) matrix.Add(new Core.PdfReal(v));
+        form.Set("Matrix", matrix);
+
+        var mk = InternalReader.ResolveDict(Dict.Get("MK")) ?? new Core.PdfDictionary();
+        mk.Set("R", new Core.PdfInteger(rotation));
+        Dict.Set("MK", mk);
     }
 
     private System.IO.Stream? ExtractAppearanceImage()

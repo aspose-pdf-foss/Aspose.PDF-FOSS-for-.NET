@@ -55,7 +55,7 @@ internal static partial class HtmlToPdfConverter
         double? Side(string t, double box)
         {
             if (t == "auto" || t.Length == 0) return null;
-            if (Regex.Match(t, @"^([0-9.]+)%$") is { Success: true } pm)
+            if (SafeRegex.Match(t, @"^([0-9.]+)%$") is { Success: true } pm)
                 return box * double.Parse(pm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) / 100.0;
             return TryParseLength(t);
         }

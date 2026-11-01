@@ -46,15 +46,42 @@ public sealed partial class Document
         {
             if (!RenderLayoutTableCell(rl, lrow, c)) break;
         }
-        rl.y -= rl.lpadTop + rl.rowAdvance + rl.lpadBottom;
+        var rowH = rl.lpadTop + rl.rowAdvance + rl.lpadBottom;
+        if (!rl.measureOnly) StrokeHostCellFrames(rl, lrow, rowH);
+        rl.y -= rowH;
         return true;
+    }
+
+    /// <summary>Strokes the declared border of each cell of the row that carries one (a cell hosting a
+    /// nested grid) round the cell's box: its column, the row's height; the rule sits inside the box.</summary>
+    private static void StrokeHostCellFrames(LayoutTableRenderState rl, Row lrow, double rowH)
+    {
+        var x = rl.originLeft;
+        for (var c = 0; c < rl.cellCount; c++)
+        {
+            if (lrow.Cells.At(c).HtmlHostFrame is { Width: > 0 } frame)
+            {
+                var half = frame.Width / 2;
+                var fb = new Content.ContentStreamBuilder();
+                fb.SaveState();
+                fb.SetLineWidth(frame.Width).SetStrokeColor(frame.Color)
+                  .Rectangle(x + half, rl.y - rowH + half, rl.widths[c] - frame.Width, rowH - frame.Width).Stroke();
+                fb.RestoreState();
+                rl.flow.InjectContentAtCursor(fb.Build());
+            }
+            x += rl.widths[c];
+        }
     }
 
     /// <summary>Renders one cell of the row: its column box and background, then its paragraphs flowed inside the padding, the cell's height kept for the row.</summary>
     private bool RenderLayoutTableCell(LayoutTableRenderState rl, Row lrow, int c)
     {
         var lcell = lrow.Cells.At(c);
-        var cy = rl.rowTop;
+        // a framed host cell keeps its content inside its rule and the UA cell padding
+        var inset = lcell.HtmlHostFrame is { Width: > 0 } frame ? frame.Width + Converters.HtmlToPdfConverter.UaCellPadPt : 0;
+        var cellX = rl.cx + inset;
+        var cellW = rl.widths[c] - 2 * inset;
+        var cy = rl.rowTop - inset;
         foreach (var lp in lcell.Paragraphs)
         {
             if (lp is Table lin)
@@ -65,18 +92,18 @@ public sealed partial class Document
                 // a table that itself only places other tables keeps placing them
                 if (HasNestedTables(lin))
                 {
-                    cy -= RenderLayoutTable(lin, rl.cx, rl.widths[c], cy, rl.flow, rl.marginLeft, rl.renderedTables, rl.measureOnly);   // nested: no paging
+                    cy -= RenderLayoutTable(lin, cellX, cellW, cy, rl.flow, rl.marginLeft, rl.renderedTables, rl.measureOnly);   // nested: no paging
                     continue;
                 }
                 // a floated cell resolves its percentage a second
                 // time: the region is half the cell, hung on its
                 // right edge, and the table may overflow past it
                 var region = lcell.Alignment == HorizontalAlignment.Right
-                    ? rl.widths[c] / 2 : rl.widths[c];
+                    ? cellW / 2 : cellW;
                 Converters.HtmlToPdfConverter.ApplyAutoWidths(lin, region, fill: !lin.HtmlAutoWidth);
                 Converters.HtmlToPdfConverter.ApplyAutoRowHeights(lin);
                 var lx = lcell.Alignment == HorizontalAlignment.Right
-                    ? rl.cx + rl.widths[c] - region : rl.cx;
+                    ? cellX + cellW - region : cellX;
                 lin.FlowLeftOffset = lx;
                 var lcontents = lin.BuildMultiPage(rl.flow.CurrentPage, cy, rl.flow.BottomMargin,
                     measureOnly: rl.measureOnly);
@@ -88,7 +115,7 @@ public sealed partial class Document
                             rl.flow.InjectContentAtCursor(gc);
                     if (!rl.flow.HasOverflowed && lin.LastImageDraws.Count > 0)
                         foreach (var (data, rect) in lin.LastImageDraws[0])
-                            rl.flow.CurrentPage.AddImage(data, rect);
+                            rl.flow.CurrentPage.AddLayoutImage(data, rect);
                 }
                 cy -= lin.LastRenderedHeight;
             }
@@ -103,8 +130,8 @@ public sealed partial class Document
                     var lb = new Content.ContentStreamBuilder();
                     lb.SaveState();
                     lb.BeginText().SetFont(lres, lfs)
-                      .MoveTextPosition(rl.cx, cy - lfs)
-                      .ShowText(ltf.Text!).EndText();
+                      .MoveTextPosition(cellX, cy - lfs)
+                      .ShowText(ltf.Text).EndText();
                     lb.RestoreState();
                     rl.flow.InjectContentAtCursor(lb.Build());
                 }
@@ -116,7 +143,7 @@ public sealed partial class Document
                 cy -= Converters.HtmlToPdfConverter.FaceLineHeight("Helvetica",
                     lws.TextState.FontSize > 0 ? lws.TextState.FontSize : 12);
         }
-        rl.rowAdvance = Math.Max(rl.rowAdvance, rl.rowTop - cy);
+        rl.rowAdvance = Math.Max(rl.rowAdvance, rl.rowTop - cy + inset);
         rl.cx += rl.widths[c];
         return true;
     }
@@ -130,7 +157,7 @@ public sealed partial class Document
             for (var c = 0; c < rl.cellCount; c++)
             {
                 var mcell = lrow.Cells.At(c);
-                var mh = 0.0;
+                var mh = mcell.HtmlHostFrame is { Width: > 0 } mf ? 2 * (mf.Width + Converters.HtmlToPdfConverter.UaCellPadPt) : 0.0;
                 foreach (var mp in mcell.Paragraphs)
                 {
                     if (mp is Table mt)

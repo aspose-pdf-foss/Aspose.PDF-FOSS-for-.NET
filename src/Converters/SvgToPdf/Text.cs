@@ -30,9 +30,11 @@ internal static partial class SvgToPdfConverter
         // as the round-trip case drops x/y entirely and stacks every run at the origin.
         if (sx.tmMatrix is not null && (sx.elem.HasAttribute("x") || sx.elem.HasAttribute("y")))
             sx.tmMatrix = null;
-        sx.newCtm = sx.tmMatrix is null ? ApplyTransform(sx.elem, sx.sb, sx.ctm) : sx.ctm;
-        ApplyClipPath(sx.style, sx.ctx, sx.newCtm);
-        ApplyMask(sx.style, sx.ctx, sx.newCtm);
+        // A pure matrix() transform is applied through the text matrix (Tm) in
+        // EmitRun — emitting it as a cm too would double the translation.
+        if (sx.tmMatrix is null) ApplyTransform(sx.elem, sx.sb, sx.ctm);
+        ApplyClipPath(sx.style, sx.ctx);
+        ApplyMask(sx.style, sx.ctx);
 
         sx.curX = GetFirstLen(sx.elem, "x", sx.ctx.VpW);
         sx.curY = GetFirstLen(sx.elem, "y", sx.ctx.VpH);
@@ -41,7 +43,7 @@ internal static partial class SvgToPdfConverter
         sx.sb.Append("Q\n");
     }
 
-    private static string CollapseWs(string s) => Regex.Replace(s, @"\s+", " ").Trim();
+    private static string CollapseWs(string s) => SafeRegex.Replace(s, @"\s+", " ").Trim();
 
     private static string EscapePdfString(string text)
     {
@@ -54,9 +56,10 @@ internal static partial class SvgToPdfConverter
                 case '(': sb.Append("\\("); break;
                 case ')': sb.Append("\\)"); break;
                 default:
-                    // Content stream strings are WinAnsi-ish single-byte; map
-                    // non-Latin1 chars to '?' rather than corrupting the stream.
-                    sb.Append(ch <= 0xFF ? ch : '?');
+                    // Content stream strings are WinAnsi single-byte: a character the
+                    // encoding has (a bullet, a dash, a curly quote) takes its code, one
+                    // it lacks becomes '?' rather than corrupting the stream.
+                    sb.Append(ch <= 0x7F ? ch : (char)(Text.Cp1252.TryGetByte(ch) ?? (byte)'?'));
                     break;
             }
         }
@@ -82,9 +85,12 @@ internal static partial class SvgToPdfConverter
 
     /// <summary>Resource name for the next composite (Type0) font on a surface.
     /// LAW: SVG conversion names them <c>C0_0</c>, <c>C1_0</c>, …
-    /// — the name a consumer indexes the converted page's font collection by.</summary>
-    private static string NextCompositeResName(PdfDictionary fontDict)
+    /// — the name a consumer indexes the converted page's font collection by. Null once the face
+    /// is embedded on the surface: it keeps the name it got, rather than being filed again under
+    /// a fresh one for every run drawn in it.</summary>
+    private static string? NextCompositeResName(PdfDictionary fontDict, byte[] ttf)
     {
+        if (Text.Type0FontEmbedder.IsEmbedded(fontDict, ttf)) return null;
         var n = 0;
         while (fontDict.ContainsKey($"C{n}_0")) n++;
         return $"C{n}_0";
@@ -97,7 +103,7 @@ internal static partial class SvgToPdfConverter
         var weight = Prop(style, "font-weight").ToLowerInvariant();
         var italicStyle = Prop(style, "font-style").ToLowerInvariant();
 
-        var bold = weight is "bold" or "bolder" || (double.TryParse(weight, out var wNum) && wNum >= 600);
+        var bold = weight is "bold" or "bolder" || (double.TryParse(weight, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var wNum) && wNum >= 600);
         var italic = italicStyle is "italic" or "oblique";
 
         // First recognizable family in the list decides the face.
@@ -120,18 +126,27 @@ internal static partial class SvgToPdfConverter
 
         return face switch
         {
-            "times" => bold && italic ? "Times-BoldItalic"
-                : bold ? "Times-Bold"
-                : italic ? "Times-Italic"
-                : "Times-Roman",
-            "courier" => bold && italic ? "Courier-BoldOblique"
-                : bold ? "Courier-Bold"
-                : italic ? "Courier-Oblique"
-                : "Courier",
-            _ => bold && italic ? "Helvetica-BoldOblique"
-                : bold ? "Helvetica-Bold"
-                : italic ? "Helvetica-Oblique"
-                : "Helvetica",
+            "times" => (bold, italic) switch
+            {
+                (true, true) => "Times-BoldItalic",
+                (true, _) => "Times-Bold",
+                (_, true) => "Times-Italic",
+                _ => "Times-Roman",
+            },
+            "courier" => (bold, italic) switch
+            {
+                (true, true) => "Courier-BoldOblique",
+                (true, _) => "Courier-Bold",
+                (_, true) => "Courier-Oblique",
+                _ => "Courier",
+            },
+            _ => (bold, italic) switch
+            {
+                (true, true) => "Helvetica-BoldOblique",
+                (true, _) => "Helvetica-Bold",
+                (_, true) => "Helvetica-Oblique",
+                _ => "Helvetica",
+            },
         };
     }
 
@@ -140,7 +155,7 @@ internal static partial class SvgToPdfConverter
         double total = 0;
         foreach (var ch in text)
         {
-            var w = Text.Standard14Fonts.GetWidth(baseFont, ch < 256 ? ch : '?');
+            var w = Text.Standard14Fonts.GetWidth(baseFont, ch <= 0x7F ? ch : Text.Cp1252.TryGetByte(ch) ?? (byte)'?');
             total += (w >= 0 ? w : 500) / 1000.0 * fontSize;
         }
         return total;
@@ -156,9 +171,7 @@ internal static partial class SvgToPdfConverter
     /// <summary>True when the run has any character the WinAnsi Tf/Tj path cannot encode.</summary>
     private static bool NeedsUnicodeSvg(string s)
     {
-        foreach (var ch in s)
-            if (ch > 0x7F && Text.Cp1252.TryGetByte(ch) is null) return true;
-        return false;
+        return s.Any(ch => ch > 0x7F && Text.Cp1252.TryGetByte(ch) is null);
     }
 
     /// <summary>Resolve an embedded Unicode fallback face covering every non-WinAnsi

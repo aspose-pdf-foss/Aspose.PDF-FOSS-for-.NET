@@ -11,17 +11,23 @@ internal static partial class TiffDecoder
         switch (tf.photometric)
         {
             case 0: // WhiteIsZero
-            case 1: // BlackIsZero
+            case 1: // BlackIsZero (+ optional alpha extra sample)
             {
-                var gray = new byte[(long)tf.w * tf.h];
-                for (long i = 0, p = 0; i < gray.Length; i++, p += tf.spp)
-                    gray[i] = tf.photometric == 0 ? (byte)(255 - tf.samples[p]) : tf.samples[p];
-                return PngEncoder.Encode(gray, tf.w, tf.h, colorType: 0);
+                var hasAlpha = AlphaFollows(tf, 1, unassociatedOnly: true);
+                var bpp = hasAlpha ? 2 : 1;
+                var gray = new byte[(long)tf.w * tf.h * bpp];
+                for (long i = 0, p = 0; i < (long)tf.w * tf.h; i++, p += tf.spp)
+                {
+                    gray[i * bpp] = tf.photometric == 0 ? (byte)(255 - tf.samples[p]) : tf.samples[p];
+                    if (hasAlpha) gray[i * bpp + 1] = tf.samples[p + 1];
+                }
+                // Every taker decodes the frame straight away, so the PNG is stored, not deflated.
+                return PngEncoder.Encode(gray, tf.w, tf.h, colorType: hasAlpha ? 4 : 0, level: Filters.DeflateLevel.Store);
             }
             case 2: // RGB (+ optional alpha extra sample)
             {
                 if (tf.spp < 3) return null;
-                var hasAlpha = tf.spp >= 4 && tf.extraSamples is { Length: > 0 } && tf.extraSamples[0] is 1 or 2;
+                var hasAlpha = AlphaFollows(tf, 3);
                 var bpp = hasAlpha ? 4 : 3;
                 var px = new byte[(long)tf.w * tf.h * bpp];
                 for (long i = 0, p = 0; i < (long)tf.w * tf.h; i++, p += tf.spp)
@@ -31,7 +37,7 @@ internal static partial class TiffDecoder
                     px[i * bpp + 2] = tf.samples[p + 2];
                     if (hasAlpha) px[i * bpp + 3] = tf.samples[p + 3];
                 }
-                return PngEncoder.Encode(px, tf.w, tf.h, colorType: hasAlpha ? 6 : 2);
+                return PngEncoder.Encode(px, tf.w, tf.h, colorType: hasAlpha ? 6 : 2, level: Filters.DeflateLevel.Store);
             }
             case 3: // Palette
             {
@@ -47,27 +53,41 @@ internal static partial class TiffDecoder
                     px[i * 3 + 1] = (byte)(tf.colorMap[mapLen + idx] >> 8);
                     px[i * 3 + 2] = (byte)(tf.colorMap[2 * mapLen + idx] >> 8);
                 }
-                return PngEncoder.Encode(px, tf.w, tf.h, colorType: 2);
+                return PngEncoder.Encode(px, tf.w, tf.h, colorType: 2, level: Filters.DeflateLevel.Store);
             }
-            case 5: // CMYK
+            case 5: // CMYK (+ optional alpha extra sample)
             {
                 if (tf.spp < 4) return null;
-                var px = new byte[(long)tf.w * tf.h * 3];
+                var hasAlpha = AlphaFollows(tf, 4, unassociatedOnly: true);
+                var bpp = hasAlpha ? 4 : 3;
+                var px = new byte[(long)tf.w * tf.h * bpp];
                 for (long i = 0, p = 0; i < (long)tf.w * tf.h; i++, p += tf.spp)
                 {
                     int c = tf.samples[p], m = tf.samples[p + 1], y = tf.samples[p + 2], k = tf.samples[p + 3];
-                    px[i * 3] = (byte)((255 - c) * (255 - k) / 255);
-                    px[i * 3 + 1] = (byte)((255 - m) * (255 - k) / 255);
-                    px[i * 3 + 2] = (byte)((255 - y) * (255 - k) / 255);
+                    px[i * bpp] = (byte)((255 - c) * (255 - k) / 255);
+                    px[i * bpp + 1] = (byte)((255 - m) * (255 - k) / 255);
+                    px[i * bpp + 2] = (byte)((255 - y) * (255 - k) / 255);
+                    if (hasAlpha) px[i * bpp + 3] = tf.samples[p + 4];
                 }
-                return PngEncoder.Encode(px, tf.w, tf.h, colorType: 2);
+                return PngEncoder.Encode(px, tf.w, tf.h, colorType: hasAlpha ? 6 : 2, level: Filters.DeflateLevel.Store);
             }
         }
         return null;
     }
 
+    /// <summary>True when the first sample after the <paramref name="colourSamples"/> colour ones is alpha
+    /// (ExtraSamples 1, associated, or 2, unassociated): it becomes the picture's transparency. A grey or CMYK frame
+    /// takes only unassociated alpha: its associated (premultiplied) samples are drawn opaque, as the reference
+    /// draws them.</summary>
+    private static bool AlphaFollows(TiffIfdState tf, int colourSamples, bool unassociatedOnly = false)
+        => tf.spp > colourSamples && tf.extraSamples is { Length: > 0 }
+           && (tf.extraSamples[0] == UnassociatedAlpha || (!unassociatedOnly && tf.extraSamples[0] == AssociatedAlpha));
+
+    private const long AssociatedAlpha = 1;
+    private const long UnassociatedAlpha = 2;
+
     /// <summary>The raster assembled from the file's tiles or strips, each decompressed by the IFD's compression.</summary>
-    private static bool ReadTiffRaster(TiffIfdState tf, byte[] d, bool le)
+    private static bool ReadTiffRaster(TiffIfdState tf, byte[] d)
     {
         if (tf.tileOffsets is not null && tf.tileWidth > 0 && tf.tileLength > 0)
         {
@@ -81,26 +101,26 @@ internal static partial class TiffDecoder
             tf.rowBytes = (tf.w * tf.bps * tf.spp + 7) / 8;
             tf.raster = new byte[(long)tf.rowBytes * tf.h];
             for (var ty = 0; ty < tilesDown; ty++)
-            for (var tx = 0; tx < tilesAcross; tx++)
-            {
-                var ti = ty * tilesAcross + tx;
-                var expected = tileRowBytes * th;
-                var tile = DecodeSegment(d, le, stripOffset: tf.tileOffsets[ti],
-                    stripCount: tf.tileCounts is not null && ti < tf.tileCounts.Length ? tf.tileCounts[ti] : -1,
-                    tf.compression, tw, th, expected, tf.t4Options, tf.predictor, tf.spp, tf.bps, tf.fillOrder, tf.strictGroup4);
-                // Blit the tile rows into the raster, clipping the right/bottom edges.
-                for (var r = 0; r < th && ty * th + r < tf.h; r++)
+                for (var tx = 0; tx < tilesAcross; tx++)
                 {
-                    var dstRow = (long)(ty * th + r) * tf.rowBytes;
-                    var srcRow = (long)r * tileRowBytes;
-                    // Whole-byte copy is exact when tx*tw*bps*spp is byte-aligned,
-                    // which holds because tile widths are multiples of 16 (spec).
-                    var dstBit = (long)tx * tw * tf.bps * tf.spp;
-                    var copyBits = Math.Min((long)tw, tf.w - (long)tx * tw) * tf.bps * tf.spp;
-                    var copyBytes = (int)((copyBits + 7) / 8);
-                    Array.Copy(tile, srcRow, tf.raster, dstRow + dstBit / 8, copyBytes);
+                    var ti = ty * tilesAcross + tx;
+                    var expected = tileRowBytes * th;
+                    var tile = DecodeSegment(d, stripOffset: tf.tileOffsets[ti],
+                        stripCount: tf.tileCounts is not null && ti < tf.tileCounts.Length ? tf.tileCounts[ti] : -1,
+                        tf.compression, tw, th, expected, tf.t4Options, tf.predictor, tf.spp, tf.bps, tf.fillOrder, tf.strictGroup4);
+                    // Blit the tile rows into the raster, clipping the right/bottom edges.
+                    for (var r = 0; r < th && ty * th + r < tf.h; r++)
+                    {
+                        var dstRow = (long)(ty * th + r) * tf.rowBytes;
+                        var srcRow = (long)r * tileRowBytes;
+                        // Whole-byte copy is exact when tx*tw*bps*spp is byte-aligned,
+                        // which holds because tile widths are multiples of 16 (spec).
+                        var dstBit = (long)tx * tw * tf.bps * tf.spp;
+                        var copyBits = Math.Min((long)tw, tf.w - (long)tx * tw) * tf.bps * tf.spp;
+                        var copyBytes = (int)((copyBits + 7) / 8);
+                        Array.Copy(tile, srcRow, tf.raster, dstRow + dstBit / 8, copyBytes);
+                    }
                 }
-            }
         }
         else
         {
@@ -124,7 +144,7 @@ internal static partial class TiffDecoder
                     byte[] strip;
                     try
                     {
-                        strip = DecodeSegment(d, le, tf.stripOffsets[si],
+                        strip = DecodeSegment(d, tf.stripOffsets[si],
                             tf.stripCounts is not null && si < tf.stripCounts.Length ? tf.stripCounts[si] : -1,
                             tf.compression, tf.w, stripRows, expected, tf.t4Options, tf.predictor, samplesPerRow, tf.bps, tf.fillOrder, tf.strictGroup4);
                     }
@@ -184,7 +204,7 @@ internal static partial class TiffDecoder
                 case 324: tf.tileOffsets = ReadValues(d, le, eo, type, count); break;
                 case 325: tf.tileCounts = ReadValues(d, le, eo, type, count); break;
                 case 338: tf.extraSamples = ReadValues(d, le, eo, type, count); break;
-                case 347: tf.jpegTables = RawBytes(d, le, eo, type, count); break;
+                case 347: tf.jpegTables = RawBytes(d, le, eo, count); break;
                 case 513: tf.jpegIfOffset = ReadValues(d, le, eo, type, count)[0]; break;
                 case 514: tf.jpegIfLength = ReadValues(d, le, eo, type, count)[0]; break;
             }

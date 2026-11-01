@@ -12,7 +12,9 @@ public sealed partial class TextFragmentAbsorber
     // segments; ends with the same-phrase RTL reorder over [preCount..).
     private void EmitMatches(SearchFragmentState sf, MatchCollection matches, int preCount)
     {
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
     foreach (Match match in matches)
+#pragma warning restore S3267
     {
         if (!EmitMatch(sf, match)) break;
     }
@@ -25,8 +27,7 @@ public sealed partial class TextFragmentAbsorber
         var t = _fragments.GetInternal(i).Text;
         if (i > preCount && !string.Equals(t, _fragments.GetInternal(preCount).Text, StringComparison.Ordinal))
             sf.samePhrase = false;
-        foreach (var ch in t)
-            if (BidiReorderer.IsRtlChar(ch)) { sf.anyRtl = true; break; }
+        if (t.Any(ch => BidiReorderer.IsRtlChar(ch))) { sf.anyRtl = true; }
     }
     if (sf.newMatches > 1 && sf.samePhrase && sf.anyRtl && HasMajorUpwardJump(sf.rawFragments))
     {

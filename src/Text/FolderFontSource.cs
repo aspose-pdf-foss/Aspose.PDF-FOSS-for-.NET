@@ -75,7 +75,7 @@ public sealed class FolderFontSource : FontSource
             try { data = System.IO.File.ReadAllBytes(file); }
             catch { continue; }
             var name = "Unknown";
-            try { name = FontRepository.ReadTtfFamilyName(data); } catch { }
+            try { name = FontRepository.ReadTtfFamilyName(data); } catch { /* an unreadable name table keeps the fallback name */ }
             if (name == "Unknown")
                 name = System.IO.Path.GetFileNameWithoutExtension(file);
             var fd = new FontData(name, FontType.TrueType, file);

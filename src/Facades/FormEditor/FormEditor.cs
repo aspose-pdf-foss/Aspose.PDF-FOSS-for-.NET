@@ -13,8 +13,6 @@ public sealed partial class FormEditor : IDisposable
     private Document? _document;
     private string? _srcFileName;
     private Stream? _srcStream;
-    private string? _destFileName;
-    private Stream? _destStream;
     private PdfFormat? _convertTo;
 
     /// <summary>The document bound to this editor, exposed so it can be
@@ -34,21 +32,21 @@ public sealed partial class FormEditor : IDisposable
     public FormEditor(Document document, Stream destStream)
     {
         _document = document;
-        _destStream = destStream;
+        DestStream = destStream;
     }
 
     /// <summary>Bind a document and pre-configure an output file path for the parameterless Save.</summary>
     public FormEditor(Document document, string destFileName)
     {
         _document = document;
-        _destFileName = destFileName;
+        DestFileName = destFileName;
     }
 
     /// <summary>Open from an input stream, writing to an output stream on Save.</summary>
     public FormEditor(Stream srcStream, Stream destStream)
     {
         _srcStream = srcStream;
-        _destStream = destStream;
+        DestStream = destStream;
         using var ms = new MemoryStream();
         if (srcStream.CanSeek) srcStream.Position = 0;
         srcStream.CopyTo(ms);
@@ -59,7 +57,7 @@ public sealed partial class FormEditor : IDisposable
     public FormEditor(string srcFileName, string destFileName)
     {
         _srcFileName = srcFileName;
-        _destFileName = destFileName;
+        DestFileName = destFileName;
         _document = Document.Open(File.ReadAllBytes(srcFileName));
         // Binding to a destination path CLAIMS that path immediately: the file exists
         // (empty) from the moment the editor is constructed, and Save fills it in. The
@@ -79,8 +77,8 @@ public sealed partial class FormEditor : IDisposable
             if (!string.IsNullOrEmpty(dir)) System.IO.Directory.CreateDirectory(dir);
             System.IO.File.Create(destFileName).Dispose();
         }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
+        catch (IOException) { /* an unwritable path surfaces on Save, where the caller expects the write */ }
+        catch (UnauthorizedAccessException) { /* an unwritable path surfaces on Save, where the caller expects the write */ }
     }
 
     // ── Stateful destination/source properties ────────────────────────────
@@ -114,23 +112,17 @@ public sealed partial class FormEditor : IDisposable
     }
 
     /// <summary>Destination file path written by the parameterless <see cref="Save()"/>.</summary>
-    public string? DestFileName
-    {
-        get => _destFileName;
-        set => _destFileName = value;
-    }
+    public string? DestFileName { get; set; }
 
     /// <summary>Destination stream written by the parameterless <see cref="Save()"/>.</summary>
-    public Stream? DestStream
-    {
-        get => _destStream;
-        set => _destStream = value;
-    }
+    public Stream? DestStream { get; set; }
 
+#pragma warning disable S2376 // public API: a write-only property of the published surface
     /// <summary>
     /// Target PDF/A or PDF version for the saved output. Stored only; the save path emits plain PDF.
     /// </summary>
     public PdfFormat ConvertTo
+#pragma warning restore S2376
     {
         set => _convertTo = value;
     }
@@ -213,12 +205,12 @@ public sealed partial class FormEditor : IDisposable
     public void Save()
     {
         if (_document is null) throw new InvalidOperationException("No document bound.");
-        if (_destFileName is null && _destStream is null)
+        if (DestFileName is null && DestStream is null)
             throw new InvalidOperationException("No destination configured. Set DestFileName or DestStream, or call Save(string)/Save(Stream).");
         ApplyConvertTo();
         var bytes = _document.ToArray();
-        if (_destFileName is not null) File.WriteAllBytes(_destFileName, bytes);
-        if (_destStream is not null) _destStream.Write(bytes);
+        if (DestFileName is not null) File.WriteAllBytes(DestFileName, bytes);
+        if (DestStream is not null) DestStream.Write(bytes);
     }
 
     /// <summary>Apply a <see cref="ConvertTo"/> target PDF version to the bound document
@@ -360,12 +352,14 @@ public sealed partial class FormEditor : IDisposable
     /// <summary>Alias for <see cref="ResetFacade"/> covering nested-facade callers.</summary>
     public void ResetInnerFacade() => Facade.Reset();
 
+#pragma warning disable S2325 // public API: the published instance member
     // ── Setters that return success ──────────────────────────────────────
 
     // ── Stateless (byte[]-in / byte[]-out) helpers ───────────────────────
 
     /// <summary>Fill form fields with the given values (field name → value).</summary>
     public byte[] FillFields(byte[] input, Dictionary<string, string> fieldValues)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (doc.Form is null)
@@ -385,8 +379,10 @@ public sealed partial class FormEditor : IDisposable
     public byte[] FillField(byte[] input, string fieldName, string value)
         => FillFields(input, new Dictionary<string, string> { [fieldName] = value });
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Flatten the form — render fields as static content and remove the AcroForm.</summary>
     public byte[] FlattenForm(byte[] input)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (!doc.HasForm)
@@ -395,14 +391,18 @@ public sealed partial class FormEditor : IDisposable
         return doc.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Get all field names in the document's form.</summary>
     public string[] GetFieldNames(byte[] input)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (!doc.HasForm) return [];
 
         var names = new List<string>();
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
         foreach (var field in doc.Form.Fields)
+#pragma warning restore S3267
         {
             if (field.FullName is not null)
                 names.Add(field.FullName);
@@ -410,42 +410,54 @@ public sealed partial class FormEditor : IDisposable
         return names.ToArray();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Get the value of a specific field.</summary>
     public string? GetFieldValue(byte[] input, string fieldName)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         return doc.Form?.FindFieldOrNull(fieldName)?.Value;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Get the type of a specific field.</summary>
     public Forms.FieldType? GetFieldType(byte[] input, string fieldName)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         return doc.Form?.FindFieldOrNull(fieldName)?.Type;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Check if the document has a form.</summary>
     public bool HasForm(byte[] input)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         return doc.HasForm;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Get the total number of form fields.</summary>
     public int GetFieldCount(byte[] input)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         return doc.Form?.Count ?? 0;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Export form data as a dictionary (field name → value).</summary>
     public Dictionary<string, string> ExportFormData(byte[] input)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         var result = new Dictionary<string, string>();
         if (doc.Form is null) return result;
 
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
         foreach (var field in doc.Form.Fields)
+#pragma warning restore S3267
         {
             if (field.Value is not null && field.FullName is not null)
                 result[field.FullName] = field.Value;
@@ -457,11 +469,13 @@ public sealed partial class FormEditor : IDisposable
     public byte[] ImportFormData(byte[] input, Dictionary<string, string> data)
         => FillFields(input, data);
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Rename a form field in the supplied bytes. Returns the updated PDF bytes and
     /// whether the field was found. Stateless variant of <see cref="RenameField(string,string)"/>.
     /// </summary>
     public (byte[] Pdf, bool Found) RenameField(byte[] input, string oldName, string newPartialName)
+#pragma warning restore S2325
     {
         using var doc = Document.Open(input);
         if (doc.Form is null) return (input, false);

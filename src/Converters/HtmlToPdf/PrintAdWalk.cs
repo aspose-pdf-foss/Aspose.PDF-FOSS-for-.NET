@@ -19,7 +19,7 @@ internal static partial class HtmlToPdfConverter
             && TryParseLength(mbv.Trim().Replace("!important", "").Trim()) is { } mbPt)
             return mbPt;
         if (r.TryGetValue("margin", out var mv)
-            && TryParseCssMarginBox(Regex.Replace(mv, @"!important", "").Trim(), out var mBox))
+            && TryParseCssMarginBox(SafeRegex.Replace(mv, @"!important", "").Trim(), out var mBox))
             return mBox.bottom;
         return dflt;
     }
@@ -40,8 +40,10 @@ internal static partial class HtmlToPdfConverter
         var (rn, hex) = Text.Type0FontEmbedder.Embed(
             (pa.page.Dict.Get("Resources") as Core.PdfDictionary)!.Get("Font") as Core.PdfDictionary
                 ?? throw new InvalidOperationException(),
+#pragma warning disable S8969 // the compiler reports a possible null without it (CS8602/CS8603)
             PosFace(pa.face + (bold ? " Bold" : "")).ttf ?? PosFace(pa.face!).ttf!,
             pa.face!.Replace(" ", "") + (bold ? "Bold" : ""), text, stripSpacesInBaseFont: true);
+#pragma warning restore S8969
         pa.sb.AppendLine(Compat.Format(pa.inv,
             $"BT /{rn} {fs:0.##} Tf 1 0 0 1 {x:F2} {pa.pageHeight - (pa.y + Drop(pa, fs, box)):F2} Tm <{Compat.ToHexString(hex)}> Tj ET"));
     }
@@ -55,8 +57,8 @@ internal static partial class HtmlToPdfConverter
         }
     }
 
-    private static string PlainText(PrintAdState pa, string s2) => CollapseWs(DecodeEntities(
-        Regex.Replace(s2, @"<[^>]+>", ""))).Trim();
+    private static string PlainText(string s2) => CollapseWs(DecodeEntities(
+        SafeRegex.Replace(s2, @"<[^>]+>", ""))).Trim();
 
     private static void WalkAd(PrintAdState pa, string frag)
     {

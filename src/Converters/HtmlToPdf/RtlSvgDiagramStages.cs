@@ -22,7 +22,7 @@ internal static partial class HtmlToPdfConverter
             {
                 rd.cv.flow.page.AddImage(figBytes, new Rectangle(figX, rd.cv.flow.y - rd.figH, figX + drawW, rd.cv.flow.y));
             }
-            catch { }
+            catch { /* an image the page cannot take is left out - the layout carries on */ }
         }
     }
 
@@ -41,7 +41,7 @@ internal static partial class HtmlToPdfConverter
                     rd.cv.flow.page.AddImage(sw, new Rectangle(boxLeft, rd.cv.flow.y - rd.legendBoxH,
                         boxLeft + boxW, rd.cv.flow.y));
                 }
-                catch { }
+                catch { /* an image the page cannot take is left out - the layout carries on */ }
         }
         if (label.Length > 0)
             DrawRtlText(rd, label, rd.canvasLeft + rd.dg.LegendLabelRightFrac[k] * rd.canvasW,
@@ -51,8 +51,10 @@ internal static partial class HtmlToPdfConverter
     private static void DrawRtlText(RtlSvgDiagramState rd, string text, double rightX, double baseline, double fontPt, bool centerCanvas = false)
     {
         if (rd.fontDictD is null || rd.arialD.ttf is null || text.Length == 0) return;
-        var visual = IsPureRtl(text) ? ToVisualRtl(text)
-            : Text.BidiReorderer.ContainsRtl(text) ? VisualizeMixedRtl(text) : text;
+        string visual;
+        if (IsPureRtl(text)) visual = ToVisualRtl(text);
+        else if (Text.BidiReorderer.ContainsRtl(text)) visual = VisualizeMixedRtl(text);
+        else visual = text;
         var tw = MeasureFaceText("Arial", visual, fontPt);
         var tx = centerCanvas ? (rd.canvasLeft + rd.canvasRight - tw) / 2 : rightX - tw;
         var (rn, hex) = Text.Type0FontEmbedder.Embed(rd.fontDictD, rd.arialD.ttf, "Arial",

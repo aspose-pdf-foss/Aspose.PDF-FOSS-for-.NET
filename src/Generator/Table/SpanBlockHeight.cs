@@ -27,14 +27,14 @@ public partial class Table
     private double SpanBlockDemand(SpanBlock block)
     {
         var demand = SpanBlockFixedHeight(block);
-        foreach (var line in block.Lines) demand += SpanLinePitch(line, block.LineHeight);
+        foreach (var line in block.Lines) demand += SpanLinePitch(line);
         return demand;
     }
 
     /// <summary>One span line's advance. A line carrying a declared line box
     /// advances by that box, the same as it does inside an ordinary cell; one
     /// that declared none keeps the block's uniform pitch.</summary>
-    private static double SpanLinePitch(CellLine line, double uniformLineHeight) =>
+    private static double SpanLinePitch(CellLine line) =>
         line.LineBoxAscentEm > 0 && line.LineBoxDescentEm > 0
             ? line.FontSize + line.Leading
             : line.FontSize + line.TopGap;

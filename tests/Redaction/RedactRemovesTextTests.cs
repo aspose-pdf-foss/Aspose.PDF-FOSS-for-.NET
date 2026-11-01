@@ -124,7 +124,7 @@ public class RedactRemovesTextTests
         using var doc = Document.Open(Save(pdf, new Rectangle(97.5, 695, 101.8, 715)));
 
         var text = TextOf(doc);
-        Assert.DoesNotContain(":", text);
+        Assert.DoesNotContain(":", text, StringComparison.Ordinal);
         Assert.Contains("Date ", text);
         Assert.Contains("13 November", text);
     }
@@ -153,7 +153,7 @@ public class RedactRemovesTextTests
 
         using var doc = Document.Open(Save(pdf, new Rectangle(97.5, 695, 101.8, 715)));
 
-        Assert.DoesNotContain(":", TextOf(doc));
+        Assert.DoesNotContain(":", TextOf(doc), StringComparison.Ordinal);
         Assert.Equal(x, XOf(doc, "13 November"), 2);
     }
 

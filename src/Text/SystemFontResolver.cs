@@ -73,7 +73,9 @@ internal static partial class SystemFontResolver
             || descriptor.GetInt("StemV") >= 120;
         bool mono = (flags & 0x1) != 0 && WidthsAreUniform(fontDict, reader);
 
-        string family = mono ? "Courier" : serif ? "Times" : "Helvetica";
+        string family = "Helvetica";
+        if (mono) family = "Courier";
+        else if (serif) family = "Times";
         string style = (bold, italic) switch
         {
             (true, true) => "-BoldItalic",
@@ -130,14 +132,10 @@ internal static partial class SystemFontResolver
             name = name[1..];
 
         // CID encoding suffix — cid fonts tack on the encoding for identification
-        foreach (var suffix in new[] { "-Identity-H", "-Identity-V", "-UCS2", "-UniJIS-UTF16-H" })
-        {
-            if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-            {
-                name = name[..^suffix.Length];
-                break;
-            }
-        }
+        var suffix = new[] { "-Identity-H", "-Identity-V", "-UCS2", "-UniJIS-UTF16-H" }
+            .FirstOrDefault(suffix => name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
+        if (suffix is not null)
+            name = name[..^suffix.Length];
 
         // Trailing "-<digits>" is typically a subset ID (e.g. "-27586"); strip it.
         var dash = name.LastIndexOf('-');
@@ -192,10 +190,7 @@ internal static partial class SystemFontResolver
         string[] entries;
         try { entries = Directory.GetFiles(dir); }
         catch { return null; }
-        foreach (var e in entries)
-            if (string.Equals(Path.GetFileName(e), fileName, StringComparison.OrdinalIgnoreCase))
-                return e;
-        return null;
+        return entries.FirstOrDefault(e => string.Equals(Path.GetFileName(e), fileName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>Whether <paramref name="fileName"/> could name a file on this platform at
@@ -211,7 +206,23 @@ internal static partial class SystemFontResolver
 
     private static readonly char[] InvalidFileNameChars = Path.GetInvalidFileNameChars();
 
-    private static (string? fileName, string familyName, bool isBold, bool isItalic) MapFontName(string name)
+    /// <summary>The face that stands in for a font with no embedded program, as a web page names it:
+    /// the standard families under the names of the installed faces metrically matching them, any
+    /// other under its own family, with the weight and slant read from the name.</summary>
+    internal static (string Family, bool Bold, bool Italic) SubstituteFaceName(string baseFont)
+    {
+        var (_, family, bold, italic) = MapFontName(NormalizeBaseFontName(baseFont));
+        var webFamily = family switch
+        {
+            "Helvetica" => "Arial",
+            "Times" => "Times New Roman",
+            "Courier" => "Courier New",
+            _ => family,
+        };
+        return (webFamily, bold, italic);
+    }
+
+    internal static (string? fileName, string familyName, bool isBold, bool isItalic) MapFontName(string name)
     {
         // Detect style from suffix
         var lower = name.ToLowerInvariant();
@@ -237,7 +248,7 @@ internal static partial class SystemFontResolver
         // …including the space-joined and bare TRAILING spellings a WinAnsi
         // resource writes ("Tahoma Bold", "TahomaBold") — anchored at the end
         // so a family whose real name merely contains the word survives.
-        family = System.Text.RegularExpressions.Regex.Replace(family,
+        family = SafeRegex.Replace(family,
             @"[ ]?(Bold|Italic|Oblique)+$", "",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         // Strip trailing hyphens/commas
@@ -256,30 +267,9 @@ internal static partial class SystemFontResolver
         {
             family = "Arial Black";
         }
-        else if (family.StartsWith("Helvetica", StringComparison.OrdinalIgnoreCase) ||
-            family.StartsWith("Arial", StringComparison.OrdinalIgnoreCase))
+        else if (StandardFamily(family, isNarrow) is { } standard)
         {
-            if (isNarrow)
-            {
-                // Arial Narrow is metrically equivalent to Helvetica-Narrow
-                fileName = null; // use candidate search
-                family = "Arial Narrow";
-            }
-            else
-            {
-                fileName = "Helvetica.ttc";
-                family = "Helvetica";
-            }
-        }
-        else if (family.StartsWith("Times", StringComparison.OrdinalIgnoreCase))
-        {
-            fileName = "Times.ttc";
-            family = "Times";
-        }
-        else if (family.StartsWith("Courier", StringComparison.OrdinalIgnoreCase))
-        {
-            fileName = "Courier.ttc";
-            family = "Courier";
+            (fileName, family) = standard;
         }
         else if (family.Equals("Symbol", StringComparison.OrdinalIgnoreCase))
         {
@@ -445,7 +435,8 @@ internal static partial class SystemFontResolver
 
     /// <summary>The metric-compatible aliases of the standard families: Arial for
     /// Helvetica and Arial Narrow, Times New Roman for Times, Courier New for Courier,
-    /// each in the requested style.</summary>
+    /// each in the requested style - and the Windows file names of those three families
+    /// themselves.</summary>
     private static IEnumerable<string> StandardFamilyAliases(string family, bool bold, bool italic, string style)
     {
         // Arial Narrow is shipped in Office (ARIALN*.TTF) but not always in the
@@ -469,8 +460,9 @@ internal static partial class SystemFontResolver
 
         // On Windows there's no Helvetica.ttf — fall through to Arial which is
         // metric-compatible. Mirrors the family/Arial branch in MapFontName so a
-        // /BaseFont /Helvetica request resolves to arial.ttf when Helvetica is absent.
-        if (family is "Helvetica")
+        // /BaseFont /Helvetica request resolves to arial.ttf when Helvetica is absent;
+        // Arial itself is installed there under these short names too.
+        if (family is "Helvetica" or "Arial")
         {
             var arialStyle = (bold, italic) switch
             {
@@ -497,8 +489,8 @@ internal static partial class SystemFontResolver
             yield return $"times{timesStyle}.ttf";
             yield return $"Times New Roman{(timesStyle.Length > 0 ? " " + style : "")}.ttf";
         }
-        // Same for Courier → Courier New on Windows.
-        else if (family is "Courier")
+        // Same for Courier → Courier New on Windows, and Courier New itself.
+        else if (family is "Courier" or "Courier New")
         {
             var courierStyle = (bold, italic) switch
             {
@@ -555,9 +547,9 @@ internal static partial class SystemFontResolver
                 string[] entries;
                 try { entries = Directory.GetFiles(dir); }
                 catch { continue; }
-                foreach (var e in entries)
-                    if (string.Equals(Path.GetFileName(e), fileName, StringComparison.OrdinalIgnoreCase))
-                    { found = e; break; }
+                var e = entries.FirstOrDefault(e => string.Equals(Path.GetFileName(e), fileName, StringComparison.OrdinalIgnoreCase));
+                if (e is not null)
+                { found = e; }
                 if (found is not null) break;
             }
             if (found is not null) break;
@@ -637,11 +629,11 @@ internal static partial class SystemFontResolver
     }
 
     /// <summary>
-    /// Extract a single font from a TrueType Collection (.ttc) file.
-    /// Matches by checking the name table for family name and OS/2 style flags.
-    /// Falls back to the first font if no match is found.
+    /// Extract a single font from a TrueType Collection (.ttc) file: the first face of the
+    /// requested name and style, else the first of the name, else the first of the style,
+    /// else the collection's first face.
     /// </summary>
-    private static byte[]? ExtractFromTtc(byte[] data, string familyName, bool bold, bool italic)
+    internal static byte[]? ExtractFromTtc(byte[] data, string familyName, bool bold, bool italic)
     {
         if (data.Length < 12) return null;
         var numFonts = ReadUInt32BE(data, 8);
@@ -650,25 +642,33 @@ internal static partial class SystemFontResolver
         // Try each font in the collection. An exact face-NAME match wins over a
         // style match: collections such as YuGoth*.ttc pack faces that share a glyph
         // count but not a glyph order (Yu Gothic vs Yu Gothic UI), so a Type0/Identity
-        // CID only renders correctly against the exact authoring face.
+        // CID only renders correctly against the exact authoring face. Among the faces
+        // of the name the style decides: every face of a one-family collection (macOS
+        // Helvetica.ttc, Times.ttc) carries the family's name, and the first of them -
+        // the regular face - answered every style.
+        int namedAndStyledOffset = -1;
         int nameOffset = -1;
         int styleOffset = -1;
         int firstOffset = -1;
         var wantName = (familyName ?? string.Empty).Replace(" ", "");
 
-        for (var i = 0; i < numFonts; i++)
+        for (var i = 0; i < numFonts && namedAndStyledOffset < 0; i++)
         {
             var fontOffset = (int)ReadUInt32BE(data, 12 + i * 4);
             if (fontOffset + 12 > data.Length) continue;
             if (firstOffset < 0) firstOffset = fontOffset;
 
-            if (nameOffset < 0 && wantName.Length > 0 && TtcFaceNameMatches(data, fontOffset, wantName))
-                nameOffset = fontOffset;
-            if (styleOffset < 0 && MatchesTtcFont(data, fontOffset, bold, italic))
-                styleOffset = fontOffset;
+            var named = wantName.Length > 0 && TtcFaceNameMatches(data, fontOffset, wantName);
+            var styled = MatchesTtcFont(data, fontOffset, bold, italic);
+            if (named && styled) namedAndStyledOffset = fontOffset;
+            if (named && nameOffset < 0) nameOffset = fontOffset;
+            if (styled && styleOffset < 0) styleOffset = fontOffset;
         }
 
-        var offset = nameOffset >= 0 ? nameOffset : (styleOffset >= 0 ? styleOffset : firstOffset);
+        int offset;
+        if (namedAndStyledOffset >= 0) offset = namedAndStyledOffset;
+        else if (nameOffset >= 0) offset = nameOffset;
+        else offset = styleOffset >= 0 ? styleOffset : firstOffset;
         if (offset < 0) return null;
 
         // Return the full TTC data but with the offset information
@@ -728,33 +728,50 @@ internal static partial class SystemFontResolver
         return false;
     }
 
+    /// <summary>Whether a collection face is of the requested style, as its head.macStyle or its
+    /// OS/2 fsSelection says: macOS's own collections say it in macStyle alone - the bold Times
+    /// face's fsSelection carries the regular bit only, and the Courier faces have no OS/2
+    /// table at all.</summary>
     private static bool MatchesTtcFont(byte[] data, int fontOffset, bool wantBold, bool wantItalic)
     {
-        // Parse table directory to find OS/2 table
         if (fontOffset + 12 > data.Length) return false;
         var numTables = ReadUInt16BE(data, fontOffset + 4);
 
+        bool isBold = false, isItalic = false, styleRead = false;
         for (var i = 0; i < numTables; i++)
         {
             var entryOff = fontOffset + 12 + i * 16;
             if (entryOff + 16 > data.Length) break;
             var tag = Encoding.ASCII.GetString(data, entryOff, 4);
+            var tableOff = (int)ReadUInt32BE(data, entryOff + 8);
 
-            if (tag == "OS/2")
+            if (tag == "head" && tableOff + MacStyleOffset + 2 <= data.Length)
             {
-                var tableOff = (int)ReadUInt32BE(data, entryOff + 8);
-                if (tableOff + 64 > data.Length) return false;
-
-                // fsSelection at offset 62
-                var fsSelection = ReadUInt16BE(data, tableOff + 62);
-                var isBold = (fsSelection & 0x20) != 0; // bit 5
-                var isItalic = (fsSelection & 0x01) != 0; // bit 0
-
-                return isBold == wantBold && isItalic == wantItalic;
+                var macStyle = ReadUInt16BE(data, tableOff + MacStyleOffset);
+                isBold |= (macStyle & MacStyleBold) != 0;
+                isItalic |= (macStyle & MacStyleItalic) != 0;
+                styleRead = true;
+            }
+            else if (tag == "OS/2" && tableOff + FsSelectionOffset + 2 <= data.Length)
+            {
+                var fsSelection = ReadUInt16BE(data, tableOff + FsSelectionOffset);
+                isBold |= (fsSelection & FsSelectionBold) != 0;
+                isItalic |= (fsSelection & FsSelectionItalic) != 0;
+                styleRead = true;
             }
         }
-        return false;
+        return styleRead && isBold == wantBold && isItalic == wantItalic;
     }
+
+    /// <summary>Where the head table keeps macStyle, and its bold and italic bits.</summary>
+    private const int MacStyleOffset = 44;
+    private const int MacStyleBold = 0x01;
+    private const int MacStyleItalic = 0x02;
+
+    /// <summary>Where the OS/2 table keeps fsSelection, and its bold and italic bits.</summary>
+    private const int FsSelectionOffset = 62;
+    private const int FsSelectionBold = 0x20;
+    private const int FsSelectionItalic = 0x01;
 
     /// <summary>
     /// Create a standalone TTF from a font within a TTC.
@@ -790,7 +807,7 @@ internal static partial class SystemFontResolver
         var dataOffset = headerSize;
         for (var i = 0; i < tables.Count; i++)
         {
-            var (tag, origOffset, length) = tables[i];
+            var (_, origOffset, length) = tables[i];
             var entryOff = 12 + i * 16;
 
             // Copy tag and checksum from original entry

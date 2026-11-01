@@ -1,4 +1,4 @@
-namespace Aspose.Pdf;
+﻿namespace Aspose.Pdf;
 
 public sealed partial class Document
 {
@@ -8,11 +8,50 @@ public sealed partial class Document
         /// once their slots are pages.</summary>
         private readonly List<(int slot, Rectangle rect, string name, bool checkedState)> _pendingRadios = new();
 
+        /// <summary>Text controls a flow paragraph placed: bound as text box or combo box fields once
+        /// their slots are pages.</summary>
+        private readonly List<(int slot, Rectangle rect, Converters.HtmlToPdfConverter.FlowControl control)> _pendingControls = new();
+
+        /// <summary>Queue a text control's widget at <paramref name="rect"/> on the current page
+        /// without moving the cursor.</summary>
+        public void QueueControlAt(Rectangle rect, Converters.HtmlToPdfConverter.FlowControl control)
+        {
+            _pendingControls.Add((_currentSlot, rect, control));
+            _overflowBuffer?.Add(Array.Empty<byte>());
+        }
+
+        /// <summary>Bind every queued text control: a select as a combo box of its entries, a text
+        /// input or text area as a text box, each in a solid one point black border with its value.</summary>
+        private void FinaliseInlineControls(IList<Page> overflowPageRefs, Document doc)
+        {
+            foreach (var (slot, rect, control) in _pendingControls)
+            {
+                var pg = SlotPage(slot, overflowPageRefs);
+                if (pg is null) continue;
+                Forms.Field field;
+                if (control.IsButton)
+                {
+                    doc.Form.Add(Converters.HtmlToPdfConverter.NewPushButton(pg, rect, control.Name), pg.Number);
+                    continue;
+                }
+                if (control.Options is { } entries)
+                    field = Converters.HtmlToPdfConverter.NewComboBox(pg, rect, entries, control.Name);
+                else
+                {
+                    field = new Forms.TextBoxField(pg, rect) { Multiline = control.Multiline, ReadOnly = control.ReadOnly };
+                    if (!string.IsNullOrEmpty(control.Name)) field.PartialName = control.Name;
+                    field.Characteristics.Border = System.Drawing.Color.Black;
+                }
+                doc.Form.Add(field, pg.Number);
+                if (control.Value.Length > 0) field.Value = control.Value;
+            }
+        }
+
         /// <summary>Draw a picture at <paramref name="rect"/> on the page the cursor is on
         /// without moving the cursor (an inline picture standing on a line).</summary>
         public void QueueImageAt(byte[] data, Rectangle rect)
         {
-            if (_overflowBuffer is null) { _startPage.AddImage(data, rect); return; }
+            if (_overflowBuffer is null) { _startPage.AddLayoutImage(data, rect); return; }
             _pendingImages.Add((_currentSlot, data, rect, false));
             _overflowBuffer.Add(Array.Empty<byte>());
         }
@@ -47,7 +86,7 @@ public sealed partial class Document
                 option.Characteristics.Border = System.Drawing.Color.Black;
                 radio.Add(option);
                 doc.Form.Add(radio, pg.Number);
-                radio.PlaceOptionWidget(option, pg, rect);
+                Forms.RadioButtonField.PlaceOptionWidget(option, pg, rect);
                 if (checkedState) radio.Selected = 1;
             }
         }

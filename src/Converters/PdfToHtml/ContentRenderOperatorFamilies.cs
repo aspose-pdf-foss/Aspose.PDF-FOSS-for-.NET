@@ -14,10 +14,10 @@ public sealed partial class PdfToHtmlConverter
         {
             // ── Graphics state stack ──
             case "q":
-                SaveStateOp(ct, op);
+                SaveStateOp(ct);
                 break;
             case "Q":
-                RestoreStateOp(ct, op);
+                RestoreStateOp(ct);
                 break;
 
             // ── ExtGState: a luminosity /SMask masks what follows ──
@@ -26,12 +26,12 @@ public sealed partial class PdfToHtmlConverter
             // applied as an SVG mask around the painted content until a
             // gs clears the soft mask or the q-scope pops.
             case "gs":
-                ApplyGraphicsStateOp(ct, op);
+                ApplyGraphicsStateOp(ct);
                 break;
 
             // ── CTM ──
             case "cm":
-                ConcatMatrixOp(ct, op);
+                ConcatMatrixOp(ct);
                 break;
 
             // ── Marked content ──
@@ -40,24 +40,27 @@ public sealed partial class PdfToHtmlConverter
             // only /MCID-carrying BDC marks advance the sequence —
             // ActualText spans and artifacts are not line boundaries.
             case "BDC":
-                BeginMarkedContentOp(ct, op);
+                BeginMarkedContentOp(ct);
                 break;
             case "BMC":
                 ct.mcStack.Push(false);
                 ct.ocDepth.Push(0);
                 break;
             case "EMC":
-                EndMarkedContentOp(ct, op);
+                EndMarkedContentOp(ct);
                 break;
 
             // ── Line width ──
             case "w":
-                SetLineWidthOp(ct, op);
+                SetLineWidthOp(ct);
                 break;
 
         }
         return null;
     }
+
+    /// <summary>The scale a Tz operand is written in: percent.</summary>
+    private const double PercentScale = 100.0;
 
     /// <summary>The text operators: the text object, its font, its positioning and the strings it shows.</summary>
     private static bool? RenderTextOperator(ContentRenderState ct, string op)
@@ -68,12 +71,12 @@ public sealed partial class PdfToHtmlConverter
             case "BT":
                 ct.tlm.Set(1, 0, 0, 1, 0, 0);
                 ct.tm.Set(1, 0, 0, 1, 0, 0);
-                ct.tx = 0; ct.ty = 0;
+
                 break;
             case "ET":
                 break;
             case "Tf":
-                SetFontOp(ct, op);
+                SetFontOp(ct);
                 break;
             case "Tr":
                 if (ct.operands.Count >= 1) ct.textRenderMode = (int)Num(ct.operands[0]);
@@ -86,12 +89,12 @@ public sealed partial class PdfToHtmlConverter
                 MoveTextLineOp(ct, op);
                 break;
             case "Tm":
-                SetTextMatrixOp(ct, op);
+                SetTextMatrixOp(ct);
                 break;
             case "T*":
                 ct.tlm.Concat(1, 0, 0, 1, 0, -(ct.hasLeading ? ct.leading : ct.fontSize * 1.2));
                 ct.tm.CopyFrom(ct.tlm);
-                ct.tx = ct.tm.E; ct.ty = ct.tm.F;
+
                 break;
             case "Ts":
                 if (ct.operands.Count >= 1)
@@ -101,19 +104,23 @@ public sealed partial class PdfToHtmlConverter
                 if (ct.operands.Count >= 1)
                     ct.charSpacing = Num(ct.operands[0]);
                 break;
+            case "Tz": // horizontal scaling, in percent
+                if (ct.operands.Count >= 1)
+                    ct.horizScale = Num(ct.operands[0]) / PercentScale;
+                break;
             case "Tw": // word spacing (single-byte code 32)
-                SetWordSpacingOp(ct, op);
+                SetWordSpacingOp(ct);
                 break;
 
             // ── Text showing ──
             case "Tj":
-                ShowTextOp(ct, op);
+                ShowTextOp(ct);
                 break;
             case "TJ":
-                ShowTextArrayOp(ct, op);
+                ShowTextArrayOp(ct);
                 break;
             case "'":
-                NextLineShowTextOp(ct, op);
+                NextLineShowTextOp(ct);
                 break;
 
         }
@@ -127,22 +134,22 @@ public sealed partial class PdfToHtmlConverter
         {
             // ── Color ──
             case "rg":
-                SetFillRgbOp(ct, op);
+                SetFillRgbOp(ct);
                 break;
             case "RG":
-                SetStrokeRgbOp(ct, op);
+                SetStrokeRgbOp(ct);
                 break;
             case "g":
-                SetFillGrayOp(ct, op);
+                SetFillGrayOp(ct);
                 break;
             case "G":
-                SetStrokeGrayOp(ct, op);
+                SetStrokeGrayOp(ct);
                 break;
             case "k":
-                SetFillCmykOp(ct, op);
+                SetFillCmykOp(ct);
                 break;
             case "K":
-                SetStrokeCmykOp(ct, op);
+                SetStrokeCmykOp(ct);
                 break;
             // Colour space selection: a Separation/DeviceN space carries a
             // tint transform for its scn operand; other spaces keep the
@@ -152,17 +159,17 @@ public sealed partial class PdfToHtmlConverter
                     ? TryBuildTintMap(ct.resources, fcs.Value, ct.reader) : null;
                 break;
             case "CS":
-                SetStrokeColorSpaceOp(ct, op);
+                SetStrokeColorSpaceOp(ct);
                 break;
 
             // Colour in the current colour space (sc/scn): numeric
             // components map like gray/rgb/cmyk by count; a trailing
             // pattern NAME operand leaves the colour untouched.
             case "sc" or "scn":
-                SetFillColorOp(ct, op);
+                SetFillColorOp(ct);
                 break;
             case "SC" or "SCN":
-                SetStrokeColorOp(ct, op);
+                SetStrokeColorOp(ct);
                 break;
 
         }
@@ -176,7 +183,7 @@ public sealed partial class PdfToHtmlConverter
         {
             // ── XObject (Do operator): images drawn, forms recursed ──
             case "Do":
-                DrawXObjectOp(ct, op);
+                DrawXObjectOp(ct);
                 break;
 
             // ── Path construction ──
@@ -185,61 +192,61 @@ public sealed partial class PdfToHtmlConverter
             // scaling cm — e.g. q 0.12 0 0 0.12 0 0 cm — landed kilopoints
             // off-canvas when emitted raw).
             case "m": // moveto
-                MoveToOp(ct, op);
+                MoveToOp(ct);
                 break;
             case "l": // lineto
-                LineToOp(ct, op);
+                LineToOp(ct);
                 break;
             case "c": // curveto
-                CurveToOp(ct, op);
+                CurveToOp(ct);
                 break;
             case "v": // curveto (initial point replicated)
-                CurveToInitialOp(ct, op);
+                CurveToInitialOp(ct);
                 break;
             case "y": // curveto (final point replicated)
-                CurveToFinalOp(ct, op);
+                CurveToFinalOp(ct);
                 break;
             case "h": // closepath
                 ct.pathState.Data.Append("Z");
                 break;
             case "re": // rectangle
-                RectangleOp(ct, op);
+                RectangleOp(ct);
                 break;
 
             // ── Path painting ──
             case "S": // stroke
-                StrokeOp(ct, op);
+                StrokeOp(ct);
                 break;
             case "s": // close and stroke
-                CloseStrokeOp(ct, op);
+                CloseStrokeOp(ct);
                 break;
             case "f" or "F": // fill (nonzero)
-                FillOp(ct, op);
+                FillOp(ct);
                 break;
             case "f*": // fill (even-odd)
-                FillEvenOddOp(ct, op);
+                FillEvenOddOp(ct);
                 break;
             case "B": // fill and stroke (nonzero)
-                FillStrokeOp(ct, op);
+                FillStrokeOp(ct);
                 break;
             case "B*": // fill and stroke (even-odd)
-                FillStrokeEvenOddOp(ct, op);
+                FillStrokeEvenOddOp(ct);
                 break;
             case "b": // close, fill and stroke (nonzero)
-                CloseFillStrokeOp(ct, op);
+                CloseFillStrokeOp(ct);
                 break;
             case "b*": // close, fill and stroke (even-odd)
-                CloseFillStrokeEvenOddOp(ct, op);
+                CloseFillStrokeEvenOddOp(ct);
                 break;
             case "W":
             case "W*":
-                ClipOp(ct, op);
+                ClipOp(ct, evenOdd: op == "W*");
                 break;
             case "n": // end path (no paint)
-                EndPathOp(ct, op);
+                EndPathOp(ct);
                 break;
             case "sh":
-                ShadingOp(ct, op);
+                ShadingOp(ct);
                 break;
             case "BI":
                 SkipInlineImage(ct.lexer);

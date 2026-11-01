@@ -43,7 +43,7 @@ public sealed class ContentStreamBuilder
     // Baseline bookkeeping for a caller that bounds a text block AFTER drawing it (the
     // generator's per-cell text clip): every non-empty Tj records the baseline the
     // text matrix seated it at and its font size, from the last ResetTextExtent on.
-    private double _textX, _textY, _textSize;
+    private double _textY, _textSize;
     private readonly List<(double Y, double Size)> _shows = new();
 
     /// <summary>Current length of the stream — an insertion point for
@@ -98,8 +98,9 @@ public sealed class ContentStreamBuilder
     }
 
     // Color.R/.G/.B are bytes (0–255); PDF rg/RG operators expect 0–1.
+    /// <summary>The fill colour in its own space: a CMYK colour writes its four components (k), any other its RGB.</summary>
     public ContentStreamBuilder SetFillColor(Color color)
-        => SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
+        => CmykComponents(color) is { } k ? SetCmyk(k, "k") : SetFillColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
 
     public ContentStreamBuilder SetStrokeColor(double r, double g, double b)
     {
@@ -107,8 +108,20 @@ public sealed class ContentStreamBuilder
         return this;
     }
 
+    /// <summary>The stroke colour in its own space: a CMYK colour writes its four components (K), any other its RGB.</summary>
     public ContentStreamBuilder SetStrokeColor(Color color)
-        => SetStrokeColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
+        => CmykComponents(color) is { } k ? SetCmyk(k, "K") : SetStrokeColor(color.R / 255.0, color.G / 255.0, color.B / 255.0);
+
+    private const int CmykComponentCount = 4;
+
+    private static double[]? CmykComponents(Color color)
+        => color.ColorType == ColorType.Cmyk && color.Data is { Length: CmykComponentCount } k ? k : null;
+
+    private ContentStreamBuilder SetCmyk(double[] k, string op)
+    {
+        _sb.Append($"{Fc(k[0])} {Fc(k[1])} {Fc(k[2])} {Fc(k[3])} {op}\n");
+        return this;
+    }
 
     public ContentStreamBuilder SetFillGray(double gray)
     {
@@ -159,7 +172,7 @@ public sealed class ContentStreamBuilder
     // Line cap style (0=butt, 1=round, 2=square)
     public ContentStreamBuilder SetLineCap(int cap)
     {
-        _sb.Append($"{cap} J\n");
+        _sb.Append($"{cap.ToString(CultureInfo.InvariantCulture)} J\n");
         return this;
     }
 
@@ -190,7 +203,7 @@ public sealed class ContentStreamBuilder
 
     public ContentStreamBuilder SetLineJoin(int join)
     {
-        _sb.Append($"{join} j\n");
+        _sb.Append($"{join.ToString(CultureInfo.InvariantCulture)} j\n");
         return this;
     }
 
@@ -281,7 +294,7 @@ public sealed class ContentStreamBuilder
     public ContentStreamBuilder ClipPathEvenOdd() { _sb.Append("W*\n"); return this; }
 
     // Text
-    public ContentStreamBuilder BeginText() { _sb.Append("BT\n"); _textX = _textY = 0; return this; }
+    public ContentStreamBuilder BeginText() { _sb.Append("BT\n"); _textY = 0; return this; }
     public ContentStreamBuilder EndText() { _sb.Append("ET\n"); return this; }
 
     public ContentStreamBuilder SetFont(string fontName, double size)
@@ -294,7 +307,7 @@ public sealed class ContentStreamBuilder
     public ContentStreamBuilder MoveTextPosition(double tx, double ty)
     {
         _sb.Append($"{F(tx)} {F(ty)} Td\n");
-        _textX += tx; _textY += ty;
+        _textY += ty;
         return this;
     }
 
@@ -308,7 +321,6 @@ public sealed class ContentStreamBuilder
     public ContentStreamBuilder MoveTextPositionWithLeading(double tx, double ty)
     {
         _sb.Append($"{F(tx)} {F(ty)} TD\n");
-        _textX += tx;
         _textY += ty;
         return this;
     }
@@ -316,7 +328,7 @@ public sealed class ContentStreamBuilder
     public ContentStreamBuilder SetTextMatrix(double a, double b, double c, double d, double e, double f)
     {
         _sb.Append($"{F(a)} {F(b)} {F(c)} {F(d)} {F(e)} {F(f)} Tm\n");
-        _textX = e; _textY = f;
+        _textY = f;
         return this;
     }
 
@@ -351,7 +363,7 @@ public sealed class ContentStreamBuilder
 
     public ContentStreamBuilder SetTextRenderingMode(int mode)
     {
-        _sb.Append($"{mode} Tr\n");
+        _sb.Append($"{mode.ToString(CultureInfo.InvariantCulture)} Tr\n");
         return this;
     }
 
@@ -405,6 +417,9 @@ public sealed class ContentStreamBuilder
             // CJK titles) swallow the rest of the content stream.
             if (ch > 0xFF)
             {
+                // A format character (a zero-width space, a byte order mark) has no glyph in any
+                // single-byte encoding and draws nothing, not the '?' an unknown letter folds to.
+                if (char.GetUnicodeCategory(ch) == System.Globalization.UnicodeCategory.Format) continue;
                 one[0] = ch;
                 Compat.Latin1.GetBytes(one, oneB);
                 ch = (char)oneB[0];
@@ -511,7 +526,9 @@ public sealed class ContentStreamBuilder
     }
 
     // Extended graphics state
+#pragma warning disable S4144 // public API: both published members write the gs operator
     public ContentStreamBuilder SetExtGState(string name)
+#pragma warning restore S4144
     {
         _sb.Append($"/{name} gs\n");
         return this;
@@ -526,7 +543,16 @@ public sealed class ContentStreamBuilder
 
     public ContentStreamBuilder BeginMarkedContent(string tag, int mcid)
     {
-        _sb.Append($"/{tag} <</MCID {mcid}>> BDC\n");
+        _sb.Append($"/{tag} <</MCID {mcid.ToString(CultureInfo.InvariantCulture)}>> BDC\n");
+        return this;
+    }
+
+    /// <summary>
+    /// Begin a marked content sequence using a MarkedContentInfo from a StructureElementBuilder.
+    /// </summary>
+    public ContentStreamBuilder BeginMarkedContent(Tagged.MarkedContentInfo info)
+    {
+        _sb.Append(info.BeginMarkedContent());
         return this;
     }
 
@@ -540,15 +566,6 @@ public sealed class ContentStreamBuilder
     public ContentStreamBuilder EndMarkedContent()
     {
         _sb.Append("EMC\n");
-        return this;
-    }
-
-    /// <summary>
-    /// Begin a marked content sequence using a MarkedContentInfo from a StructureElementBuilder.
-    /// </summary>
-    public ContentStreamBuilder BeginMarkedContent(Tagged.MarkedContentInfo info)
-    {
-        _sb.Append(info.BeginMarkedContent());
         return this;
     }
 

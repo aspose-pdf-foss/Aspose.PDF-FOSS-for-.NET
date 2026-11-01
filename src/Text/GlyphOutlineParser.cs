@@ -42,6 +42,10 @@ internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
     /// <summary>Font units per em.</summary>
     public int UnitsPerEm { get; private set; } = 1000;
 
+    /// <summary>Whether the program holds outlines to draw: a glyf table and a loca table counting its glyphs. A
+    /// damaged or truncated program parses to none, and a face that draws nothing is no face.</summary>
+    public bool HasGlyphOutlines => _numGlyphs > 0 && _glyfOffset > 0 && _locaOffsets is { Length: > 1 };
+
     /// <summary>hhea ascender in font units (0 when the program ships no hhea).</summary>
     public int Ascender { get; private set; }
 
@@ -63,6 +67,8 @@ internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
         0x20DE => 0x25A1,   // COMBINING ENCLOSING SQUARE  → WHITE SQUARE
         0x2610 or 0x2611 or 0x2612 => 0x25A1,   // BALLOT BOX (and its marked forms)
         0x2B24 or 0x2B58 => 0x25CF,             // BLACK LARGE CIRCLE / HEAVY CIRCLE
+        // An isolated Arabic presentation form is drawn by the letter's own glyph.
+        >= 0xFE70 and <= 0xFEFF when ArabicShaper.BaseOfIsolated((char)cp) is var b and not '\0' => b,
         _ => RadicalLookAlike(cp),
     };
 
@@ -111,6 +117,7 @@ internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
         ParseCMap();
         MirrorSymbolPuaEntries();
         ParseHmtx();
+        ParsePost();
     }
 
     /// <inheritdoc />
@@ -129,22 +136,26 @@ internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
     {
         if (string.IsNullOrEmpty(name) || name == ".notdef") return 0;
 
-        var digits = 0;
-        while (digits < name.Length - 1 && Compat.IsAsciiDigit(name[name.Length - 1 - digits])) digits++;
-        if (digits > 0)
-        {
-            var prefix = name[..^digits];
-            if ((prefix == "g" || prefix == "glyph" || prefix == "index")
-                && int.TryParse(name[^digits..], out var gidNum)
-                && gidNum > 0 && gidNum < _numGlyphs)
-                return gidNum;
-        }
+        if (TryParseGlyphIndexName(name, out var gidNum) && gidNum < _numGlyphs) return gidNum;
 
         var uni = TextAbsorber.ResolveGlyphName(name);
         if (!string.IsNullOrEmpty(uni)
-            && CMap.TryGetValue(uni![0], out var gid) && gid > 0)
+            && CMap.TryGetValue(uni[0], out var gid) && gid > 0)
             return gid;
         return 0;
+    }
+
+    /// <summary>The glyph index a name of the subset conventions "gNNN", "glyphNNN" or
+    /// "indexNNN" carries; false for any other name.</summary>
+    public static bool TryParseGlyphIndexName(string name, out int gid)
+    {
+        gid = 0;
+        var digits = 0;
+        while (digits < name.Length - 1 && Compat.IsAsciiDigit(name[name.Length - 1 - digits])) digits++;
+        if (digits == 0) return false;
+        var prefix = name[..^digits];
+        return (prefix == "g" || prefix == "glyph" || prefix == "index")
+            && int.TryParse(name[^digits..], out gid) && gid > 0;
     }
 
     // hmtx is laid out as a sequence of `longHorMetric` entries (advanceWidth u16 + lsb i16)
@@ -242,6 +253,7 @@ internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
         var xMax = ReadInt16(start + 6);
         var yMax = ReadInt16(start + 8);
 
+        if (depth == 0 && TryInstructedGlyph(glyphId, start + 10, numContours) is { } assembled) return assembled;
         if (numContours >= 0)
             return ParseSimpleGlyph(start + 10, numContours, xMin, yMin, xMax, yMax);
         else
@@ -279,7 +291,9 @@ internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
         {
             var lastFlagged = ReadGlyphFlags(sg, i);
             if (lastFlagged is null) return null;
+#pragma warning disable S127 // a repeated flag fills several points - the scan steps past the repeats
             i = lastFlagged.Value;
+#pragma warning restore S127
         }
 
         sg.xCoords = new double[sg.numPoints];
@@ -454,6 +468,18 @@ internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
         return offsets;
     }
 
+    private const int UnicodePlatform = 0;
+    private const int WindowsPlatform = 3;
+    private const int WindowsSymbolEncoding = 0;
+
+    /// <summary>Where a symbol table keeps the font's codes: code c at U+F000 + c.</summary>
+    internal const int SymbolCodeBase = 0xF000;
+
+    /// <summary>True when the character table read is the Windows symbol one and the program
+    /// carries no Unicode table: an entry of <see cref="CMap"/> at U+F000 + code is then that
+    /// code's glyph, and its mirror at the code is not a character's.</summary>
+    public bool HasSymbolTableOnly { get; private set; }
+
     private void ParseCMap()
     {
         if (!_tables.TryGetValue("cmap", out var t)) return;
@@ -467,20 +493,31 @@ internal sealed partial class GlyphOutlineParser : IGlyphOutlineSource
         // codes into these trimmed tables, not Unicode code points. Without parsing them
         // the cmap stays empty for those fonts and the renderer can't find any glyph.
         int fmt0Offset = -1, fmt4Offset = -1, fmt6Offset = -1, fmt12Offset = -1;
+        var fmt4IsSymbol = false;
+        var hasUnicodeTable = false;
         for (var i = 0; i < numSubtables; i++)
         {
             var subOff = off + 4 + i * 8;
             if (subOff + 8 > _data.Length) break;
+            var platform = ReadUInt16(subOff);
+            var encoding = ReadUInt16(subOff + 2);
             var subtableOffset = off + (int)ReadUInt32(subOff + 4);
 
             if (subtableOffset + 2 > _data.Length) continue;
             var format = ReadUInt16(subtableOffset);
+            if (platform == UnicodePlatform || (platform == WindowsPlatform && encoding != WindowsSymbolEncoding))
+                hasUnicodeTable = true;
             if (format == 12) fmt12Offset = subtableOffset;
-            else if (format == 4 && fmt4Offset < 0) fmt4Offset = subtableOffset;
+            else if (format == 4 && fmt4Offset < 0)
+            {
+                fmt4Offset = subtableOffset;
+                fmt4IsSymbol = platform == WindowsPlatform && encoding == WindowsSymbolEncoding;
+            }
             else if (format == 6 && fmt6Offset < 0) fmt6Offset = subtableOffset;
             else if (format == 0 && fmt0Offset < 0) fmt0Offset = subtableOffset;
         }
 
+        HasSymbolTableOnly = fmt12Offset < 0 && fmt4IsSymbol && !hasUnicodeTable;
         if (fmt12Offset >= 0)
             ParseCMapFormat12(fmt12Offset);
         else if (fmt4Offset >= 0)

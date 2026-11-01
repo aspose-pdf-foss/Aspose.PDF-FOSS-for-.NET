@@ -135,6 +135,9 @@ internal static partial class HtmlToPdfConverter
         public List<MetricDivSeg>? DivSegs;
         public double ImgHPt;            // declared image box height in the cell, pt
         public double ImgWPt;            // declared image box width in the cell, pt
+        // The image's CSS `width: N%`: a share of the cell's content box, resolved onto
+        // ImgWPt/ImgHPt (its own aspect kept) once the columns are solved (0 = none)
+        public double ImgWFrac;
         // A data-URI PNG inside an absolutely positioned div (left:N%): drawn
         // at natural size, offset from the cell content left by the fraction.
         public byte[]? AbsPng;
@@ -145,9 +148,12 @@ internal static partial class HtmlToPdfConverter
         public bool ImgPlaceholder;      // a missing image without alt: the 34 pt broken-image frame
         public bool ImgRemoteBroken;     // …a REMOTE one: its bevel keeps a 6 px gutter on either side
         public bool ImgAfterText;        // …a sized one that follows the line's text: drawn inline after it
+        public bool ImgBlock;            // …an img made `display: block`: it ignores the cell's text-align
         public double PadTopPt;          // td style padding-top (newsletter and UA cells)
         public double PadBottomPt;       // td style padding-bottom (UA cells)
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public string[] Lines = [];      // wrapped at layout time
+#pragma warning restore S3218
         public double ContentH;          // Σ line boxes
         public bool Phantom;             // colspan filler / RTL pad slot — never draws
         public int RowSpan = 1;          // rowspan attr — content overlays rows below

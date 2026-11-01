@@ -98,7 +98,9 @@ internal static class HmacSha
         info ??= [];
         var result = new byte[length];
         var previous = Array.Empty<byte>();
+#pragma warning disable S1994 // the loop runs on its own exit condition; the counter only numbers the passes
         for (int done = 0, counter = 1; done < length; counter++)
+#pragma warning restore S1994
         {
             var input = new byte[previous.Length + info.Length + 1];
             previous.CopyTo(input, 0);

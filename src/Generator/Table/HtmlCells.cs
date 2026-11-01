@@ -14,13 +14,13 @@ public partial class Table
 
     private static readonly Regex BoldOnlyHtmlRegex = new(
         @"^\s*<(b|strong)\b[^>]*>(?<t>[^<>]+)</\1\s*>\s*$",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static string? TryBoldOnlyHtml(string? html)
     {
         string text = "";
         if (string.IsNullOrEmpty(html)) return null;
-        var m = BoldOnlyHtmlRegex.Match(html);
+        var m = SafeRegex.Match(BoldOnlyHtmlRegex, html);
         if (!m.Success) return null;
         text = HtmlFragment.StripHtmlTags(m.Groups["t"].Value);
         return (text.Length > 0) ? text : null;
@@ -47,7 +47,7 @@ public partial class Table
     }
 
     private static readonly Regex HtmlEngineTagRegex = new(
-        @"<(/?)(b|strong|small|div|br|p|a|ul|ol|li|span|em|i|u|h[1-6]|table|tbody|thead|tfoot|tr|td|th|img)\b[^>]*?>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"<(/?)(b|strong|small|div|br|p|a|ul|ol|li|span|em|i|u|h[1-6]|table|tbody|thead|tfoot|tr|td|th|img)\b[^>]*?>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>A list item's text starts this far inside its list's content edge —
     /// the UA `padding-inline-start: 40px`.</summary>
@@ -60,9 +60,9 @@ public partial class Table
 
     private static readonly Regex HrefRegex = new(
         @"\bhref\s*=\s*(?:'(?<u>[^']*)'|""(?<u>[^""]*)""|(?<u>[^\s>]+))",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
-    private static readonly Regex AnyTagRegex = new(@"<[^>]*>", RegexOptions.Compiled);
+    private static readonly Regex AnyTagRegex = new(@"<[^>]*>", RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Decode the common HTML entities in tag-free text WITHOUT trimming or
     /// tag-stripping (unlike <see cref="HtmlFragment.StripHtmlTags"/>), so inter-word
@@ -80,6 +80,40 @@ public partial class Table
     {
         if (page is null) return null;
         if (ParseHtmlEngineCell(html, availWidth) is not { Count: > 0 } lines) return null;
+        return DrawHtmlEngineLines(b, page, lines, x, topY);
+    }
+
+    /// <summary>An HtmlFragment's HTML-engine lines wrapped at a width, for a host that needs their
+    /// height before it draws them (a box sizing itself to its content): parsed once, measured,
+    /// then drawn.</summary>
+    internal sealed class HtmlEngineLines
+    {
+        private readonly List<CellLine> _lines;
+
+        private HtmlEngineLines(List<CellLine> lines) { _lines = lines; }
+
+        /// <summary>The fragment's lines wrapped at <paramref name="availWidth"/>; null when the
+        /// markup falls outside the engine family.</summary>
+        internal static HtmlEngineLines? Measure(string? html, double availWidth) =>
+            ParseHtmlEngineCell(html, availWidth) is { Count: > 0 } lines ? new HtmlEngineLines(lines) : null;
+
+        /// <summary>The height the lines take: full line boxes, the last one ending at its own
+        /// baseline + descent.</summary>
+        internal double Height => HtmlEngineLinesHeight(_lines);
+
+        /// <summary>Draws the lines with their content box top-left at (<paramref name="x"/>,
+        /// <paramref name="topY"/>); returns the height consumed.</summary>
+        internal double Draw(ContentStreamBuilder b, Page page, double x, double topY) =>
+            DrawHtmlEngineLines(b, page, _lines, x, topY);
+    }
+
+    private static double HtmlEngineLinesHeight(List<CellLine> lines) =>
+        (lines.Count - 1) * _serifRootBox + lines[^1].BoxH;
+
+    /// <summary>Draws measured HTML-engine lines with their content box top-left at
+    /// (<paramref name="x"/>, <paramref name="topY"/>); returns the height consumed.</summary>
+    private static double DrawHtmlEngineLines(ContentStreamBuilder b, Page page, List<CellLine> lines, double x, double topY)
+    {
         var fontDict = ResolvePageFontDict(page);
         for (var i = 0; i < lines.Count; i++)
         {
@@ -101,25 +135,24 @@ public partial class Table
                 b.EndText();
             }
         }
-        // The last line ends at its own baseline + descent, not at a full box.
-        return (lines.Count - 1) * _serifRootBox + lines[^1].BoxH;
+        return HtmlEngineLinesHeight(lines);
     }
 
     private static readonly Regex EscNlDoctypeRegex = new(@"<!DOCTYPE[^>]*>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex EscNlStyleRegex = new(@"<style[^>]*>[\s\S]*?</style\s*>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex EscNlCellRegex = new(
         @"<(t[dh])\b[^>]*>(?<c>[\s\S]*?)</t[dh]\s*>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex EscNlRowRegex = new(@"<tr\b[^>]*>(?<r>[\s\S]*?)</tr\s*>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex EscNlBrRegex = new(@"<br\b[^>]*/?>",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>HTML default table chrome, in points: cellspacing 2px, cellpadding 1px.</summary>
     private const double EscNlCellSpacing = 2 * 0.75;
@@ -140,9 +173,7 @@ public partial class Table
     /// measure reports the widest unbreakable word, so its column wraps.</summary>
     private static bool HasHtmlContent(Cell cell)
     {
-        foreach (var p in cell.Paragraphs)
-            if (p is HtmlFragment) return true;
-        return false;
+        return cell.Paragraphs.Any(p => p is HtmlFragment);
     }
 
     /// <summary>True when the cell holds an HtmlFragment of BLOCK-structured markup

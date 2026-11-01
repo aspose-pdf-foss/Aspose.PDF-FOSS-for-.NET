@@ -19,7 +19,6 @@ private sealed class FontSizeStreamState
         this.text = text;
         this.oldSize = oldSize;
         this.newSize = newSize;
-        this.pageDict = pageDict;
         this.reader = reader;
         this.allowCollateral = allowCollateral;
         this.reseat = reseat;
@@ -69,13 +68,12 @@ private sealed class FontSizeStreamState
     // or only part of one.
     public int wholeShow = -1;
     // Whether a match that is part of one show may split it (see ModifyFontSize).
-    public bool splitSubRun = true;
+    public bool splitSubRun;
     public byte[] result = null!;
     public byte[] streamBytes;
     public string text;
     public double oldSize;
     public double newSize;
-    public PdfDictionary pageDict;
     public PdfReader reader;
     public bool allowCollateral;
 }

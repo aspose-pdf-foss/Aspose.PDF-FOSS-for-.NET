@@ -47,10 +47,12 @@ public class FormDataConverter
     /// rather than appended to. Stored only.</summary>
     public bool ReplaceExistingTable { get; set; }
 
+#pragma warning disable S2325 // public API: the published instance member
     // ── Stream-based transforms ─────────────────────────────────────────────
 
     /// <summary>Convert XML form data to FDF.</summary>
     public void ConvertXmlToFdf(Stream sourceXml, Stream destFdf)
+#pragma warning restore S2325
     {
         if (sourceXml is null) throw new System.ArgumentNullException(nameof(sourceXml));
         if (destFdf is null) throw new System.ArgumentNullException(nameof(destFdf));
@@ -73,8 +75,10 @@ public class FormDataConverter
         sw.Flush();
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Convert FDF form data to XML.</summary>
     public void ConvertFdfToXml(Stream sourceFdf, Stream destXml)
+#pragma warning restore S2325
     {
         if (sourceFdf is null) throw new System.ArgumentNullException(nameof(sourceFdf));
         if (destXml is null) throw new System.ArgumentNullException(nameof(destXml));
@@ -94,14 +98,11 @@ public class FormDataConverter
             var name = text.Substring(nameStart, nameEnd - nameStart);
             var vIdx = text.IndexOf("/V (", nameEnd, System.StringComparison.Ordinal);
             string? value = null;
-            if (vIdx >= 0 && vIdx < text.IndexOf("/T (", nameEnd, System.StringComparison.Ordinal) + 4 || vIdx < 0)
+            if ((vIdx >= 0 && vIdx < text.IndexOf("/T (", nameEnd, System.StringComparison.Ordinal) + 4 || vIdx < 0) && vIdx >= 0)
             {
-                if (vIdx >= 0)
-                {
-                    var valueStart = vIdx + 4;
-                    var valueEnd = text.IndexOf(')', valueStart);
-                    if (valueEnd >= 0) value = text.Substring(valueStart, valueEnd - valueStart);
-                }
+                var valueStart = vIdx + 4;
+                var valueEnd = text.IndexOf(')', valueStart);
+                if (valueEnd >= 0) value = text.Substring(valueStart, valueEnd - valueStart);
             }
             sw.WriteLine($"  <{System.Security.SecurityElement.Escape(name)}>{System.Security.SecurityElement.Escape(value ?? string.Empty)}</{System.Security.SecurityElement.Escape(name)}>");
             idx = nameEnd + 1;
@@ -174,21 +175,25 @@ public class FormDataConverter
     public void ConverToStreams(Stream[] destStream, DataType destType)
         => ConvertToStreams(destStream, destType);
 
+#pragma warning disable S2325 // public API: the published instance member
     // ── Database paths (signature-only stubs) ─────────────────────────────
 
     /// <summary>Export form data from a database connection into
     /// <see cref="Table"/>. Stored-only stub — the FOSS build doesn't link
     /// against System.Data.OleDb / System.Data.Odbc.</summary>
     public void ExportFromDataBase(string connectString, DataType dbType)
+#pragma warning restore S2325
     {
         _ = connectString; _ = dbType;
         throw new System.NotImplementedException(
             "FormDataConverter.ExportFromDataBase is not implemented in FOSS (no OLEDB/ODBC dependency).");
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Import <see cref="Table"/> into a database. See
     /// <see cref="ExportFromDataBase"/>.</summary>
     public void ImportIntoDataBase(string connectString, DataType dbType)
+#pragma warning restore S2325
     {
         _ = connectString; _ = dbType;
         throw new System.NotImplementedException(

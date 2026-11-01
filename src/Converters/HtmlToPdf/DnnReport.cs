@@ -56,15 +56,15 @@ internal static partial class HtmlToPdfConverter
     private const double DnnHeaderTextSeatPt = 4.1;
     private const double DnnSubTextSeatPt = 5.6;
 
-    private abstract class DnnBlock { }
+    private interface IDnnBlock { }
 
-    private sealed class DnnBand : DnnBlock          // header or subheader
+    private sealed class DnnBand : IDnnBlock          // header or subheader
     {
         public string Text = "";
         public bool Header;                          // teal header vs DFEEF7 sub
     }
 
-    private sealed class DnnFieldRow : DnnBlock
+    private sealed class DnnFieldRow : IDnnBlock
     {
         // (label text, label border-box width pt, value text, x offset of the
         //  pair from the module body left). Label text right-aligns 7.5 pt
@@ -74,13 +74,15 @@ internal static partial class HtmlToPdfConverter
         public bool Bare;                            // no RowPad wrapper: taller line
     }
 
-    private sealed class DnnParaLine : DnnBlock      // stray plain-text line
+    private sealed class DnnParaLine : IDnnBlock      // stray plain-text line
     {
         public string Text = "";
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double Pitch = 23 * 0.75;
+#pragma warning restore S3218
     }
 
-    private sealed class DnnGap : DnnBlock
+    private sealed class DnnGap : IDnnBlock
     {
         public double H;
     }
@@ -88,17 +90,21 @@ internal static partial class HtmlToPdfConverter
     // A DataList grid: the header row of th cells, a record's summary row of
     // td cells (both at the scaled column grid), and a record's background
     // fill emitted BEFORE its content blocks with the pre-measured height.
-    private sealed class DnnGridHeader : DnnBlock
+    private sealed class DnnGridHeader : IDnnBlock
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<(string Text, double Wpx)> Cells = new();
+#pragma warning restore S3218
     }
 
-    private sealed class DnnGridRow : DnnBlock
+    private sealed class DnnGridRow : IDnnBlock
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<(string Text, double Wpx)> Cells = new();
+#pragma warning restore S3218
     }
 
-    private sealed class DnnGridFill : DnnBlock
+    private sealed class DnnGridFill : IDnnBlock
     {
         public double H;
         public bool White;                           // GridRowOdd records
@@ -107,10 +113,10 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>Render a DNN portal report (see the class comment). Null when
     /// the document does not carry the skin's fingerprint.</summary>
-    private static Document? TryRenderDnnReport(string html, HtmlLoadOptions? options,
+    private static Document? TryRenderDnnReport(string html,
         double pageHIn)
     {
-        if (!Regex.IsMatch(html, @"class\s*=\s*[""']skinmaster[""']", RegexOptions.IgnoreCase)
+        if (!SafeRegex.IsMatch(html, @"class\s*=\s*[""']skinmaster[""']", RegexOptions.IgnoreCase)
             || html.IndexOf("ModuleHeaderContainer", StringComparison.OrdinalIgnoreCase) < 0
             || html.IndexOf("ContainerFieldLabelHoriz", StringComparison.OrdinalIgnoreCase) < 0)
             return null;
@@ -119,7 +125,9 @@ internal static partial class HtmlToPdfConverter
         if (!TryParseDnnReport(dn, pageHIn, html)) return null;
 
         DrawDnnHeader(dn);
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var b in dn.blocks)
+#pragma warning restore S3267
         {
             if (!RenderDnnBlock(dn, b)) break;
         }
@@ -143,7 +151,7 @@ internal static partial class HtmlToPdfConverter
         var end = html.IndexOf('>', openIdx);
         if (end < 0) return null;
         var depth = 1;
-        foreach (Match m in Regex.Matches(html[(end + 1)..], @"<(/?)div\b[^>]*>",
+        foreach (Match m in SafeRegex.Matches(html[(end + 1)..], @"<(/?)div\b[^>]*>",
                      RegexOptions.IgnoreCase))
         {
             depth += m.Groups[1].Value.Length > 0 ? -1 : 1;
@@ -162,7 +170,7 @@ internal static partial class HtmlToPdfConverter
     /// and indents them by its 10px padding-left.</summary>
     /// <returns>True when the walk's last content element was a RowPad
     /// subtree (the caller then collapses its own bottom pad).</returns>
-    private static bool DnnWalk(string inner, double indentPx, List<DnnBlock> blocks, bool inRowPad = false)
+    private static bool DnnWalk(string inner, double indentPx, List<IDnnBlock> blocks, bool inRowPad = false)
     {
         var dw = new DnnWalkState();
         dw.inner = inner;
@@ -197,10 +205,10 @@ internal static partial class HtmlToPdfConverter
     /// GridRowEven/Odd records — a summary row of ListCell tds plus a details
     /// panel of ordinary field rows. Column x's scale the declared px widths
     /// (+4px padding each side) onto the grid width.</summary>
-    private static void DnnParseGrid(string grid, double indentPx, List<DnnBlock> blocks)
+    private static void DnnParseGrid(string grid, double indentPx, List<IDnnBlock> blocks)
     {
         var hasHeader = grid.Contains("GridRowHeader", StringComparison.OrdinalIgnoreCase);
-        foreach (Match td in Regex.Matches(grid,
+        foreach (Match td in SafeRegex.Matches(grid,
                      @"<td\b[^>]*class\s*=\s*[""'](GridRowHeader|GridRowEven|GridRowOdd)[""'][^>]*>",
                      RegexOptions.IgnoreCase))
         {
@@ -212,12 +220,12 @@ internal static partial class HtmlToPdfConverter
             if (kind.Equals("GridRowHeader", StringComparison.OrdinalIgnoreCase))
             {
                 var header = new DnnGridHeader();
-                foreach (Match th in Regex.Matches(cell, @"<th\b([^>]*)>([\s\S]*?)</th>",
-                             RegexOptions.IgnoreCase))
+                foreach (var groups in SafeRegex.Matches(cell, @"<th\b([^>]*)>([\s\S]*?)</th>",
+                             RegexOptions.IgnoreCase).Select(th => th.Groups))
                 {
-                    var wm = Regex.Match(th.Groups[1].Value, @"width\s*:\s*([\d.]+)px",
+                    var wm = SafeRegex.Match(groups[1].Value, @"width\s*:\s*([\d.]+)px",
                         RegexOptions.IgnoreCase);
-                    header.Cells.Add((DnnPlainText(th.Groups[2].Value),
+                    header.Cells.Add((DnnPlainText(groups[2].Value),
                         wm.Success ? DtpNum(wm.Groups[1].Value) : 100));
                 }
                 if (header.Cells.Count > 0) blocks.Add(header);
@@ -225,25 +233,25 @@ internal static partial class HtmlToPdfConverter
             }
 
             // record: summary ItemTable row + details panel
-            var content = new List<DnnBlock>();
-            var itemTr = Regex.Match(cell,
+            var content = new List<IDnnBlock>();
+            var itemTr = SafeRegex.Match(cell,
                 @"<table\b[^>]*_ItemTable[^>]*>[\s\S]*?<tr\b[^>]*>([\s\S]*?)</tr>",
                 RegexOptions.IgnoreCase);
             var rest = cell;
             if (itemTr.Success)
             {
                 var summary = new DnnGridRow();
-                foreach (Match tc in Regex.Matches(itemTr.Groups[1].Value,
-                             @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase))
+                foreach (var tcGroups in SafeRegex.Matches(itemTr.Groups[1].Value,
+                             @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(tc => tc.Groups))
                 {
-                    var wm = Regex.Match(tc.Groups[1].Value, @"width\s*:\s*([\d.]+)px",
+                    var wm = SafeRegex.Match(tcGroups[1].Value, @"width\s*:\s*([\d.]+)px",
                         RegexOptions.IgnoreCase);
-                    summary.Cells.Add((DnnPlainText(DnnStripHidden(tc.Groups[2].Value)),
+                    summary.Cells.Add((DnnPlainText(DnnStripHidden(tcGroups[2].Value)),
                         wm.Success ? DtpNum(wm.Groups[1].Value) : 100));
                 }
                 content.Add(summary);
                 var tblEnd = DnnTagEnd(cell,
-                    Regex.Match(cell, @"<table\b[^>]*_ItemTable[^>]*>", RegexOptions.IgnoreCase).Index,
+                    SafeRegex.Match(cell, @"<table\b[^>]*_ItemTable[^>]*>", RegexOptions.IgnoreCase).Index,
                     "table");
                 if (tblEnd >= 0) rest = cell[(cell.IndexOf('>', tblEnd) + 1)..];
             }
@@ -274,7 +282,7 @@ internal static partial class HtmlToPdfConverter
     {
         for (var guard = 0; guard < 32; guard++)
         {
-            var m = Regex.Match(html,
+            var m = SafeRegex.Match(html,
                 @"<(div|span|a)\b[^>]*(?:PrintHidden|display\s*:\s*none)[^>]*>",
                 RegexOptions.IgnoreCase);
             if (!m.Success) break;
@@ -293,11 +301,11 @@ internal static partial class HtmlToPdfConverter
         var end = html.IndexOf('>', openIdx);
         if (end < 0) return -1;
         var depth = 1;
-        var rx = new Regex(@"<(/?)" + tag + @"\b[^>]*>", RegexOptions.IgnoreCase);
+        var rx = new Regex(@"<(/?)" + tag + @"\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var scan = end + 1;
         while (depth > 0)
         {
-            var m = rx.Match(html, scan);
+            var m = SafeRegex.Match(rx, html, scan);
             if (!m.Success) return -1;
             depth += m.Groups[1].Value.Length > 0 ? -1 : 1;
             if (depth == 0) return m.Index;
@@ -311,13 +319,13 @@ internal static partial class HtmlToPdfConverter
     /// an empty control renders as an underscore.</summary>
     private static string DnnControlValue(string inner)
     {
-        var sel = Regex.Match(inner,
+        var sel = SafeRegex.Match(inner,
             @"<option[^>]*\bselected\b[^>]*>([^<]*)</option>", RegexOptions.IgnoreCase);
         if (sel.Success) return EdgarHtmlRenderer.DecodeEntities(sel.Groups[1].Value).Trim();
-        var chk = Regex.Match(inner,
+        var chk = SafeRegex.Match(inner,
             @"<input[^>]*\bchecked\b[^>]*>\s*<label[^>]*>([^<]*)</label>", RegexOptions.IgnoreCase);
         if (chk.Success) return EdgarHtmlRenderer.DecodeEntities(chk.Groups[1].Value).Trim();
-        var inp = Regex.Match(inner, @"<input[^>]*>", RegexOptions.IgnoreCase);
+        var inp = SafeRegex.Match(inner, @"<input[^>]*>", RegexOptions.IgnoreCase);
         if (inp.Success && DtpAttr(inp.Value, "type") is not "hidden")
         {
             var v = DtpAttr(inp.Value, "value");
@@ -330,8 +338,8 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Tag-stripped, entity-decoded, whitespace-collapsed text.</summary>
     private static string DnnPlainText(string inner)
     {
-        var t = Regex.Replace(inner, @"<[^>]+>", " ");
+        var t = SafeRegex.Replace(inner, @"<[^>]+>", " ");
         t = EdgarHtmlRenderer.DecodeEntities(t);
-        return Regex.Replace(t, @"\s+", " ").Trim();
+        return SafeRegex.Replace(t, @"\s+", " ").Trim();
     }
 }

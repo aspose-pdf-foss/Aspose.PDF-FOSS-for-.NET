@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Aspose.Pdf.Text;
 
 namespace Aspose.Pdf;
 
@@ -39,21 +40,21 @@ public partial class Table
         else if (tagName is "p" or "div") st.Block = true;
         var css = EngineStyleValue(tag);
         if (css is null) return st;
-        var fm = Regex.Match(css, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var fm = SafeRegex.Match(css, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (fm.Success)
         {
             var first = fm.Groups[1].Value.Split(',')[0].Trim().Trim('\'', '"');
             if (first.Length > 0) st.Family = first;
         }
-        var zm = Regex.Match(css, @"(?<![-\w])font-size\s*:\s*([\d.]+)\s*(px|pt)?", RegexOptions.IgnoreCase);
+        var zm = SafeRegex.Match(css, @"(?<![-\w])font-size\s*:\s*([\d.]+)\s*(px|pt)?", RegexOptions.IgnoreCase);
         if (zm.Success && double.TryParse(zm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var fz) && fz > 0)
         {
             st.Size = zm.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase) ? fz * UaFace.CssPxToPt : fz;
             if (st.MarginTop > 0) st.MarginTop = EngineHeadingMarginEm[tagName[1] - '0'] * st.Size;
         }
-        if (Regex.IsMatch(css, @"font-weight\s*:\s*(bold|[6-9]00)", RegexOptions.IgnoreCase)) st.Bold = true;
-        if (Regex.IsMatch(css, @"font-style\s*:\s*(italic|oblique)", RegexOptions.IgnoreCase)) st.Italic = true;
+        if (SafeRegex.IsMatch(css, @"font-weight\s*:\s*(bold|[6-9]00)", RegexOptions.IgnoreCase)) st.Bold = true;
+        if (SafeRegex.IsMatch(css, @"font-style\s*:\s*(italic|oblique)", RegexOptions.IgnoreCase)) st.Italic = true;
         return st;
     }
 
@@ -67,11 +68,11 @@ public partial class Table
     /// a value with a space ends at the space and styles nothing). Null without a style.</summary>
     private static string? EngineStyleValue(string tag)
     {
-        var m = Regex.Match(tag, @"\bstyle\s*=\s*(?:'(?<v>[^']*)'|""(?<v>[^""]*)""|(?<v>[^\s>]+))", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(tag, @"\bstyle\s*=\s*(?:'(?<v>[^']*)'|""(?<v>[^""]*)""|(?<v>[^\s>]+))", RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         var kept = new List<string>();
-        foreach (var decl in m.Groups["v"].Value.Split(';'))
-            if (Regex.IsMatch(decl, @"^\s*[A-Za-z-]+\s*:")) kept.Add(decl);
+        foreach (var decl in m.Groups["v"].Value.Split(';').Where(decl => SafeRegex.IsMatch(decl, @"^\s*[A-Za-z-]+\s*:")))
+            kept.Add(decl);
         return string.Join(";", kept);
     }
 
@@ -86,6 +87,7 @@ public partial class Table
             bold |= fs.Bold;
             italic |= fs.Italic;
         }
+        if (family is null && hc.rootFont is { } rootFont) return ResolveEngineRootFace(hc, rootFont, bold, italic);
         if (family is null && !italic) return null;
         var key = (family ?? "").ToLowerInvariant() + (bold ? "|b" : "") + (italic ? "|i" : "");
         if (hc.faceCache.TryGetValue(key, out var cached)) return cached;
@@ -96,12 +98,43 @@ public partial class Table
         return face;
     }
 
+    /// <summary>The face the fragment's text state names, at the weight and slant the open
+    /// elements ask for: its family's styled member when one is installed, else the face
+    /// itself (its own program, or the installed face standing in for a standard font).
+    /// Null keeps the engine's serif pair.</summary>
+    private static UaFace? ResolveEngineRootFace(HtmlEngineCellState hc, Font rootFont, bool bold, bool italic)
+    {
+        var key = EngineRootFaceKey + (bold ? "|b" : "") + (italic ? "|i" : "");
+        if (hc.faceCache.TryGetValue(key, out var cached)) return cached;
+        var family = SystemFontResolver.SubstituteFaceName(rootFont.BaseFont ?? rootFont.FontName).Family;
+        var face = (bold || italic ? UaFace.TryLoad(family, bold, italic, EngineFaceResourcePrefix + (++hc.faceIndex)) : null)
+                   ?? UaFace.FromFont(rootFont, EngineFaceResourcePrefix + (++hc.faceIndex))
+                   ?? UaFace.TryLoad(family, false, false, EngineFaceResourcePrefix + (++hc.faceIndex));
+        hc.faceCache[key] = face;
+        return face;
+    }
+
+    /// <summary>The face an HTML fragment's own text state names for its cell text, as a CSS
+    /// family: a font the caller set whose name is a family (a face named with a weight or a
+    /// slant, "Arial Bold", is none, and the serif the engine sets a family-less run in stays,
+    /// as it does for a state naming that serif itself). Null keeps the UA serif.</summary>
+    private static Font? EngineRootFont(HtmlFragment html)
+    {
+        if (html.TextState?.ExplicitFont is not { } font) return null;
+        var (family, bold, italic) = SystemFontResolver.SubstituteFaceName(font.BaseFont ?? font.FontName);
+        if (bold || italic || string.Equals(family, UaSerifFamilyName, StringComparison.OrdinalIgnoreCase)) return null;
+        return font;
+    }
+
+    /// <summary>Face-cache key of the text state's own face (no CSS family spells it).</summary>
+    private const string EngineRootFaceKey = "|root";
+
     /// <summary>The size the open elements give the text in progress: the innermost declared
     /// size, else the small size inside <c>&lt;small&gt;</c>, else the base size.</summary>
     private static double ResolveEngineSize(HtmlEngineCellState hc)
     {
         var size = hc.smallDepth > 0 ? hc.smallSize : hc.baseSize;
-        foreach (var fs in hc.faceStack) if (fs.Size > 0) size = fs.Size;
+        foreach (var fsSize in hc.faceStack.Select(fs => fs.Size).Where(fsSize => fsSize > 0)) size = fsSize;
         return size;
     }
 

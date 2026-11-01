@@ -19,7 +19,7 @@ public sealed partial class PdfAnnotationEditor
         var pageAttr = node.Attributes?["page"];
         int pageIdx = 0;
         if (pageAttr is not null)
-            int.TryParse(pageAttr.Value, out pageIdx);
+            int.TryParse(pageAttr.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out pageIdx);
 
         // XFDF page is 0-based
         int pageNum = pageIdx + 1;
@@ -30,7 +30,7 @@ public sealed partial class PdfAnnotationEditor
         if (subtype is null) return;
 
         // Parse rect
-        var dict = BuildXfdfAnnotationDict(node, page, subtype);
+        var dict = BuildXfdfAnnotationDict(node, subtype);
 
         // Standard attributes
         ReadXfdfCommonAttributes(dict, node);
@@ -87,7 +87,7 @@ public sealed partial class PdfAnnotationEditor
         AppendAnnotationDict(page, dict);
 
         // Popup child
-        ImportXfdfChildAnnotations(doc, node, page, dict);
+        ImportXfdfChildAnnotations(node, page, dict);
     }
 
     private static void AppendAnnotationDict(Page page, PdfDictionary annotDict)
@@ -139,10 +139,7 @@ public sealed partial class PdfAnnotationEditor
     {
         // Check if all characters fit in Latin1 (0-255)
         bool needsUnicode = false;
-        foreach (char c in text)
-        {
-            if (c > 255) { needsUnicode = true; break; }
-        }
+        if (text.Any(c => c > 255)) { needsUnicode = true; }
 
         if (needsUnicode)
         {

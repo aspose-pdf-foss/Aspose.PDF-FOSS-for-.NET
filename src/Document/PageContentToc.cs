@@ -15,7 +15,7 @@ namespace Aspose.Pdf;
 public sealed partial class Document : IDisposable
 {
     /// <summary>Lays out the head of a table of contents: the column geometry, then the title band.</summary>
-    private void LayoutTocHeader(Page page, PageContentState pc, PageLayoutState pl)
+    private void LayoutTocHeader(Page page, PageLayoutState pl)
     {
         if (pl.tocEntries.Count > 0)
         {
@@ -28,13 +28,13 @@ public sealed partial class Document : IDisposable
             pl.tocColCount = ci is { ColumnCount: > 1 } ? ci.ColumnCount : 1;
             if (pl.tocColCount > 1)
                 (pl.tocColLefts, pl.tocColWidths) = BuildColumnGeometry(
-                    ci!, pl.marginLeft, page.Width - pl.marginLeft - pl.marginRight);
+                    ci!, pl.marginLeft, page.LayoutFrameWidth - pl.marginLeft - pl.marginRight);
             else
             {
                 pl.tocColLefts = new[] { pl.marginLeft };
                 // The entry band mirrors the page margins: the page number's
                 // right edge sits at Width − marginRight.
-                pl.tocColWidths = new[] { page.Width - pl.marginRight - pl.marginLeft };
+                pl.tocColWidths = new[] { page.LayoutFrameWidth - pl.marginRight - pl.marginLeft };
             }
         }
 
@@ -43,9 +43,6 @@ public sealed partial class Document : IDisposable
         // column's width and consumes an entry slot there, while the
         // other columns start at the pre-title top (the
         // second column's first entry aligns with the title row).
-        if (page.TocInfo?.Title is { } tocTitle)
-        {
-            if (!LayoutTocTitle(page, pl, tocTitle)) return;
-        }
+        if (page.TocInfo?.Title is { } tocTitle && !LayoutTocTitle(page, pl, tocTitle)) return;
     }
 }

@@ -33,18 +33,28 @@ public sealed class BI : Operator
 /// <summary>ID — Begin image data (after the inline-image dictionary).</summary>
 public sealed class ID : Operator
 {
+    internal const string Keyword = "ID";
+
     /// <summary>Creates an <c>ID</c> operator, which ends the inline image dictionary and begins the image data.</summary>
     public ID() { }
-    public override string ToPdf() => "ID";
+
+    /// <summary>The image data that follows the keyword in a parsed stream, with the
+    /// whitespace that delimits it on both sides (Latin-1, one char per byte); empty for
+    /// an operator built by a caller.</summary>
+    internal string Data { get; init; } = string.Empty;
+
+    public override string ToPdf() => Keyword + Data;
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
 }
 
 /// <summary>EI — End inline-image object.</summary>
 public sealed class EI : Operator
 {
+    internal const string Keyword = "EI";
+
     /// <summary>Creates an <c>EI</c> operator, which ends an inline image object.</summary>
     public EI() { }
-    public override string ToPdf() => "EI";
+    public override string ToPdf() => Keyword;
     public override void Accept(IOperatorSelector visitor) => visitor.Visit(this);
 }
 

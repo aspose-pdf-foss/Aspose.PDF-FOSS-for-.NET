@@ -13,7 +13,6 @@ internal sealed partial class FontMetrics
 {
     private readonly int[]? _simpleWidths; // indexed by (charCode - _firstChar)
     private readonly int _firstChar;
-    private readonly int _lastChar;
     private readonly Dictionary<int, int>? _cidWidths; // CID → width
     // CID → unrounded glyph advance (1/1000 units) read from the embedded TrueType
     // hmtx. The PDF /W array stores integer advances, but the embedded font program
@@ -47,14 +46,33 @@ internal sealed partial class FontMetrics
 
     /// <summary>The WinAnsi code, which the Standard-14 width table is keyed by, of the glyph a
     /// code shows through the font's encoding; -1 when WinAnsi has no such glyph.</summary>
-    private int WinAnsiLookupCode(int code) => _macRomanEncoding ? MacRomanToWinAnsiCode(code)
-        : _standardEncoding ? code switch
-        {
-            StandardQuoteRightCode => WinAnsiQuoteRightCode,
-            StandardQuoteLeftCode => WinAnsiQuoteLeftCode,
-            _ => code,
-        }
-        : code;
+    private int WinAnsiLookupCode(int code)
+    {
+        if (_macRomanEncoding) return MacRomanToWinAnsiCode(code);
+        if (_standardEncoding)
+            return code switch
+            {
+                StandardQuoteRightCode => WinAnsiQuoteRightCode,
+                StandardQuoteLeftCode => WinAnsiQuoteLeftCode,
+                _ => code,
+            };
+        return code;
+    }
+
+    /// <summary>
+    /// The width of a straight quote or a grave accent given as TEXT to a face read with
+    /// StandardEncoding. Codes 0x27 and 0x60 show that encoding's curly quotes, but the
+    /// characters U+0027 and U+0060 are the straight glyphs - the ones a writer sets them
+    /// in through WinAnsi - so measuring them as codes would size them as the curly quotes.
+    /// Null for every other character, and for a face whose codes are its characters.
+    /// </summary>
+    private int? UnicodeQuoteWidth(char ch)
+    {
+        if (!_standardEncoding || _simpleWidths is not null || ch is not ('\'' or '`')) return null;
+
+        var width = Standard14Fonts.GetWidth(_baseFontName!, ch);
+        return width >= 0 ? width : null;
+    }
 
     private const int StandardQuoteRightCode = 0x27;
     private const int StandardQuoteLeftCode = 0x60;
@@ -70,6 +88,12 @@ internal sealed partial class FontMetrics
     // Reverse /ToUnicode (unicode code point -> character CODE), the mapping a
     // subset with no cmap still carries; built lazily from the Type0 dict.
     private PdfDictionary? _type0Dict;
+    // The predefined CMap (other than Identity) a Type0 font's codes are written in: its codes
+    // are one or two bytes long and select CIDs through its table, and /W is keyed by CID.
+    private PredefinedCMap? _codeCMap;
+    // A CMap embedded in the file that gives some or all codes one byte (9.7.6.2): its codes are walked by
+    // its codespace, each selecting the CID of its own value.
+    private ShowCodespace? _codespace;
     private PdfReader? _reader;
     private Dictionary<int, int>? _reverseToUnicode;
     private bool _reverseTried;
@@ -123,7 +147,7 @@ internal sealed partial class FontMetrics
                     _sysUpm = upm;
                 }
             }
-            catch { }
+            catch { /* a font that cannot be found or read leaves the fallback in place */ }
         }
         if (_sysRawWidths is null || _sysUpm <= 0) return null;
         var idx = ch < 256 ? ch : '?';
@@ -166,7 +190,6 @@ internal sealed partial class FontMetrics
     {
         _simpleWidths = simpleWidths;
         _firstChar = firstChar;
-        _lastChar = lastChar;
         _cidWidths = cidWidths;
         _defaultWidth = defaultWidth;
         _baseFontName = baseFontName;
@@ -206,6 +229,10 @@ internal sealed partial class FontMetrics
     // page's /T1_0); an edit that swaps in a new font dict gets a new key.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, FontMetrics>
         _metricsCache = new();
+
+    /// <summary>Drops the metrics built for a font dictionary whose widths were just
+    /// re-stated: a font the editor grows as replacement text adds glyphs to it.</summary>
+    internal static void Forget(PdfDictionary fontDict) => _metricsCache.Remove(fontDict);
 
     public static FontMetrics FromFontDict(PdfDictionary fontDict, PdfReader reader)
     {
@@ -331,7 +358,23 @@ internal sealed partial class FontMetrics
     public double MeasureString(byte[] bytes, double fontSize)
     {
         double total = 0;
-        if (_isCid)
+        if (_codeCMap is not null)
+        {
+            foreach (var code in _codeCMap.Codes(bytes))
+                total += GetWidth(_codeCMap.Cid(code));
+        }
+        else if (_codespace is not null)
+        {
+            for (var i = 0; i < bytes.Length;)
+            {
+                var length = _codespace.CodeLength(bytes, i);
+                var code = 0;
+                for (var k = 0; k < length; k++) code = (code << 8) | bytes[i + k];
+                total += GetWidth(code);
+                i += length;
+            }
+        }
+        else if (_isCid)
         {
             for (var i = 0; i + 1 < bytes.Length; i += 2)
             {
@@ -376,7 +419,9 @@ internal sealed partial class FontMetrics
                 if (char.IsHighSurrogate(ch) && ci + 1 < text.Length && char.IsLowSurrogate(text[ci + 1]))
                 {
                     var scp = char.ConvertToUtf32(ch, text[ci + 1]);
+#pragma warning disable S127 // a surrogate pair is one code point - the scan steps over its low half
                     ci++;
+#pragma warning restore S127
                     // The reversed /ToUnicode names the exact CODE the file draws this
                     // code point with — the key its /W advances are stored under; a
                     // subset with a surviving cmap resolves through the GID instead.
@@ -445,10 +490,10 @@ internal sealed partial class FontMetrics
             {
                 // A Standard-14 face's widths are keyed by WinAnsi code: a character WinAnsi names past Latin-1 (a
                 // curly quote, a dash, a bullet) is measured by that code, not as the '?' standing for what a face lacks.
-                var code = ch < 256 ? ch
-                    : _isStandard14 && Aspose.Pdf.Content.ContentStreamBuilder.ToWinAnsi(ch) is var ansi && ansi < 256 ? ansi
-                    : '?';
-                total += GetWidth(code);
+                char code = '?';
+                if (ch < 256) code = ch;
+                else if (_isStandard14 && Aspose.Pdf.Content.ContentStreamBuilder.ToWinAnsi(ch) is var ansi && ansi < 256) code = ansi;
+                total += UnicodeQuoteWidth(ch) ?? GetWidth(code);
             }
         }
 
@@ -487,7 +532,23 @@ internal sealed partial class FontMetrics
             return MeasureString(bytes, fontSize);
 
         double total = 0;
-        if (_isCid)
+        if (_codeCMap is not null)
+        {
+            foreach (var code in _codeCMap.Codes(bytes))
+                total += GetWidthExact(_codeCMap.Cid(code));
+        }
+        else if (_codespace is not null)
+        {
+            for (var i = 0; i < bytes.Length;)
+            {
+                var length = _codespace.CodeLength(bytes, i);
+                var code = 0;
+                for (var k = 0; k < length; k++) code = (code << 8) | bytes[i + k];
+                total += GetWidthExact(code);
+                i += length;
+            }
+        }
+        else if (_isCid)
         {
             for (var i = 0; i + 1 < bytes.Length; i += 2)
             {

@@ -1,4 +1,4 @@
-﻿using System.IO;
+﻿using System.Globalization;
 using Aspose.Pdf.Converters;
 using Aspose.Pdf.Devices;
 
@@ -26,7 +26,7 @@ internal static class ImageRasterizer
         try
         {
             var head = System.Text.Encoding.UTF8.GetString(svgData, 0, System.Math.Min(4096, svgData.Length));
-            var root = System.Text.RegularExpressions.Regex.Match(head, "<svg\\b[^>]*>");
+            var root = SafeRegex.Match(head, "<svg\\b[^>]*>");
             if (!root.Success) return null;
             var w = SvgLengthPt(root.Value, "width");
             var h = SvgLengthPt(root.Value, "height");
@@ -40,7 +40,7 @@ internal static class ImageRasterizer
 
     private static double? SvgLengthPt(string rootTag, string attribute)
     {
-        var m = System.Text.RegularExpressions.Regex.Match(rootTag,
+        var m = SafeRegex.Match(rootTag,
             "\\s" + attribute + "\\s*=\\s*[\"']\\s*([0-9.]+)\\s*([a-z%]*)\\s*[\"']",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (!m.Success) return null;
@@ -95,11 +95,11 @@ internal static class ImageRasterizer
         try
         {
             var text = System.Text.Encoding.UTF8.GetString(svgData);
-            var m = System.Text.RegularExpressions.Regex.Match(text, "<svg\\b[^>]*>");
+            var m = SafeRegex.Match(text, "<svg\\b[^>]*>");
             if (!m.Success) return RasterizeSvg(svgData);
-            var tag = System.Text.RegularExpressions.Regex.Replace(
+            var tag = SafeRegex.Replace(
                 m.Value, "\\s+(width|height)\\s*=\\s*(\"[^\"]*\"|'[^']*')", "");
-            tag = tag.Insert("<svg".Length, FormattableString.Invariant(
+            tag = tag.Insert("<svg".Length, Compat.Format(CultureInfo.InvariantCulture,
                 $" width=\"{widthPt:0.##}\" height=\"{heightPt:0.##}\""));
             text = text.Remove(m.Index, m.Length).Insert(m.Index, tag);
             return RasterizeSvg(System.Text.Encoding.UTF8.GetBytes(text));
@@ -216,10 +216,12 @@ internal static class ImageRasterizer
             var page = doc.Pages[1];
             naturalWidthPt = page.Width;
             naturalHeightPt = page.Height;
-            using var ms = new MemoryStream();
-            var device = new PngDevice(new Resolution(RasterDpi));
-            device.Process(page, ms);
-            var bytes = ms.ToArray();
+            // Every taker decodes the raster straight away, so its PNG is stored, not deflated.
+            // The SVG's own background is transparent: the raster keeps it as alpha, which the
+            // image takers turn into a soft mask, instead of painting white over what lies under it.
+            var raster = new PngDevice(new Resolution(RasterDpi)).Render(page, transparentBackground: true);
+            var bytes = IO.PngEncoder.Encode(raster.Data, raster.Width, raster.Height, colorType: 6,
+                level: IO.Filters.DeflateLevel.Store);
             return (bytes.Length > 0 ? bytes : null, naturalWidthPt, naturalHeightPt, doc);
         }
         catch

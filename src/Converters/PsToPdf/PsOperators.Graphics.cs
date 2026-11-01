@@ -137,7 +137,7 @@ internal sealed partial class PsInterpreter
     private static void CurrentPointOperator(PsInterpreter i)
     {
         if (!i.Graphics.TryGetCurrentPoint(out var x, out var y))
-            throw new PsErrorSignal("nocurrentpoint");
+            throw new PsErrorException("nocurrentpoint");
         i.Push(x);
         i.Push(y);
     }
@@ -156,7 +156,7 @@ internal sealed partial class PsInterpreter
         var dy = i.PopNumber();
         var dx = i.PopNumber();
         if (!i.Graphics.TryGetCurrentPoint(out var x, out var y))
-            throw new PsErrorSignal("nocurrentpoint");
+            throw new PsErrorException("nocurrentpoint");
         add(i.Graphics, x + dx, y + dy);
     }
 
@@ -170,7 +170,7 @@ internal sealed partial class PsInterpreter
         var x1 = i.PopNumber();
         double ox = 0, oy = 0;
         if (relative && !i.Graphics.TryGetCurrentPoint(out ox, out oy))
-            throw new PsErrorSignal("nocurrentpoint");
+            throw new PsErrorException("nocurrentpoint");
         i.Graphics.CurveTo(ox + x1, oy + y1, ox + x2, oy + y2, ox + x3, oy + y3);
     }
 
@@ -207,7 +207,7 @@ internal sealed partial class PsInterpreter
     private static void PathBBoxOperator(PsInterpreter i)
     {
         if (!i.Graphics.Path.TryGetBounds(out var minX, out var minY, out var maxX, out var maxY))
-            throw new PsErrorSignal("nocurrentpoint");
+            throw new PsErrorException("nocurrentpoint");
         var inverse = i.Graphics.State.Ctm.Invert();
         double loX = double.MaxValue, loY = double.MaxValue;
         double hiX = double.MinValue, hiY = double.MinValue;
@@ -244,8 +244,9 @@ internal sealed partial class PsInterpreter
         {
             foreach (var s in segments) WalkSegment(i, s, inverse, move, line, curve, close);
         }
-        catch (PsExitSignal)
+        catch (PsExitException)
         {
+            // exit ends the loop - the operator finishes normally
         }
     }
 
@@ -483,7 +484,7 @@ internal sealed partial class PsInterpreter
 
     /// <summary>Cap and join styles run 0 to 2; anything else is clamped rather than
     /// faulted, because a stray value must not lose the rest of the page.</summary>
-    private static int ClampStyle(int value) => value < 0 ? 0 : value > MaxLineStyle ? MaxLineStyle : value;
+    private static int ClampStyle(int value) => value switch { < 0 => 0, > MaxLineStyle => MaxLineStyle, _ => value };
 
     private const int MaxLineStyle = 2;
 
@@ -495,7 +496,7 @@ internal sealed partial class PsInterpreter
         var total = 0.0;
         for (var k = 0; k < array.Length; k++)
         {
-            if (!array[k].IsNumber) throw new PsErrorSignal("typecheck");
+            if (!array[k].IsNumber) throw new PsErrorException("typecheck");
             var v = Math.Abs(array[k].Number);
             lengths.Add(v);
             total += v;

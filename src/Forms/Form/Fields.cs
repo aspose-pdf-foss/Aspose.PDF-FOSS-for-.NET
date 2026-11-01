@@ -42,20 +42,16 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             }
 
         // 1a. Direct match by AcroForm full name
-        foreach (var field in _fields)
-        {
-            if (string.Equals(field.FullName, fullName, StringComparison.Ordinal))
-                return field;
-        }
+        var direct = _fields.FirstOrDefault(field => string.Equals(field.FullName, fullName, StringComparison.Ordinal));
+        if (direct is not null)
+            return direct;
 
         // 1b. Group/parent prefix match — if fullName is a parent path,
         // return the first child field whose name starts with it
         var dotPrefix = fullName + ".";
-        foreach (var field in _fields)
-        {
-            if (field.FullName?.StartsWith(dotPrefix, StringComparison.Ordinal) == true)
-                return field;
-        }
+        var child = _fields.FirstOrDefault(field => field.FullName?.StartsWith(dotPrefix, StringComparison.Ordinal) == true);
+        if (child is not null)
+            return child;
 
         // 1c. Anonymous-container–insensitive match. An XFA SOM address omits
         // unnamed container segments, so the test/caller asks for
@@ -73,18 +69,12 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         }
 
         // 2. XFA path resolution fallback — try for any path with bracket indices
-        if (fullName.Contains('['))
-        {
-            if (FindFieldByXfaPath(fullName) is { } found) return found;
-        }
+        if (fullName.Contains('[') && FindFieldByXfaPath(fullName) is { } found) return found;
 
         // 6. Bracket-stripped XFA-style match (no '[' in input but fields have '[N]')
         // Strip [N] indices from each stored FullName/PartialName and compare.
         // Only return a hit if exactly one field's stripped name matches.
-        if (!fullName.Contains('['))
-        {
-            if (FindFieldByStrippedIndices(fullName) is { } found) return found;
-        }
+        if (!fullName.Contains('[') && FindFieldByStrippedIndices(fullName) is { } stripped) return stripped;
 
         return null;
     }
@@ -132,7 +122,8 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         if (path.IndexOf('\\') < 0) return path.Split('.');
         var segs = new List<string>();
         var sb = new StringBuilder();
-        for (int i = 0; i < path.Length; i++)
+        int i = 0;
+        while (i < path.Length)
         {
             char c = path[i];
             if (c == '\\' && i + 1 < path.Length && path[i + 1] == '.')
@@ -149,6 +140,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             {
                 sb.Append(c);
             }
+            i++;
         }
         segs.Add(sb.ToString());
         return segs.ToArray();
@@ -197,10 +189,14 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         {
             if (!IsXfa) return FormType.Standard;
             // Detect Static vs Dynamic from the config packet.
-            // Dynamic XFA uses client-side rendering (<renderPolicy>client</renderPolicy>).
+            // Dynamic XFA uses client-side rendering (<renderPolicy>client</renderPolicy>); the word in a comment,
+            // beside an empty policy, says nothing.
             var (_, configXml) = GetXfaPart("config");
-            if (configXml is not null &&
-                configXml.Contains("<renderPolicy") && configXml.Contains("client"))
+            if (configXml is not null && SafeRegex.IsMatch(configXml, @"<renderPolicy\s*>\s*client\s*</renderPolicy\s*>"))
+                return FormType.Dynamic;
+            // A catalog that asks the viewer to build the pages from the form marks a dynamic form.
+            var reader = ResolvedReader;
+            if (!IgnoreNeedsRendering && reader?.Resolve(reader.Catalog.Get("NeedsRendering")) is PdfBoolean { Value: true })
                 return FormType.Dynamic;
             // Fallback: check template for dynamicRender
             var templateXml = GetXfaTemplateXml();
@@ -216,6 +212,11 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             }
         }
     }
+
+    /// <summary>Turns an XFA form into a standard one whose pages only show the fields: the fields are listed
+    /// but none is made a widget. An archival conversion takes this form, where every annotation it adds has
+    /// to meet the profile.</summary>
+    internal void ConvertXfaToStandardWithoutWidgets() => FlattenXfa(placeWidgets: false);
 
     /// <summary>Caption reserve (in points) and placement for an XFA template field node.</summary>
     private static (double reserve, string placement) GetCaptionReserve(XmlElement fieldEl)
@@ -266,14 +267,26 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 {
                     var stream = reader.Resolve(xfaArray[i + 1]) as PdfStream;
                     if (stream is not null)
-                    {
-                        var data = reader.DecodeStream(stream);
-                        return (stream, Encoding.UTF8.GetString(data));
-                    }
+                        return (stream, XfaPartText(partName, stream, reader));
                 }
             }
         }
         return (null, null);
+    }
+
+    // Each XFA part's text, kept while its stream holds the same bytes: a flatten reads the
+    // datasets once per field, and inflating them every time dominated the walk. A write
+    // replaces the stream's data array, which retires the entry.
+    private readonly Dictionary<string, (PdfStream Stream, byte[] Raw, string Xml)> _xfaPartText = new();
+
+    private string XfaPartText(string partName, PdfStream stream, PdfReader reader)
+    {
+        if (_xfaPartText.TryGetValue(partName, out var known)
+            && ReferenceEquals(known.Stream, stream) && ReferenceEquals(known.Raw, stream.RawData))
+            return known.Xml;
+        var xml = Encoding.UTF8.GetString(reader.DecodeStream(stream));
+        _xfaPartText[partName] = (stream, stream.RawData, xml);
+        return xml;
     }
 
     // ── Tagged caption ────────────────────────────────────────────────────────

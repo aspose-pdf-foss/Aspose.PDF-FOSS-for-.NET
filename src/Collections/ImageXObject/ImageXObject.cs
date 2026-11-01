@@ -62,63 +62,80 @@ public partial class ImageXObject
     internal ImageCollection? Owner { get; set; }
 
     /// <summary>
-    /// Replace the raw image stream data with the given bytes. If the new bytes
-    /// look like JPEG (SOI + marker), also update the stream dictionary's
-    /// /Filter, /Width, /Height, /BitsPerComponent, /ColorSpace entries to
-    /// match — otherwise the PDF reader would still try to apply the original
-    /// /Filter (e.g. FlateDecode) to the JPEG bytes and produce garbage.
+    /// Replace the image with the picture in the given file bytes, keeping this XObject (and so every
+    /// reference to it). A JPEG is stored as it is, under a dictionary that describes it; any other
+    /// image file (PNG, GIF, BMP, TIFF...) is decoded and stored exactly as adding it to a collection
+    /// would build it, its transparency as an /SMask. Bytes no decoder recognises are stored as given
+    /// under the old dictionary, for callers who hand over data already in the image's own encoding.
     /// </summary>
     internal void ReplaceImageData(byte[] newData)
     {
-        // Replacing an image can leave the original (often large) image object orphaned;
-        // ask the save to reachability-prune so the superseded data isn't carried over.
+        // Replacing an image can leave the original (often large) image object orphaned; ask
+        // the save to reachability-prune so the superseded data isn't carried over.
         _reader.MayHaveOrphansOnSave = true;
-        // PNG (89 50 4E 47): a PDF image XObject cannot carry a PNG codestream
-        // verbatim, so decode it to raw RGB samples and re-store as a FlateDecode
-        // image with a matching dictionary. Without this the PNG bytes would sit
-        // under the original /Filter (e.g. FlateDecode) and decode to nothing —
-        // the round-tripped image renders blank.
-        if (newData.Length >= 8 && newData[0] == 0x89 && newData[1] == 0x50
-            && newData[2] == 0x4E && newData[3] == 0x47)
-        {
-            var (px, pw, ph, hasAlpha) = Aspose.Pdf.Facades.PdfFileMend.DecodePng(newData);
-            byte[] rgb = px;
-            if (hasAlpha)
-            {
-                rgb = new byte[pw * ph * 3];
-                for (var i = 0; i < pw * ph; i++)
-                {
-                    rgb[i * 3] = px[i * 4]; rgb[i * 3 + 1] = px[i * 4 + 1]; rgb[i * 3 + 2] = px[i * 4 + 2];
-                }
-            }
-            _stream.ReplaceData(IO.Filters.ManagedDeflater.DeflateZlib(rgb));
-            var pdict = _stream.Dict;
-            pdict.Set("Filter", new PdfName("FlateDecode"));
-            pdict.Remove("DecodeParms");
-            pdict.Set("Width", new PdfInteger(pw));
-            pdict.Set("Height", new PdfInteger(ph));
-            pdict.Set("BitsPerComponent", new PdfInteger(8));
-            pdict.Set("ColorSpace", new PdfName("DeviceRGB"));
-            pdict.Remove("SMask");
-            pdict.Remove("Decode");
-            pdict.Remove("ImageMask");
-            return;
-        }
-
-        _stream.ReplaceData(newData);
         if (newData.Length >= 4 && newData[0] == 0xFF && newData[1] == 0xD8 &&
             newData[2] == 0xFF)
         {
-            var dict = _stream.Dict;
-            dict.Set("Filter", new PdfName("DCTDecode"));
-            dict.Remove("DecodeParms");
-            if (TryParseJpegSize(newData) is (var w, var h, var nf))
-            {
-                dict.Set("Width", new PdfInteger(w));
-                dict.Set("Height", new PdfInteger(h));
-                dict.Set("BitsPerComponent", new PdfInteger(8));
-                dict.Set("ColorSpace", new PdfName(nf == 1 ? "DeviceGray" : "DeviceRGB"));
-            }
+            ReplaceWithJpeg(newData);
+            return;
+        }
+        if (BuildReplacement(newData) is { } built)
+        {
+            AdoptImage(built);
+            return;
+        }
+        _stream.ReplaceData(newData);
+    }
+
+    private void ReplaceWithJpeg(byte[] jpeg)
+    {
+        _stream.ReplaceData(jpeg);
+        var dict = _stream.Dict;
+        dict.Set("Filter", new PdfName("DCTDecode"));
+        dict.Remove("DecodeParms");
+        // The image replaced may have been a stencil mask: its keys on a colour
+        // JPEG make a viewer paint the stream as one-bit stripes. Its metadata described the old picture.
+        dict.Remove("ImageMask");
+        dict.Remove("Decode");
+        dict.Remove("Metadata");
+        if (TryParseJpegSize(jpeg) is (var w, var h, var nf))
+        {
+            dict.Set("Width", new PdfInteger(w));
+            dict.Set("Height", new PdfInteger(h));
+            dict.Set("BitsPerComponent", new PdfInteger(8));
+            // Four components are ink amounts: read as RGB they draw as noise. No /Decode is
+            // written - a JPEG taken from a PDF already holds the values its viewers expect.
+            dict.Set("ColorSpace", new PdfName(nf switch { 1 => "DeviceGray", 4 => "DeviceCMYK", _ => "DeviceRGB" }));
+        }
+    }
+
+    /// <summary>The image file decoded into an image XObject the way a collection's Add builds one,
+    /// or null when no decoder recognises the bytes.</summary>
+    private static PdfStream? BuildReplacement(byte[] data)
+    {
+        try { return new ImageStamp(new MemoryStream(data)).BuildImageXObject(); }
+        catch (Exception e) when (e is ArgumentException or InvalidDataException or NotSupportedException
+            or IndexOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    // The entries that describe an image's samples - and its metadata, which describes the picture replaced -
+    // a replacement sets each one it has and drops the rest.
+    private static readonly string[] SampleKeys =
+        { "Filter", "DecodeParms", "Width", "Height", "BitsPerComponent", "ColorSpace", "Decode", "SMask",
+          "Mask", "ImageMask", "Metadata" };
+
+    /// <summary>Take over the samples and their description from a freshly built image XObject.</summary>
+    private void AdoptImage(PdfStream built)
+    {
+        _stream.ReplaceData(built.RawData);
+        var dict = _stream.Dict;
+        foreach (var key in SampleKeys)
+        {
+            if (built.Dict.Get(key) is { } value) dict.Set(key, value);
+            else dict.Remove(key);
         }
     }
 
@@ -138,28 +155,11 @@ public partial class ImageXObject
             // Threshold to bitonal and store as CCITT G4 — the compact encoding
             // used for isBlackAndWhite replacements.
             var stride = (w + 7) / 8;
-            var packed = new byte[stride * h]; // bit 1 = black
-            for (var i = 0; i < w * h; i++)
-            {
-                int lum;
-                if (comps == 1) lum = pixels[i];
-                else
-                {
-                    var src = i * comps;
-                    lum = (pixels[src] * 299 + pixels[src + 1] * 587 + pixels[src + 2] * 114) / 1000;
-                }
-                if (lum < 128)
-                    packed[i / w * stride + i % w / 8] |= (byte)(0x80 >> (i % w % 8));
-            }
-            var g4 = IO.Filters.CcittG4Encoder.Encode(packed, w, h, stride);
+            var g4 = IO.Filters.CcittG4Encoder.Encode(ImageFilterEncoder.PackBilevel(pixels, comps, w, h), w, h, stride);
             _stream.ReplaceData(g4);
             var bwDict = _stream.Dict;
             bwDict.Set("Filter", new PdfName("CCITTFaxDecode"));
-            var parms = new PdfDictionary();
-            parms.Set("K", new PdfInteger(-1));
-            parms.Set("Columns", new PdfInteger(w));
-            parms.Set("Rows", new PdfInteger(h));
-            bwDict.Set("DecodeParms", parms);
+            bwDict.Set("DecodeParms", ImageFilterEncoder.G4Parms(w, h));
             bwDict.Set("Width", new PdfInteger(w));
             bwDict.Set("Height", new PdfInteger(h));
             bwDict.Set("BitsPerComponent", new PdfInteger(1));
@@ -232,7 +232,6 @@ public partial class ImageXObject
         int width = default;
         int height = default;
         int nf = default;
-        width = height = nf = 0;
         var i = 2; // skip SOI
         while (i + 4 < data.Length)
         {
@@ -290,11 +289,25 @@ public partial class ImageXObject
         }
     }
 
+    /// <summary>The codec of the image data: the last filter of the chain. An image codec closes a
+    /// filter chain (ISO 32000-1 7.4.1), and the lossless filters before it are what DecodeStream
+    /// removes, leaving the codec's data: a deflated JPEG is still a JPEG.</summary>
+    private string? ImageCodec => _stream.Dict.Get("Filter") switch
+    {
+        PdfName n => n.Value,
+        PdfArray { Count: > 0 } a when a[a.Count - 1] is PdfName last => last.Value,
+        _ => null,
+    };
+
+    /// <summary>The JPEG codestream: the stream data with any filter before DCTDecode removed.</summary>
+    private byte[] JpegCodestream =>
+        _stream.Dict.Get("Filter") is PdfArray { Count: > 1 } ? _reader.DecodeStream(_stream) : _stream.RawData;
+
     /// <summary>Whether this is a JPEG image (DCTDecode filter).</summary>
-    public bool IsJpeg => Filter == "DCTDecode";
+    public bool IsJpeg => ImageCodec == "DCTDecode";
 
     /// <summary>Whether this is a JPEG2000 image (JPXDecode filter).</summary>
-    public bool IsJpeg2000 => Filter == "JPXDecode";
+    public bool IsJpeg2000 => ImageCodec == "JPXDecode";
 
     /// <summary>Whether this image has a soft mask (alpha channel).</summary>
     public bool HasSoftMask => _stream.Dict.ContainsKey("SMask");
@@ -345,7 +358,7 @@ public partial class ImageXObject
     public byte[]? GetJpegBytes()
     {
         if (!IsJpeg) return null;
-        return _stream.RawData;
+        return JpegCodestream;
     }
 
     /// <summary>
@@ -362,7 +375,7 @@ public partial class ImageXObject
     {
         if (IsJpeg)
         {
-            output.Write(_stream.RawData);
+            output.Write(JpegCodestream);
             return;
         }
         if (GetPixelSource() is { } getter)
@@ -377,7 +390,8 @@ public partial class ImageXObject
     /// <summary>
     /// Save the image to a stream in the specified format. JPEG output uses the
     /// embedded JPEG bytes when source is JPEG, otherwise re-encodes pixels via
-    /// the in-lib baseline JPEG encoder. All other formats fall back to PNG.
+    /// the in-lib baseline JPEG encoder. TIFF, BMP and GIF output is encoded from
+    /// the decoded pixels. All other formats fall back to PNG.
     /// </summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416",
         Justification = "ImageFormat.Guid is read-only and works on all platforms.")]
@@ -388,7 +402,7 @@ public partial class ImageXObject
         {
             if (IsJpeg)
             {
-                output.Write(_stream.RawData);
+                output.Write(JpegCodestream);
                 return;
             }
             var getter = GetPixelSource();
@@ -400,9 +414,65 @@ public partial class ImageXObject
                 return;
             }
         }
+        if (fmtGuid == System.Drawing.Imaging.ImageFormat.Tiff.Guid && GetPixelSource() is { } pixel)
+        {
+            Aspose.Pdf.Devices.TiffDevice.EncodeRgbaImage(Rgba(pixel), Width, Height, output,
+                Aspose.Pdf.Devices.CompressionType.LZW);
+            return;
+        }
+        if (fmtGuid == System.Drawing.Imaging.ImageFormat.Bmp.Guid && GetPixelSource() is { } bmpPixel)
+        {
+            output.Write(Aspose.Pdf.Devices.BmpDevice.EncodeBmp(Rgba(bmpPixel), Width, Height));
+            return;
+        }
+        if (fmtGuid == System.Drawing.Imaging.ImageFormat.Gif.Guid && GetPixelSource() is { } gifPixel)
+        {
+            output.Write(Aspose.Pdf.Devices.GifDevice.EncodeGif(Rgba(gifPixel), Width, Height));
+            return;
+        }
         var png = ToPng();
         output.Write(png);
     }
+
+    // The picture as opaque RGBA rows, for the encoders that take a whole buffer.
+    private byte[] Rgba(IO.PixelGetter pixel)
+    {
+        int w = Width, h = Height;
+        var rgba = new byte[w * h * 4];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                var (r, g, b) = pixel(x, y);
+                int o = (y * w + x) * 4;
+                rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b; rgba[o + 3] = 255;
+            }
+        return rgba;
+    }
+
+    /// <summary>
+    /// Save the image to a file. Uses the file extension to determine format:
+    /// .jpg/.jpeg JPEG, .bmp BMP, .gif GIF, .tif/.tiff TIFF; all other extensions PNG.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416",
+        Justification = "ImageFormat values only name the format; the writer branches on their Guid.")]
+    public void Save(string path)
+    {
+        using var fs = File.Create(path);
+        Save(fs, FormatOfPath(path));
+    }
+
+    // The file name says the format: the file holds what its name promises.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416",
+        Justification = "ImageFormat values only name the format; the writer branches on their Guid.")]
+    private static System.Drawing.Imaging.ImageFormat FormatOfPath(string path) =>
+        Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".jpg" or ".jpeg" => System.Drawing.Imaging.ImageFormat.Jpeg,
+            ".bmp" => System.Drawing.Imaging.ImageFormat.Bmp,
+            ".gif" => System.Drawing.Imaging.ImageFormat.Gif,
+            ".tif" or ".tiff" => System.Drawing.Imaging.ImageFormat.Tiff,
+            _ => System.Drawing.Imaging.ImageFormat.Png,
+        };
 
     /// <summary>
     /// Save the decoded image rotated <paramref name="clockwiseQuarterTurns"/> × 90°
@@ -448,8 +518,13 @@ public partial class ImageXObject
         int ow = sideways ? h : w;
         int oh = sideways ? w : h;
         // The source index along an axis, read off an output position.
-        int Along((int X, int Y) axis, int x, int y) =>
-            axis.X > 0 ? x : axis.X < 0 ? ow - 1 - x : axis.Y > 0 ? y : oh - 1 - y;
+        int Along((int X, int Y) axis, int x, int y)
+        {
+            if (axis.X > 0) return x;
+            if (axis.X < 0) return ow - 1 - x;
+            if (axis.Y > 0) return y;
+            return oh - 1 - y;
+        }
         IO.PixelGetter rotated = (int x, int y) => src(Along(across, x, y), Along(down, x, y));
 
         if (IsJpeg)
@@ -480,13 +555,16 @@ public partial class ImageXObject
     private const int HugeImageThreshold = 10000;
     private const int HugeImageMaxDim = 5250;
 
-    private static (IO.PixelGetter getter, int width, int height) CapHugeImage(IO.PixelGetter src, int w, int h)
+    private (IO.PixelGetter getter, int width, int height) CapHugeImage(IO.PixelGetter src, int w, int h)
     {
         var maxDim = Math.Max(w, h);
         if (maxDim <= HugeImageThreshold) return (src, w, h);
         var scale = (double)HugeImageMaxDim / maxDim;
         var tw = Math.Max(1, (int)(w * scale));
         var th = Math.Max(1, (int)(h * scale));
+        // A 1-bit image - the usual huge one, a scanned page - is averaged from its packed
+        // rows; any other through its pixel source, a sample at a time.
+        if (ReducedOneBit(tw, th) is { } oneBit) return oneBit;
         IO.PixelGetter scaled = (int x, int y) =>
         {
             var sx0 = (int)((long)x * w / tw);
@@ -505,26 +583,6 @@ public partial class ImageXObject
             return ((byte)(ar / n), (byte)(ag / n), (byte)(ab / n));
         };
         return (scaled, tw, th);
-    }
-
-    /// <summary>
-    /// Save the image to a file. Uses the file extension to determine format.
-    /// .jpg/.jpeg saves JPEG (if available), otherwise PNG.
-    /// All other extensions save as PNG.
-    /// </summary>
-    public void Save(string path)
-    {
-        using var fs = File.Create(path);
-        var ext = Path.GetExtension(path).ToLowerInvariant();
-        if (ext is ".jpg" or ".jpeg" && IsJpeg)
-        {
-            fs.Write(_stream.RawData);
-        }
-        else
-        {
-            var png = ToPng();
-            fs.Write(png);
-        }
     }
 
     /// <summary>Interleave an alpha plane into an RGB (→RGBA) or gray (→gray+alpha)

@@ -7,12 +7,12 @@ namespace Aspose.Pdf.Annotations;
 public partial class TextMarkupAnnotation : MarkupAnnotation
 {
     /// <summary>The stages of the marked-text collection: one fragment against the quads, one line key, one output line.</summary>
-    private void EmitMarkedLine(MarkedTextState mt, int li)
+    private static void EmitMarkedLine(MarkedTextState mt, int li)
     {
         var line = mt.lines[li];
         line.Sort((a, b) => a.minX.CompareTo(b.minX));
         double lineRight = double.MinValue;
-        foreach (var p in line) if (p.maxX > lineRight) lineRight = p.maxX;
+        foreach (var pmaxX in line.Select(p => p.maxX).Where(pmaxX => pmaxX > lineRight)) lineRight = pmaxX;
 
         // A line ending well short of the block's right edge is a hard break (a label
         // or paragraph end), not a soft wrap: emit a trailing space on its last quad
@@ -28,7 +28,7 @@ public partial class TextMarkupAnnotation : MarkupAnnotation
     }
 
     /// <summary>The stages of the marked-text collection: one fragment against the quads, one line key, one output line.</summary>
-    private void CollectMarkedLineKey(MarkedTextState mt, (int q, int fi) key)
+    private static void CollectMarkedLineKey(MarkedTextState mt, (int q, int fi) key)
     {
         var list = mt.groups[key];
         if (list.Count == 0) return;
@@ -42,7 +42,7 @@ public partial class TextMarkupAnnotation : MarkupAnnotation
     }
 
     /// <summary>The stages of the marked-text collection: one fragment against the quads, one line key, one output line.</summary>
-    private void MatchFragmentToQuads(MarkedTextState mt, Aspose.Pdf.Text.TextFragment f)
+    private static void MatchFragmentToQuads(MarkedTextState mt, Aspose.Pdf.Text.TextFragment f)
     {
         var runIndex = mt.fi++;
         foreach (Aspose.Pdf.Text.TextSegment seg in f.Segments)

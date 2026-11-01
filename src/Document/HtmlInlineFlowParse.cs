@@ -61,18 +61,18 @@ public sealed partial class Document
         public int hiddenDepth;
     }
 
-    private static readonly Regex HtmlInlineTagName = new(@"^</?\s*([A-Za-z][A-Za-z0-9]*)", RegexOptions.Compiled);
-    private static readonly Regex HtmlInlineWhitespace = new(@"[ \t\r\n\f]+", RegexOptions.Compiled);
-    private static readonly Regex HtmlInlineComment = new(@"<!--.*?-->|<!DOCTYPE[^>]*>", RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    private static readonly Regex HtmlInlineTagName = new(@"^</?\s*([A-Za-z][A-Za-z0-9]*)", RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex HtmlInlineWhitespace = new(@"[ \t\r\n\f]+", RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex HtmlInlineComment = new(@"<!--.*?-->|<!DOCTYPE[^>]*>", RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
     private static readonly Regex HtmlInlineHeadBlock = new(@"<(style|script|head|title)\b[^>]*>.*?</\1\s*>",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
     /// <summary>Tags the UA flow has no model for: their fragment keeps the calibrated engines.</summary>
     private static readonly Regex HtmlUnsupportedFlowTag = new(
         @"<\s*(table|tr|td|th|blockquote|hr|form|textarea|select|pre|center|dl|dt|dd|svg|iframe|object|section|article|header|footer|nav|aside|main)\b",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
     /// <summary>A style sheet the flow can honour: at most a <c>body</c> rule.</summary>
     private static readonly Regex HtmlBodyOnlyStyle = new(@"^<style\b[^>]*>\s*(?:body\s*\{[^}]*\}\s*)?</style\s*>$",
-        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
     /// <summary>Whether the fragment holds only content the UA flow models: inline text,
     /// emphasis, spans, fonts, links, breaks, pictures, controls, paragraphs, divisions,
@@ -80,18 +80,17 @@ public sealed partial class Document
     private static bool IsUaFlowHtml(string html)
     {
         if (string.IsNullOrWhiteSpace(html)) return false;
-        var s = HtmlInlineComment.Replace(html, "");
-        foreach (Match sm in Regex.Matches(s, @"<style\b.*?</style\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
-            if (!HtmlBodyOnlyStyle.IsMatch(sm.Value) && !IsTableOnlyStyleSheet(sm.Value)) return false;
-        if (Regex.IsMatch(s, @"\bclass\s*=", RegexOptions.IgnoreCase)) return false;
+        var s = SafeRegex.Replace(HtmlInlineComment, html, "");
+        if (SafeRegex.Matches(s, @"<style\b.*?</style\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline).Any(sm => !SafeRegex.IsMatch(HtmlBodyOnlyStyle, sm.Value) && !IsTableOnlyStyleSheet(sm.Value))) return false;
+        if (SafeRegex.IsMatch(s, @"\bclass\s*=", RegexOptions.IgnoreCase)) return false;
         // A tag broken open inside another (</<strong>) keeps the calibrated engines.
         if (s.Contains("</<")) return false;
-        if (HtmlUnsupportedFlowTag.IsMatch(s)) return false;
-        foreach (Match tm in Regex.Matches(s, @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\bstyle\s*=\s*(['""])(.*?)\2",
-                     RegexOptions.IgnoreCase | RegexOptions.Singleline))
+        if (SafeRegex.IsMatch(HtmlUnsupportedFlowTag, s)) return false;
+        foreach (var groups in SafeRegex.Matches(s, @"<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\bstyle\s*=\s*(['""])(.*?)\2",
+                     RegexOptions.IgnoreCase | RegexOptions.Singleline).Select(tm => tm.Groups))
         {
-            var block = Regex.IsMatch(tm.Groups[1].Value, @"^(p|div|h[1-6]|li|ul|ol|body|html)$", RegexOptions.IgnoreCase);
-            if (HasUnsupportedFlowCss(tm.Groups[3].Value, block)) return false;
+            var block = SafeRegex.IsMatch(groups[1].Value, @"^(p|div|h[1-6]|li|ul|ol|body|html)$", RegexOptions.IgnoreCase);
+            if (HasUnsupportedFlowCss(groups[3].Value, block)) return false;
         }
         return true;
     }
@@ -106,10 +105,10 @@ public sealed partial class Document
 
     private static bool HasUnsupportedFlowCss(string style, bool block)
     {
-        if (Regex.IsMatch(style, block ? HtmlUnsupportedBlockCss : HtmlUnsupportedInlineCss, RegexOptions.IgnoreCase)) return true;
-        if (Regex.IsMatch(style, @"(?<![-\w])display\s*:", RegexOptions.IgnoreCase) && !IsHiddenCss(style)) return true;
+        if (SafeRegex.IsMatch(style, block ? HtmlUnsupportedBlockCss : HtmlUnsupportedInlineCss, RegexOptions.IgnoreCase)) return true;
+        if (SafeRegex.IsMatch(style, @"(?<![-\w])display\s*:", RegexOptions.IgnoreCase) && !IsHiddenCss(style)) return true;
         if (!block) return false;
-        var ti = Regex.Match(style, @"(?<![-\w])text-indent\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var ti = SafeRegex.Match(style, @"(?<![-\w])text-indent\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (ti.Success && CssMarginPt(ti.Groups[1].Value.Trim(), UaInlineBasePt) != 0) return true;
         var (_, _, left, right) = BlockCssMargins(style, UaInlineBasePt);
         return (!double.IsNaN(left) && left != 0) || (!double.IsNaN(right) && right != 0);
@@ -119,30 +118,27 @@ public sealed partial class Document
     /// blocks, comments and whitespace (a section's sheet and tags around its table).</summary>
     private static bool IsContentFreeHtml(string html)
     {
-        var s = HtmlInlineHeadBlock.Replace(HtmlInlineComment.Replace(html, ""), "");
-        s = Regex.Replace(s, @"</?\s*(html|body|head|meta|link)\b[^>]*>", "", RegexOptions.IgnoreCase);
+        var s = SafeRegex.Replace(HtmlInlineHeadBlock, SafeRegex.Replace(HtmlInlineComment, html, ""), "");
+        s = SafeRegex.Replace(s, @"</?\s*(html|body|head|meta|link)\b[^>]*>", "", RegexOptions.IgnoreCase);
         return string.IsNullOrWhiteSpace(s);
     }
 
     /// <summary>display: none on an element hides it and everything inside it.</summary>
     private static bool IsHiddenCss(string style) =>
-        Regex.IsMatch(style, @"(?<![-\w])display\s*:\s*none\b", RegexOptions.IgnoreCase);
+        SafeRegex.IsMatch(style, @"(?<![-\w])display\s*:\s*none\b", RegexOptions.IgnoreCase);
 
     /// <summary>A style sheet whose rules select only table parts (which the flow never lays
     /// out: a piece holding a table keeps the calibrated engines) or the body binds nothing
     /// the flow sets, so a section report's table sheet does not disqualify its prose pieces.</summary>
     private static bool IsTableOnlyStyleSheet(string styleElement)
     {
-        var css = Regex.Replace(Regex.Replace(styleElement, @"^<style\b[^>]*>|</style\s*>$", "", RegexOptions.IgnoreCase), @"/\*.*?\*/", "", RegexOptions.Singleline);
-        foreach (Match rule in Regex.Matches(css, @"([^{}]+)\{[^{}]*\}"))
-            foreach (var sel in rule.Groups[1].Value.Split(','))
-                if (!HtmlTableOnlySelector.IsMatch(sel.Trim()) && !sel.Trim().Equals("body", StringComparison.OrdinalIgnoreCase)) return false;
-        return true;
+        var css = SafeRegex.Replace(SafeRegex.Replace(styleElement, @"^<style\b[^>]*>|</style\s*>$", "", RegexOptions.IgnoreCase), @"/\*.*?\*/", "", RegexOptions.Singleline);
+        return !SafeRegex.Matches(css, @"([^{}]+)\{[^{}]*\}").Any(rule => rule.Groups[1].Value.Split(',').Any(sel => !SafeRegex.IsMatch(HtmlTableOnlySelector, sel.Trim()) && !sel.Trim().Equals("body", StringComparison.OrdinalIgnoreCase)));
     }
 
     private static readonly Regex HtmlTableOnlySelector = new(
         @"^(?:(?:table|thead|tbody|tfoot|tr|td|th|caption)(?:[#.][\w-]+)*)(?:\s+(?:table|thead|tbody|tfoot|tr|td|th|caption)(?:[#.][\w-]+)*)*$",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
     /// <summary>A block's CSS margins in points (top, bottom, left, right): the shorthand's
     /// 1-4 values, then the longhands; em of the block's font size, a unitless value in points;
@@ -150,7 +146,7 @@ public sealed partial class Document
     private static (double Top, double Bottom, double Left, double Right) BlockCssMargins(string style, double fontPt)
     {
         double top = double.NaN, bottom = double.NaN, left = double.NaN, right = double.NaN;
-        var sh = Regex.Match(style, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var sh = SafeRegex.Match(style, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (sh.Success)
         {
             var v = sh.Groups[1].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
@@ -159,12 +155,12 @@ public sealed partial class Document
                 top = CssMarginPt(v[0], fontPt);
                 right = CssMarginPt(v[v.Length > 1 ? 1 : 0], fontPt);
                 bottom = CssMarginPt(v[v.Length > 2 ? 2 : 0], fontPt);
-                left = CssMarginPt(v[v.Length > 3 ? 3 : v.Length > 1 ? 1 : 0], fontPt);
+                left = CssMarginPt(v[v.Length switch { > 3 => 3, > 1 => 1, _ => 0 }], fontPt);
             }
         }
         foreach (var (name, side) in new[] { ("top", 0), ("bottom", 1), ("left", 2), ("right", 3) })
         {
-            var lm = Regex.Match(style, @"(?<![-\w])margin-" + name + @"\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            var lm = SafeRegex.Match(style, @"(?<![-\w])margin-" + name + @"\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
             if (!lm.Success) continue;
             var pt = CssMarginPt(lm.Groups[1].Value.Trim(), fontPt);
             switch (side) { case 0: top = pt; break; case 1: bottom = pt; break; case 2: left = pt; break; default: right = pt; break; }
@@ -175,7 +171,7 @@ public sealed partial class Document
     /// <summary>One CSS margin value in points; "auto" and an unreadable value count as none (NaN).</summary>
     private static double CssMarginPt(string value, double fontPt)
     {
-        var m = Regex.Match(value, @"^(-?[\d.]+)\s*(px|pt|em|%)?$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(value, @"^(-?[\d.]+)\s*(px|pt|em|%)?$", RegexOptions.IgnoreCase);
         if (!m.Success || !double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var v)) return double.NaN;
         return m.Groups[2].Value.ToLowerInvariant() switch
@@ -190,7 +186,7 @@ public sealed partial class Document
     /// <summary>The body rule of a body-only style sheet: its family and size.</summary>
     private static (string? Family, double SizePt) HtmlBodyStyleRule(string html)
     {
-        var m = Regex.Match(html, @"<style\b[^>]*>\s*body\s*\{([^}]*)\}", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        var m = SafeRegex.Match(html, @"<style\b[^>]*>\s*body\s*\{([^}]*)\}", RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (!m.Success) return (null, 0);
         var st = new HtmlInlineStyle();
         ApplyInlineCssStyle(st, m.Groups[1].Value, '\0');
@@ -205,7 +201,7 @@ public sealed partial class Document
         out bool firstElementIsControl, out HtmlInlineStyle? firstElementStyle)
     {
         var ps = new HtmlFlowParseState { hl = hl, basePt = basePt, paragraphMargins = hl.html.IsParagraphHasMargin };
-        var s = HtmlInlineHeadBlock.Replace(HtmlInlineComment.Replace(html, ""), "");
+        var s = SafeRegex.Replace(HtmlInlineHeadBlock, SafeRegex.Replace(HtmlInlineComment, html, ""), "");
         var i = 0;
         var n = s.Length;
         while (i < n)
@@ -232,7 +228,7 @@ public sealed partial class Document
 
     private static void ParseFlowTag(HtmlFlowParseState ps, string tagStr)
     {
-        var nm = HtmlInlineTagName.Match(tagStr);
+        var nm = SafeRegex.Match(HtmlInlineTagName, tagStr);
         if (!nm.Success) return;
         var tag = nm.Groups[1].Value.ToLowerInvariant();
         var isClose = tagStr[1] == '/';
@@ -249,8 +245,8 @@ public sealed partial class Document
         switch (tag)
         {
             case "br": ps.cur.Items.Add(new HtmlInlineItem { Kind = HtmlInlineKind.Break }); return;
-            case "img": if (!isClose) AddInlineImage(ps.cur.Items, ps.stack[^1], tagStr, ps.hl); return;
-            case "input": if (!isClose) AddInlineControl(ps.cur.Items, tagStr); return;
+            case "img": if (!isClose) { AddInlineImage(ps.cur.Items, ps.stack[^1], tagStr, ps.hl); } return;
+            case "input": if (!isClose) { AddInlineControl(ps.cur.Items, tagStr); } return;
             case "p" or "div" or "h1" or "h2" or "h3" or "h4" or "h5" or "h6" or "li":
                 if (isClose) CloseFlowBlock(ps); else OpenFlowBlock(ps, tag, tagStr);
                 return;
@@ -288,7 +284,7 @@ public sealed partial class Document
         var b = ps.cur;
         b.StyleDepth = ps.stack.Count;
         var attrStyle = InlineAttr(tagStr, "style") ?? "";
-        var am = Regex.Match(attrStyle, @"text-align\s*:\s*(left|right|center)", RegexOptions.IgnoreCase);
+        var am = SafeRegex.Match(attrStyle, @"text-align\s*:\s*(left|right|center)", RegexOptions.IgnoreCase);
         if (am.Success)
             b.Align = am.Groups[1].Value.ToLowerInvariant() switch
             { "right" => HorizontalAlignment.Right, "center" => HorizontalAlignment.Center, _ => HorizontalAlignment.Left };
@@ -379,7 +375,7 @@ public sealed partial class Document
 
     private static void AddInlineText(List<HtmlInlineItem> items, HtmlInlineStyle st, string raw)
     {
-        var text = HtmlInlineWhitespace.Replace(System.Net.WebUtility.HtmlDecode(raw), " ");
+        var text = SafeRegex.Replace(HtmlInlineWhitespace, System.Net.WebUtility.HtmlDecode(raw), " ");
         if (text.Length == 0) return;
         items.Add(new HtmlInlineItem
         {
@@ -396,7 +392,7 @@ public sealed partial class Document
         {
             Kind = type == "radio" ? HtmlInlineKind.Radio : HtmlInlineKind.Checkbox,
             ControlName = InlineAttr(tagStr, "name"),
-            Checked = Regex.IsMatch(tagStr, @"\bchecked\b", RegexOptions.IgnoreCase),
+            Checked = SafeRegex.IsMatch(tagStr, @"\bchecked\b", RegexOptions.IgnoreCase),
         });
     }
 
@@ -420,7 +416,7 @@ public sealed partial class Document
         items.Add(new HtmlInlineItem
         {
             Kind = HtmlInlineKind.Image, ImageData = bytes, ImageW = w, ImageH = h, Href = st.Href,
-            ImageMiddle = Regex.IsMatch(style, @"vertical-align\s*:\s*middle", RegexOptions.IgnoreCase),
+            ImageMiddle = SafeRegex.IsMatch(style, @"vertical-align\s*:\s*middle", RegexOptions.IgnoreCase),
         });
     }
 
@@ -428,8 +424,8 @@ public sealed partial class Document
     {
         try
         {
-            var dm = Regex.Match(src, @"^data:[^;,]*;base64,(.*)$", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (dm.Success) return System.Convert.FromBase64String(Regex.Replace(dm.Groups[1].Value, @"\s+", ""));
+            var dm = SafeRegex.Match(src, @"^data:[^;,]*;base64,(.*)$", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            if (dm.Success) return System.Convert.FromBase64String(SafeRegex.Replace(dm.Groups[1].Value, @"\s+", ""));
             if (src.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
                 || src.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
                 || src.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return null;
@@ -443,7 +439,7 @@ public sealed partial class Document
     /// <summary>A CSS length in <paramref name="style"/> for <paramref name="prop"/>, in points; null when absent.</summary>
     private static double? InlineCssLength(string style, string prop)
     {
-        var m = Regex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*([\d.]+)\s*(px|pt)?", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*([\d.]+)\s*(px|pt)?", RegexOptions.IgnoreCase);
         if (!m.Success || !double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var v)) return null;
         return m.Groups[2].Value.Equals("pt", StringComparison.OrdinalIgnoreCase) ? v : v * CssPxToPt;
@@ -451,9 +447,11 @@ public sealed partial class Document
 
     private static string? InlineAttr(string tagStr, string name)
     {
-        var m = Regex.Match(tagStr, @"\b" + name + @"\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(tagStr, @"\b" + name + @"\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))", RegexOptions.IgnoreCase);
         if (!m.Success) return null;
-        return m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Success ? m.Groups[2].Value : m.Groups[3].Value;
+        if (m.Groups[1].Success) return m.Groups[1].Value;
+        if (m.Groups[2].Success) return m.Groups[2].Value;
+        return m.Groups[3].Value;
     }
 
     /// <summary>The style an element resolves for its content: its parent's, then its tag
@@ -477,7 +475,7 @@ public sealed partial class Document
                 if (InlineAttr(tagStr, "color") is { Length: > 0 } fc && Converters.HtmlToPdfConverter.ParseCssColor(fc) is { } fcol) st.Fore = fcol;
                 break;
         }
-        var sm = Regex.Match(tagStr, @"\bstyle\s*=\s*(['""])(.*?)\1", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        var sm = SafeRegex.Match(tagStr, @"\bstyle\s*=\s*(['""])(.*?)\1", RegexOptions.IgnoreCase | RegexOptions.Singleline);
         if (sm.Success) ApplyInlineCssStyle(st, sm.Groups[2].Value, sm.Groups[1].Value[0]);
         return st;
     }
@@ -486,15 +484,15 @@ public sealed partial class Document
     {
         var other = quote == '"' ? '\'' : '"';
         var otherCount = 0;
-        foreach (var c in style) if (c == other) otherCount++;
+        foreach (var c in style.Where(c => c == other)) otherCount++;
         if (otherCount % 2 == 1 || (quote != '\0' && style.Contains(quote))) return;
-        var fm = Regex.Match(style, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var fm = SafeRegex.Match(style, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (fm.Success)
         {
             var first = fm.Groups[1].Value.Split(',')[0].Trim().Trim('\'', '"');
             if (first.Length > 0) st.Family = first;
         }
-        var zm = Regex.Match(style, @"(?<![-\w])font-size\s*:\s*([\d.]+)\s*(px|pt|em|%)?", RegexOptions.IgnoreCase);
+        var zm = SafeRegex.Match(style, @"(?<![-\w])font-size\s*:\s*([\d.]+)\s*(px|pt|em|%)?", RegexOptions.IgnoreCase);
         if (zm.Success && double.TryParse(zm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var fz) && fz > 0)
         {
@@ -507,15 +505,15 @@ public sealed partial class Document
                 _ => fz,
             };
         }
-        if (Regex.IsMatch(style, @"font-weight\s*:\s*(bold|[6-9]00)", RegexOptions.IgnoreCase)) st.Bold = true;
-        else if (Regex.IsMatch(style, @"font-weight\s*:\s*(normal|[1-5]00)", RegexOptions.IgnoreCase)) st.Bold = false;
-        if (Regex.IsMatch(style, @"font-style\s*:\s*(italic|oblique)", RegexOptions.IgnoreCase)) st.Italic = true;
-        else if (Regex.IsMatch(style, @"font-style\s*:\s*normal", RegexOptions.IgnoreCase)) st.Italic = false;
-        if (Regex.IsMatch(style, @"text-decoration\s*:\s*[^;]*underline", RegexOptions.IgnoreCase)) st.Underline = true;
-        else if (Regex.IsMatch(style, @"text-decoration\s*:\s*none", RegexOptions.IgnoreCase)) st.Underline = false;
-        var cm = Regex.Match(style, @"(?<![-\w])color\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        if (SafeRegex.IsMatch(style, @"font-weight\s*:\s*(bold|[6-9]00)", RegexOptions.IgnoreCase)) st.Bold = true;
+        else if (SafeRegex.IsMatch(style, @"font-weight\s*:\s*(normal|[1-5]00)", RegexOptions.IgnoreCase)) st.Bold = false;
+        if (SafeRegex.IsMatch(style, @"font-style\s*:\s*(italic|oblique)", RegexOptions.IgnoreCase)) st.Italic = true;
+        else if (SafeRegex.IsMatch(style, @"font-style\s*:\s*normal", RegexOptions.IgnoreCase)) st.Italic = false;
+        if (SafeRegex.IsMatch(style, @"text-decoration\s*:\s*[^;]*underline", RegexOptions.IgnoreCase)) st.Underline = true;
+        else if (SafeRegex.IsMatch(style, @"text-decoration\s*:\s*none", RegexOptions.IgnoreCase)) st.Underline = false;
+        var cm = SafeRegex.Match(style, @"(?<![-\w])color\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (cm.Success && Converters.HtmlToPdfConverter.ParseCssColor(cm.Groups[1].Value.Trim()) is { } fc) st.Fore = fc;
-        var bm = Regex.Match(style, @"background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var bm = SafeRegex.Match(style, @"background(?:-color)?\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (bm.Success && Converters.HtmlToPdfConverter.ParseCssColor(bm.Groups[1].Value.Trim()) is { } bc) st.Back = bc;
     }
 
@@ -524,7 +522,7 @@ public sealed partial class Document
     private static double HtmlFontTagSizePt(string value)
     {
         var v = value.Trim();
-        var m = Regex.Match(v, @"^([+-]?)(\d+)");
+        var m = SafeRegex.Match(v, @"^([+-]?)(\d+)");
         if (!m.Success) return 0;
         var scale = int.Parse(m.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
         if (m.Groups[1].Value == "+") scale = 3 + scale;

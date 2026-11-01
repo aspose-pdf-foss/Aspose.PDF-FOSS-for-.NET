@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 internal sealed partial class TextStateModifier
 {
     /// <summary>Font size stream: one token of the content stream scanned into the show list.</summary>
-    private bool ScanFontSizeToken(FontSizeStreamState fz)
+    private static bool ScanFontSizeToken(FontSizeStreamState fz)
     {
         var startPos = (int)fz.lexer.Position;
         var token = fz.lexer.NextToken();
@@ -73,7 +73,7 @@ internal sealed partial class TextStateModifier
             }
             case TokenKind.Keyword:
             {
-                ScanFontSizeOperator(fz, token, startPos, endPos);
+                ScanFontSizeOperator(fz, token, endPos);
                 fz.operands.Clear();
                 break;
             }

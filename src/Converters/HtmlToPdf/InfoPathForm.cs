@@ -57,7 +57,6 @@ internal static partial class HtmlToPdfConverter
     private const double IpRadioDotRadius = 2.0;
     private const double IpButtonPadX = 6.0;                // a push button's text inset
     private const double IpButtonPadTop = 2.25;             // …and its line's top inset
-    private const double IpButtonFillH = 16.5;              // an unsized button: the 12 line + 2 × 2.25
     private const double IpButtonRectX = 2.0;               // the 1pt black rect outside the fill, sides
     private const double IpButtonRectY = 1.5;               // …top and bottom
     private const double IpButtonBevelW = 1.5;              // the #a9a9a9 bevel strokes
@@ -102,21 +101,19 @@ internal static partial class HtmlToPdfConverter
         public StringBuilder sb = new();                    // borders, widgets and text after
         public double pageW, pageH;
         public IpNode body = null!;
-        public Dictionary<IpNode, double> heights = new();  // measured content heights per block container
-        public Dictionary<IpNode, IpLine> lines = new();    // built lines per line container
     }
 
     /// <summary>Render the InfoPath form, or null when the page does not carry the idiom's markup.</summary>
     private static Document? TryRenderInfoPathForm(ConvertState cv)
     {
         var html = cv.html;
-        if (!Regex.IsMatch(html, "<table\\b[^>]*class\\s*=\\s*['\"][^'\"]*\\bxdFormLayout\\b", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "\\bxdComboBox\\b", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "\\bxdDTPicker\\b", RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(html, "\\boptionalPlaceholder\\b", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(html, "<table\\b[^>]*class\\s*=\\s*['\"][^'\"]*\\bxdFormLayout\\b", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "\\bxdComboBox\\b", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "\\bxdDTPicker\\b", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(html, "\\boptionalPlaceholder\\b", RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor(IpFace) is null) return null;
-        var bodyOpen = Regex.Match(html, "<body\\b[^>]*>", RegexOptions.IgnoreCase);
+        var bodyOpen = SafeRegex.Match(html, "<body\\b[^>]*>", RegexOptions.IgnoreCase);
         var body = IpParse(bodyOpen.Success ? html[(bodyOpen.Index + bodyOpen.Length)..] : html);
         var form = IpFindForm(body);
         if (form is null) return null;
@@ -152,14 +149,14 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A px length in pt; 0 when absent or not px.</summary>
     private static double IpPx(string value)
     {
-        var m = Regex.Match(value, "^\\s*(-?\\d+(?:\\.\\d+)?)\\s*px\\s*$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(value, "^\\s*(-?\\d+(?:\\.\\d+)?)\\s*px\\s*$", RegexOptions.IgnoreCase);
         return m.Success ? double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * IpPxPt : 0;
     }
 
     /// <summary>A percent width against a box; 0 when the value is not a percent.</summary>
     private static double IpPct(string value, double of)
     {
-        var m = Regex.Match(value, "^\\s*(\\d+(?:\\.\\d+)?)\\s*%\\s*$");
+        var m = SafeRegex.Match(value, "^\\s*(\\d+(?:\\.\\d+)?)\\s*%\\s*$");
         return m.Success ? double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) / 100.0 * of : 0;
     }
 
@@ -194,8 +191,7 @@ internal static partial class HtmlToPdfConverter
 
     private static bool IpIsCjk(string text)
     {
-        foreach (var ch in text) if (ch >= 0x2E80 && ch <= 0x9FFF || ch >= 0xFF00 && ch <= 0xFFEF) return true;
-        return false;
+        return text.Any(ch => ch >= 0x2E80 && ch <= 0x9FFF || ch >= 0xFF00 && ch <= 0xFFEF);
     }
 
     /// <summary>A CSS colour as a PDF rgb triple, or null.</summary>
@@ -220,7 +216,7 @@ internal static partial class HtmlToPdfConverter
                 case "large": return 13.5;
             }
             if (IpPx(css) > 0) return IpPx(css);
-            var pt = Regex.Match(css, "^(\\d+(?:\\.\\d+)?)\\s*pt$", RegexOptions.IgnoreCase);
+            var pt = SafeRegex.Match(css, "^(\\d+(?:\\.\\d+)?)\\s*pt$", RegexOptions.IgnoreCase);
             if (pt.Success) return double.Parse(pt.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         }
         if (el.Tag == "font" && el.Attr("size") is { Length: > 0 } size)

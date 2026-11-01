@@ -276,15 +276,10 @@ internal static partial class MarkdownRenderer
             var j = i;
             while (j < end && uris[j] == uri && img[j] == isImg && style[j] == st) j++;
             var seg = raw.Substring(i, j - i);
-            if (isImg)
+            // An image, and a whitespace-only run, pass through as-is (lead and trail
+            // would otherwise both capture a blank run's characters and double them).
+            if (isImg || seg.Trim().Length == 0)
             {
-                sb.Append(seg);
-                prevWasLink = false;
-            }
-            else if (seg.Trim().Length == 0)
-            {
-                // A whitespace-only run passes through as-is (lead and trail would
-                // otherwise both capture the same characters and double them).
                 sb.Append(seg);
                 prevWasLink = false;
             }

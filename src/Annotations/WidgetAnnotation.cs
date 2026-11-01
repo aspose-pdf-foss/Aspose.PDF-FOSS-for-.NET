@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.Functions;
 using Aspose.Pdf.IO;
 
@@ -61,8 +61,15 @@ public partial class WidgetAnnotation : Annotation
                 };
                 if (InternalReader.Resolve(bs.Get("D")) is PdfArray d && d.Count > 0)
                 {
-                    int on = d[0] is PdfInteger di ? (int)di.Value : d[0] is PdfReal dr ? (int)dr.Value : 0;
-                    int off = d.Count > 1 ? (d[1] is PdfInteger oi ? (int)oi.Value : d[1] is PdfReal orr ? (int)orr.Value : on) : on;
+                    int on = d[0] switch { PdfInteger di => (int)di.Value, PdfReal dr => (int)dr.Value, _ => 0 };
+                    int off;
+                    if (d.Count > 1)
+                    {
+                        if (d[1] is PdfInteger oi) off = (int)oi.Value;
+                        else if (d[1] is PdfReal orr) off = (int)orr.Value;
+                        else off = on;
+                    }
+                    else off = on;
                     border.Dash = new Dash(on, off);
                 }
             }
@@ -126,17 +133,25 @@ public partial class WidgetAnnotation : Annotation
 
     /// <summary>Default-appearance (font, size, colour) for this widget. Write-through:
     /// the setter serialises a /DA string onto the widget dict (so a per-widget appearance
-    /// survives save and drives the regenerated /AP), and the getter reads /DA back.</summary>
+    /// survives save and drives the regenerated /AP), and the getter reads /DA back.
+    /// A form field reached through this type - the form's indexer hands fields out as
+    /// widgets - keeps its own appearance, which redraws the field when it changes.</summary>
     public DefaultAppearance DefaultAppearance
     {
         get
         {
+            if (this is Forms.Field field) return field.DefaultAppearance;
             if (_defaultAppearance is not null) return _defaultAppearance;
             var da = (Dict.Get("DA") as PdfString)?.ToText();
             return _defaultAppearance = (ParseDefaultAppearanceString(da) ?? new DefaultAppearance());
         }
         set
         {
+            if (this is Forms.Field field)
+            {
+                field.DefaultAppearance = value;
+                return;
+            }
             _defaultAppearance = value;
             if (value is not null)
                 Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(SerializeDefaultAppearance(value))));
@@ -158,7 +173,7 @@ public partial class WidgetAnnotation : Annotation
     private static DefaultAppearance? ParseDefaultAppearanceString(string? da)
     {
         if (string.IsNullOrEmpty(da)) return null;
-        var p = da!.Split(new[] { ' ', '\n', '\t', '\r' }, System.StringSplitOptions.RemoveEmptyEntries);
+        var p = da.Split(new[] { ' ', '\n', '\t', '\r' }, System.StringSplitOptions.RemoveEmptyEntries);
         string font = "Helvetica";
         double size = 12;
         var color = System.Drawing.Color.Black;
@@ -340,8 +355,8 @@ public partial class WidgetAnnotation : Annotation
         if (apDict is null) return string.Empty;
         var n = InternalReader.Resolve(apDict.Get("N")) as PdfDictionary;
         if (n is null) return string.Empty;
-        foreach (var key in n.Keys)
-            if (key != "Off") return key;
+        var key = n.Keys.FirstOrDefault(key => key != "Off");
+        if (key is not null) return key;
         return string.Empty;
     }
 

@@ -70,10 +70,7 @@ namespace Aspose.Pdf.Comparison.SideBySideComparison
             if (ExcludeAreas is null) return false;
             var cx = (rect.LLX + rect.URX) / 2;
             var cy = (rect.LLY + rect.URY) / 2;
-            foreach (var area in ExcludeAreas)
-                if (area is not null && area.ContainsPoint(cx, cy))
-                    return true;
-            return false;
+            return ExcludeAreas.Any(area => area is not null && area.ContainsPoint(cx, cy));
         }
 
         private static bool Intersects(Rectangle a, Rectangle b)

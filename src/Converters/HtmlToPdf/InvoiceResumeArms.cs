@@ -37,15 +37,15 @@ internal static partial class HtmlToPdfConverter
         if (!cv.html.Contains("class='contract'", StringComparison.OrdinalIgnoreCase)
             && !cv.html.Contains("class=\"contract\"", StringComparison.OrdinalIgnoreCase))
             return null;
-        if (!Regex.IsMatch(cv.html, @"fonts\.googleapis\.com/css\?family=Lato",
+        if (!SafeRegex.IsMatch(cv.html, @"fonts\.googleapis\.com/css\?family=Lato",
                 RegexOptions.IgnoreCase)
-            && !Regex.IsMatch(cv.html, @"@font-face[^}]*Lato", RegexOptions.IgnoreCase))
+            && !SafeRegex.IsMatch(cv.html, @"@font-face[^}]*Lato", RegexOptions.IgnoreCase))
             return null;
         cv.inv = System.Globalization.CultureInfo.InvariantCulture;
         cv.cssText = cv.html;
-        if (!Regex.IsMatch(cv.html, @"@font-face", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(cv.html, @"@font-face", RegexOptions.IgnoreCase))
         {
-            var linkM = Regex.Match(cv.html,
+            var linkM = SafeRegex.Match(cv.html,
                 @"<link[^>]*href\s*=\s*[""'](https?://fonts\.googleapis\.com[^""']+)[""']",
                 RegexOptions.IgnoreCase);
             if (!linkM.Success) return null;
@@ -62,7 +62,9 @@ internal static partial class HtmlToPdfConverter
         cv.wm = wm;
         cv.regFace = regFace;
         RenderInvoiceHeader(cv);
-        foreach (Match cM in Regex.Matches(cv.html, @"<div class='(contract|total)'[^>]*>",
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match cM in SafeRegex.Matches(cv.html, @"<div class='(contract|total)'[^>]*>",
+#pragma warning restore S3267
             RegexOptions.IgnoreCase))
         {
             if (!RenderInvoiceCard(cv, cM)) break;

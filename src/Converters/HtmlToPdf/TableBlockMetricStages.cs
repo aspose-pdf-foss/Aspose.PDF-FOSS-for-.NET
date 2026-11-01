@@ -7,6 +7,32 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>The metric layouter draws the table block: its rows, its nested grids and the flow cursor it leaves behind. False means the caller's loop moves on.</summary>
+    /// <summary>A metric table's available width.</summary>
+    private static double MetricTableAvailW(Block block, HtmlFlowCursor flow, HtmlDocProfile profile)
+    {
+        // (a grid under a wrapper whose rule declares a box lays out in that box)
+        if (profile.uaStdSerif && block.HostWidthPt > 0) return block.HostWidthPt;
+        // inside a fieldset the FRAME's content box is the
+        // table's available width, not the page content box
+        if (flow.fsIndentLive > 0 && profile.fsBoxW > 0)
+            return profile.fsBoxW - (profile.uaFieldsetContent ? 2 * (FsPadLeftPt - UaFieldsetSideInsetPt) : FsPadLeftPt + FsPadRightPt);
+        if (flow.frameContentW > 0) return flow.frameContentW - FramedTableOffsetPt(flow, block.TableHtml ?? "");
+        return flow.contentWidth - flow.fsIndentLive;
+    }
+
+    /// <summary>The size a metric table's cells type at when they state none.</summary>
+    private static double MetricTableBaseFontPt(TableBlockState tb, Block block, HtmlDocProfile profile)
+    {
+        if (profile.printGrid) return profile.printGridBase;
+        if (profile.ptReportDoc && profile.ptTableFontPt > 0) return profile.ptTableFontPt;
+        // (…and at the size the wrapper's rule states)
+        if (profile.uaStdSerif && block.HostFontPt > 0) return block.HostFontPt;
+        // (…or the body's own size where its tag or class states one: a standards
+        //  document's cells inherit it - the change-control page's 9.5 pt th/td)
+        if (profile.uaStdSerif && profile.bodyOwnFontPt > 0) return profile.bodyOwnFontPt;
+        return profile.uaStdSerif || tb.quirksRunTable ? 12 : 11;
+    }
+
     private static void LayoutMetricTableBlock(TableBlockState tb, Block block, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, Dictionary<string, Dictionary<string, string>> css, HtmlLoadOptions? options, double marginLeft, double marginTop, double marginBottom, double pageWidth, double pageHeight, bool tableAfterText, bool tableAfterSpacer, (double asc, double sum) tfm)
     {
         // Measured on the width:100%-body sheet only — the plain-
@@ -30,31 +56,17 @@ internal static partial class HtmlToPdfConverter
         // (inside a framed wrapper div the tables stand in its content box, centred when it centres)
         var frameX = flow.frameContentW > 0 ? flow.frameInset + FramedTableOffsetPt(flow, block.TableHtml ?? "") : 0;
         RenderMetricTable(doc, flow, block.TableHtml ?? "", css,
-            marginLeft + flow.fsIndentLive + frameX,
-            // inside a fieldset the FRAME's content box is the
-            // table's available width, not the page content box
-            // (a grid under a wrapper whose rule declares a box lays out in that box)
-            profile.uaStdSerif && block.HostWidthPt > 0 ? block.HostWidthPt
-                : flow.fsIndentLive > 0 && profile.fsBoxW > 0
-                ? profile.fsBoxW - (profile.uaFieldsetContent ? 2 * (FsPadLeftPt - UaFieldsetSideInsetPt) : FsPadLeftPt + FsPadRightPt)
-                : flow.frameContentW > 0 ? flow.frameContentW - FramedTableOffsetPt(flow, block.TableHtml ?? "")
-                : flow.contentWidth - flow.fsIndentLive,
+            marginLeft + flow.fsIndentLive + frameX + TableRelativeShiftPt(block.TableHtml),
+            MetricTableAvailW(block, flow, profile),
             pageWidth, pageHeight,
             marginTop, marginBottom,
             // (a UA grid under a wrapper whose rule states a face draws in that face)
-            profile.uaStdSerif && block.HostFace is { } hostFace && WinMetricsFor(hostFace) is { } hostFm ? hostFace : tb.tableFace!,
+            profile.uaStdSerif && block.HostFace is { } hostFace && WinMetricsFor(hostFace) is { } ? hostFace : tb.tableFace!,
             profile.uaStdSerif && block.HostFace is { } hostFace2 && WinMetricsFor(hostFace2) is { } hostFm2 ? hostFm2 : tfm,
             docFontDict,
             // (a pt-sized form document grids on the UA table laws in its own face)
             stdSerif: profile.uaStdSerif || (profile.ptReportDoc && profile.uaFormCells),
-            baseFontSize: profile.printGrid ? profile.printGridBase
-                : profile.ptReportDoc && profile.ptTableFontPt > 0 ? profile.ptTableFontPt
-                // (…and at the size the wrapper's rule states)
-                : profile.uaStdSerif && block.HostFontPt > 0 ? block.HostFontPt
-                // (…or the body's own size where its tag or class states one: a standards
-                //  document's cells inherit it - the change-control page's 9.5 pt th/td)
-                : profile.uaStdSerif && profile.bodyOwnFontPt > 0 ? profile.bodyOwnFontPt
-                : profile.uaStdSerif || tb.quirksRunTable ? 12 : 11,
+            baseFontSize: MetricTableBaseFontPt(tb, block, profile),
             // The wrapper-stack recursion serves the legacy nested-
             // markup corpus; the dead-css greens were calibrated on
             // the flat merge and keep it. A zero body margin has no

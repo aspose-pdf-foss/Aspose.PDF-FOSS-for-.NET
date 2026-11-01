@@ -17,6 +17,9 @@ public sealed class FontCollection : IEnumerable<Font>
     // absorber's view of accumulated fonts) has none and stays read-only.
     private readonly PdfDictionary? _pageDict;
     private readonly PdfReader? _pageReader;
+    // A collection read from a resource dictionary that carries /Font itself (the
+    // AcroForm /DR, a form XObject's resources) adds its fonts there.
+    private readonly PdfDictionary? _resourceDict;
 
     /// <summary>Empty collection — used by <see cref="FontAbsorber"/> to expose accumulated fonts.</summary>
     internal FontCollection() { }
@@ -73,12 +76,30 @@ public sealed class FontCollection : IEnumerable<Font>
         return null;
     }
 
+    private FontCollection(PdfReader reader, PdfDictionary resourceDict)
+    {
+        _resourceDict = resourceDict;
+        _pageReader = reader;
+    }
+
+    /// <summary>True when an added font can be declared: the collection belongs to a page or a resource dictionary.</summary>
+    private bool CanDeclare => _pageReader is not null && (_pageDict is not null || _resourceDict is not null);
+
+    /// <summary>The /Font dictionary an added font is declared in, created when absent.</summary>
+    private PdfDictionary DeclaredFonts()
+    {
+        if (_pageDict is not null) return GetOrCreateFontResources(_pageDict, _pageReader!);
+        var fonts = _pageReader!.ResolveDict(_resourceDict!.Get("Font"));
+        if (fonts is null) _resourceDict.Set("Font", fonts = new PdfDictionary());
+        return fonts;
+    }
+
     /// <summary>Build a collection from a resource dictionary that carries /Font
     /// directly (e.g. the AcroForm /DR), as opposed to a page dict whose fonts
     /// live under /Resources/Font.</summary>
     internal static FontCollection ForResources(PdfDictionary resourceDict, PdfReader reader)
     {
-        var fc = new FontCollection();
+        var fc = new FontCollection(reader, resourceDict);
         var fontDict = reader.ResolveDict(resourceDict.Get("Font"));
         if (fontDict is not null)
         {
@@ -118,8 +139,12 @@ public sealed class FontCollection : IEnumerable<Font>
     public IEnumerator<Font> GetEnumerator() => _fonts.GetEnumerator();
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => false;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>Returns <c>true</c> when the collection contains the given font object.</summary>
@@ -157,10 +182,28 @@ public sealed class FontCollection : IEnumerable<Font>
     {
         if (newFont is null) throw new ArgumentNullException(nameof(newFont));
 
-        var program = newFont.ProgramBytes();
-        if (_pageDict is not null && _pageReader is not null && program is not null)
+        // A Type 1 program is declared as the simple font it is, its program embedded.
+        if (CanDeclare && newFont.SourceFontData?.Type1 is { } type1)
         {
-            var fontDict = GetOrCreateFontResources(_pageDict, _pageReader);
+            resName = DeclareType1(DeclaredFonts(), type1);
+            newFont.PageResourceName = resName;
+            _fonts.Add(newFont);
+            return;
+        }
+
+        // A predefined CJK face is declared by name in its CMap, with no program.
+        if (CanDeclare && newFont.SourceFontData?.PredefinedCid is { } cid)
+        {
+            resName = DeclarePredefinedCid(DeclaredFonts(), cid);
+            newFont.PageResourceName = resName;
+            _fonts.Add(newFont);
+            return;
+        }
+
+        var program = newFont.ProgramBytes();
+        if (CanDeclare && program is not null)
+        {
+            var fontDict = DeclaredFonts();
             // No text yet: this registers the face. Each run shown against it
             // adds its own glyphs, and the save-time subsetter keeps only those.
             // /BaseFont carries the face's PostScript name, which is not its full
@@ -174,10 +217,88 @@ public sealed class FontCollection : IEnumerable<Font>
             return;
         }
 
+        // A Standard-14 face has no program to embed: it is declared by name, as a
+        // plain Type1 font every reader carries, and its text is written in WinAnsi.
+        var core = program is null ? Standard14Fonts.CanonicalName(newFont.FontName ?? string.Empty) : null;
+        if (CanDeclare && core is not null)
+        {
+            resName = DeclareStandard14(DeclaredFonts(), core);
+            newFont.PageResourceName = resName;
+            _fonts.Add(newFont);
+            return;
+        }
+
         // No page to write to, or no font program to embed: keep the old
         // behaviour of naming the font without registering it.
         resName = $"F{_nextResId++}";
         _fonts.Add(newFont);
+    }
+
+    /// <summary>
+    /// The resource name of a Type1 entry for <paramref name="baseFont"/> in the page's
+    /// /Font dictionary, written when the page does not declare one already. Symbol and
+    /// ZapfDingbats keep their built-in encodings; the text faces use WinAnsi.
+    /// </summary>
+    private static string DeclareStandard14(PdfDictionary fonts, string baseFont)
+    {
+        foreach (var key in fonts.Keys)
+        {
+            if (fonts.Get(key) is PdfDictionary entry
+                && entry.GetName("Subtype") == "Type1"
+                && entry.GetName("BaseFont") == baseFont
+                && entry.Get("FontDescriptor") is null)
+                return key;
+        }
+
+        var counter = 1;
+        while (fonts.ContainsKey($"F{counter}")) counter++;
+        var name = $"F{counter}";
+
+        var font = new PdfDictionary();
+        font.Set("Type", new PdfName("Font"));
+        font.Set("Subtype", new PdfName("Type1"));
+        font.Set("BaseFont", new PdfName(baseFont));
+        if (!Standard14Fonts.IsSymbolic(baseFont))
+            font.Set("Encoding", new PdfName("WinAnsiEncoding"));
+        fonts.Set(name, font);
+        return name;
+    }
+
+    /// <summary>The resource name of <paramref name="type1"/> in the page's /Font dictionary,
+    /// declared when the page does not hold it already.</summary>
+    private static string DeclareType1(PdfDictionary fonts, Type1FontFile type1)
+    {
+        foreach (var key in fonts.Keys)
+        {
+            if (fonts.Get(key) is PdfDictionary entry
+                && entry.Get("FontDescriptor") is PdfDictionary descriptor
+                && ReferenceEquals(descriptor.Get("FontFile"), type1.Program()))
+                return key;
+        }
+
+        var counter = 1;
+        while (fonts.ContainsKey($"F{counter}")) counter++;
+        var name = $"F{counter}";
+        fonts.Set(name, type1.FontDictionary());
+        return name;
+    }
+
+    /// <summary>The resource name of <paramref name="cid"/> in the page's /Font dictionary,
+    /// declared when the page does not hold the face in that CMap already.</summary>
+    internal static string DeclarePredefinedCid(PdfDictionary fonts, PredefinedCidFont cid)
+    {
+        var declared = fonts.Keys.FirstOrDefault(key =>
+            fonts.Get(key) is PdfDictionary entry
+            && entry.GetName("Subtype") == "Type0"
+            && entry.GetName("BaseFont") == cid.FaceName
+            && entry.GetName("Encoding") == cid.CMap.Name);
+        if (declared is not null) return declared;
+
+        var counter = 1;
+        while (fonts.ContainsKey($"F{counter}")) counter++;
+        var name = $"F{counter}";
+        fonts.Set(name, cid.FontDictionary());
+        return name;
     }
 
     /// <summary>The page's /Resources /Font dictionary, created when absent.</summary>

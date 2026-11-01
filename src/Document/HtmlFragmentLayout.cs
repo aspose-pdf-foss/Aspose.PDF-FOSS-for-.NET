@@ -41,7 +41,7 @@ public sealed partial class Document
         hl.marginRight = marginRight;
         hl.marginTop = marginTop;
         hl.marginBottom = marginBottom;
-        (hl.htmlContent, var inlineSvgs) = Converters.HtmlToPdfConverter.ExtractInlineSvgs(Converters.HtmlToPdfConverter.ApplyKnockoutTextBindings(hl.html.HtmlContent ?? ""));
+        (hl.htmlContent, var inlineSvgs) = Converters.HtmlToPdfConverter.ExtractInlineSvgs(Converters.HtmlToPdfConverter.InlineFragmentSheet(Converters.HtmlToPdfConverter.ApplyKnockoutTextBindings(hl.html.HtmlContent ?? "")));
         hl.htmlColor = hl.html.TextState?.ForegroundColor;
         hl.htmlFragmentLinkEmitted = false;
 
@@ -51,20 +51,20 @@ public sealed partial class Document
         hl.htmlOpenFrames = new List<(int Index, int Slot, double Top)>();
         if (hl.html.HtmlLoadOptions?.PageInfo is { MarginAssigned: true } mfPi)
         {
-            if (!LayoutMarginAssignedFragment(hl, mfPi)) return;
+            LayoutMarginAssignedFragment(hl, mfPi);
         }
         else if (Converters.HtmlToPdfConverter.TryParseFilingLetter(hl.htmlContent) is { } flItems)
         {
-            if (!LayoutFilingLetter(hl, flItems)) return;
+            LayoutFilingLetter(hl, flItems);
         }
         else if (Converters.HtmlToPdfConverter.TryParseProcedureStepRows(hl.htmlContent,
                      hl.html.IsParagraphHasMargin, hl.html.HtmlLoadOptions) is { } psRows)
         {
-            LayoutProcedureStepRows(psRows, hl.html, hl.flow, hl.page, hl.marginLeft, hl.marginRight, hl.marginTop, hl.marginBottom);
+            LayoutProcedureStepRows(psRows, hl.flow, hl.page, hl.marginLeft, hl.marginRight);
         }
         else if (Converters.HtmlToPdfConverter.ContainsTable(hl.htmlContent))
         {
-            if (!LayoutHtmlTableFragment(hl, inlineSvgs)) return;
+            LayoutHtmlTableFragment(hl, inlineSvgs);
         }
         else if (TryRenderListDialect(hl))
         {

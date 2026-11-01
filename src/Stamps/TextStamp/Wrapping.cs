@@ -13,30 +13,30 @@ public partial class TextStamp
     // exceed maxW; a single word wider than maxW gets its own (overflowing) line. Explicit
     // '\n' forces a break. Words are measured with the real face metrics (MeasureRow).
     // Largest font size (bisected to AutoFitPrecision) at which the word-wrapped
-    // text still fits Width×Height. The block is N wrapped lines tall, each line
+    // text still fits the boxW×boxH box. The block is N wrapped lines tall, each line
     // one em of leading with a 1.1-em box on the single line, so the block height
     // is (N + 0.1)·fontSize. Width binds only when a single word is itself wider
     // than the box (an unbreakable word ⇒ the search collapses to 0).
-    private double ComputeAutoFitFontSize(string baseFont, byte[] encoded)
+    private double ComputeAutoFitFontSize(string baseFont, byte[] encoded, double boxW, double boxH)
     {
         var prec = AutoFitPrecision > 0 ? AutoFitPrecision : 0.1;
         double lo = 0, hi = 2000;
-        if (!AutoFitFits(hi, baseFont, encoded))
+        if (!AutoFitFits(hi, baseFont, encoded, boxW, boxH))
         {
             while (hi - lo > prec)
             {
                 var mid = (lo + hi) / 2;
-                if (AutoFitFits(mid, baseFont, encoded)) lo = mid; else hi = mid;
+                if (AutoFitFits(mid, baseFont, encoded, boxW, boxH)) lo = mid; else hi = mid;
             }
             return lo;
         }
         return hi;
     }
 
-    private bool AutoFitFits(double f, string baseFont, byte[] encoded)
+    private static bool AutoFitFits(double f, string baseFont, byte[] encoded, double boxW, double boxH)
     {
         if (f <= 0) return true;
-        var rows = AutoFitWrap(encoded, baseFont, f, Width);
+        var rows = AutoFitWrap(encoded, baseFont, f, boxW);
         double blockWidth = 0;
         foreach (var r in rows)
         {
@@ -44,7 +44,7 @@ public partial class TextStamp
             if (w > blockWidth) blockWidth = w;
         }
         var blockHeight = (rows.Count + 0.1) * f;
-        return blockWidth <= Width + 1e-6 && blockHeight <= Height + 1e-6;
+        return blockWidth <= boxW + 1e-6 && blockHeight <= boxH + 1e-6;
     }
 
     // Greedy word wrap for the auto-fit measurement. Unlike the render-side
@@ -72,37 +72,6 @@ public partial class TextStamp
                 if (cur.Count == 0) { cur.AddRange(word); continue; }
                 var trial = new List<byte>(cur); trial.AddRange(word);
                 if (MeasureRow(TrimTrailingSpace(trial), baseFont, fontSize) > maxW)
-                {
-                    rows.Add(TrimTrailingSpace(cur));
-                    cur = new List<byte>(word);
-                }
-                else cur = trial;
-            }
-            rows.Add(TrimTrailingSpace(cur));
-        }
-        return rows.Count == 0 ? new List<byte[]> { enc } : rows;
-    }
-
-    private static List<byte[]> WrapAtSpaces(byte[] enc, string baseFont, double fontSize, double maxW)
-    {
-        var rows = new List<byte[]>();
-        foreach (var lineSeg in SplitRows(enc))
-        {
-            var words = new List<byte[]>();
-            var w = new List<byte>();
-            foreach (var b in lineSeg)
-            {
-                w.Add(b);
-                if (b == (byte)' ') { words.Add(w.ToArray()); w = new List<byte>(); }
-            }
-            if (w.Count > 0) words.Add(w.ToArray());
-
-            var cur = new List<byte>();
-            foreach (var word in words)
-            {
-                if (cur.Count == 0) { cur.AddRange(word); continue; }
-                var trial = new List<byte>(cur); trial.AddRange(word);
-                if (MeasureRow(trial.ToArray(), baseFont, fontSize) > maxW)
                 {
                     rows.Add(TrimTrailingSpace(cur));
                     cur = new List<byte>(word);

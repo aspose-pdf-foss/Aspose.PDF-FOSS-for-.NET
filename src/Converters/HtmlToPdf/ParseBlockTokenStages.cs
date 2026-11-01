@@ -32,9 +32,19 @@ internal static partial class HtmlToPdfConverter
     {
         if (pb.controlBoxes && pb.tag.Equals("button", StringComparison.OrdinalIgnoreCase))
         {
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             pb.inlineRunId = 0; pb.runPrevWasControl = false;
             pb.inButton = true; pb.buttonText.Clear();
+            return false;
+        }
+
+        // (the base flows: a button element is a push button on its control line, its text the caption)
+        if (pb.controlLines && pb.tag.Equals("button", StringComparison.OrdinalIgnoreCase))
+        {
+            OpenControlLine(pb);
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
+            pb.inButton = true; pb.buttonText.Clear();
+            pb.buttonAttrs = tok.Attributes;
             return false;
         }
 
@@ -49,7 +59,8 @@ internal static partial class HtmlToPdfConverter
             if (pb.controlBoxes && pb.inlineRunId == 0) pb.inlineRunId = pb.nextInlineRunId++;
             var taTrailWs = pb.currentText.Length > 0 && char.IsWhiteSpace(pb.currentText[^1]);
             var taBefore = pb.blocks.Count;
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            OpenControlLine(pb);
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             if (pb.controlBoxes && taTrailWs && pb.blocks.Count > taBefore)
                 pb.blocks[^1].Text += " ";
             pb.blocks.Add(BuildInputBlock(tok.Attributes, pb.styleStack.Peek(),
@@ -59,6 +70,8 @@ internal static partial class HtmlToPdfConverter
                 pb.blocks[^1].InlineRunId = pb.inlineRunId;
                 pb.runPrevWasControl = true;
             }
+            pb.blocks[^1].CtlLineId = pb.ctlLineId;
+            if (pb.controlLines) ApplyDeclaredAreaBox(pb.blocks[^1], tok.Attributes);
             pb.textareaBlock = pb.blocks[^1];
             pb.textareaText.Clear();
             pb.inTextarea = true;
@@ -72,7 +85,8 @@ internal static partial class HtmlToPdfConverter
             if (pb.controlBoxes && pb.inlineRunId == 0) pb.inlineRunId = pb.nextInlineRunId++;
             var trailWs = pb.currentText.Length > 0 && char.IsWhiteSpace(pb.currentText[^1]);
             var nBefore = pb.blocks.Count;
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            OpenControlLine(pb);
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             if (pb.controlBoxes && trailWs && pb.blocks.Count > nBefore)
                 pb.blocks[^1].Text += " ";
             pb.inSelect = true; pb.inSelectedOption = false; pb.selectedText.Clear();
@@ -81,6 +95,9 @@ internal static partial class HtmlToPdfConverter
             tok.Attributes?.TryGetValue("name", out selNm);
             tok.Attributes?.TryGetValue("id", out selId);
             pb.selectName = !string.IsNullOrEmpty(selNm) ? selNm : selId;
+            string? selStyle = null;
+            tok.Attributes?.TryGetValue("style", out selStyle);
+            (pb.selectWidthPx, _) = ParseInputSize(selStyle);
             return false;
         }
         if (pb.inSelect && pb.tag.Equals("option", StringComparison.OrdinalIgnoreCase))
@@ -102,7 +119,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (pb.tag.Equals(FrameDivTag, StringComparison.OrdinalIgnoreCase))
         {
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             var marker = new Block { Text = "", IsHardBreak = true, FsBox = tok.IsClose ? -1 : 1, FrameW = CssBorderMediumPt };
             if (!tok.IsClose && tok.Attributes is { } fa)
             {
@@ -110,7 +127,7 @@ internal static partial class HtmlToPdfConverter
                 var sides = CssBorderSides(st);
                 marker.FrameW = sides[0].W > 0 ? sides[0].W : CssBorderMediumPt;
                 marker.FrameCol = sides[0].Col;
-                if (Regex.Match(st, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } wm
+                if (SafeRegex.Match(st, @"(?<![-\w])width\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } wm
                     && TryParseLength(wm.Groups[1].Value.Trim()) is { } wPt) marker.FrameBoxW = wPt;
                 marker.FrameCentred = fa.TryGetValue("align", out var al) && al is not null
                     && al.Trim().Equals("center", StringComparison.OrdinalIgnoreCase);
@@ -120,7 +137,7 @@ internal static partial class HtmlToPdfConverter
         }
         if (pb.fieldsetBoxes && pb.tag.Equals("fieldset", StringComparison.OrdinalIgnoreCase))
         {
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             pb.blocks.Add(new Block { Text = "", IsHardBreak = true, FsBox = tok.IsClose ? -1 : 1 });
             // clamped at zero: the close tag often parses in a LATER segment
             // (its table split the parse) whose fresh root never saw the open
@@ -131,7 +148,7 @@ internal static partial class HtmlToPdfConverter
         }
         if (pb.fieldsetBoxes && pb.tag.Equals("legend", StringComparison.OrdinalIgnoreCase))
         {
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             var lgdTop = pb.styleStack.Peek();
             if (!tok.IsClose)
             {
@@ -139,7 +156,7 @@ internal static partial class HtmlToPdfConverter
                 var lgdFactor = pb.uaFieldset ? 1.0 : 1.2;
                 if (pb.css is not null && pb.css.TryGetValue("legend", out var lgdRule)
                     && lgdRule.TryGetValue("font-size", out var lgdFs)
-                    && Regex.Match(lgdFs, @"([\d.]+)\s*em") is { Success: true } lgdEm)
+                    && SafeRegex.Match(lgdFs, @"([\d.]+)\s*em") is { Success: true } lgdEm)
                     lgdFactor = double.Parse(lgdEm.Groups[1].Value,
                         System.Globalization.CultureInfo.InvariantCulture);
                 lgdTop.FontSize *= lgdFactor;
@@ -163,7 +180,7 @@ internal static partial class HtmlToPdfConverter
             return false;
         }
 
-        if (tok.IsClose) { HandleBlockClose(pb, tok, pb.tag); return false; }
+        if (tok.IsClose) { HandleBlockClose(pb, pb.tag); return false; }
 
         // Opening tag (or self-closing).
         // Anchor targets: an `id` on any element, or a `name` on <a>, marks a
@@ -179,7 +196,7 @@ internal static partial class HtmlToPdfConverter
         }
         if (pb.tag.Equals("center", StringComparison.OrdinalIgnoreCase))
         {
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             if (!tok.IsSelfClosing) pb.centerDepth++;
             return false;
         }
@@ -222,7 +239,7 @@ internal static partial class HtmlToPdfConverter
                 && tok.Attributes.TryGetValue("i", out var riStr)
                 && int.TryParse(riStr, out var ri) && ri >= 0 && ri < pb.rowBlocks.Count)
             {
-                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
                 // (an inline-block row lays out inside its container's box: the insets the
                 // open styles carry travel with the placeholder)
                 var rowBlock = pb.rowBlocks[ri];
@@ -234,7 +251,7 @@ internal static partial class HtmlToPdfConverter
                     // the container's pending padding-top spaces the row, as it would a block
                     if (rowStyle.PadTop > 0)
                     {
-                        rowBlock.InlineRow!.PadTopPt += rowStyle.PadTop;
+                        rowBlock.InlineRow.PadTopPt += rowStyle.PadTop;
                         rowStyle.PadTop = 0;
                     }
                 }
@@ -242,7 +259,7 @@ internal static partial class HtmlToPdfConverter
             }
             return false;
         }
-        if (!tok.IsClose && IsHiddenElement(pb.tag, tok.Attributes, pb.css))
+        if (!tok.IsClose && (IsHiddenElement(pb.tag, tok.Attributes, pb.css) || HiddenUnderOpenBlocks(pb, tok)))
         {
             if (!tok.IsSelfClosing && !VoidTags.Contains(pb.tag))
             {
@@ -253,6 +270,45 @@ internal static partial class HtmlToPdfConverter
         }
         return true;
     }
+
+    /// <summary>True when a rule addressed through the blocks open above the element hides it - a descendant
+    /// (`div.nav ul { display: none }`) or a longer chain (`div.kid > ul`, the chain's winning value deciding);
+    /// the element's own selectors are IsHiddenElement's.</summary>
+    private static bool HiddenUnderOpenBlocks(ParseBlocksState pb, Token tok)
+    {
+        if (pb.divClassStack.Count == 0) return false;
+        var hiding = HidingDescendantChains(pb.css);
+        if (hiding.Count == 0 && pb.chainRules is null) return false;
+        var classes = tok.Attributes is { } a && a.TryGetValue("class", out var cls) && cls is not null
+            ? cls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries) : null;
+        string? id = null;
+        tok.Attributes?.TryGetValue("id", out id);
+        var chain = OpenAncestors(pb);
+        chain.Add(new CssElem { Tag = pb.tag.ToLowerInvariant(), Id = id, Classes = classes });
+        if (hiding.Any(segs => MatchChainAt(segs, segs.Count - 1, chain, chain.Count - 1))) return true;
+        if (pb.chainRules is null) return false;
+        foreach (var prop in VisibilityProperties)
+        {
+            CssChainRule? winner = null;
+            foreach (var r in pb.chainRules.Where(r => r.Decls.ContainsKey(prop) && MatchChainAt(r.Segs, r.Segs.Count - 1, chain, chain.Count - 1)))
+                if (winner is null || r.Spec > winner.Spec || (r.Spec == winner.Spec && r.Order > winner.Order)) winner = r;
+            if (winner is not null && HidesBy(prop, winner.Decls[prop]) && !ShowsASiblingPane(pb.chainRules, winner, prop)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>The tab idiom: a chain hiding every pane under a context (`.tab-content > .tab-pane { display:
+    /// none }`) beside a chain of the same shape showing one of them (`.tab-content > .active { display: block }`).
+    /// The page prints every pane, as the reference does, not the one a script would switch to.</summary>
+    private static bool ShowsASiblingPane(List<CssChainRule> rules, CssChainRule hiding, string prop)
+        => rules.Any(r => !ReferenceEquals(r, hiding) && r.Segs.Count == hiding.Segs.Count
+            && r.Decls.TryGetValue(prop, out var shown) && !HidesBy(prop, shown)
+            && r.Segs.Take(r.Segs.Count - 1).Zip(hiding.Segs.Take(hiding.Segs.Count - 1), SameSeg).All(same => same));
+
+    private static bool SameSeg(CssChainSeg a, CssChainSeg b)
+        => string.Equals(a.Tag, b.Tag, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(a.Id, b.Id, StringComparison.OrdinalIgnoreCase)
+            && (a.Classes ?? new List<string>()).SequenceEqual(b.Classes ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The parse's collections, run trackers and depth marks start empty.</summary>
     private static void ResetParseState(ParseBlocksState pb)
@@ -302,6 +358,7 @@ internal static partial class HtmlToPdfConverter
         pb.inlineRunId = 0;
         pb.nextInlineRunId = 1;
         pb.runPrevWasControl = false;
+        pb.ctlLineId = 0;
         pb.italicOpenTextLen = -1;
         pb.inButton = false;
         pb.buttonText = new StringBuilder();
@@ -333,6 +390,7 @@ internal static partial class HtmlToPdfConverter
         pb.rawFamilyRuns = new List<(int start, int end, string fam)>();
         pb.openFamilyRuns = new Stack<(int depth, int start, string fam)>();
         pb.openSubSupRuns = new Stack<int>();
+        pb.openBdoRuns = new Stack<(int start, bool rtl)>();
         pb.bgSpans = new Stack<(int idx, Color c, double w, double frac, double padT, double padB, double padL, int depth)>();
         pb.rawDecorRuns = new List<(int start, int end, int kind, Color? c)>();
         pb.openDecorRuns = new Stack<(int depth, int start, int kind, Color? c)>();
@@ -346,20 +404,30 @@ internal static partial class HtmlToPdfConverter
     private static string NormaliseHtmlSource(string html)
     {
         // (a title is never content, wherever a headless document leaves it)
-        html = Regex.Replace(html, @"<(script|style|head|title)[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase);
+        html = SafeRegex.Replace(html, @"<(script|style|head|title)[^>]*>[\s\S]*?</\1>", "", RegexOptions.IgnoreCase);
+        return StripInertMarkup(html);
+    }
+
+    /// <summary>Scripts, the doctype, comments, CDATA sections, conditional-comment markers, processing instructions and a
+    /// leading byte-order mark leave the markup: none of them is an element or text, and a tag inside a script's string
+    /// literal or a commented-out block must not open a structure or count as a control. The style and head blocks stay
+    /// for the scans that read the sheet from the markup.</summary>
+    private static string StripInertMarkup(string html)
+    {
+        html = SafeRegex.Replace(html, @"<script\b[^>]*>[\s\S]*?</script>", "", RegexOptions.IgnoreCase);
         // Strip DOCTYPE, comments and CDATA sections — the tag tokenizer
         // below only recognises <Name …> shapes, so these would otherwise
         // surface as literal text content.
-        html = Regex.Replace(html, @"<!DOCTYPE[^>]*>", "", RegexOptions.IgnoreCase);
-        html = Regex.Replace(html, @"<!--[\s\S]*?-->", "");
-        html = Regex.Replace(html, @"<!\[CDATA\[[\s\S]*?\]\]>", "");
+        html = SafeRegex.Replace(html, @"<!DOCTYPE[^>]*>", "", RegexOptions.IgnoreCase);
+        html = SafeRegex.Replace(html, @"<!--[\s\S]*?-->", "");
+        html = SafeRegex.Replace(html, @"<!\[CDATA\[[\s\S]*?\]\]>", "");
         // Word's downlevel-revealed conditional comments (`<![if !supportLists]>` …
         // `<![endif]>`) are markup around content a browser shows; the markers
         // themselves are never text.
-        html = Regex.Replace(html, ConditionalCommentMarker, "", RegexOptions.IgnoreCase);
+        html = SafeRegex.Replace(html, ConditionalCommentMarker, "", RegexOptions.IgnoreCase);
         // XML processing instructions (<?xml …?> prolog of an XHTML file) are markup,
         // not text — a browser never renders them.
-        html = Regex.Replace(html, @"<\?[\s\S]*?\?>", "");
+        html = SafeRegex.Replace(html, @"<\?[\s\S]*?\?>", "");
         // Strip leading BOM if present — UTF-8 HTMLs often ship with one.
         if (html.Length > 0 && html[0] == '\uFEFF') html = html.Substring(1);
         return html;
@@ -371,7 +439,8 @@ internal static partial class HtmlToPdfConverter
         if (pb.controlBoxes)
         {
             var merged = new List<Block>(pb.blocks.Count);
-            for (int i = 0; i < pb.blocks.Count; i++)
+            int i = 0;
+            while (i < pb.blocks.Count)
             {
                 var b = pb.blocks[i];
                 if (b.InlineRunId > 0)
@@ -383,11 +452,12 @@ internal static partial class HtmlToPdfConverter
                         var items = new List<Block>();
                         for (int k = i; k <= j; k++) items.Add(pb.blocks[k]);
                         merged.Add(new Block { InlineItems = items, FontSize = b.FontSize });
-                        i = j;
+                        i = j + 1;
                         continue;
                     }
                 }
                 merged.Add(b);
+                i++;
             }
             return merged;
         }
@@ -397,7 +467,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The last run flushes, trailing hard breaks drop, and a pending page break lands on the last block.</summary>
     private static void FinishBlocks(ParseBlocksState pb)
     {
-        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false,pb.styleStack.Peek());
+        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography,pb.styleStack.Peek());
         // Drop trailing hard-break spacers so the doc doesn't grow a blank
         // tail page for HTML that ends with close-tags.
         // Drop trailing spacer-only hardbreaks so HTML that ends with close-tags
@@ -417,7 +487,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A UA span's own font-size: an em or percent of the size it opens in, else the CSS size as it stands.</summary>
     private static double? UaSpanFontSizePt(string value, double enclosingPt)
     {
-        var rel = Regex.Match(value, @"^(\d+(?:\.\d+)?|\.\d+)\s*(em|%)$", RegexOptions.IgnoreCase);
+        var rel = SafeRegex.Match(value, @"^(\d+(?:\.\d+)?|\.\d+)\s*(em|%)$", RegexOptions.IgnoreCase);
         if (rel.Success && enclosingPt > 0)
         {
             var n = double.Parse(rel.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
@@ -439,7 +509,7 @@ internal static partial class HtmlToPdfConverter
                 uaSpSt = uaSpSt.Replace("&quot;", "\"").Replace("&#34;", "\"")
                                .Replace("&apos;", "'").Replace("&#39;", "'");
             var uaTop = pb.styleStack.Peek();
-            var fsM = Regex.Match(uaSpSt, @"font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            var fsM = SafeRegex.Match(uaSpSt, @"font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
             // (an em or percent resolves against the size the span opens in - MEASURED, the evaluation
             //  form: the H1's `font-size: .8em` span is 11.44 = .8 x the 14.3 heading, not .8 x the body)
             if (fsM.Success && UaSpanFontSizePt(fsM.Groups[1].Value.Trim(), uaTop.FontSize) is { } uaSpFs)
@@ -458,14 +528,14 @@ internal static partial class HtmlToPdfConverter
                 }
                 uaTop.FontSize = uaSpFs;
             }
-            var lhM = Regex.Match(uaSpSt, @"line-height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+            var lhM = SafeRegex.Match(uaSpSt, @"line-height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
             if (lhM.Success && double.TryParse(lhM.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var uaLhPx))
                 uaTop.LineBoxPt = uaLhPx * 0.75;
             // …and a percentage one resolves against the span's own size
             // (which the same style attribute set just above).
-            var lhPctM = Regex.Match(uaSpSt, @"line-height\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase);
+            var lhPctM = SafeRegex.Match(uaSpSt, @"line-height\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase);
             if (lhPctM.Success && double.TryParse(lhPctM.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var uaLhPct)
@@ -474,20 +544,20 @@ internal static partial class HtmlToPdfConverter
             // A span's RESOLVABLE font-family styles its element's runs,
             // exactly like a <font face> (Word-filtered markup carries the
             // face on spans).
-            var famM = Regex.Match(uaSpSt, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+            var famM = SafeRegex.Match(uaSpSt, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
             if (famM.Success && FirstFontFamily(famM.Groups[1].Value) is { Length: > 0 } uaSpFam
                 && WinMetricsFor(uaSpFam) is not null)
                 uaTop.FontFamily = uaSpFam;
             // text-decoration: underline on an inline span opens an
             // underline run over the span's extent (its </span> closes it).
             if (pb.tagCmp == "span" && !tok.IsSelfClosing
-                && Regex.IsMatch(uaSpSt, @"text-decoration\s*:\s*[^;]*\bunderline",
+                && SafeRegex.IsMatch(uaSpSt, @"text-decoration\s*:\s*[^;]*\bunderline",
                     RegexOptions.IgnoreCase))
             {
                 if (pb.inlineUnderDepth++ == 0) pb.inlineUnderStart = pb.currentText.Length;
                 pb.uaUnderSpanDepths.Push(pb.spanDepth);
             }
-            var mlM = Regex.Match(uaSpSt, @"margin-left\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+            var mlM = SafeRegex.Match(uaSpSt, @"margin-left\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
             if (mlM.Success && double.TryParse(mlM.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var uaMlPx))
@@ -507,9 +577,9 @@ internal static partial class HtmlToPdfConverter
                 pb.wmSpanSaves.Push((pb.spanDepth, pb.currentText.Length, ptyTop.FontSize, ptyTop.FontFamily, ptyTop.ForeColor, ptyTop.EmBold, ptyTop.EmItalic));
             // (the `font:` shorthand sizes a span as font-size does - the Word export's
             // 7 pt nbsp filler between a list label and its text)
-            var ptyFs = Regex.Match(ptySt, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+            var ptyFs = SafeRegex.Match(ptySt, @"font-size\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
             if (!ptyFs.Success)
-                ptyFs = Regex.Match(ptySt, @"(?<![-\w])font\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
+                ptyFs = SafeRegex.Match(ptySt, @"(?<![-\w])font\s*:\s*([\d.]+)\s*pt", RegexOptions.IgnoreCase);
             if (ptyFs.Success
                 && double.TryParse(ptyFs.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -530,16 +600,16 @@ internal static partial class HtmlToPdfConverter
             // of that face: the list label in Symbol / Wingdings, the filler in Times New Roman.
             if (pb.wordExport && SpanRunFamily(ptySt) is { } ptyFam)
                 pb.openFamilyRuns.Push((pb.spanDepth, pb.currentText.Length, ptyFam));
-            if (Regex.IsMatch(ptySt, @"font-weight\s*:\s*(bold|[7-9]00)",
+            if (SafeRegex.IsMatch(ptySt, @"font-weight\s*:\s*(bold|[7-9]00)",
                     RegexOptions.IgnoreCase))
                 ptyTop.EmBold = true;
-            if (Regex.IsMatch(ptySt, @"font-style\s*:\s*italic",
+            if (SafeRegex.IsMatch(ptySt, @"font-style\s*:\s*italic",
                     RegexOptions.IgnoreCase))
                 ptyTop.EmItalic = true;
-            if (Regex.IsMatch(ptySt, @"font-variant\s*:\s*small-caps",
+            if (SafeRegex.IsMatch(ptySt, @"font-variant\s*:\s*small-caps",
                     RegexOptions.IgnoreCase))
                 ptyTop.SmallCaps = true;
-            if (Regex.Match(ptySt, @"letter-spacing\s*:\s*(-?[\d.]+)\s*pt",
+            if (SafeRegex.Match(ptySt, @"letter-spacing\s*:\s*(-?[\d.]+)\s*pt",
                     RegexOptions.IgnoreCase) is { Success: true } ptyLs
                 && double.TryParse(ptyLs.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -576,12 +646,13 @@ internal static partial class HtmlToPdfConverter
     private static void TrackSpanColourAndEmphasisRuns(ParseBlocksState pb, Token tok)
     {
         OpenSpanClassSizeRun(pb, tok);
-        OpenSpanChainSizeRun(pb, tok);
         OpenInlineClassTypographyRuns(pb, tok);
-        if (pb.trackBoldRuns && (pb.spanPtTypography || pb.sheetElementTypography) && pb.tagCmp == "span" && !tok.IsSelfClosing
+        // (…and on the browser-UA flow, whose span class rules already open size, face and weight runs:
+        //  the class colour is a run of the same extent, as the browser inks it)
+        if (pb.trackBoldRuns && (pb.spanPtTypography || pb.sheetElementTypography || pb.browserUa) && pb.tagCmp == "span" && !tok.IsSelfClosing
             && pb.css is not null && tok.Attributes is { } clsColAttrs
             && !(clsColAttrs.TryGetValue("style", out var clsInlSt) && clsInlSt is not null
-                && Regex.IsMatch(clsInlSt, @"(?<![-\w])color\s*:", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(clsInlSt, @"(?<![-\w])color\s*:", RegexOptions.IgnoreCase))
             && clsColAttrs.TryGetValue("class", out var clsColCls) && clsColCls is not null)
             foreach (var sc in clsColCls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
             {
@@ -605,7 +676,7 @@ internal static partial class HtmlToPdfConverter
             void OpenDecor(int kind, Color? dcol) =>
                 pb.openDecorRuns.Push((pb.spanDepth, pb.currentText.Length, kind, dcol));
             if (decAttrs.TryGetValue("style", out var decSt) && decSt is not null
-                && Regex.Match(decSt, @"text-decoration\s*:\s*([^;]+)",
+                && SafeRegex.Match(decSt, @"text-decoration\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase) is { Success: true } tdm)
             {
                 var tdv = tdm.Groups[1].Value;
@@ -637,7 +708,7 @@ internal static partial class HtmlToPdfConverter
             && tok.Attributes is { } spanColAttrs
             && spanColAttrs.TryGetValue("style", out var spanColSt)
             && spanColSt is not null
-            && Regex.Match(spanColSt, @"(?<![-\w])color\s*:\s*([^;]+)",
+            && SafeRegex.Match(spanColSt, @"(?<![-\w])color\s*:\s*([^;]+)",
                 RegexOptions.IgnoreCase) is { Success: true } spanColM
             && ParseCssColor(spanColM.Groups[1].Value.Trim()) is { } spanRunCol)
             pb.openColorRuns.Push((pb.spanDepth, pb.currentText.Length, spanRunCol,
@@ -651,13 +722,13 @@ internal static partial class HtmlToPdfConverter
             && spanEmAttrs.TryGetValue("style", out var spanEmSt)
             && spanEmSt is not null)
         {
-            if (Regex.IsMatch(spanEmSt, @"(?<![-\w])font-weight\s*:\s*(bold|bolder|[7-9]00)",
+            if (SafeRegex.IsMatch(spanEmSt, @"(?<![-\w])font-weight\s*:\s*(bold|bolder|[7-9]00)",
                     RegexOptions.IgnoreCase))
             {
                 if (pb.inlineBoldDepth++ == 0) pb.inlineBoldStart = pb.currentText.Length;
                 pb.styleBoldSpanDepths.Push(pb.spanDepth);
             }
-            if (Regex.IsMatch(spanEmSt, @"(?<![-\w])font-style\s*:\s*(italic|oblique)",
+            if (SafeRegex.IsMatch(spanEmSt, @"(?<![-\w])font-style\s*:\s*(italic|oblique)",
                     RegexOptions.IgnoreCase))
             {
                 if (pb.inlineItalicDepth++ == 0) pb.inlineItalicStart = pb.currentText.Length;
@@ -671,7 +742,7 @@ internal static partial class HtmlToPdfConverter
     private static bool SpanIsBidiIsolate(ParseBlocksState pb, Token tok)
     {
         if (tok.Attributes!.TryGetValue("style", out var biSt) && biSt is not null
-            && Regex.IsMatch(biSt, @"unicode-bidi\s*:\s*isolate", RegexOptions.IgnoreCase)) return true;
+            && SafeRegex.IsMatch(biSt, @"unicode-bidi\s*:\s*isolate", RegexOptions.IgnoreCase)) return true;
         if (pb.css is null || !tok.Attributes.TryGetValue("class", out var biCls) || biCls is null) return false;
         foreach (var c in biCls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
             if (pb.css.TryGetValue("." + c, out var rule) && rule.TryGetValue("unicode-bidi", out var ub)
@@ -697,7 +768,7 @@ internal static partial class HtmlToPdfConverter
                     && scr.TryGetValue("left", out var scLeft)
                     && TryParseLength(scLeft) is { } scLeftPt)
                 {
-                    Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+                    Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
                     pb.absSpanLabelIdx = -1;
                     if (pb.blocks.Count > 0 && !pb.blocks[^1].IsHardBreak
                         && pb.blocks[^1].Text.Length > 0)
@@ -735,33 +806,32 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Sheet-typography flow: a span CLASS's font-size opens a SIZE RUN over the span's
     /// extent (probed: `.ms-rteFontSize-4 { font-size: 18pt }` draws its words at 18 inside a
     /// 9.75 pt paragraph, the line box growing to the run).</summary>
-    /// <summary>UA flow: a sheet's descendant chain ending in the span (`ul li span { font-size: 10pt }`)
-    /// sizes the span's own extent as a run, the way its class would (probed on the state analysis:
-    /// the list items' spans draw at 10 pt under a 12 pt list).</summary>
-    private static void OpenSpanChainSizeRun(ParseBlocksState pb, Token tok)
-    {
-        if (!pb.browserUa || pb.tagCmp != "span" || tok.IsSelfClosing || pb.chainRules is null) return;
-        if (tok.Attributes is { } a && a.TryGetValue("class", out var cls) && !string.IsNullOrWhiteSpace(cls)) return;
-        if (MatchChainDecls(pb.chainRules, OpenElementChain(pb, tok, "span")) is { } chained
-            && chained.TryGetValue("font-size", out var chFs) && TryParseCssFontSize(chFs.Trim()) is { } chPt && chPt > 0)
-            pb.openSizeRuns.Push((pb.spanDepth, pb.currentText.Length, chPt));
-    }
-
     private static void OpenSpanClassSizeRun(ParseBlocksState pb, Token tok)
     {
         if (!pb.sheetElementTypography || pb.tagCmp != "span" || tok.IsSelfClosing
             || pb.css is null || tok.Attributes is not { } szAttrs
             || !szAttrs.TryGetValue("class", out var szCls) || szCls is null) return;
+        var sized = false;
+        var bold = false;
         foreach (var sc in szCls.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
         {
             if (!pb.css.TryGetValue("." + sc, out var szr))
                 pb.css.TryGetValue("span." + sc, out szr);
-            if (szr is not null && szr.TryGetValue("font-size", out var szv)
+            if (szr is null) continue;
+            if (!sized && szr.TryGetValue("font-size", out var szv)
                 && TryParseCssFontSize(szv.Trim()) is { } szPt && szPt > 0)
             {
                 pb.openSizeRuns.Push((pb.spanDepth, pb.currentText.Length, szPt));
-                break;
+                sized = true;
             }
+            // …and the class's weight bolds the span's own extent as a run, the way its size
+            // runs and the way an inline `font-weight` already does on this flow
+            if (!bold && szr.TryGetValue("font-weight", out var szw)) bold = IsBoldFontWeight(StripImportant(szw));
+        }
+        if (bold && pb.trackBoldRuns)
+        {
+            if (pb.inlineBoldDepth++ == 0) pb.inlineBoldStart = pb.currentText.Length;
+            pb.styleBoldSpanDepths.Push(pb.spanDepth);
         }
     }
 
@@ -775,26 +845,22 @@ internal static partial class HtmlToPdfConverter
     private static void OpenInlineClassTypographyRuns(ParseBlocksState pb, Token tok)
     {
         if (!pb.browserUa || tok.IsSelfClosing || pb.css is null
-            || pb.tagCmp is not ("span" or "label")
-            || tok.Attributes is not { } clsAttrs
-            || !clsAttrs.TryGetValue("class", out var clsNames) || clsNames is null) return;
+            || pb.tagCmp is not ("span" or "label")) return;
+        var clsNames = tok.Attributes is { } clsAttrs && clsAttrs.TryGetValue("class", out var cls) ? cls : null;
         double sizePt = 0;
         var bold = false;
         string? family = null;
-        foreach (var sc in clsNames.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        foreach (var rule in InlineTypographyRules(pb, tok, clsNames))
         {
-            if (!pb.css.TryGetValue("." + sc, out var rule))
-                pb.css.TryGetValue(pb.tagCmp + "." + sc, out rule);
-            if (rule is null) continue;
             // (…and its resolvable family: the enterprise summary's `.title { Arial }` lines draw
             // Arial bold in the UA serif flow)
-            if (family is null && rule.TryGetValue("font-family", out var ffv)
+            if (rule.TryGetValue("font-family", out var ffv)
                 && FirstFontFamily(StripImportant(ffv)) is { Length: > 0 } fam && WinMetricsFor(fam) is not null)
                 family = fam;
-            if (sizePt <= 0 && rule.TryGetValue("font-size", out var fsv)
+            if (rule.TryGetValue("font-size", out var fsv)
                 && TryParseCssFontSize(StripImportant(fsv)) is { } fsPt && fsPt > 0)
                 sizePt = fsPt;
-            if (!bold && rule.TryGetValue("font-weight", out var fwv))
+            if (rule.TryGetValue("font-weight", out var fwv))
                 bold = IsBoldFontWeight(StripImportant(fwv));
         }
         // At most one run of each kind per element: the close pops one entry at this
@@ -810,6 +876,44 @@ internal static partial class HtmlToPdfConverter
         }
     }
 
+    /// <summary>The sheet rules addressing an inline span or label, least specific first so a later one's value
+    /// stands: its type rule, the two-part rules the open blocks hook (`li span`), its class rules (the first
+    /// class LAST - it decides, as it always has), then the longer chains it ends.</summary>
+    private static List<Dictionary<string, string>> InlineTypographyRules(ParseBlocksState pb, Token tok, string? clsNames)
+    {
+        var rules = new List<Dictionary<string, string>>();
+        var classes = clsNames?.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries) ?? Array.Empty<string>();
+        if (pb.css!.TryGetValue(pb.tagCmp, out var typeRule)) rules.Add(typeRule);
+        var ancestors = OpenAncestors(pb);
+        foreach (var anc in ancestors)
+        {
+            var hooks = new List<string> { anc.Tag };
+            if (anc.Classes is not null)
+                foreach (var ac in anc.Classes) { hooks.Add("." + ac); hooks.Add(anc.Tag + "." + ac); }
+            if (anc.Id is { Length: > 0 }) hooks.Add("#" + anc.Id);
+            foreach (var hook in hooks)
+            {
+                if (pb.css.TryGetValue(hook + " " + pb.tagCmp, out var descRule)) rules.Add(descRule);
+                foreach (var c in classes)
+                    if (pb.css.TryGetValue(hook + " ." + c, out var descClassRule)) rules.Add(descClassRule);
+            }
+        }
+        foreach (var sc in classes.Reverse())
+        {
+            if (!pb.css.TryGetValue("." + sc, out var rule))
+                pb.css.TryGetValue(pb.tagCmp + "." + sc, out rule);
+            if (rule is not null) rules.Add(rule);
+        }
+        if (pb.chainRules is not null)
+        {
+            string? id = null;
+            tok.Attributes?.TryGetValue("id", out id);
+            ancestors.Add(new CssElem { Tag = pb.tagCmp, Id = id, Classes = classes });
+            if (MatchedChainRules(pb.chainRules, ancestors) is { } chained) rules.AddRange(chained.Select(r => r.Decls));
+        }
+        return rules;
+    }
+
     /// <summary>A declaration's value without its `!important` cascade suffix.</summary>
     private static string StripImportant(string v)
     {
@@ -823,6 +927,6 @@ internal static partial class HtmlToPdfConverter
         v = v.Trim();
         return v.Equals("bold", StringComparison.OrdinalIgnoreCase)
             || v.Equals("bolder", StringComparison.OrdinalIgnoreCase)
-            || (int.TryParse(v, out var numeric) && numeric >= 600);
+            || (int.TryParse(v, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var numeric) && numeric >= 600);
     }
 }

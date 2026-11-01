@@ -39,7 +39,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Under an RTL document, each table not yet claimed becomes an RTL SVG or topics table block.</summary>
     private static void ScanRtlTables(RowBlocksState rb)
     {
-        if (Regex.IsMatch(rb.html, @"<(?:html|body)[^>]*\bdir\s*=\s*[""']?rtl", RegexOptions.IgnoreCase))
+        if (SafeRegex.IsMatch(rb.html, @"<(?:html|body)[^>]*\bdir\s*=\s*[""']?rtl", RegexOptions.IgnoreCase))
         {
             foreach (var el in rb.dom.Descendants())
             {
@@ -114,22 +114,22 @@ internal static partial class HtmlToPdfConverter
                 {
                     if (p.Tag != "div") continue;
                     if (block.Flex!.PageContentPt <= 0 && DomDecl(p, "width", rb.css) is { } pw
-                        && Regex.IsMatch(pw, @"[\d.]+\s*(in|cm|mm|pt)\b", RegexOptions.IgnoreCase)
+                        && SafeRegex.IsMatch(pw, @"[\d.]+\s*(in|cm|mm|pt)\b", RegexOptions.IgnoreCase)
                         && TryParseLength(pw.Trim()) is { } pwPt && pwPt > 0)
-                        block.Flex!.PageContentPt = pwPt;
+                        block.Flex.PageContentPt = pwPt;
                     if (DomDecl(p, "height", rb.css) is { } ph)
                     {
                         var phv = ph.Trim();
-                        if (Regex.Match(phv, @"^([\d.]+)\s*%$") is { Success: true } pctM
+                        if (SafeRegex.Match(phv, @"^([\d.]+)\s*%$") is { Success: true } pctM
                             && double.TryParse(pctM.Groups[1].Value,
                                 System.Globalization.NumberStyles.Float,
                                 System.Globalization.CultureInfo.InvariantCulture, out var pctV)
                             && pctV > 0)
                             hFactor *= pctV / 100.0;
-                        else if (Regex.IsMatch(phv, @"[\d.]+\s*(in|cm|mm|pt)\b", RegexOptions.IgnoreCase)
+                        else if (SafeRegex.IsMatch(phv, @"[\d.]+\s*(in|cm|mm|pt)\b", RegexOptions.IgnoreCase)
                                  && TryParseLength(phv) is { } phPt && phPt > 0)
                         {
-                            block.Flex!.PageContentHPt = phPt * hFactor;
+                            block.Flex.PageContentHPt = phPt * hFactor;
                             break;
                         }
                     }

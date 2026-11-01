@@ -13,11 +13,12 @@ public sealed partial class TextAbsorber
     {
     _textShowingOpCount++;
     EnsureFontSet(xs.fontSet, op);
-    if (xs.skipText) return;
+    // A run under a font key the page carries nowhere yields no text: its bytes address
+    // the glyphs of a font no one has, and reading them as characters would invent words.
+    if (xs.skipText || xs.currentFontMissing) return;
     _pageHasRotatedText |= xs.tmRotated;
-    _currentLineEffFs = xs.tmRotated
-        ? Math.Abs(xs.fontSize * xs.tmN)  // composed projection norm already carries the CTM; the scalar d is ~0 sideways
-        : Math.Abs(xs.fontSize * (xs.tmD > 0 ? xs.tmD : xs.tmN) * xs.localCmD);
+    if (xs.tmRotated) _currentLineEffFs = Math.Abs(xs.fontSize * xs.tmN);  // composed projection norm already carries the CTM; the scalar d is ~0 sideways
+    else _currentLineEffFs = Math.Abs(xs.fontSize * (xs.tmD > 0 ? xs.tmD : xs.tmN) * xs.localCmD);
     _currentLineDescent = xs.currentMetrics is not null && xs.currentMetrics.Descent < 0
         ? -xs.currentMetrics.Descent / 1000.0
         : 0.2;
@@ -61,11 +62,10 @@ public sealed partial class TextAbsorber
     {
     _textShowingOpCount++;
     EnsureFontSet(xs.fontSet, op);
-    if (xs.skipText) return;
+    if (xs.skipText || xs.currentFontMissing) return;
     _pageHasRotatedText |= xs.tmRotated;
-    _currentLineEffFs = xs.tmRotated
-        ? Math.Abs(xs.fontSize * xs.tmN)  // composed projection norm already carries the CTM; the scalar d is ~0 sideways
-        : Math.Abs(xs.fontSize * (xs.tmD > 0 ? xs.tmD : xs.tmN) * xs.localCmD);
+    if (xs.tmRotated) _currentLineEffFs = Math.Abs(xs.fontSize * xs.tmN);  // composed projection norm already carries the CTM; the scalar d is ~0 sideways
+    else _currentLineEffFs = Math.Abs(xs.fontSize * (xs.tmD > 0 ? xs.tmD : xs.tmN) * xs.localCmD);
     _currentLineDescent = xs.currentMetrics is not null && xs.currentMetrics.Descent < 0
         ? -xs.currentMetrics.Descent / 1000.0
         : 0.2;
@@ -111,7 +111,7 @@ public sealed partial class TextAbsorber
                     {
                         var t3 = Type3Advance(atS.Value, xs.currentFontDict!, xs.reader, xs.fontSize);
                         if (t3 >= 0) atItemAdv = t3 * xs.horizScale;
-                        atRawLen += DecodeString(atS.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine).Length;
+                        atRawLen += DecodeString(atS.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader).Length;
                     }
                     xs.tx += atItemAdv;
                 }
@@ -125,7 +125,7 @@ public sealed partial class TextAbsorber
         }
         else
         {
-            ShowTextArrayRuns(xs, op, tjArr);
+            ShowTextArrayRuns(xs, tjArr);
         }
     }
     }
@@ -152,18 +152,17 @@ public sealed partial class TextAbsorber
     // never re-entered it and its in-window lines were dropped.
     xs.tmE += -xs.leading * xs.tmCr;
     xs.tmF += -xs.leading * xs.tmDr;
-    var newY = xs.tmRotated
-        ? RotatedRowY(xs.tmCr, xs.tmDr, xs.tmE, xs.tmF)
-        : xs.tmY - xs.leading * (xs.tmD > 0 ? xs.tmD : xs.tmN);
+    double newY;
+    if (xs.tmRotated) newY = RotatedRowY(xs.tmCr, xs.tmDr, xs.tmE, xs.tmF);
+    else newY = xs.tmY - xs.leading * (xs.tmD > 0 ? xs.tmD : xs.tmN);
     xs.tmY = newY;
     xs.tx = xs.tlmX;
     // Re-evaluate the line-level filters at the new baseline.
     xs.skipText = LineFiltered(xs, xs.tmY);
-    if (xs.skipText) { return; }
+    if (xs.skipText || xs.currentFontMissing) { return; }
     _pageHasRotatedText |= xs.tmRotated;
-    _currentLineEffFs = xs.tmRotated
-        ? Math.Abs(xs.fontSize * xs.tmN)  // composed projection norm already carries the CTM; the scalar d is ~0 sideways
-        : Math.Abs(xs.fontSize * (xs.tmD > 0 ? xs.tmD : xs.tmN) * xs.localCmD);
+    if (xs.tmRotated) _currentLineEffFs = Math.Abs(xs.fontSize * xs.tmN);  // composed projection norm already carries the CTM; the scalar d is ~0 sideways
+    else _currentLineEffFs = Math.Abs(xs.fontSize * (xs.tmD > 0 ? xs.tmD : xs.tmN) * xs.localCmD);
     _currentLineDescent = xs.currentMetrics is not null && xs.currentMetrics.Descent < 0
         ? -xs.currentMetrics.Descent / 1000.0
         : 0.2;

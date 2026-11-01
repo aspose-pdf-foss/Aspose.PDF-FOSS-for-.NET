@@ -9,6 +9,9 @@ internal static partial class HtmlToPdfConverter
     /// steps by CSS boxes - UA body inset top and right, a line box per bare br, the UA base size,
     /// the sheet's heading boxes and margins, a class-bordered frame. Per conversion, like the quirks flag.</summary>
     [ThreadStatic] private static bool _quirksChainSheet;
+    // The conversion's punctuation falls back mark by mark (see PreferredFallbackFaces): a sans page
+    // that pads its own CSS box; a page on the UA default face keeps its marks in the run's CJK face.
+    [ThreadStatic] private static bool _cssPunctuationFallback;
     /// <summary>The quirks-mode sheet whose grids the stylesheet reaches through their ancestors. Per conversion.</summary>
     [ThreadStatic] private static bool _ancestorGridSheet;
 
@@ -20,10 +23,10 @@ internal static partial class HtmlToPdfConverter
     private static bool SheetScopesCellsThroughContainer(ConvertState cv)
     {
         if (cv.profile.docChainCellRulesOnly || cv.profile.docChainRules is not { Count: > 0 } rules) return false;
-        foreach (var r in rules)
+        foreach (var segs in rules.Select(r => r.Segs))
         {
-            if (r.Segs.Count < 2 || r.Segs[^1].Tag is not ("td" or "th")) continue;
-            var head = r.Segs[0];
+            if (segs.Count < 2 || segs[^1].Tag is not ("td" or "th")) continue;
+            var head = segs[0];
             if (head.Id is null && head.Classes is null) continue;
             if (head.Tag is "table" or "tr" or "tbody" or "thead" or "tfoot" or "td" or "th") continue;
             var hooks = new List<string>();
@@ -31,9 +34,8 @@ internal static partial class HtmlToPdfConverter
             if (head.Classes is not null)
                 foreach (var c in head.Classes)
                     hooks.Add(@"\bclass\s*=\s*(?:[""'][^""']*\b" + Regex.Escape(c) + @"\b[^""']*[""']|" + Regex.Escape(c) + @"\b)");
-            foreach (var hook in hooks)
-                if (Regex.IsMatch(cv.html, @"<(?:div|section|article|main|form|center|fieldset|blockquote)\b[^>]*" + hook, RegexOptions.IgnoreCase))
-                    return true;
+            if (hooks.Any(hook => SafeRegex.IsMatch(cv.html, @"<(?:div|section|article|main|form|center|fieldset|blockquote)\b[^>]*" + hook, RegexOptions.IgnoreCase)))
+                return true;
         }
         return false;
     }
@@ -64,10 +66,9 @@ internal static partial class HtmlToPdfConverter
         // The pagination must be the SHEET's (an @page rule or a page-break rule in a <style> block): an
         // inline `style="page-break-before"` on a div is the application form's, a calibrated green.
         var paged = false;
-        foreach (Match sheet in Regex.Matches(cv.html, "<style[^>]*>(.*?)</style>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
-            if (Regex.IsMatch(sheet.Groups[1].Value, "page-break-(before|after) *: *(always|page)", RegexOptions.IgnoreCase)
-                || Regex.IsMatch(sheet.Groups[1].Value, "@page *[{:]", RegexOptions.IgnoreCase))
-                paged = true;
+        foreach (Match sheet in SafeRegex.Matches(cv.html, "<style[^>]*>(.*?)</style>", RegexOptions.IgnoreCase | RegexOptions.Singleline).Where(sheet => SafeRegex.IsMatch(sheet.Groups[1].Value, "page-break-(before|after) *: *(always|page)", RegexOptions.IgnoreCase)
+                || SafeRegex.IsMatch(sheet.Groups[1].Value, "@page *[{:]", RegexOptions.IgnoreCase)))
+            paged = true;
         // …or the sheet types the TABLE element itself (`table { font-family: Arial; font-size: 12px }`); a td
         // rule alone is the calibrated grids' (the claim plan and the invoice keep their flow).
         var tableTyped = cv.css.TryGetValue("table", out var tableRule)
@@ -88,7 +89,7 @@ internal static partial class HtmlToPdfConverter
 
     private static Document? ConvertBlockBuild(HtmlLoadOptions? options, ConvertState cv)
     {
-        ResolveUaFlowAndBodyWidth(cv, options);
+        ResolveUaFlowAndBodyWidth(cv);
 
         // Official-letter flow (gated): an explicit-zero-margin CJK letter —
         // a content class carries the family, table rows pace themselves with
@@ -96,13 +97,13 @@ internal static partial class HtmlToPdfConverter
         // for the standard metric gate. The metric flow lays it out with the
         // face's real advances; an uninstalled family substitutes to SimSun,
         // the same fallback the expected output draws it with.
-        ApplyMetricFlowMargins(cv, options);
+        ApplyMetricFlowMargins(cv);
 
         cv.articleFlow = false;
         cv.articleLineFactor = 0.0;
         DetectArticleAndNewsletterFlow(cv.bodyCssFace, cv.css, cv.html, cv.inlineSvgs, cv.marginsExplicit, cv.profile, cv);
 
-        cv.printCoverDoc = cv.profile.bodyZeroMargin && !cv.profile.metricFlow && !cv.profile.chartCardDoc && Regex.IsMatch(cv.html, @"page-break-after\s*:\s*always", RegexOptions.IgnoreCase);
+        cv.printCoverDoc = cv.profile.bodyZeroMargin && !cv.profile.metricFlow && !cv.profile.chartCardDoc && SafeRegex.IsMatch(cv.html, @"page-break-after\s*:\s*always", RegexOptions.IgnoreCase);
         // The chain dialect on the calibrated flow takes its sheet's typography (probed: H1 22px
         // draws 16.5, H2/H3 14px draw 10.5 where the legacy defaults drew 18/15/13); the print
         // cover, chart card and float-both-sides certificate dialects keep their own probed
@@ -118,17 +119,24 @@ internal static partial class HtmlToPdfConverter
 
         // Styled inline rows (nav bars, centered link lines) render from prebuilt
         // run blocks; their markup is replaced by <rowmark> placeholders.
+        // Text an element keeps as written (white-space pre and its kin) reaches the flow with its breaks and spaces spelled out.
+        cv.html = PreserveAuthoredWhiteSpace(cv.html, cv.css);
+        cv.html = LiftTableCaptions(cv.html);
+        var htmlBeforeRows = cv.html;
         (cv.html, var rowBlocks) = ExtractRowBlocks(cv.html, cv.css);
+        // The COLUMN-ROW document (see FloatBoxColumns.cs): a plain-flow page whose sheet seats
+        // sibling boxes side by side (flex rows, table-cell boxes, percentage floats).
+        if (TryRenderColumnRowDocument(cv, options, htmlBeforeRows, rowBlocks) is { } columnDoc) return columnDoc;
 
         // Document-level RTL (dir="rtl" on <html>/<body>): a block image wider than
         // the content box keeps its NATIVE size with its right edge on the right
         // margin, overflowing (and clipping) off the left page edge — the mirror of
         // the LTR left-pinned overflow.
-        DetectRegionsAndFooterImage(cv, options);
-        ParseDocumentBlocks(cv, options, rowBlocks);
+        DetectRegionsAndFooterImage(cv);
+        ParseDocumentBlocks(cv, rowBlocks);
         // A content-less document still ships ONE page at the configured size —
         // the converter never emits a zero-page PDF.
-        if (EmptyDocumentOrContinue(cv, options) is { } emptyDocumentOrContinueResult) return emptyDocumentOrContinueResult;
+        if (EmptyDocumentOrContinue(cv) is { } emptyDocumentOrContinueResult) return emptyDocumentOrContinueResult;
         SeatBlockFaces(cv, options);
 
         MeasureTableWidths(cv, options);
@@ -155,15 +163,15 @@ internal static partial class HtmlToPdfConverter
         // the rightmost absolutely positioned child's edge — inside the page and
         // UA body margins. The canvas min-width does NOT drive it (measured:
         // 878.25 = 90 + 6 + (403 + 520)px·0.75 + 90 on a 960px-min-width slide).
-        WidenPageForChartsAndEdges(cv, options);
+        WidenPageForChartsAndEdges(cv);
         // A position:absolute/fixed element anchored by `left` (at any depth in a chain of
         // positioned ancestors) can extend past the content box in real CSS just as a table
         // or slide can - the page grows to fit it the same way (measured against the
         // reference). A `right`-anchored chain (no `left` anywhere in it) never contributes.
-        WidenPageForAbsoluteOverflow(cv, options);
+        WidenPageForAbsoluteOverflow(cv);
         // The widest painted ink outside the tables grows the sheet last: page margin +
         // body inset + ink + page margin, the flow reflowing to the grown content box.
-        WidenPageToInk(cv, options);
+        WidenPageToInk(cv);
         // The SSRS report opens at the raw 72 pt content top and flows to the
         // raw 72 pt bottom (measured: the first grid baseline seats at 86 =
         // 72 + the 2.05 mm spacer row + cell chrome, and page 1 runs to 753).

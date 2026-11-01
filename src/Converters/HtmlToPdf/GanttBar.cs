@@ -12,7 +12,7 @@ internal static partial class HtmlToPdfConverter
         var st = bar.Groups["s"].Value;
         double W(string prop)
         {
-            var pm = Regex.Match(st, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)px", RegexOptions.IgnoreCase);
+            var pm = SafeRegex.Match(st, @"(?<![-\w])" + prop + @"\s*:\s*(-?[\d.]+)px", RegexOptions.IgnoreCase);
             return pm.Success ? double.Parse(pm.Groups[1].Value, gc.inv) : 0;
         }
         var bx = gc.timelineX + GtPx(W("left"));
@@ -26,7 +26,7 @@ internal static partial class HtmlToPdfConverter
             $"{bx + 0.375:F2} {gc.pageHeight - by - 0.375:F2} {bw - 0.75:F2} {-(bh - 0.75):F2} re S Q\n"));
 
         var inner = bar.Groups["b"].Value;
-        var prog = Regex.Match(inner,
+        var prog = SafeRegex.Match(inner,
             @"<div class=""gantt_task_progress""[^>]*style=""[^""]*width:\s*(?<w>[\d.]+)px",
             RegexOptions.IgnoreCase);
         if (prog.Success)
@@ -37,11 +37,11 @@ internal static partial class HtmlToPdfConverter
                     System.Math.Min(pw, bw - 2 * GtBarInsetPt), bh - 2 * GtBarInsetPt);
         }
 
-        var content = Regex.Match(inner,
+        var content = SafeRegex.Match(inner,
             @"<div class=""gantt_task_content""[^>]*>(?<t>[^<]*)</div\s*>", RegexOptions.IgnoreCase);
         if (content.Success)
         {
-            var text = Regex.Replace(DecodeEntities(content.Groups["t"].Value), @"\s+", " ").Trim();
+            var text = SafeRegex.Replace(DecodeEntities(content.Groups["t"].Value), @"\s+", " ").Trim();
             if (text.Length > 0)
             {
                 var tw = MeasureFaceText("Arial", text, GtBarLabelPt);

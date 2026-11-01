@@ -41,7 +41,7 @@ public sealed partial class Document
         // A chain of images alone keeps the legacy shared-line image layout (its
         // per-image alignment model); the inline engine is for text-bearing lines.
         var anyText = false;
-        foreach (var m in members) if (m is Text.TextFragment) { anyText = true; break; }
+        if (members.Any(m => m is Text.TextFragment)) { anyText = true; }
         if (!anyText) return false;
 
         var runs = new List<FlowLayout.InlineRun>();
@@ -90,8 +90,7 @@ public sealed partial class Document
         // A caller who asked for the segments to flow as runs wants the flow's
         // own wrap (see FlowSegmentedRuns), not the inline model.
         if (tf.TextState.FormattingOptions is { SegmentsFlowAsRuns: true }) return false;
-        foreach (var s in segs)
-            if (s.Position is not null) return false;
+        if (segs.Any(s => s.Position is not null)) return false;
         // A lone fragment with explicit newlines keeps the segment writer (its
         // per-line marker runs are what the absorber-indexing callers count) -
         // unless it carries a LEADING: then its newline segments stand on the
@@ -106,9 +105,7 @@ public sealed partial class Document
         }
         if (newline && leaded) return true;
         if (!Text.TextBuilder.SegmentStylesDiffer(tf, tf.TextState.FontSize)) return false;
-        if (!leaded)
-            foreach (var s in segs)
-                if ((s.Text ?? string.Empty).IndexOf('\n') >= 0) return false;
+        if (!leaded && segs.Any(s => (s.Text ?? string.Empty).IndexOf('\n') >= 0)) return false;
         var complex = tf.HyperlinkValue is not null || tf.FootNote is not null || tf.EndNote is not null
                       || tf.TextState.Underline || tf.TextState.IsStrikeOut
                       || tf.TextState.FontData is not null || tf.TextState.Font?.SourceFontData is not null;
@@ -144,8 +141,9 @@ public sealed partial class Document
             if (string.IsNullOrEmpty(seg.Text)) continue;
             var st = seg.TextState;
             var size = st.FontSizeTouched ? (double)st.FontSize : parentSize;
-            var leading = st.LineSpacing > 0 ? (double)st.LineSpacing
-                : parent.LineSpacing > 0 ? (double)parent.LineSpacing : 0;
+            double leading = 0;
+            if (st.LineSpacing > 0) leading = (double)st.LineSpacing;
+            else if (parent.LineSpacing > 0) leading = (double)parent.LineSpacing;
             var state = new Text.TextState
             {
                 ForegroundColor = st.ForegroundColor ?? parent.ForegroundColor,
@@ -187,8 +185,6 @@ public sealed partial class Document
         byte[]? data = default;
         double width = default;
         double height = default;
-        data = Array.Empty<byte>();
-        width = height = 0;
         byte[]? bytes = null;
         if (img.ImageStream is not null)
         {
@@ -234,10 +230,7 @@ public sealed partial class Document
         if (para is Text.TextFragment or HtmlFragment
             && lc.paraIdx + 1 < lc.pl.paraList.Count
             && ParagraphInlineFlag(lc.pl.paraList[lc.paraIdx + 1])
-            && InlineJoinable(para) is (_, _))
-        {
-            if (LayoutInlineJoinedRun(lc, para)) return true;
-        }
+            && InlineJoinable(para) is (_, _) && LayoutInlineJoinedRun(lc, para)) return true;
         return false;
     }
 }

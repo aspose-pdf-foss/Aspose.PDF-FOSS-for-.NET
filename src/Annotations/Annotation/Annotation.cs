@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 using Aspose.Pdf.Functions;
 using Aspose.Pdf.IO;
 
@@ -21,6 +21,10 @@ public partial class Annotation : BaseParagraph
         get => _dictObjNum >= 0 ? _dictObjNum : _reader?.OwnerDocument?.FindObjectNumber(_dict) ?? -1;
         set => _dictObjNum = value;
     }
+
+    /// <summary>True when the dictionary is known as an object of the file (a loader, or the
+    /// form it was added to, numbered it), without asking the document to look for it.</summary>
+    internal bool IsNumberedObject => _dictObjNum >= 0;
 
     /// <summary>Registers the dictionary for the next incremental save, so a change made
     /// through the annotation reaches the file. An inline annotation is written through
@@ -56,6 +60,7 @@ public partial class Annotation : BaseParagraph
         _dict = new PdfDictionary();
         _reader = PdfReader.Empty;
         _creationPage = page;
+        SetPrintedByDefault();
         if (rect != null)
         {
             var arr = new PdfArray();
@@ -75,6 +80,7 @@ public partial class Annotation : BaseParagraph
     {
         _dict = new PdfDictionary();
         _reader = PdfReader.Empty;
+        SetPrintedByDefault();
         if (rect != null)
         {
             var arr = new PdfArray();
@@ -86,17 +92,27 @@ public partial class Annotation : BaseParagraph
         }
     }
 
+    /// <summary>A new annotation is printed with the page (/F Print), a popup too (as the reference writes it). A widget
+    /// takes the flags its form field gives it.</summary>
+    private void SetPrintedByDefault()
+    {
+        if (this is WidgetAnnotation) return;
+        _dict.Set("F", new PdfInteger((int)AnnotationFlags.Print));
+    }
 
     /// <summary>The annotation subtype.</summary>
     public AnnotationType AnnotationType => ParseSubtype(_dict.GetName("Subtype"));
 
     /// <summary>Dispatch this annotation to the typed
-    /// <c>Visit(SubType)</c> overload of <paramref name="visitor"/>. The
-    /// base implementation is a no-op so callers operating on a raw
-    /// <see cref="Annotation"/> reference can still invoke
-    /// <c>Accept</c>; concrete subclasses override this to land on the
-    /// correct typed Visit overload.</summary>
-    public virtual void Accept(AnnotationSelector visitor) { _ = visitor; }
+    /// <c>Visit(SubType)</c> overload of <paramref name="visitor"/>. Concrete
+    /// subclasses override this to land on the correct typed Visit overload;
+    /// an annotation of a kind with none is admitted to the selection as it is,
+    /// so a selector of every annotation misses none of a page's.</summary>
+    public virtual void Accept(AnnotationSelector visitor) => visitor?.Admit(this);
+
+    /// <summary>Where the annotation is placed on its page: its /Rect. A form field whose widget is a kid of
+    /// its own reports that widget's.</summary>
+    private protected virtual Rectangle? PlacedRect => Rect;
 
     /// <summary>The annotation rectangle (position on page).</summary>
     public Rectangle? Rect
@@ -157,7 +173,7 @@ public partial class Annotation : BaseParagraph
     /// the rectangle by moving URX, preserving LLX.</summary>
     public double Width
     {
-        get => Rect is { } r ? r.Width : 0;
+        get => PlacedRect is { } r ? r.Width : 0;
         set
         {
             var r = Rect ?? new Rectangle(0, 0, 0, 0);
@@ -169,7 +185,7 @@ public partial class Annotation : BaseParagraph
     /// the rectangle by moving URY, preserving LLY.</summary>
     public double Height
     {
-        get => Rect is { } r ? r.Height : 0;
+        get => PlacedRect is { } r ? r.Height : 0;
         set
         {
             var r = Rect ?? new Rectangle(0, 0, 0, 0);
@@ -187,7 +203,7 @@ public partial class Annotation : BaseParagraph
     /// /Rotate; otherwise returns <see cref="Rect"/> as-is.</summary>
     public Rectangle? GetRectangle(bool considerRotation)
     {
-        var r = Rect;
+        var r = PlacedRect;
         if (r is null) return null;
         if (!considerRotation) return r;
         var rotate = (int)(_dict.Get("Rotate") is PdfInteger pi ? pi.Value : 0);
@@ -265,9 +281,18 @@ public partial class Annotation : BaseParagraph
     /// rich text). Stored on the annotation directly as /Alignment.</summary>
     public TextAlignment Alignment { get; set; } = TextAlignment.Left;
 
+    private Aspose.Pdf.HorizontalAlignment _horizontalAlignment = Aspose.Pdf.HorizontalAlignment.Left;
+
     /// <summary>Horizontal alignment (exposed in addition
     /// to <see cref="Alignment"/>; the two are independently settable).</summary>
-    public new Aspose.Pdf.HorizontalAlignment HorizontalAlignment { get; set; } = Aspose.Pdf.HorizontalAlignment.Left;
+    public new Aspose.Pdf.HorizontalAlignment HorizontalAlignment
+    {
+        get => _horizontalAlignment;
+        set { _horizontalAlignment = value; HorizontalAlignmentSet = true; }
+    }
+
+    /// <summary>True once a caller set <see cref="HorizontalAlignment"/>: its Left default asks for nothing.</summary>
+    internal bool HorizontalAlignmentSet { get; private set; }
 
     /// <summary>Text-specific horizontal alignment override.</summary>
     public Aspose.Pdf.HorizontalAlignment TextHorizontalAlignment { get; set; } = Aspose.Pdf.HorizontalAlignment.Left;
@@ -320,10 +345,16 @@ public partial class Annotation : BaseParagraph
         set
         {
             if (value is null) _dict.Remove("Contents");
-            else _dict.Set("Contents", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            // A PDF text string: PDFDocEncoding, or UTF-16BE with its byte order mark for text it cannot hold.
+            else _dict.Set("Contents", Forms.Field.EncodePdfTextString(value));
             MarkDirty();
+            OnContentsChanged();
         }
     }
+
+    /// <summary>Hook invoked after /Contents is set. The base is a no-op; an annotation whose appearance
+    /// draws its text (free text) overrides it to paint the appearance again.</summary>
+    private protected virtual void OnContentsChanged() { }
 
     /// <summary>Annotation opacity (0.0 = transparent, 1.0 = opaque). Maps to /CA entry.</summary>
     public double Opacity
@@ -348,29 +379,32 @@ public partial class Annotation : BaseParagraph
             var arr = new PdfArray();
             arr.Add(new PdfInteger(0));
             arr.Add(new PdfInteger(0));
-            arr.Add(new PdfInteger((int)value.Width));
+            arr.Add(new PdfInteger(value.Width));
             _dict.Set("Border", arr);
 
             // The /Border array can't express the style or dash pattern; emit a
             // /BS border-style dictionary (PDF 32000 §12.5.4) that carries them.
+            // A dash pattern makes the border a dashed one: a caller who sets Dash and
+            // leaves Style alone asked for dashes, and /D is only read under /S /D.
+            var dash = value.Dash is { Pattern.Length: > 0 } given ? given : null;
             var bs = new PdfDictionary();
-            bs.Set("W", new PdfInteger((int)value.Width));
+            bs.Set("W", new PdfInteger(value.Width));
             bs.Set("S", new PdfName(value.Style switch
             {
                 Aspose.Pdf.Annotations.BorderStyle.Dashed => "D",
                 Aspose.Pdf.Annotations.BorderStyle.Beveled => "B",
                 Aspose.Pdf.Annotations.BorderStyle.Inset => "I",
                 Aspose.Pdf.Annotations.BorderStyle.Underline => "U",
-                _ => "S",
+                _ => dash is null ? "S" : "D",
             }));
-            if (value.Style == Aspose.Pdf.Annotations.BorderStyle.Dashed
-                && value.Dash is { Pattern.Length: > 0 } dash)
+            if (dash is not null && bs.GetName("S") == "D")
             {
                 var d = new PdfArray();
                 foreach (var seg in dash.Pattern) d.Add(new PdfInteger(seg));
                 bs.Set("D", d);
             }
             _dict.Set("BS", bs);
+            OnBorderChanged();
         }
     }
 
@@ -407,9 +441,10 @@ public partial class Annotation : BaseParagraph
         }
     }
 
-    /// <summary>Hook invoked after the annotation's /C colour is set. The base is a
-    /// no-op; FreeText overrides it to regenerate its appearance so the cached /AP
-    /// reflects the new background colour.</summary>
+    /// <summary>Hook invoked after the annotation's /C or /IC colour is set. The base is a
+    /// no-op; the annotations that draw their appearance from their own geometry and colours
+    /// (free text, line, polyline, polygon, square, circle, highlight) override it to paint the
+    /// appearance again, or a viewer goes on showing the colour it was painted with.</summary>
     private protected virtual void OnColorChanged() { }
 
     /// <summary>The annotation interior color (/IC entry, for circle/square/line annotations).</summary>
@@ -426,12 +461,16 @@ public partial class Annotation : BaseParagraph
         }
         set
         {
-            if (value is null) { _dict.Remove("IC"); return; }
-            var arr = new PdfArray();
-            arr.Add(new PdfReal(value.R / 255.0));
-            arr.Add(new PdfReal(value.G / 255.0));
-            arr.Add(new PdfReal(value.B / 255.0));
-            _dict.Set("IC", arr);
+            if (value is null) _dict.Remove("IC");
+            else
+            {
+                var arr = new PdfArray();
+                arr.Add(new PdfReal(value.R / 255.0));
+                arr.Add(new PdfReal(value.G / 255.0));
+                arr.Add(new PdfReal(value.B / 255.0));
+                _dict.Set("IC", arr);
+            }
+            OnColorChanged();
         }
     }
 
@@ -453,7 +492,7 @@ public partial class Annotation : BaseParagraph
         set
         {
             if (value is null) _dict.Remove("T");
-            else _dict.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else _dict.Set("T", Forms.Field.EncodePdfTextString(value));
         }
     }
 
@@ -464,7 +503,7 @@ public partial class Annotation : BaseParagraph
         set
         {
             if (value is null) _dict.Remove("NM");
-            else _dict.Set("NM", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else _dict.Set("NM", Forms.Field.EncodePdfTextString(value));
         }
     }
 
@@ -503,7 +542,7 @@ public partial class Annotation : BaseParagraph
         set
         {
             if (value is null) _dict.Remove("Subj");
-            else _dict.Set("Subj", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else _dict.Set("Subj", Forms.Field.EncodePdfTextString(value));
         }
     }
 
@@ -534,19 +573,32 @@ public partial class Annotation : BaseParagraph
             int Field(int start, int def) =>
                 s.Length >= start + 2 && char.IsDigit(s[start]) && char.IsDigit(s[start + 1])
                     ? int.Parse(s.Substring(start, 2)) : def;
-            int year = int.Parse(s.Substring(0, 4));
+            int year = int.Parse(s.Substring(0, 4), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture);
             int mon = Field(4, 1);
             int day = Field(6, 1);
             int hour = Field(8, 0);
             int min = Field(10, 0);
             int sec = Field(12, 0);
-            return new DateTime(year, mon, day, hour, min, sec);
+            return new DateTime(year, mon, day, hour, min, sec, DateTimeKind.Unspecified);
         }
         catch { return default; }
     }
 
-    /// <summary>Format a DateTime as a PDF date string.</summary>
-    internal static string FormatPdfDate(DateTime dt) => "D:" + dt.ToString("yyyyMMddHHmmss");
+    /// <summary>Format a DateTime as a PDF date string (Gregorian, whatever the culture's calendar).</summary>
+    internal static string FormatPdfDate(DateTime dt)
+        => "D:" + dt.ToString("yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture) + OffsetSuffix(dt);
+
+    /// <summary>The offset a date is written with: Z for universal time, the offset of the moment for a local time,
+    /// none for a time of no stated zone.</summary>
+    private static string OffsetSuffix(DateTime dt)
+    {
+        if (dt.Kind == DateTimeKind.Utc) return "Z";
+        if (dt.Kind != DateTimeKind.Local) return string.Empty;
+        var offset = TimeZoneInfo.Local.GetUtcOffset(dt);
+        if (offset == TimeSpan.Zero) return "Z";
+        var sign = offset < TimeSpan.Zero ? '-' : '+';
+        return $"{sign}{Math.Abs(offset.Hours):D2}'{Math.Abs(offset.Minutes):D2}'";
+    }
 
     /// <summary>Annotation flags (/F entry) — used as the storage backing
     /// for both the int and typed forms.</summary>
@@ -631,8 +683,20 @@ public partial class Annotation : BaseParagraph
         set
         {
             if (value is null) _dict.Remove("IRT");
-            else _dict.Set("IRT", value._dict);
+            else _dict.Set("IRT", ReferenceTo(value));
         }
+    }
+
+    /// <summary>How this annotation names another one (/IRT, /Popup, /Parent): an annotation read from this
+    /// document by the object it was read as, so the entry is written as a reference to that object and not as
+    /// a copy of it; one made in this session by its dictionary, which the writer makes an object of its own.</summary>
+    internal PdfObject ReferenceTo(Annotation target)
+    {
+        // An annotation made in this session reads through the empty reader: its document is its page's.
+        var home = ReferenceEquals(_reader, PdfReader.Empty) ? (_ownerPage ?? _creationPage)?.Reader ?? _reader : _reader;
+        return target.IsNumberedObject && ReferenceEquals(target._reader, home)
+            ? new PdfIndirectRef(target._dictObjNum, 0)
+            : target._dict;
     }
 
     /// <summary>

@@ -16,12 +16,11 @@ public sealed partial class TextReplacer
     /// character matches it and none steps over it.</summary>
     private const int LineBreakOp = -2;
 
-    private byte[]? TryCrossOperatorReplaceCore(byte[] streamBytes, string search, string replacement,
+    private byte[]? TryCrossOperatorReplaceCore(byte[] streamBytes, string replacement,
         PdfDictionary pageDict, PdfReader reader, string normalizedSearch, List<CrossTextOp> textOps)
     {
         var cx = new CrossReplaceState();
         cx.streamBytes = streamBytes;
-        cx.search = search;
         cx.replacement = replacement;
         cx.pageDict = pageDict;
         cx.reader = reader;
@@ -85,6 +84,6 @@ public sealed partial class TextReplacer
 
         CopyRange(cx, cx.streamBytes.Length);
 
-        return cx.result.ToArray();
+        return ApplyPendingShifts(cx.result.ToArray(), cx.pendingShifts);
     }
 }

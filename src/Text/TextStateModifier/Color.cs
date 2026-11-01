@@ -133,7 +133,7 @@ internal sealed partial class TextStateModifier
                     fc.operands.Add((token.Kind, new PdfName(token.StringValue!), startPos, endPos));
                     break;
                 case TokenKind.ArrayStart:
-                    if (!CollectTjArray(fc, startPos)) goto streamDone;
+                    if (!CollectTjArray(fc, startPos)) return fc.bestResult;
                     break;
                 case TokenKind.Keyword:
                     var op = token.StringValue!;
@@ -162,7 +162,6 @@ internal sealed partial class TextStateModifier
                     break;
             }
         }
-        streamDone:
         return fc.bestResult;
     }
 
@@ -224,7 +223,8 @@ internal sealed partial class TextStateModifier
         string text, Color color, (double r, double g, double b) activeColor,
         int occurrenceCharIndex = -1, int? renderingMode = null, int activeRenderingMode = 0)
     {
-        // Operand must be a plain "(...)" literal.
+        // Operand must be a plain "(...)" literal; its recorded start may hold the white space before it.
+        litStart = SkipSpace(original, litStart);
         if (litEnd - litStart < 2
             || original[litStart] != (byte)'(' || original[litEnd - 1] != (byte)')')
             return null;
@@ -313,13 +313,19 @@ internal sealed partial class TextStateModifier
             N(color.R / 255.0), N(color.G / 255.0), N(color.B / 255.0));
     }
 
+    /// <summary>`m Tr` for a rendering mode, spaced so it never abuts a neighbour; nothing for none.</summary>
+    private static string TrOps(int? mode) =>
+        mode is int m ? string.Format(CultureInfo.InvariantCulture, " {0} Tr ", m) : string.Empty;
+
     /// <summary>The operator that puts the fill colour back to what was active. Written as
     /// `v g` when the prior fill was a gray, matching how producers write a default-black
     /// reset, otherwise as `r g b rg`.</summary>
     private static string RestoreFillOps(double r, double g, double b)
     {
         static string N(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
+#pragma warning disable S1244 // gray test on colour components as given - exact equality picks the gray operator
         return r == g && g == b
+#pragma warning restore S1244
             ? string.Format(CultureInfo.InvariantCulture, " {0} g ", N(r))
             : string.Format(CultureInfo.InvariantCulture, " {0} {1} {2} rg ", N(r), N(g), N(b));
     }
@@ -370,6 +376,13 @@ internal sealed partial class TextStateModifier
         return result;
     }
 
+    /// <summary>The first position at or after <paramref name="at"/> that is not white space.</summary>
+    private static int SkipSpace(byte[] data, int at)
+    {
+        while (at < data.Length - 1 && data[at] is (byte)' ' or (byte)'\n' or (byte)'\r' or (byte)'\t' or (byte)'\f' or 0) at++;
+        return at;
+    }
+
     /// <summary>
     /// Wrap a text-showing operator with a fill-colour change and a matching restore:
     /// inject `R G B rg` immediately before the show operand (at <paramref name="rgInsertPos"/>)
@@ -399,7 +412,9 @@ internal sealed partial class TextStateModifier
         // Restore the producer's OWN colour operator verbatim when one was seen, so
         // `0 0 0 rg` comes back as `0 0 0 rg` instead of collapsing to `0 g`.
         string restoreColor = restoreOpText
+#pragma warning disable S1244 // gray test on colour components as given - exact equality picks the gray operator
             ?? ((restore.r == restore.g && restore.g == restore.b)
+#pragma warning restore S1244
                 ? string.Format(CultureInfo.InvariantCulture, "{0} g", N(restore.r))
                 : string.Format(CultureInfo.InvariantCulture, "{0} {1} {2} rg",
                     N(restore.r), N(restore.g), N(restore.b)));

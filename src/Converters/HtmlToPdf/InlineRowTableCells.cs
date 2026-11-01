@@ -29,7 +29,7 @@ internal static partial class HtmlToPdfConverter
                 return null;
             var cell = new InlineRowCell { Lines = new List<InlineRowLine>() };
             if (DomDecl(item, "width", css)?.Trim() is { } w
-                && Regex.Match(w, @"^([\d.]+)\s*%$") is { Success: true } pm
+                && SafeRegex.Match(w, @"^([\d.]+)\s*%$") is { Success: true } pm
                 && double.TryParse(pm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var pct) && pct > 0)
                 cell.WidthFrac = pct / 100.0;
@@ -147,10 +147,9 @@ internal static partial class HtmlToPdfConverter
             {
                 var ttf = PosFace(ln.face).ttf ?? regularTtf;
                 var (rn, hex) = Text.Type0FontEmbedder.Embed(fontDict, ttf, ln.face, ln.text, stripSpacesInBaseFont: true);
-                var rgb = ln.color is { } col ? $"{col.R / 255.0:0.###} {col.G / 255.0:0.###} {col.B / 255.0:0.###} rg" : "0 0 0 rg";
+                var rgb = ln.color is { } col ? Compat.Format(inv, $"{col.R / 255.0:0.###} {col.G / 255.0:0.###} {col.B / 255.0:0.###} rg") : "0 0 0 rg";
                 var textW = MeasureFaceText(ln.face, ln.text, ln.fontPt);
-                var lineX = ln.align == InlineRowAlignRight ? x + cellW - textW
-                    : ln.align == InlineRowAlignCenter ? x + (cellW - textW) / 2 : x;
+                var lineX = ln.align switch { InlineRowAlignRight => x + cellW - textW, InlineRowAlignCenter => x + (cellW - textW) / 2, _ => x };
                 sb.Append(Compat.Format(inv,
                     $"BT {rgb} /{rn} {ln.fontPt:F2} Tf 1 0 0 1 {lineX:F3} {y - ln.drop:F3} Tm <{Compat.ToHexString(hex)}> Tj ET\n"));
                 y -= ln.lineH;

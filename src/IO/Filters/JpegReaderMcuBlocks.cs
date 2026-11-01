@@ -24,19 +24,9 @@ internal static partial class JpegDecoder
                         var block = mcuBlock;
                         dcPred[compIdx] = DecodeBlock(bits, block, dcPred[compIdx], dcTable!, acTable!);
                         Dequantize(block, qt);
-                        IDCT(block);
-
-                        // Write block to component buffer
-                        var px = (mcuCol * comp.H + bh) * 8;
-                        var py = (mcuRow * comp.V + bv) * 8;
-                        var bw = bufWidths[compIdx];
-                        for (var y = 0; y < 8; y++)
-                        {
-                            var dst = (py + y) * bw + px;
-                            var src = y * 8;
-                            for (var x = 0; x < 8; x++)
-                                buffers[compIdx][dst + x] = (byte)Clamp(block[src + x] + 128);
-                        }
+                        InverseTransform(block);
+                        PlaceBlock(block, buffers[compIdx], bufWidths[compIdx],
+                            (mcuCol * comp.H + bh) * BlockSide, (mcuRow * comp.V + bv) * BlockSide);
                     }
                 }
             }

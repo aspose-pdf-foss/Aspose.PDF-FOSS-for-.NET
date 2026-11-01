@@ -5,9 +5,6 @@ namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
-// The receipt-card render helpers: flattened markup text, number and y formatting, the run emitter and the text width.
-    private static string Flat(ReceiptCardState rk, string s) => CollapseWs(DecodeEntities(
-        Regex.Replace(s, @"<[^>]+>", " "))).Trim();
 
     private static string N(ReceiptCardState rk, double v) => v.ToString("0.###", rk.inv);
 
@@ -22,6 +19,6 @@ internal static partial class HtmlToPdfConverter
         rk.runs.AppendLine($"({EscapePdfString(text)}) Tj ET");
     }
 
-    private static double W(ReceiptCardState rk, string t, double fs, bool bold) =>
+    private static double ReceiptW(string t, double fs, bool bold) =>
         MeasureFaceText(bold ? "Helvetica-Bold" : "Helvetica", t, fs);
 }

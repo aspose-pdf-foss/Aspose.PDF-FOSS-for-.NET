@@ -32,6 +32,7 @@ public sealed partial class Document : IDisposable
         if (ResolvePdfAPart(pa) is { } resolvePdfAPartResult) return resolvePdfAPartResult;
         // 1. Remove encryption
         RemoveEncryptionAndFloorVersion(pa);
+        if (!pa.isPdfX) ReplaceXfaFormForPdfA(pa);
 
         WritePdfAIdentification(pa);
 
@@ -45,12 +46,20 @@ public sealed partial class Document : IDisposable
 
         // 5. Remove prohibited actions from catalog (only when ErrorAction strips)
         RemoveProhibitedCatalogActions(pa.options, pa.strip);
+        if (pa.strip) RemoveDocumentJavaScript(pa.options);
+        RemoveProhibitedFieldActions(pa.options, pa.strip);
+        if (!pa.isPdfX) DropNonStandardMarkInfoEntries(pa.part);
+        if (pa.part == "1") RemoveEmbeddedFilesForPartOne(pa);
 
         // 6. Fix annotations (per page) — print-flag fixes always, removal only when stripping
         foreach (var page in Pages)
         {
             FixAnnotationsForPdfA(page, pa.options, pa.fix, pa.strip);
         }
+        _generatedAppearanceFonts = null;
+
+        // 6a. No stream stays LZW-compressed.
+        if (!pa.isPdfX) ReplaceLzwCompressionForPdfA(pa);
 
         // 6b. Remove page-level transparency groups — PDF/A-1 (ISO 19005-1)
         // prohibits transparency. The page /Group entry only declares the
@@ -72,6 +81,10 @@ public sealed partial class Document : IDisposable
         // 8. For PDF/X, set GTS_PDFXVersion in Info dict and XMP
         ApplyPdfXAndLevelAFixes(pa);
 
+        // 8a. Decided after the walk over the pages' images, which notes layer membership
+        // on its way.
+        if (pa.part == "1") RemoveOptionalContentForPartOne(pa);
+
         // 10b. Repair out-of-range vertical metrics that would leave the output
         // non-conformant: a Courier-family FontDescriptor whose Descent falls below
         // -310 (the validator's range gate) is clamped to -300. Only the descriptor
@@ -82,7 +95,7 @@ public sealed partial class Document : IDisposable
         // 10c. The faces embedded above carry their own advances, and the /Widths the
         // source declared were written for the faces it did not embed - clause 6.3.6.
         if (pa.fix && !pa.isPdfX)
-            ReportInconsistentGlyphWidths(pa.options);
+            ApplyFontDictionaryRules(pa);
 
         ResolveFontsAndAutoTag(pa);
 

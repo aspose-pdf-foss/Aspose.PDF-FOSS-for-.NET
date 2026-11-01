@@ -154,10 +154,11 @@ internal static partial class PdfAValidator
     /// <remarks>A document THIS instance just UA-converted is exempt: the conversion's
     /// auto-tagger repairs the structure level while content-stream MCIDs are not yet
     /// emitted, and its own post-validation treats the repaired dimension as fixed (the
-    /// PdfAConversionApplied precedent).</remarks>
+    /// PdfAConversionApplied precedent). A conversion that was not asked to tag leaves no
+    /// structure tree to repair, so its content is as untagged as it was.</remarks>
     private static void CheckUaContent(Document document, UaReport report)
     {
-        if (document.LastConvertedFormat == PdfFormat.PDF_UA_1) return;
+        if (document.LastConvertedFormat == PdfFormat.PDF_UA_1 && document.HasStructTree) return;
         var reportedUntagged = new HashSet<string>(StringComparer.Ordinal);
         foreach (var page in document.Pages)
             CheckUaUntaggedContent(page, report, reportedUntagged);
@@ -171,8 +172,7 @@ internal static partial class PdfAValidator
         {
             IEnumerable<Operator> ops;
             try { ops = page.Contents; } catch { continue; }
-            foreach (var op in ops)
-                if (op is Aspose.Pdf.Operators.TextShowOperator) return true;
+            if (ops.Any(op => op is Aspose.Pdf.Operators.TextShowOperator)) return true;
         }
         return false;
     }

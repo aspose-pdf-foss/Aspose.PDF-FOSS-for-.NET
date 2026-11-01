@@ -90,9 +90,7 @@ internal static class ArabicTextShaper
     public static bool ContainsArabic(string? text)
     {
         if (string.IsNullOrEmpty(text)) return false;
-        foreach (var c in text)
-            if (IsArabicLetter(c)) return true;
-        return false;
+        return text.Any(c => IsArabicLetter(c));
     }
 
     /// <summary>
@@ -108,17 +106,18 @@ internal static class ArabicTextShaper
         // 1) Resolve each Arabic letter to its contextual presentation form (logical order),
         //    fusing lam + alef into a single ligature. Non-Arabic chars pass through.
         var forms = new List<char>(text.Length);
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
             var c = text[i];
-            if (!IsArabicLetter(c)) { forms.Add(c); continue; }
+            if (!IsArabicLetter(c)) { forms.Add(c); i++; continue; }
 
             // lam-alef ligature: a LAM directly followed by an ALEF variant.
             if (c == 'ل' && i + 1 < text.Length && LamAlef.TryGetValue(text[i + 1], out var lig))
             {
                 var prevJoinsLig = JoinsToPrev(text, i);
                 forms.Add(prevJoinsLig ? lig.fin : lig.iso);
-                i++; // consume the alef
+                i += 2; // the lam and the alef make one ligature
                 continue;
             }
 
@@ -134,6 +133,7 @@ internal static class ArabicTextShaper
                 _ => sh.Iso,
             };
             forms.Add(form);
+            i++;
         }
 
         // 2) Reorder logical → visual with a 2-level bidi pass (Unicode rule L2). The base
@@ -185,7 +185,11 @@ internal static class ArabicTextShaper
         // Strong direction: +1 = R (Arabic), -1 = L (Latin/digit), 0 = neutral.
         var dir = new int[n];
         for (var i = 0; i < n; i++)
-            dir[i] = IsArabicVisual(forms[i]) ? 1 : IsLatinOrDigit(forms[i]) ? -1 : 0;
+        {
+            if (IsArabicVisual(forms[i])) dir[i] = 1;
+            else if (IsLatinOrDigit(forms[i])) dir[i] = -1;
+            else dir[i] = 0;
+        }
 
         // Base direction from the first strong char (default LTR).
         var baseDir = -1;
@@ -203,11 +207,12 @@ internal static class ArabicTextShaper
                 d = (prev != 0 && prev == next) ? prev : baseDir;
             }
             // LTR base: L→0, R→1.  RTL base: R→1, L→2.
-            level[i] = baseDir == 1 ? (d == 1 ? 1 : 2) : (d == 1 ? 1 : 0);
+            if (baseDir == 1) level[i] = d == 1 ? 1 : 2;
+            else level[i] = d == 1 ? 1 : 0;
         }
 
         var visual = new List<char>(forms);
-        var maxLevel = 0; foreach (var l in level) if (l > maxLevel) maxLevel = l;
+        var maxLevel = 0; foreach (var l in level.Where(l => l > maxLevel)) maxLevel = l;
         for (var lvl = maxLevel; lvl >= 1; lvl--)
         {
             var i = 0;

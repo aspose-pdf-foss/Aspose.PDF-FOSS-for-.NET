@@ -5,7 +5,8 @@ namespace Aspose.Pdf.Devices;
 /// </summary>
 public enum ColorDepth
 {
-    /// <summary>Default (24-bit RGB).</summary>
+    /// <summary>Default: 32-bit RGBA frames (8 bits per channel, the alpha opaque); for a 24-bit RGB frame,
+    /// a quarter smaller, ask for <see cref="Format24bpp"/>.</summary>
     Default,
     /// <summary>1 bit per pixel (bi-level).</summary>
     Format1bpp,
@@ -41,7 +42,8 @@ public enum CompressionType
 /// </summary>
 public sealed class TiffSettings
 {
-    /// <summary>Initializes default TIFF settings (24bpp, no compression).</summary>
+    /// <summary>Initializes default TIFF settings: <see cref="ColorDepth.Default"/> depth (32-bit RGBA) and LZW
+    /// compression.</summary>
     public TiffSettings() { }
 
     /// <summary>Initializes TIFF settings with the specified color depth.</summary>
@@ -145,14 +147,20 @@ public enum ShapeType
 /// <summary>Page margins in points for TIFF rendering.</summary>
 public sealed class Margins
 {
+    private int _left, _right, _top, _bottom;
+
     /// <summary>Gets or sets the left margin.</summary>
-    public int Left { get; set; }
+    public int Left { get => _left; set { _left = value; Edited = true; } }
     /// <summary>Gets or sets the right margin.</summary>
-    public int Right { get; set; }
+    public int Right { get => _right; set { _right = value; Edited = true; } }
     /// <summary>Gets or sets the top margin.</summary>
-    public int Top { get; set; }
+    public int Top { get => _top; set { _top = value; Edited = true; } }
     /// <summary>Gets or sets the bottom margin.</summary>
-    public int Bottom { get; set; }
+    public int Bottom { get => _bottom; set { _bottom = value; Edited = true; } }
+
+    /// <summary>True once a side was set, even to the value it had: margins a caller edits in place are margins
+    /// they gave.</summary>
+    internal bool Edited { get; private set; }
 
     /// <summary>Creates margins with all four sides set to 0.</summary>
     public Margins() { }

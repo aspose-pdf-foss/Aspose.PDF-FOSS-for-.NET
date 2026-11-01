@@ -33,6 +33,48 @@ public class ExtGStateWriteTests
     }
 
     [Fact]
+    public void FillOpacity_WritesCaOnly_EvenWhenOpaque()
+    {
+        var opaque = ExtGState.FillOpacity(1.0).ToPdfDictionary();
+        var half = ExtGState.FillOpacity(0.5).ToPdfDictionary();
+
+        Assert.Equal(1.0, Assert.IsType<PdfReal>(opaque.Get("ca")).Value);
+        Assert.Null(opaque.Get("CA"));
+        Assert.Equal(0.5, Assert.IsType<PdfReal>(half.Get("ca")).Value);
+        Assert.Null(half.Get("CA"));
+    }
+
+    [Fact]
+    public void StrokeOpacity_WritesCAOnly_EvenWhenOpaque()
+    {
+        var opaque = ExtGState.StrokeOpacity(1.0).ToPdfDictionary();
+        var quarter = ExtGState.StrokeOpacity(0.25).ToPdfDictionary();
+
+        Assert.Equal(1.0, Assert.IsType<PdfReal>(opaque.Get("CA")).Value);
+        Assert.Null(opaque.Get("ca"));
+        Assert.Equal(0.25, Assert.IsType<PdfReal>(quarter.Get("CA")).Value);
+        Assert.Null(quarter.Get("ca"));
+    }
+
+    [Theory]
+    [InlineData(-0.1)]
+    [InlineData(1.5)]
+    public void Opacity_OutsideZeroToOne_Throws(double alpha)
+    {
+        Assert.Throws<System.ArgumentOutOfRangeException>(() => ExtGState.FillOpacity(alpha));
+        Assert.Throws<System.ArgumentOutOfRangeException>(() => ExtGState.StrokeOpacity(alpha));
+    }
+
+    [Fact]
+    public void AnOpaqueAlphaSetByInitializer_StillWritesNothing()
+    {
+        // The factories are the only way to write an opaque alpha; existing callers keep their output.
+        var dict = new ExtGState { FillAlpha = 1.0, StrokeAlpha = 1.0 }.ToPdfDictionary();
+        Assert.Null(dict.Get("ca"));
+        Assert.Null(dict.Get("CA"));
+    }
+
+    [Fact]
     public void ToPdfDictionary_BlendMode()
     {
         var gs = new ExtGState { BlendMode = "Multiply" };

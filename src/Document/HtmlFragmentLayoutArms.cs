@@ -59,17 +59,17 @@ public sealed partial class Document
             // and re-attach its hyperlink so the flow writer emits
             // a Link annotation over the rendered run.
             System.Collections.Generic.List<(int Start, int Length, string Url)>? plainAnchors = null;
-            foreach (System.Text.RegularExpressions.Match am in
-                System.Text.RegularExpressions.Regex.Matches(hl.htmlContent,
+            foreach (var groups in
+                SafeRegex.Matches(hl.htmlContent,
                     "<a\\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase
-                    | System.Text.RegularExpressions.RegexOptions.Singleline))
+                    | System.Text.RegularExpressions.RegexOptions.Singleline).Select(am => am.Groups))
             {
-                var aText = HtmlFragment.StripHtmlTags(am.Groups[2].Value);
+                var aText = HtmlFragment.StripHtmlTags(groups[2].Value);
                 if (aText.Length == 0) continue;
                 var aAt = plainText.IndexOf(aText, StringComparison.Ordinal);
                 if (aAt >= 0)
-                    (plainAnchors ??= new()).Add((aAt, aText.Length, am.Groups[1].Value));
+                    (plainAnchors ??= new()).Add((aAt, aText.Length, groups[1].Value));
             }
             if (plainAnchors is not null)
                 ApplyHtmlAnchorSegments(frag, plainText, plainAnchors);
@@ -84,7 +84,7 @@ public sealed partial class Document
             }
             if (!hl.flow.WriteTextFragment(frag))
             {
-                frag.Position = new Text.Position(hl.marginLeft, hl.page.Height - hl.marginTop - frag.TextState.FontSize);
+                frag.Position = new Text.Position(hl.marginLeft, hl.page.LayoutFrameHeight - hl.marginTop - frag.TextState.FontSize);
                 hl.tb.AppendTextInline(frag);
             }
             if (frag.Rectangle is { } r)
@@ -128,12 +128,12 @@ public sealed partial class Document
     {
         bool under = false, italic = false, bold = false;
         var inlineWrap = htmlContent.Trim();
-        for (var wm = System.Text.RegularExpressions.Regex.Match(inlineWrap,
+        for (var wm = SafeRegex.Match(inlineWrap,
                  @"^<(u|i|b|em|strong)\b[^>]*>(.*)</\1\s*>$",
                  System.Text.RegularExpressions.RegexOptions.IgnoreCase
                  | System.Text.RegularExpressions.RegexOptions.Singleline);
              wm.Success;
-             wm = System.Text.RegularExpressions.Regex.Match(inlineWrap,
+             wm = SafeRegex.Match(inlineWrap,
                  @"^<(u|i|b|em|strong)\b[^>]*>(.*)</\1\s*>$",
                  System.Text.RegularExpressions.RegexOptions.IgnoreCase
                  | System.Text.RegularExpressions.RegexOptions.Singleline))
@@ -163,7 +163,7 @@ public sealed partial class Document
     }
 
     /// <summary>A monospace pre-formatted report lays out as verbatim Courier line boxes on its own pitch.</summary>
-    private void LayoutMonoFontLineBoxes(HtmlFragmentLayoutState hl, double mfPt, List<List<(string text, bool bold)>> mfLines)
+    private static void LayoutMonoFontLineBoxes(HtmlFragmentLayoutState hl, double mfPt, List<List<(string text, bool bold)>> mfLines)
     {
         // Monospace pre-formatted report: verbatim Courier line boxes
         // (every &nbsp; a real column space, every <br/> a hard line)
@@ -172,8 +172,8 @@ public sealed partial class Document
         // margin), below the ambient flow top when that sits higher.
         var mfPitch = mfPt * 1.377;
         var mfAscent = 0.562 * mfPt; // Courier cap ascent
-        if (hl.flow.CurrentY > hl.page.Height - 90)
-            hl.flow.AdvanceY(hl.flow.CurrentY - (hl.page.Height - 90));
+        if (hl.flow.CurrentY > hl.page.LayoutFrameHeight - 90)
+            hl.flow.AdvanceY(hl.flow.CurrentY - (hl.page.LayoutFrameHeight - 90));
         foreach (var mline in mfLines)
         {
             if (hl.flow.CurrentY - mfPitch < hl.flow.BottomMargin) hl.flow.ForceNewPage();
@@ -227,7 +227,7 @@ public sealed partial class Document
     }
 
     /// <summary>A fragment holding a table lays it out as a table; false when the paragraph is finished here.</summary>
-    private bool LayoutHtmlTableFragment(HtmlFragmentLayoutState hl, List<byte[]> inlineSvgs)
+    private void LayoutHtmlTableFragment(HtmlFragmentLayoutState hl, List<byte[]> inlineSvgs)
     {
         // Mixed content (text blocks + real column tables): render each
         // top-level segment in document order so an HTML <table> flows as
@@ -237,30 +237,30 @@ public sealed partial class Document
         // shape: its text chunks set in the serif writer above, and
         // its tables use the widest declared box.
         var uaWideBoxPt = 0.0;
-        var uaSerifFrag = System.Text.RegularExpressions.Regex.IsMatch(
+        var uaSerifFrag = SafeRegex.IsMatch(
                 hl.htmlContent, @"<html[\s>]",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase)
             && hl.html.TextState?.Font is null
             && string.IsNullOrEmpty(hl.html.TextState?.FontName);
         if (uaSerifFrag)
             foreach (System.Text.RegularExpressions.Match uwm in
-                System.Text.RegularExpressions.Regex.Matches(hl.htmlContent,
+                SafeRegex.Matches(hl.htmlContent,
                     @"<table\b[^>]*\bwidth\s*=\s*[""']?(\d+)(?![\d%])",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase))
                 uaWideBoxPt = Math.Max(uaWideBoxPt,
                     double.Parse(uwm.Groups[1].Value,
                         System.Globalization.CultureInfo.InvariantCulture) * 0.75);
-        uaSerifFrag &= uaWideBoxPt > hl.page.Width - hl.marginLeft - hl.marginRight;
+        uaSerifFrag &= uaWideBoxPt > hl.page.LayoutFrameWidth - hl.marginLeft - hl.marginRight;
         // The segments concatenate back to htmlContent, so a running
         // offset places each one in the source — which is how the
         // framed-block spans above are expressed.
         // Verdana form-grid document: a width-percent wrapper div
         // whose cells declare inline Verdana spans throughout —
         // every table chunk below takes the dialect.
-        var vgDoc = System.Text.RegularExpressions.Regex.IsMatch(
+        var vgDoc = SafeRegex.IsMatch(
                 hl.htmlContent, @"^\s*<div[^>]*style\s*=\s*'[^']*width:\s*\d+%",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            && System.Text.RegularExpressions.Regex.Matches(
+            && SafeRegex.Matches(
                 hl.htmlContent, @"font-family:\s*Verdana",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count >= 4;
         // The width-percent wrapper scopes only its OWN subtree: a
@@ -273,7 +273,7 @@ public sealed partial class Document
         {
             var vgDepth = 0;
             foreach (System.Text.RegularExpressions.Match dm in
-                System.Text.RegularExpressions.Regex.Matches(hl.htmlContent,
+                SafeRegex.Matches(hl.htmlContent,
                     @"<\s*(/?)div\b",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             {
@@ -291,11 +291,10 @@ public sealed partial class Document
         {
             if (!LayoutHtmlTableChunk(hl, inlineSvgs, vgDoc, uaSerifFrag, uaWideBoxPt, vgWrapClose, isTable, chunk)) break;
         }
-        return true;
     }
 
     /// <summary>The centered filing-letter dialect: letterhead at natural size, then Times lines on a 4 em rhythm; false when the paragraph is finished here.</summary>
-    private bool LayoutFilingLetter(HtmlFragmentLayoutState hl, List<Converters.HtmlToPdfConverter.FilingItem> flItems)
+    private void LayoutFilingLetter(HtmlFragmentLayoutState hl, List<Converters.HtmlToPdfConverter.FilingItem> flItems)
     {
         // Centered filing-letter dialect: the letterhead image at
         // natural size on the page center, then Times lines on the
@@ -326,9 +325,9 @@ public sealed partial class Document
                     fw *= 0.75;
                     fh *= 0.75;
                     if (fw <= 0 || fh <= 0) { fw = 187.5; fh = 75; }
-                    var fx = (hl.page.Width - fw) / 2;
+                    var fx = (hl.page.LayoutFrameWidth - fw) / 2;
                     var fTop = hl.flow.CurrentY;
-                    hl.flow.CurrentPage.AddImage(fbytes,
+                    hl.flow.CurrentPage.AddLayoutImage(fbytes,
                         new Rectangle(fx, fTop - fh, fx + fw, fTop));
                     hl.flow.AdvanceY(fh);
                 }
@@ -337,7 +336,7 @@ public sealed partial class Document
             if (fl.Blank) { hl.flow.AdvanceY(flPitch); continue; }
             if (fl.Text is not { } ftext) continue;
             var fres = Table.RegisterFont(hl.flow.CurrentPage, "Times-Roman");
-            var maxW = hl.page.Width - 144 - fl.IndentPt;
+            var maxW = hl.page.LayoutFrameWidth - 144 - fl.IndentPt;
             var linesOut = new List<string>();
             var rem2 = ftext;
             while (rem2.Length > 0 && FlMeasure(rem2) > maxW)
@@ -356,7 +355,7 @@ public sealed partial class Document
                 if (hl.flow.CurrentY - flDrop < hl.flow.BottomMargin) hl.flow.ForceNewPage();
                 var lw = FlMeasure(lt);
                 var lx = fl.AlignLeft ? 72 + fl.IndentPt
-                    : Math.Max(72, (hl.page.Width - lw) / 2);
+                    : Math.Max(72, (hl.page.LayoutFrameWidth - lw) / 2);
                 var fb = new Content.ContentStreamBuilder();
                 fb.SaveState();
                 fb.BeginText().SetFont(fres, flFs)
@@ -367,20 +366,19 @@ public sealed partial class Document
                 hl.flow.AdvanceY(flPitch);
             }
         }
-        return true;
     }
 
     /// <summary>A fragment whose load options declare page margins lays out in its own box inside the page's content box; false when the paragraph is finished here.</summary>
-    private bool LayoutMarginAssignedFragment(HtmlFragmentLayoutState hl, PageInfo mfPi)
+    private void LayoutMarginAssignedFragment(HtmlFragmentLayoutState hl, PageInfo mfPi)
     {
         var mf = new MarginFragmentState();
         mf.mfSize = hl.html.TextState is { } mfTs && mfTs.FontSize > 0 ? (double)mfTs.FontSize : 10.0;
         mf.mfFirst = mfPi.Margin;
         mf.mfRest = mfPi.AnyMarginAssigned ? mfPi.AnyMargin : mfPi.Margin;
         mf.mfLeft = hl.marginLeft + mf.mfFirst.Left;
-        mf.mfRight = hl.page.Width - hl.marginRight - mf.mfFirst.Right;
+        mf.mfRight = hl.page.LayoutFrameWidth - hl.marginRight - mf.mfFirst.Right;
         mf.mfWidth = Math.Max(1, mf.mfRight - mf.mfLeft);
-        mf.mfBottom = hl.page.Height - hl.marginBottom - mf.mfFirst.Bottom;
+        mf.mfBottom = hl.page.LayoutFrameHeight - hl.marginBottom - mf.mfFirst.Bottom;
         mf.mfTopFirst = hl.marginTop + mf.mfFirst.Top;
         mf.mfTopRest = hl.marginTop + mf.mfRest.Top;
 
@@ -390,7 +388,9 @@ public sealed partial class Document
         mf.mfLines = new List<(List<(string Text, Converters.HtmlToPdfConverter.FlowRun Run, string Face, double X, double W)> Pieces,
             double Above, double Below)>();
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var mfPara in Converters.HtmlToPdfConverter.ParseFlowParagraphs(hl.htmlContent))
+#pragma warning restore S3267
         {
             if (!WrapMarginAssignedParagraph(hl, mf, mfPara)) break;
         }
@@ -409,9 +409,8 @@ public sealed partial class Document
         }
         mf.mfBuilder.RestoreState();
         if (mf.mfDrew) hl.flow.InjectContentAtCursor(mf.mfBuilder.Build());
-        mf.mfEnd = hl.page.Height - (mf.mfY + mf.mfPrevBelow);
+        mf.mfEnd = hl.page.LayoutFrameHeight - (mf.mfY + mf.mfPrevBelow);
         if (hl.flow.CurrentY > mf.mfEnd) hl.flow.AdvanceY(hl.flow.CurrentY - mf.mfEnd);
-        return true;
     }
 
     /// <summary>Lays out one segment of a mixed-content fragment: a table as a table, text between tables as flowed lines.</summary>
@@ -419,7 +418,7 @@ public sealed partial class Document
     {
         if (vgDoc && Environment.GetEnvironmentVariable("ASPOSE_HTML_DEBUG_FG") is not null)
             Console.WriteLine($"[chunk] table={isTable} len={chunk.Length} " +
-                $"'{System.Text.RegularExpressions.Regex.Replace(chunk.Length > 70 ? chunk[..70] : chunk, @"\s+", " ")}'");
+                $"'{SafeRegex.Replace(chunk.Length > 70 ? chunk[..70] : chunk, @"\s+", " ")}'");
         var chunkEnd = hl.chunkAt + chunk.Length;
         HtmlFramesOpening(hl, hl.chunkAt, chunkEnd, chunk);
         if (isTable && uaSerifFrag)
@@ -434,7 +433,7 @@ public sealed partial class Document
         {
             LayoutTableSegment(hl, inlineSvgs, vgDoc, uaSerifFrag, uaWideBoxPt, vgWrapClose, chunk);
         }
-        else if (uaSerifFrag) RenderUaSerifChunk(chunk, uaWideBoxPt, hl.html, hl.flow, hl.marginLeft);
+        else if (uaSerifFrag) RenderUaSerifChunk(chunk, uaWideBoxPt, hl.flow, hl.marginLeft);
         else if (!vgDoc && TryLayoutUaFlowFragment(hl, chunk, lastPiece: chunkEnd >= hl.htmlContent.Length))
         {
             // A prose piece between the tables of a mixed fragment sets on the UA
@@ -447,14 +446,14 @@ public sealed partial class Document
         // font's UNROUNDED Verdana-12 line inside it
         // (414.0+14.58 = 428.6; the rounded 19px box
         // measures 0.35 short there).
-        else if (vgDoc && System.Text.RegularExpressions.Regex.IsMatch(
+        else if (vgDoc && SafeRegex.IsMatch(
                      chunk, @"^\s*(<br\s*/?>\s*)+$",
                      System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             foreach (System.Text.RegularExpressions.Match brm in
-                System.Text.RegularExpressions.Regex.Matches(
+                SafeRegex.Matches(
                     chunk, @"<br\s*/?>",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                hl.flow.AdvanceY(VgBrBoxPt(hl, vgWrapClose, hl.chunkAt + brm.Index));
+                hl.flow.AdvanceY(VgBrBoxPt(vgWrapClose, hl.chunkAt + brm.Index));
         else if (vgDoc && TryVgFlowText(hl, vgWrapClose, chunk, hl.chunkAt))
         {
             // Form-grid document: a bare top-level <div>text</div>
@@ -471,10 +470,10 @@ public sealed partial class Document
             // table tag) counts too.
             if (vgDoc)
                 foreach (System.Text.RegularExpressions.Match brm in
-                    System.Text.RegularExpressions.Regex.Matches(
+                    SafeRegex.Matches(
                         chunk, @"(?<=>)\s*<br\s*/?>\s*(?=<|$)",
                         System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                    hl.flow.AdvanceY(VgBrBoxPt(hl, vgWrapClose, hl.chunkAt + brm.Index));
+                    hl.flow.AdvanceY(VgBrBoxPt(vgWrapClose, hl.chunkAt + brm.Index));
             RenderHtmlBlocks(chunk, hl.html, hl.flow, hl.page, hl.tb, hl.htmlColor, inlineSvgs, hl, hl.htmlFrameIndent, hl.marginLeft, hl.marginRight, hl.marginTop);
         }
         HtmlFramesClosing(hl, hl.chunkAt, chunkEnd);
@@ -491,7 +490,7 @@ public sealed partial class Document
             : TableSheetForChunk(hl.htmlContent, chunk);
         // a percentage width resolves against the body's own
         // declared width when the document states one
-        var layoutAvail = hl.page.Width - hl.marginLeft - hl.marginRight;
+        var layoutAvail = hl.page.LayoutFrameWidth - hl.marginLeft - hl.marginRight;
         if (uaSerifFrag) layoutAvail = uaWideBoxPt;
         if (isLayout
             && Converters.HtmlToPdfConverter.DeclaredBodyWidthPt(hl.htmlContent) is > 0 and var bw)
@@ -512,14 +511,14 @@ public sealed partial class Document
         // grid takes the dialect — the one-span section
         // bands and the spacer table included, not just
         // the span-heavy label grid.
-        var vgWrap = System.Text.RegularExpressions.Regex.Match(
+        var vgWrap = SafeRegex.Match(
             hl.htmlContent, @"^\s*<div[^>]*style\s*=\s*'[^']*width:\s*(\d+)%",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var vgSize = System.Text.RegularExpressions.Regex.Match(
+        var vgSize = SafeRegex.Match(
             chunk, @"font-size:\s*([\d.]+)\s*pt",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (!vgSize.Success)
-            vgSize = System.Text.RegularExpressions.Regex.Match(
+            vgSize = SafeRegex.Match(
                 hl.htmlContent, @"font-size:\s*([\d.]+)\s*pt",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         var verdanaGrid = !isLayout && vgDoc && vgWrap.Success
@@ -536,26 +535,30 @@ public sealed partial class Document
         // default size — Verdana-12 (14.25) inside the
         // wrapper's <font face='Verdana'>, the serif
         // default's 13.5 for the top-level section tables.
-        var vgStrutPt = !verdanaGrid ? 0
-            : vgInWrap
-                ? Converters.HtmlToPdfConverter.PxLinePt(
-                    Converters.HtmlToPdfConverter.FormGridBasePt,
-                    Converters.HtmlToPdfConverter.VerdanaWinLineRatio)
-                : Converters.HtmlToPdfConverter.PxLinePt(
-                    Converters.HtmlToPdfConverter.FormGridBasePt,
-                    Converters.HtmlToPdfConverter.SerifWinLineRatio);
+        double vgStrutPt;
+        if (!verdanaGrid) vgStrutPt = 0;
+        else if (vgInWrap)
+            vgStrutPt = Converters.HtmlToPdfConverter.PxLinePt(
+                Converters.HtmlToPdfConverter.FormGridBasePt,
+                Converters.HtmlToPdfConverter.VerdanaWinLineRatio);
+        else
+            vgStrutPt = Converters.HtmlToPdfConverter.PxLinePt(
+                Converters.HtmlToPdfConverter.FormGridBasePt,
+                Converters.HtmlToPdfConverter.SerifWinLineRatio);
         // The strut's baseline drop: half-leading + winAscent
         // within the strut box, in the ambient face.
-        var vgStrutDropPt = !verdanaGrid ? 0
-            : vgInWrap
-                ? (vgStrutPt - Converters.HtmlToPdfConverter.FormGridBasePt
-                        * Converters.HtmlToPdfConverter.VerdanaWinLineRatio) / 2
-                    + Converters.HtmlToPdfConverter.FormGridBasePt
-                        * Converters.HtmlToPdfConverter.VerdanaWinAscent
-                : (vgStrutPt - Converters.HtmlToPdfConverter.FormGridBasePt
-                        * Converters.HtmlToPdfConverter.SerifWinLineRatio) / 2
-                    + Converters.HtmlToPdfConverter.FormGridBasePt
-                        * Converters.HtmlToPdfConverter.SerifWinAscent;
+        double vgStrutDropPt;
+        if (!verdanaGrid) vgStrutDropPt = 0;
+        else if (vgInWrap)
+            vgStrutDropPt = (vgStrutPt - Converters.HtmlToPdfConverter.FormGridBasePt
+                    * Converters.HtmlToPdfConverter.VerdanaWinLineRatio) / 2
+                + Converters.HtmlToPdfConverter.FormGridBasePt
+                    * Converters.HtmlToPdfConverter.VerdanaWinAscent;
+        else
+            vgStrutDropPt = (vgStrutPt - Converters.HtmlToPdfConverter.FormGridBasePt
+                    * Converters.HtmlToPdfConverter.SerifWinLineRatio) / 2
+                + Converters.HtmlToPdfConverter.FormGridBasePt
+                    * Converters.HtmlToPdfConverter.SerifWinAscent;
         (var t, _) = Converters.HtmlToPdfConverter.BuildTableFromHtml(chunk, layoutAvail, hl.html.HtmlLoadOptions, inlineSvgs, chunkCss, false, false, verdanaGrid ? vgStrutPt : 0, verdanaGrid ? vgPt : tblBodyCss.SizePt, false, isLayout, // …and the face's own `line-height: normal` box, // so a cell line steps on the same rhythm the
             // prose does (Arial 12 → 13.5, not a bare 12).
             cssRunFace: verdanaGrid ? null : tblBodyCss.Face, defaultCellFace: verdanaGrid ? null : tblBodyCss.Face, formGridDialect: verdanaGrid, formGridStrutPt: vgStrutPt, formGridStrutDropPt: vgStrutDropPt);
@@ -570,7 +573,7 @@ public sealed partial class Document
     }
 
     /// <summary>A table on the Verdana grid document takes the grid's strut and row pitch before it is laid out.</summary>
-    private void LayoutVerdanaGridTable(Table t, double layoutAvail, string chunk)
+    private static void LayoutVerdanaGridTable(Table t, double layoutAvail, string chunk)
     {
         t.HonorCellTtfFaces = true;
         t.FormGridCells = true;
@@ -592,21 +595,21 @@ public sealed partial class Document
         // the band rows paint edge to edge; the
         // content-sized column would shrink the fill
         // to the caption's width.
-        if (System.Text.RegularExpressions.Regex.IsMatch(
+        if (SafeRegex.IsMatch(
                 chunk, @"<table[^>]*\bwidth\s*=\s*'100%'",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            && !System.Text.RegularExpressions.Regex.IsMatch(
+            && !SafeRegex.IsMatch(
                 chunk, @"<td[^>]*<td",
                 System.Text.RegularExpressions.RegexOptions.Singleline))
         {
             var vgMaxTds = 0;
             foreach (System.Text.RegularExpressions.Match rm in
-                System.Text.RegularExpressions.Regex.Matches(
+                SafeRegex.Matches(
                     chunk, @"<tr[^>]*>(.*?)</tr>",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase
                     | System.Text.RegularExpressions.RegexOptions.Singleline))
                 vgMaxTds = Math.Max(vgMaxTds,
-                    System.Text.RegularExpressions.Regex.Matches(
+                    SafeRegex.Matches(
                         rm.Groups[1].Value, @"<td\b",
                         System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count);
             if (vgMaxTds == 1)
@@ -621,19 +624,19 @@ public sealed partial class Document
                 // box, no content floors (boundaries land
                 // to 0.01 pt).
                 foreach (System.Text.RegularExpressions.Match rm in
-                    System.Text.RegularExpressions.Regex.Matches(
+                    SafeRegex.Matches(
                         chunk, @"<tr[^>]*>(.*?)</tr>",
                         System.Text.RegularExpressions.RegexOptions.IgnoreCase
                         | System.Text.RegularExpressions.RegexOptions.Singleline))
                 {
-                    var vgTds = System.Text.RegularExpressions.Regex.Matches(
+                    var vgTds = SafeRegex.Matches(
                         rm.Groups[1].Value, @"<td\b[^>]*>",
                         System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                     if (vgTds.Count < vgMaxTds) continue;
                     var vgPcts = new List<double>();
                     foreach (System.Text.RegularExpressions.Match tdm in vgTds)
                     {
-                        var pw = System.Text.RegularExpressions.Regex.Match(
+                        var pw = SafeRegex.Match(
                             tdm.Value, @"width\s*=\s*['""]?([\d.]+)%",
                             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                         if (!pw.Success) { vgPcts.Clear(); break; }
@@ -659,7 +662,7 @@ public sealed partial class Document
     }
 
     /// <summary>Writes one wrapped line of a margin-assigned fragment, breaking to a new page at its bottom margin.</summary>
-    private bool LayoutMarginAssignedLine(HtmlFragmentLayoutState hl, MarginFragmentState mf, int li)
+    private static bool LayoutMarginAssignedLine(HtmlFragmentLayoutState hl, MarginFragmentState mf, int li)
     {
         var (pieces, above, below) = mf.mfLines[li];
         var baseline = mf.mfOnPage == 0 ? mf.mfPageTop + above : mf.mfY + mf.mfPrevBelow + above;
@@ -671,9 +674,28 @@ public sealed partial class Document
         }
         foreach (var (text, run, face, x, w) in pieces)
         {
+            var py = hl.page.LayoutFrameHeight - baseline;
+            if (run.Control is { } control)
+            {
+                // a text control: its field over its box on the line's baseline
+                var box = Converters.HtmlToPdfConverter.FlowControlBox(control, mf.mfWidth, Converters.HtmlToPdfConverter.FaceBelow(mf.mfStrut, mf.mfSize));
+                var widget = new Rectangle(mf.mfLeft + x + box.Dx, py + box.Dy, mf.mfLeft + x + box.Dx + box.W, py + box.Dy + box.H);
+                if (control.IsCheckBox) hl.flow.QueueCheckboxAt(widget, control.Checked);
+                else if (control.IsRadio) hl.flow.QueueRadioAt(widget, mf.mfRadios++ == 0 ? "radio" : "radio" + (mf.mfRadios - 1), control.Checked);
+                else hl.flow.QueueControlAt(widget, control);
+                if (control.IsButton && control.Value.Length > 0)
+                {
+                    // (a push button's caption is page text centred in its widget on the line's baseline)
+                    var captionX = widget.LLX + (widget.Width - Converters.HtmlToPdfConverter.PushButtonCaptionWidth(control.Value)) / 2;
+                    mf.mfBuilder.SetFillGray(0).BeginText()
+                        .SetFont(Table.RegisterFont(hl.flow.CurrentPage, Converters.HtmlToPdfConverter.PushButtonFace), Converters.HtmlToPdfConverter.PushButtonFontPt)
+                        .MoveTextPosition(captionX, py).ShowText(control.Value).EndText();
+                    mf.mfDrew = true;
+                }
+                continue;
+            }
             if (text.Trim().Length == 0) continue;
             var res = Table.RegisterFont(hl.flow.CurrentPage, face);
-            var py = hl.page.Height - baseline;
             if (run.Back is { } bg)
             {
                 // the highlight fills the run's content area:
@@ -682,7 +704,7 @@ public sealed partial class Document
                 var hH = Converters.HtmlToPdfConverter.FaceAscent(face, mf.mfSize)
                          + Converters.HtmlToPdfConverter.FaceDescent(face, mf.mfSize);
                 mf.mfBuilder.SetFillColor(bg)
-                         .Rectangle(mf.mfLeft + x, hl.page.Height - hTop - hH, w, hH)
+                         .Rectangle(mf.mfLeft + x, hl.page.LayoutFrameHeight - hTop - hH, w, hH)
                          .Fill();
             }
             if (run.Fore is { } fg) mf.mfBuilder.SetFillColor(fg);
@@ -711,7 +733,7 @@ public sealed partial class Document
         void MfFlush()
         {
             // trailing space never holds a line open
-            while (pieces.Count > 0 && pieces[^1].Item1.Trim().Length == 0)
+            while (pieces.Count > 0 && pieces[^1].Item2.Control is null && pieces[^1].Item1.Trim().Length == 0)
                 pieces.RemoveAt(pieces.Count - 1);
             mf.mfLines.Add((new List<(string Text, Converters.HtmlToPdfConverter.FlowRun Run, string Face, double X, double W)>(pieces),
                 above, below));
@@ -726,23 +748,35 @@ public sealed partial class Document
         foreach (var run in mfPara.Runs)
         {
             if (run.HardBreak) { MfFlush(); continue; }
-            var face = MfFace(mf, hl, run);
+            if (run.Control is { } control)
+            {
+                // a text control is one unbreakable piece: its advance wide, its box raising the line
+                var box = Converters.HtmlToPdfConverter.FlowControlBox(control, mf.mfWidth, Converters.HtmlToPdfConverter.FaceBelow(mf.mfStrut, mf.mfSize));
+                if (lineStarted && x + box.Adv > mf.mfWidth + 0.01) MfFlush();
+                pieces.Add(("", run, mf.mfStrut, x, box.Adv));
+                x += box.Adv;
+                lineStarted = true;
+                above = Math.Max(above, box.Above);
+                below = Math.Max(below, box.Below);
+                continue;
+            }
+            var face = MfFace(hl, run);
             var runAbove = Converters.HtmlToPdfConverter.FaceAbove(face, mf.mfSize);
             var runBelow = Converters.HtmlToPdfConverter.FaceBelow(face, mf.mfSize);
             // split into words, keeping each word's leading space
-            foreach (System.Text.RegularExpressions.Match wm in System.Text.RegularExpressions.Regex.Matches(run.Text, @" *[^ ]+| +"))
+            foreach (var value in SafeRegex.Matches(run.Text, @" *[^ ]+| +").Select(wm => wm.Value))
             {
-                var word = wm.Value;
+                var word = value;
                 var atLineStart = !lineStarted;
                 var draw = atLineStart ? word.TrimStart(' ') : word;
                 if (draw.Length == 0) continue;
-                var w = MfWidthOf(mf, hl, draw, face);
+                var w = MfWidthOf(mf, draw, face);
                 if (lineStarted && x + w > mf.mfWidth + 0.01 && draw.Trim().Length > 0)
                 {
                     MfFlush();
                     draw = word.TrimStart(' ');
                     if (draw.Length == 0) continue;
-                    w = MfWidthOf(mf, hl, draw, face);
+                    w = MfWidthOf(mf, draw, face);
                 }
                 pieces.Add((draw, run, face, x, w));
                 x += w;
@@ -779,6 +813,6 @@ public sealed partial class Document
             var usedH = RenderLayoutTable(t, -1, boxFloor, hl.flow.CurrentY, hl.flow, hl.marginLeft, hl.renderedTables);
             hl.flow.AdvanceY(usedH);
         }
-        else RenderHtmlTable(t, hl.flow, hl.page, hl.marginLeft, hl.marginTop, hl.overflowPages, hl.overflowImages);
+        else RenderHtmlTable(t, hl.flow, hl.marginLeft, hl.marginTop, hl.overflowPages, hl.overflowImages);
     }
 }

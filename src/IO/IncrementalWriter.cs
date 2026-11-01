@@ -12,7 +12,7 @@ internal sealed class IncrementalWriter
 {
     private readonly Stream _output;
     private readonly byte[] _originalData;
-    private readonly Dictionary<int, (long offset, PdfObject obj)> _modifiedObjects = new();
+    private readonly Dictionary<int, (int generation, PdfObject obj)> _modifiedObjects = new();
     private int _nextObjectNumber;
 
     /// <summary>Streams encountered as direct values during write are
@@ -21,9 +21,20 @@ internal sealed class IncrementalWriter
     /// the same instance share one indirect object.</summary>
     private readonly Dictionary<PdfStream, int> _promotedStreams = new();
 
-    /// <summary>Streams whose object body still needs to be written —
+    /// <summary>Dictionaries written as an object of their own: held as a value anywhere in the
+    /// update, each is written as a reference to that object, never as a copy of it.</summary>
+    private readonly Dictionary<PdfDictionary, int> _writtenAs = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>Streams and dictionaries whose object body still needs to be written —
     /// drained at the end of <see cref="Flush"/>.</summary>
-    private readonly Queue<(int objNum, PdfStream stream)> _deferredStreams = new();
+    private readonly Queue<(int objNum, PdfObject body)> _deferredBodies = new();
+
+    /// <summary>The entries that hold annotations, fields and pages: PDF 32000-1 tables 30, 220
+    /// and 164 make their items indirect objects, so an item held inline gets an object of its own.</summary>
+    private static readonly HashSet<string> ArraysOfObjects = new(StringComparer.Ordinal) { "Annots", "Fields", "Kids" };
+
+    /// <summary>A field's or a page's parent, an indirect reference by the same tables.</summary>
+    private const string ParentKey = "Parent";
 
     /// <summary>When the source document is encrypted (the copied trailer keeps its
     /// /Encrypt), every string and every NEW stream appended here must be encrypted
@@ -49,12 +60,19 @@ internal sealed class IncrementalWriter
     }
 
     /// <summary>
-    /// Register a modified or new object to be written.
+    /// Register a modified or new object to be written, under the generation the file gives its number
+    /// (a reference names both, so an edited object keeps its own).
     /// </summary>
-    public void WriteObject(int objectNumber, PdfObject obj)
+    public void WriteObject(int objectNumber, PdfObject obj, int generation = 0)
     {
-        _modifiedObjects[objectNumber] = (0, obj); // offset computed during flush
+        _modifiedObjects[objectNumber] = (generation, obj);
+        if (obj is PdfDictionary dict) _writtenAs.TryAdd(dict, objectNumber);
+        else if (obj is PdfStream stream) _promotedStreams.TryAdd(stream, objectNumber);
     }
+
+    /// <summary>Name the object a dictionary is (or stays) in the file: held as a value by an object
+    /// of the update - a page as a widget's /P - it is written as a reference to it.</summary>
+    public void WrittenAs(PdfDictionary dict, int objectNumber) => _writtenAs.TryAdd(dict, objectNumber);
 
     /// <summary>
     /// Allocate a new object number.
@@ -74,25 +92,29 @@ internal sealed class IncrementalWriter
         if (_output.CanSeek) _output.Seek(0, SeekOrigin.Begin);
         _output.Write(_originalData);
 
+        // Nothing changed: an update would be a cross-reference section with no subsection,
+        // which readers take for damage, so the file stays as it was.
+        if (_modifiedObjects.Count == 0) return;
+
         // 1b. Producer comment
         WriteLn("%   ");
 
         // 2. Write modified/new objects, track offsets
         var offsets = new Dictionary<int, long>();
-        foreach (var (objNum, (_, obj)) in _modifiedObjects)
+        foreach (var (objNum, (gen, obj)) in _modifiedObjects)
         {
             offsets[objNum] = _output.Position;
-            WriteIndirectObject(objNum, 0, obj);
+            WriteIndirectObject(objNum, gen, obj);
         }
 
-        // 2b. Drain promoted-to-indirect streams (assigned during step 2 and
-        //     possibly during this loop itself if a stream is reachable from
-        //     another stream's dict).
-        while (_deferredStreams.Count > 0)
+        // 2b. Drain the streams and dictionaries promoted to objects of their own (assigned
+        //     during step 2 and possibly during this loop itself if one is reachable from
+        //     another's body).
+        while (_deferredBodies.Count > 0)
         {
-            var (objNum, stream) = _deferredStreams.Dequeue();
+            var (objNum, body) = _deferredBodies.Dequeue();
             offsets[objNum] = _output.Position;
-            WriteIndirectObject(objNum, 0, stream);
+            WriteIndirectObject(objNum, 0, body);
         }
 
         // 3. Write new xref table (only modified entries)
@@ -108,7 +130,8 @@ internal sealed class IncrementalWriter
             WriteLn($"{start} {count}");
             for (var i = start; i < start + count; i++)
             {
-                WriteLn($"{offsets[i]:D10} 00000 n ");
+                var gen = _modifiedObjects.TryGetValue(i, out var written) ? written.generation : 0;
+                WriteLn($"{offsets[i]:D10} {gen:D5} n ");
             }
         }
 
@@ -140,7 +163,10 @@ internal sealed class IncrementalWriter
         try
         {
             WriteLn($"{objNum} {gen} obj");
-            WriteObject(obj);
+            // An array that is an object of its own is a page's /Annots, a form's /Fields, a node's
+            // /Kids held by reference: an item added to it inline gets an object of its own too.
+            if (obj is PdfArray items) WriteContainerObject(items, itemsAreObjects: true);
+            else WriteObject(obj);
             Write("\n");
             WriteLn("endobj");
         }
@@ -177,9 +203,32 @@ internal sealed class IncrementalWriter
         {
             num = _nextObjectNumber++;
             _promotedStreams[stream] = num;
-            _deferredStreams.Enqueue((num, stream));
+            _deferredBodies.Enqueue((num, stream));
         }
         return new PdfIndirectRef(num, 0);
+    }
+
+    /// <summary>The reference a dictionary held as a value is written as: the object it is written as, or,
+    /// when <paramref name="promote"/>, a new object for it, queued for writing. Null to write it inline.</summary>
+    private PdfIndirectRef? ReferenceFor(PdfDictionary dict, bool promote)
+    {
+        if (!_writtenAs.TryGetValue(dict, out var num))
+        {
+            if (!promote) return null;
+            num = _nextObjectNumber++;
+            _writtenAs[dict] = num;
+            _deferredBodies.Enqueue((num, dict));
+        }
+        return new PdfIndirectRef(num, 0);
+    }
+
+    /// <summary>A value inside a container: a stream, and a dictionary that is (or must be) an object of
+    /// its own, are written as references.</summary>
+    private void WriteValue(PdfObject value, bool promoteDict)
+    {
+        if (value is PdfStream s) WriteObject(PromoteStream(s));
+        else if (value is PdfDictionary d && ReferenceFor(d, promoteDict) is { } dictRef) WriteObject(dictRef);
+        else WriteObject(value);
     }
 
     private void Write(string text)
@@ -238,8 +287,8 @@ internal sealed class IncrementalWriter
                 Write(r.ToString());
                 break;
             case PdfString s:
-                // In-memory strings are plaintext (the reader decrypts at parse);
-                // under an encrypted trailer they must be re-encrypted with the
+                // In-memory strings are plaintext (the reader decrypts at parse); under
+                // an encrypted trailer they must be re-encrypted with the
                 // owning object's key. Ciphertext is binary — hex form keeps it
                 // byte-exact (a literal string would normalise CR bytes).
                 var strBytes = s.Value;
@@ -255,18 +304,11 @@ internal sealed class IncrementalWriter
                 }
                 else
                 {
-                    Write("(");
-                    foreach (var c in strBytes)
-                    {
-                        if (c is (byte)'(' or (byte)')' or (byte)'\\')
-                            _output.WriteByte((byte)'\\');
-                        _output.WriteByte(c);
-                    }
-                    Write(")");
+                    PdfWriter.WriteLiteralString(_output, strBytes);
                 }
                 break;
             case PdfName n:
-                Write($"/{n.Value}");
+                PdfWriter.WriteNameToken(_output, n.Value);
                 break;
             case PdfIndirectRef iref:
                 Write($"{iref.ObjectNumber} {iref.Generation} R");
@@ -275,7 +317,7 @@ internal sealed class IncrementalWriter
     }
 
     /// <summary>The container objects: arrays, dictionaries and streams, each written with its members.</summary>
-    private void WriteContainerObject(PdfObject obj)
+    private void WriteContainerObject(PdfObject obj, bool itemsAreObjects = false)
     {
         switch (obj)
         {
@@ -289,8 +331,7 @@ internal sealed class IncrementalWriter
                     for (var i = 0; i < arr.Count; i++)
                     {
                         if (i > 0) Write(" ");
-                        if (arr[i] is PdfStream s) WriteObject(PromoteStream(s));
-                        else WriteObject(arr[i]);
+                        WriteValue(arr[i], itemsAreObjects);
                     }
                     Write("]");
                 }
@@ -303,10 +344,11 @@ internal sealed class IncrementalWriter
                     Write("<< ");
                     foreach (var key in dict.Keys)
                     {
-                        Write($"/{key} ");
+                        PdfWriter.WriteNameToken(_output, key);
+                        Write(" ");
                         var v = dict.Get(key)!;
-                        if (v is PdfStream embedded) WriteObject(PromoteStream(embedded));
-                        else WriteObject(v);
+                        if (v is PdfArray items && ArraysOfObjects.Contains(key)) WriteContainerObject(items, itemsAreObjects: true);
+                        else WriteValue(v, key == ParentKey);
                         Write(" ");
                     }
                     Write(">>");
@@ -316,11 +358,12 @@ internal sealed class IncrementalWriter
             case PdfStream stream:
                 // A NEW in-memory stream (ObjectNumber == 0, e.g. a regenerated
                 // appearance) holds plaintext and must be encrypted under the
-                // encrypted trailer; a source-loaded stream (ObjectNumber > 0)
-                // still holds its original ciphertext keyed to its own number
-                // and is copied verbatim.
+                // encrypted trailer, as does a source-loaded stream whose data was
+                // replaced (a filled XFA datasets packet); a source-loaded stream
+                // left as read still holds its original ciphertext keyed to its own
+                // number and is copied verbatim.
                 var body = stream.RawData;
-                if (_encryptor is not null && _curObjNum > 0 && stream.ObjectNumber == 0)
+                if (_encryptor is not null && _curObjNum > 0 && (stream.ObjectNumber == 0 || stream.DataReplaced))
                     body = _encryptor.EncryptStream(body, _curObjNum, _curGen);
                 stream.Dict.Set("Length", new PdfInteger(body.Length));
                 WriteObject(stream.Dict);

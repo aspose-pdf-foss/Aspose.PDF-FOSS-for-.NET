@@ -126,7 +126,7 @@ internal static class PsArcs
         var y1 = i.PopNumber();
         var x1 = i.PopNumber();
         if (!i.Graphics.TryGetCurrentPoint(out var x0, out var y0))
-            throw new PsErrorSignal("nocurrentpoint");
+            throw new PsErrorException("nocurrentpoint");
         var tangents = Tangents(x0, y0, x1, y1, x2, y2, radius);
         AppendArc(i.Graphics, tangents.Cx, tangents.Cy, Math.Abs(radius),
             tangents.StartAngle, tangents.Sweep);

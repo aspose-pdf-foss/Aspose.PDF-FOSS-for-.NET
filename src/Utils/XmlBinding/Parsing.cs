@@ -107,13 +107,13 @@ internal static partial class XmlBinding
         // segment's deliberate trailing space ("Table of content ") survives.
         var raw = sb.ToString();
         if (raw.IndexOfAny(new[] { '\n', '\r', '\t' }) < 0) return raw;
-        return System.Text.RegularExpressions.Regex.Replace(raw, @"\s+", " ").Trim();
+        return SafeRegex.Replace(raw, @"\s+", " ").Trim();
     }
 
     // The Aspose XML schema stores an HtmlFragment's body two ways: as a
     // direct text/CDATA child of <HtmlFragment>, or wrapped in a nested
-    // <HtmlContent>…</HtmlContent> element. Either shape is valid input;
-    // we flatten both into a single string that the Table/HtmlFragment
+    // <HtmlContent>…</HtmlContent> element. Either shape is valid input; we
+    // flatten both into a single string that the Table/HtmlFragment
     // rendering path can strip via HtmlFragment.StripHtmlTags.
     private static string ExtractHtmlContent(XmlNode fragNode)
     {
@@ -139,7 +139,7 @@ internal static partial class XmlBinding
     private static string DecodeXmlEntities(string text)
     {
         // Decode Aspose-style XML character references: _x0027_ → '
-        return System.Text.RegularExpressions.Regex.Replace(
+        return SafeRegex.Replace(
             text, @"_x([0-9A-Fa-f]{4})_",
             m => ((char)int.Parse(m.Groups[1].Value, NumberStyles.HexNumber)).ToString());
     }

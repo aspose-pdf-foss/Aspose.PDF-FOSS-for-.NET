@@ -39,7 +39,7 @@ internal static partial class HtmlToPdfConverter
         al.wm = wm;
         al.pageHeight = pageHeight;
         al.inv = System.Globalization.CultureInfo.InvariantCulture;
-        al.c = Regex.Replace(html, @"\s+", " ");
+        al.c = SafeRegex.Replace(html, @"\s+", " ");
         al.marginTop = options?.PageInfo?.Margin?.Top ?? 20.0;
         al.marginBottom = options?.PageInfo?.Margin?.Bottom ?? 10.0;
         al.contentRight = 578.5;
@@ -59,7 +59,7 @@ internal static partial class HtmlToPdfConverter
 
         al.y = al.marginTop + 6.0 + 12.75 + 30.0;
         al.railFrom = double.NaN;
-        al.h1M = Regex.Match(al.c, @"<h1 class=""ng-binding"">([^<]*)</h1>");
+        al.h1M = SafeRegex.Match(al.c, @"<h1 class=""ng-binding"">([^<]*)</h1>");
         if (al.h1M.Success)
         {
             EmitRun(al, CollapseWs(DecodeEntities(al.h1M.Groups[1].Value)).Trim(), 10.5, "Bold",
@@ -68,23 +68,25 @@ internal static partial class HtmlToPdfConverter
         }
         al.railFrom = al.y;                                 // the border-container opens here
         al.y += 7.5;                                     // content-container 10 px pad-top
-        foreach (Match hM in Regex.Matches(al.c, @"<h([234]) class=""ng-binding""><span class=""left-line""></span>([^<]*)</h\1>"))
+        foreach (var groups in SafeRegex.Matches(al.c, @"<h([234]) class=""ng-binding""><span class=""left-line""></span>([^<]*)</h\1>").Select(hM => hM.Groups))
         {
-            var lvl = int.Parse(hM.Groups[1].Value, al.inv);
+            var lvl = int.Parse(groups[1].Value, al.inv);
             // measured: h2 +9 (2px border + 10px pad), h3 +12.75, h4 +18
-            var xOff = lvl == 2 ? 9.0 : lvl == 3 ? 12.75 : 18.0;
+            var xOff = lvl switch { 2 => 9.0, 3 => 12.75, _ => 18.0 };
             // the left-line dash under the heading (5/8/13 px wide, top:9px)
-            FillRect(al, ArContentXPt + 1.5, al.y + 6.75, lvl == 2 ? 3.8 : lvl == 3 ? 6.0 : 9.8, 1.5, al.railGray);
-            EmitRun(al, CollapseWs(DecodeEntities(hM.Groups[2].Value)).Trim(), 10.5, "Bold",
+            FillRect(al, ArContentXPt + 1.5, al.y + 6.75, lvl switch { 2 => 3.8, 3 => 6.0, _ => 9.8 }, 1.5, al.railGray);
+            EmitRun(al, CollapseWs(DecodeEntities(groups[2].Value)).Trim(), 10.5, "Bold",
                 ArContentXPt + xOff, al.y + Drop(al, 10.5, 12.6), al.inkBody);
             al.y += 12.6 + 9.0;                          // line + 12 px pad-bottom
         }
         al.y += 26.25;                                   // content-area 35 px pad-top
 
         al.pRunRx = new Regex(@"<(/?)(\w[\w-]*)((?:[^>""']|""[^""]*""|'[^']*')*?)(/?)>|([^<]+)",
-            RegexOptions.Singleline);
+            RegexOptions.Singleline, RegexLimits.Timeout);
         al.contentArea = al.c[(al.c.IndexOf("report-content-area", StringComparison.Ordinal))..];
-        foreach (Match rowM in Regex.Matches(al.contentArea,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match rowM in SafeRegex.Matches(al.contentArea,
+#pragma warning restore S3267
             @"<th class=""ng-binding"">([^<]{1,60})</th>\s*<td class=""dot"">:</td>\s*<td[^>]*>",
             RegexOptions.IgnoreCase))
         {

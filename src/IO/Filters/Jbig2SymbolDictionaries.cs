@@ -41,8 +41,6 @@ internal static partial class Jbig2Decoder
             Rdy = new IntegerDecoder(ad);
             Id = new IaidDecoder(ad, symCodeLen);
             GrCtx = new ArithmeticContext[8192];
-            if (sdh.SdRefAgg)
-                for (var i = 0; i < GrCtx.Length; i++) GrCtx[i] = new ArithmeticContext();
             // Extra integer decoders used only by aggregate (REFAGGNINST>1) symbols, which are
             // coded as an embedded text region (§6.5.8.2.2).
             Dt = new IntegerDecoder(ad);
@@ -227,7 +225,7 @@ internal static partial class Jbig2Decoder
         /// <summary>One height class: symbols of this height, left to right, until the OOB IADW
         /// that ends the class. Returns the running new-symbol count, or null when the stream ran
         /// out mid-class and the whole dictionary must stop.</summary>
-        private int? DecodeHeightClass(SymbolDictionaryHeader sdh, SymbolDictionaryDecoders dec,
+        private static int? DecodeHeightClass(SymbolDictionaryHeader sdh, SymbolDictionaryDecoders dec,
             Jbig2Bitmap[] allSyms, int importedCount, int hcHeight, int newIdx)
         {
             var symWidth = 0;
@@ -249,7 +247,7 @@ internal static partial class Jbig2Decoder
         /// <summary>One new symbol: the generic region it is coded as, or - under SDREFAGG - a
         /// refinement of an earlier symbol, or a text region aggregating several of them. Null
         /// means the stream ran out mid-symbol.</summary>
-        private Jbig2Bitmap? DecodeDictionarySymbol(SymbolDictionaryHeader sdh,
+        private static Jbig2Bitmap? DecodeDictionarySymbol(SymbolDictionaryHeader sdh,
             SymbolDictionaryDecoders dec, Jbig2Bitmap[] allSyms, int available,
             int symWidth, int hcHeight)
         {

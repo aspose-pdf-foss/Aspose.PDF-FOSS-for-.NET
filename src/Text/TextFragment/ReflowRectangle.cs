@@ -32,20 +32,20 @@ public partial class TextFragment
             && _segments.Count > 0
             && _segments.All(s => s.Position is not null && s.Rectangle is not null
                 && !string.IsNullOrEmpty(s.Text))
-            && TryTranslateBlock(rr.page, oldText, newText, rect, rr.baseFs))
+            && TryTranslateBlock(rr.page, newText, rect, rr.baseFs))
         {
             return true;
         }
         SolveReflowFontSize(rr, rect, newText);
 
-        rr.lines = rr.hmtxMeasure is not null
-            ? WrapToWidth(newText, rr.font, rr.fs, rr.wrapWidthT, trailingSpace: true, measure: s => rr.hmtxMeasure(s, rr.fs))
-            : rr.srcMeasure is not null
-            ? WrapToWidth(newText, rr.font, rr.fs, rr.wrapWidthT, trailingSpace: true, measure: s => rr.srcMeasure(s, rr.fs))
-            : WrapToWidth(newText, rr.font, rr.fs, rr.wrapWidthM / rr.sx, trailingSpace: true);
+        if (rr.hmtxMeasure is not null)
+            rr.lines = WrapToWidth(newText, rr.font, rr.fs, rr.wrapWidthT, trailingSpace: true, measure: s => rr.hmtxMeasure(s, rr.fs));
+        else if (rr.srcMeasure is not null)
+            rr.lines = WrapToWidth(newText, rr.font, rr.fs, rr.wrapWidthT, trailingSpace: true, measure: s => rr.srcMeasure(s, rr.fs));
+        else rr.lines = WrapToWidth(newText, rr.font, rr.fs, rr.wrapWidthM / rr.sx, trailingSpace: true);
         if (rr.lines.Count == 0) return false;
         SeatReflowedBaselines(rr, rect);
-        RemoveReflowedSource(rr, rect, oldText);
+        RemoveReflowedSource(rr, oldText);
         WriteReflowedLines(rr, rect);
         ReportReflowedRectangle(rr, rect, newText);
         return true;
@@ -56,11 +56,10 @@ public partial class TextFragment
     /// leading Td straight after BT) by the move delta, leaving the show
     /// strings, fonts, and kerning untouched — the re-absorbed block reproduces
     /// the original geometry exactly, moved by the shift.</summary>
-    private bool TryTranslateBlock(Page page, string oldText, string newText, Rectangle rect, double baseFs)
+    private bool TryTranslateBlock(Page page, string newText, Rectangle rect, double baseFs)
     {
         var bt = new BlockTranslateState();
         bt.page = page;
-        bt.oldText = oldText;
         bt.newText = newText;
         bt.rect = rect;
         bt.baseFs = baseFs;
@@ -145,11 +144,10 @@ public partial class TextFragment
     /// in-place replace to run) when the replacement fits on one line or the page
     /// structure defeats it.
     /// </summary>
-    private bool TryFormFillWrap(Page page, string oldText, string newText)
+    private bool TryFormFillWrap(Page page, string newText)
     {
         var fw = new FormFillWrapState();
         fw.page = page;
-        fw.oldText = oldText;
         fw.newText = newText;
         if (_rectangle is null || _position is null || string.IsNullOrEmpty(fw.newText))
             return false;
@@ -169,9 +167,9 @@ public partial class TextFragment
             if (comma > 0) fam = fam[..comma];
             Aspose.Pdf.Text.Font? sys = null;
             if (fam.Length > 0)
-                try { sys = FontRepository.TryFindFont(fam, ignoreCase: true); } catch { }
+                try { sys = FontRepository.TryFindFont(fam, ignoreCase: true); } catch { /* a font that cannot be found or read leaves the fallback in place */ }
             if (sys is null || !Covers(sys, fw.newText))
-                try { sys = FontRepository.TryFindFont("Times New Roman", ignoreCase: true); } catch { }
+                try { sys = FontRepository.TryFindFont("Times New Roman", ignoreCase: true); } catch { /* a font that cannot be found or read leaves the fallback in place */ }
             if (sys is null || !Covers(sys, fw.newText)) return false;
             fw.writeFont = sys;
         }
@@ -200,7 +198,7 @@ public partial class TextFragment
         }
         if (fw.del.ReplacementCount == 0) return false;
 
-        fw.tb = new TextBuilder(fw.page);
+        fw.tb = new TextBuilder(fw.page) { SeatsInPageSpace = true };
         fw.x0 = _rectangle.LLX;
         fw.y0 = _position.YIndent;
         fw.step = 1.2 * fw.fs;

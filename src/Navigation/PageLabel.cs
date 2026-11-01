@@ -1,3 +1,4 @@
+using System.Text;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
 
@@ -83,8 +84,10 @@ public sealed class PageLabel
 
     private int _start = 1;
 
+#pragma warning disable S2292 // init-only on the published face; the StartingValue alias still sets the field
     /// <summary>The starting number for this range.</summary>
     public int Start
+#pragma warning restore S2292
     {
         get => _start;
         init => _start = value;
@@ -127,26 +130,26 @@ public sealed class PageLabel
             (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
             (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
         ];
-        var result = "";
+        var result = new StringBuilder();
         foreach (var (value, numeral) in map)
         {
-            while (num >= value) { result += numeral; num -= value; }
+            while (num >= value) { result.Append(numeral); num -= value; }
         }
-        return result;
+        return result.ToString();
     }
 
     /// <summary>Convert a positive integer to an alphabetic label (A=1, Z=26, AA=27, etc.).</summary>
     public static string ToAlpha(int num)
     {
         if (num <= 0) return num.ToString();
-        var result = "";
+        var result = new StringBuilder();
         while (num > 0)
         {
             num--;
-            result = (char)('A' + (num % 26)) + result;
+            result.Insert(0, (char)('A' + (num % 26)));
             num /= 26;
         }
-        return result;
+        return result.ToString();
     }
 }
 
@@ -275,7 +278,7 @@ public sealed class PageLabelCollection : IEnumerable<PageLabel>
             };
             if (styleStr is not null) dict.Set("S", new PdfName(styleStr));
             if (label.Prefix is not null)
-                dict.Set("P", new PdfString(Compat.Latin1.GetBytes(label.Prefix)));
+                dict.Set("P", Aspose.Pdf.Forms.Field.EncodePdfTextString(label.Prefix));
             if (label.Start != 1) dict.Set("St", new PdfInteger(label.Start));
             nums.Add(dict);
         }
@@ -305,8 +308,10 @@ public sealed class PageLabelCollection : IEnumerable<PageLabel>
         // pre-first-range section when no range is active yet).
         var activeStart = active?.StartPage ?? 0;
         var nextStart = pageCount;
-        foreach (var l in _labels)
-            if (l.StartPage > activeStart) { nextStart = l.StartPage; break; }
+#pragma warning disable S3267 // a first-match search over a value type - FirstOrDefault cannot tell no match from a default item
+        foreach (var startPage in _labels.Select(l => l.StartPage))
+#pragma warning restore S3267
+            if (startPage > activeStart) { nextStart = startPage; break; }
         var lastIndex = Math.Min(nextStart - 1, pageCount - 1);
         if (lastIndex < 0) lastIndex = 0;
         return FormatLabel(lastIndex);
@@ -417,7 +422,7 @@ public sealed class PageLabelBuilder
             if (styleStr is not null)
                 dict.Set("S", new PdfName(styleStr));
             if (label.Prefix is not null)
-                dict.Set("P", new PdfString(Compat.Latin1.GetBytes(label.Prefix)));
+                dict.Set("P", Aspose.Pdf.Forms.Field.EncodePdfTextString(label.Prefix));
             if (label.Start != 1)
                 dict.Set("St", new PdfInteger(label.Start));
 

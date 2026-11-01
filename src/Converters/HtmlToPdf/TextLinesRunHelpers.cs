@@ -87,10 +87,11 @@ internal static partial class HtmlToPdfConverter
     /// line-height seats 36.1 below an 18 pt line and 21.1 above a 9.75 pt one).</summary>
     private static (double above, double below) RunLineExtent(Block block, string face, double pt, double blockPt, double blockLineHeight)
     {
-        var lh = block.RunNormalLines ? NormalLineOf(face, pt)
-            : block.LineBoxPt > 0 ? block.LineBoxPt
-            : block.SheetLineFactor > 0 ? block.SheetLineFactor * pt
-            : blockLineHeight * (blockPt > 0 ? pt / blockPt : 1);
+        double lh;
+        if (block.RunNormalLines) lh = NormalLineOf(face, pt);
+        else if (block.LineBoxPt > 0) lh = block.LineBoxPt;
+        else if (block.SheetLineFactor > 0) lh = block.SheetLineFactor * pt;
+        else lh = blockLineHeight * (blockPt > 0 ? pt / blockPt : 1);
         var above = LineBoxAbove(face, pt, lh);
         return (above, lh - above);
     }
@@ -154,7 +155,9 @@ internal static partial class HtmlToPdfConverter
         while (i < to)
         {
             var j = i + 1;
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             while (j < to && sizes[j] == sizes[i]) j++;
+#pragma warning restore S1244
             w += MeasureFaceText(face, text[i..j], sizes[i]);
             i = j;
         }
@@ -238,10 +241,6 @@ internal static partial class HtmlToPdfConverter
         return sb.ToString();
     }
 
-    // The glyph parser of a font program the run writers hold by its bytes (the repository
-    // hands out one array per face, so the reference is the key).
-    private static readonly Dictionary<byte[], (Text.GlyphOutlineParser? parser, double upm)> _kernParserByTtf = new();
-
     /// <summary>A run's glyph string as a kerned `TJ` array for the face whose program these bytes are.</summary>
     private static string KernedTj(byte[] ttf, byte[] hexGlyphIds)
     {
@@ -257,4 +256,8 @@ internal static partial class HtmlToPdfConverter
         }
         return KernedTj(e.parser, e.upm, hexGlyphIds);
     }
+
+    // The glyph parser of a font program the run writers hold by its bytes (the repository
+    // hands out one array per face, so the reference is the key).
+    private static readonly Dictionary<byte[], (Text.GlyphOutlineParser? parser, double upm)> _kernParserByTtf = new();
 }

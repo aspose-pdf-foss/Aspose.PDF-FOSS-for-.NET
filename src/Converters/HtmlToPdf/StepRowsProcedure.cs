@@ -61,9 +61,9 @@ internal static partial class HtmlToPdfConverter
 
     private static readonly Regex ProcOpenRx = new(
         "<table\\b[^>]*>|<p\\b[^>]*>|<span\\b[^>]*class\\s*=\\s*['\"]smart-widget-(?<k>equation|numeric|checkbox|text)\\b[^>]*>",
-        RegexOptions.IgnoreCase);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
-    private static readonly Regex ProcLabelRx = new("class\\s*=\\s*['\"]sw[a-z]-label['\"][^>]*>([^<]*)<", RegexOptions.IgnoreCase);
+    private static readonly Regex ProcLabelRx = new("class\\s*=\\s*['\"]sw[a-z]-label['\"][^>]*>([^<]*)<", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
     /// <summary>The content in source order: tables (a detable keeps its own renderer), equation widgets,
     /// runs of inline widgets, paragraphs. A widget span is taken to its balanced close.</summary>
@@ -73,7 +73,7 @@ internal static partial class HtmlToPdfConverter
         var pos = 0;
         while (pos < content.Length)
         {
-            var m = ProcOpenRx.Match(content, pos);
+            var m = SafeRegex.Match(ProcOpenRx, content, pos);
             if (!m.Success) break;
             var v = m.Value;
             string html;
@@ -85,7 +85,7 @@ internal static partial class HtmlToPdfConverter
                 html = content[m.Index..end];
                 items.Add(new ProcItem
                 {
-                    Kind = Regex.IsMatch(v, "class\\s*=\\s*['\"]swdt-table", RegexOptions.IgnoreCase) ? ProcKind.Detable : ProcKind.Table,
+                    Kind = SafeRegex.IsMatch(v, "class\\s*=\\s*['\"]swdt-table", RegexOptions.IgnoreCase) ? ProcKind.Detable : ProcKind.Table,
                     Html = html,
                 });
             }
@@ -94,12 +94,12 @@ internal static partial class HtmlToPdfConverter
                 end = content.IndexOf("</p>", m.Index, StringComparison.OrdinalIgnoreCase);
                 end = end < 0 ? content.Length : end + "</p>".Length;
                 html = content[m.Index..end];
-                if (!Regex.IsMatch(v, "class\\s*=\\s*['\"]empty", RegexOptions.IgnoreCase))
+                if (!SafeRegex.IsMatch(v, "class\\s*=\\s*['\"]empty", RegexOptions.IgnoreCase))
                 {
                     // a paragraph holding nothing but fill-in widgets is a widget line
                     var inner = html[(v.Length)..];
-                    if (Regex.IsMatch(inner, "smart-widget-(numeric|checkbox|text)", RegexOptions.IgnoreCase)
-                        && Regex.Replace(Regex.Replace(inner, "<span\\b[^>]*smart-widget[\\s\\S]*", ""), "<[^>]+>|\\s|&nbsp;", "").Length == 0)
+                    if (SafeRegex.IsMatch(inner, "smart-widget-(numeric|checkbox|text)", RegexOptions.IgnoreCase)
+                        && SafeRegex.Replace(SafeRegex.Replace(inner, "<span\\b[^>]*smart-widget[\\s\\S]*", ""), "<[^>]+>|\\s|&nbsp;", "").Length == 0)
                         AddWidgets(items, html);
                     else items.Add(new ProcItem { Kind = ProcKind.Para, Html = html });
                 }
@@ -122,11 +122,11 @@ internal static partial class HtmlToPdfConverter
     /// balanced close (nested spans honoured); (null, html.Length) without a close.</summary>
     private static (string? inner, int pastEnd) ProcSpanInner(string html, int openIdx)
     {
-        var open = Regex.Match(html[openIdx..], @"^<span\b[^>]*>", RegexOptions.IgnoreCase);
+        var open = SafeRegex.Match(html[openIdx..], @"^<span\b[^>]*>", RegexOptions.IgnoreCase);
         if (!open.Success) return (null, html.Length);
         var i = openIdx + open.Length;
         var depth = 1;
-        foreach (Match t in Regex.Matches(html[i..], @"<(/?)span\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (Match t in SafeRegex.Matches(html[i..], @"<(/?)span\b[^>]*>", RegexOptions.IgnoreCase))
         {
             if (t.Value.EndsWith("/>", StringComparison.Ordinal)) continue;
             depth += t.Groups[1].Value.Length > 0 ? -1 : 1;
@@ -164,8 +164,8 @@ internal static partial class HtmlToPdfConverter
                     y = RenderProcedureTable(sw, it.Html, y);
                     break;
                 case ProcKind.Detable:
-                    var lblM = Regex.Match(sw.content, "class\\s*=\\s*['\"]swdt-label['\"][^>]*>(?<t>[^<]*)", RegexOptions.IgnoreCase);
-                    var lbl = lblM.Success ? Flat(sw, lblM.Groups["t"].Value) : "";
+                    var lblM = SafeRegex.Match(sw.content, "class\\s*=\\s*['\"]swdt-label['\"][^>]*>(?<t>[^<]*)", RegexOptions.IgnoreCase);
+                    var lbl = lblM.Success ? Flat(lblM.Groups["t"].Value) : "";
                     if (lbl.Length > 0) Run(sw, "FA", 12, sw.contentX, y + SrProcSeatPt, lbl);
                     y = RenderDetable(sw, it.Html, y + SrProcSeatPt + SrProcDetableLabelPt, sw.limit) - SrProcSeatPt;
                     break;
@@ -201,7 +201,7 @@ internal static partial class HtmlToPdfConverter
             {
                 ProcKind.Table => ProcedureTableRows(it.Html, out _).heightPt + SrProcRowEndPt,
                 ProcKind.Detable => SrProcDetableLabelPt + SrThRowHPt
-                    + Math.Max(0, Regex.Matches(it.Html, "<tr\\b", RegexOptions.IgnoreCase).Count - 1) * SrDataRowHPt + SrProcRowEndPt,
+                    + Math.Max(0, SafeRegex.Matches(it.Html, "<tr\\b", RegexOptions.IgnoreCase).Count - 1) * SrDataRowHPt + SrProcRowEndPt,
                 ProcKind.Equation => SrProcEqEndPt,
                 _ => (first ? 0 : SrProcAfterTablePt) + SrProcCellLinePt + SrProcRowEndPt,
             };
@@ -214,7 +214,9 @@ internal static partial class HtmlToPdfConverter
     private sealed class ProcCell
     {
         public string Html = "";
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<(string text, string res, double fs, double dx)> Lines = new();
+#pragma warning restore S3218
         public double DeclPt;
         public double MinPt;
         public double BlockPt;
@@ -223,13 +225,13 @@ internal static partial class HtmlToPdfConverter
     private static (List<List<ProcCell>> rows, double heightPt) ProcedureTableRows(string tableHtml, out double[] colW)
     {
         var rows = new List<List<ProcCell>>();
-        foreach (Match trM in Regex.Matches(tableHtml, "<tr\\b[^>]*>(?<r>[\\s\\S]*?)</tr\\s*>", RegexOptions.IgnoreCase))
+        foreach (Match trM in SafeRegex.Matches(tableHtml, "<tr\\b[^>]*>(?<r>[\\s\\S]*?)</tr\\s*>", RegexOptions.IgnoreCase))
         {
             var row = new List<ProcCell>();
-            foreach (Match tdM in Regex.Matches(trM.Groups["r"].Value, "<td\\b(?<a>[^>]*)>(?<c>[\\s\\S]*?)</td\\s*>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(trM.Groups["r"].Value, "<td\\b(?<a>[^>]*)>(?<c>[\\s\\S]*?)</td\\s*>", RegexOptions.IgnoreCase).Select(tdM => tdM.Groups))
             {
-                var c = new ProcCell { Html = tdM.Groups["c"].Value };
-                var wm = Regex.Match(tdM.Groups["a"].Value, "width\\s*:\\s*([0-9.]+)\\s*px", RegexOptions.IgnoreCase);
+                var c = new ProcCell { Html = groups["c"].Value };
+                var wm = SafeRegex.Match(groups["a"].Value, "width\\s*:\\s*([0-9.]+)\\s*px", RegexOptions.IgnoreCase);
                 c.DeclPt = wm.Success ? double.Parse(wm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * 0.75 : 0;
                 c.MinPt = ProcedureCellMinPt(c.Html);
                 row.Add(c);
@@ -247,8 +249,8 @@ internal static partial class HtmlToPdfConverter
                 declared[i] = Math.Max(declared[i], r[i].DeclPt);
                 mins[i] = Math.Max(mins[i], r[i].MinPt + 2 * SrProcCellTextInsetPt);
             }
-        var tableTag = Regex.Match(tableHtml, "<table\\b[^>]*>", RegexOptions.IgnoreCase).Value;
-        var tm = Regex.Match(tableTag, "(?<![-a-z])width\\s*:\\s*([0-9.]+)\\s*px", RegexOptions.IgnoreCase);
+        var tableTag = SafeRegex.Match(tableHtml, "<table\\b[^>]*>", RegexOptions.IgnoreCase).Value;
+        var tm = SafeRegex.Match(tableTag, "(?<![-a-z])width\\s*:\\s*([0-9.]+)\\s*px", RegexOptions.IgnoreCase);
         if (tm.Success)
         {
             // the declared box: a cell narrower than its unbreakable content takes that content, the
@@ -285,9 +287,9 @@ internal static partial class HtmlToPdfConverter
     private static double ProcedureCellMinPt(string cellHtml)
     {
         var plain = cellHtml.IndexOf("smart-widget", StringComparison.OrdinalIgnoreCase) < 0
-            && !Regex.IsMatch(cellHtml, "<(em|strong|b|i)\\b", RegexOptions.IgnoreCase);
+            && !SafeRegex.IsMatch(cellHtml, "<(em|strong|b|i)\\b", RegexOptions.IgnoreCase);
         var fs = plain ? SrProcPlainCellFsPt : SrProcCellFsPt;
-        var text = DecodeEntities(Regex.Replace(cellHtml, "<[^>]+>", " "));
+        var text = DecodeEntities(SafeRegex.Replace(cellHtml, "<[^>]+>", " "));
         double min = 0;
         foreach (var tok in text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
             min = Math.Max(min, MeasureFaceText("Arial", tok, fs));
@@ -301,21 +303,25 @@ internal static partial class HtmlToPdfConverter
     {
         c.Lines.Clear();
         c.BlockPt = 0;
-        var s = Regex.Replace(c.Html, "<!--[\\s\\S]*?-->", "");
+        var s = SafeRegex.Replace(c.Html, "<!--[\\s\\S]*?-->", "");
         var bold = 0;
         var italic = 0;
         var pendingGap = false;
         var plain = s.IndexOf("smart-widget", StringComparison.OrdinalIgnoreCase) < 0
-            && !Regex.IsMatch(s, "<(em|strong|b|i)\\b", RegexOptions.IgnoreCase);
+            && !SafeRegex.IsMatch(s, "<(em|strong|b|i)\\b", RegexOptions.IgnoreCase);
         var text = new System.Text.StringBuilder();
         wrapW = Math.Max(20, wrapW);
         void FlushText()
         {
-            var t = Regex.Replace(DecodeEntities(text.ToString()), "\\s+", " ").Trim();
+            var t = SafeRegex.Replace(DecodeEntities(text.ToString()), "\\s+", " ").Trim();
             text.Clear();
             if (t.Length == 0) return;
-            var face = bold > 0 && italic > 0 ? "Arial-BoldItalic" : bold > 0 ? "Arial-Bold" : "Arial";
-            var res = bold > 0 && italic > 0 ? "FBI" : bold > 0 ? "FB" : "FA";
+            string face = "Arial";
+            if (bold > 0 && italic > 0) face = "Arial-BoldItalic";
+            else if (bold > 0) face = "Arial-Bold";
+            string res = "FA";
+            if (bold > 0 && italic > 0) res = "FBI";
+            else if (bold > 0) res = "FB";
             var fs = plain ? SrProcPlainCellFsPt : SrProcCellFsPt;
             if (pendingGap) { c.Lines.Add(("", "FA", 0, 0)); c.BlockPt += SrProcParaGapPt; pendingGap = false; }
             foreach (var ln in MeasuredWordWrap(t, wrapW, face, fs))
@@ -338,18 +344,18 @@ internal static partial class HtmlToPdfConverter
             var close = s.IndexOf('>', i);
             if (close < 0) break;
             var tag = s[i..(close + 1)];
-            if (Regex.IsMatch(tag, "^<span\\b[^>]*smart-widget-text", RegexOptions.IgnoreCase))
+            if (SafeRegex.IsMatch(tag, "^<span\\b[^>]*smart-widget-text", RegexOptions.IgnoreCase))
             {
                 var (inner, pastEnd) = ProcSpanInner(s, i);
                 FlushText();
                 if (pendingGap) { c.Lines.Add(("", "FA", 0, 0)); c.BlockPt += SrProcParaGapPt; pendingGap = false; }
-                var under = Regex.Match(inner ?? "", "^\\s*(_+)").Groups[1].Value;
+                var under = SafeRegex.Match(inner ?? "", "^\\s*(_+)").Groups[1].Value;
                 if (under.Length == 0) under = "________________";
                 c.Lines.Add((under, "FA", SrProcCellFsPt, 0));
                 c.BlockPt += SrProcCellLinePt;
                 var label = new System.Text.StringBuilder();
-                foreach (Match lm in ProcLabelRx.Matches(inner ?? "")) label.Append(lm.Groups[1].Value);
-                var lt = Regex.Replace(DecodeEntities(label.ToString()), "\\s+", " ").Trim();
+                foreach (Match lm in SafeRegex.Matches(ProcLabelRx, inner ?? "")) label.Append(lm.Groups[1].Value);
+                var lt = SafeRegex.Replace(DecodeEntities(label.ToString()), "\\s+", " ").Trim();
                 if (lt.Length > 0)
                     foreach (var ln in MeasuredWordWrap(lt, Math.Max(20, wrapW - SrProcLabelIndentPt), "Arial", SrProcCellFsPt))
                     {
@@ -367,10 +373,10 @@ internal static partial class HtmlToPdfConverter
                 c.BlockPt += SrProcCellLinePt;
             }
             else if (tag.StartsWith("</p", StringComparison.OrdinalIgnoreCase)) { FlushText(); pendingGap = c.Lines.Count > 0; }
-            else if (Regex.IsMatch(tag, "^<(em|i)\\b", RegexOptions.IgnoreCase)) { FlushText(); italic++; }
-            else if (Regex.IsMatch(tag, "^<(strong|b)\\b", RegexOptions.IgnoreCase)) { FlushText(); bold++; }
-            else if (Regex.IsMatch(tag, "^</(em|i)\\b", RegexOptions.IgnoreCase)) { FlushText(); italic = Math.Max(0, italic - 1); }
-            else if (Regex.IsMatch(tag, "^</(strong|b)\\b", RegexOptions.IgnoreCase)) { FlushText(); bold = Math.Max(0, bold - 1); }
+            else if (SafeRegex.IsMatch(tag, "^<(em|i)\\b", RegexOptions.IgnoreCase)) { FlushText(); italic++; }
+            else if (SafeRegex.IsMatch(tag, "^<(strong|b)\\b", RegexOptions.IgnoreCase)) { FlushText(); bold++; }
+            else if (SafeRegex.IsMatch(tag, "^</(em|i)\\b", RegexOptions.IgnoreCase)) { FlushText(); italic = Math.Max(0, italic - 1); }
+            else if (SafeRegex.IsMatch(tag, "^</(strong|b)\\b", RegexOptions.IgnoreCase)) { FlushText(); bold = Math.Max(0, bold - 1); }
             else if (tag.StartsWith("<p", StringComparison.OrdinalIgnoreCase)) FlushText();
         }
         FlushText();
@@ -422,7 +428,7 @@ internal static partial class HtmlToPdfConverter
         var pos = 0;
         while (pos < html.Length)
         {
-            var m = Regex.Match(html[pos..], "<span\\b[^>]*class\\s*=\\s*['\"]smart-widget-(?<k>numeric|checkbox|text)\\b[^>]*>", RegexOptions.IgnoreCase);
+            var m = SafeRegex.Match(html[pos..], "<span\\b[^>]*class\\s*=\\s*['\"]smart-widget-(?<k>numeric|checkbox|text)\\b[^>]*>", RegexOptions.IgnoreCase);
             if (!m.Success) break;
             var open = pos + m.Index;
             var (inner, pastEnd) = ProcSpanInner(html, open);
@@ -430,7 +436,7 @@ internal static partial class HtmlToPdfConverter
             inner ??= "";
             var kind = m.Groups["k"].Value.ToLowerInvariant();
             var label = new System.Text.StringBuilder();
-            foreach (Match lm in ProcLabelRx.Matches(inner)) label.Append(lm.Groups[1].Value);
+            foreach (Match lm in SafeRegex.Matches(ProcLabelRx, inner)) label.Append(lm.Groups[1].Value);
             var lt = DecodeEntities(label.ToString()).TrimStart();
             double headW;
             string head;
@@ -442,7 +448,7 @@ internal static partial class HtmlToPdfConverter
             }
             else
             {
-                head = Regex.Match(inner, "^\\s*(_+)").Groups[1].Value;
+                head = SafeRegex.Match(inner, "^\\s*(_+)").Groups[1].Value;
                 if (head.Length == 0) head = "________________";
                 headW = MeasureFaceText("Arial", head, 12) + SrProcLabelGapPt;
             }
@@ -468,8 +474,8 @@ internal static partial class HtmlToPdfConverter
 
     private static double RenderProcedureParagraph(StepRowsState sw, string html, double y)
     {
-        var bold = Regex.IsMatch(html, "<(strong|b)\\b", RegexOptions.IgnoreCase);
-        var t = Flat(sw, html);
+        var bold = SafeRegex.IsMatch(html, "<(strong|b)\\b", RegexOptions.IgnoreCase);
+        var t = Flat(html);
         var li = 0;
         if (t.Length > 0)
             foreach (var ln in MeasuredWordWrap(t, SrContentWPt, bold ? "Arial-Bold" : "Arial", 12))
@@ -483,12 +489,12 @@ internal static partial class HtmlToPdfConverter
     {
         var x = sw.contentX;
         var labels = new List<string>();
-        foreach (Match lm in Regex.Matches(html, "class\\s*=\\s*['\"]swe-label['\"][^>]*>([^<]*)<", RegexOptions.IgnoreCase))
+        foreach (Match lm in SafeRegex.Matches(html, "class\\s*=\\s*['\"]swe-label['\"][^>]*>([^<]*)<", RegexOptions.IgnoreCase))
         {
             var t = DecodeEntities(lm.Groups[1].Value).Trim();
             if (t.Length > 0) labels.Add(t);
         }
-        var em = Regex.Match(html, "class\\s*=\\s*['\"]swe-element['\"][^>]*width\\s*:\\s*([0-9.]+)\\s*px", RegexOptions.IgnoreCase);
+        var em = SafeRegex.Match(html, "class\\s*=\\s*['\"]swe-element['\"][^>]*width\\s*:\\s*([0-9.]+)\\s*px", RegexOptions.IgnoreCase);
         var ruleW = em.Success ? double.Parse(em.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * 0.75 : 108.75;
         var lx = x + SrProcEqSignDxPt;
         if (labels.Count > 0)

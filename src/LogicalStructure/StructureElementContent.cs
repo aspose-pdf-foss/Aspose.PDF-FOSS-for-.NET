@@ -47,13 +47,13 @@ public partial class StructureElement
 
     private static readonly string[] BoldNameParts = ["Bold", "Black", "Heavy", "Semibold", "Demi"];
     // A face naming its weight in two letters after the family (HelveticaNeueLTPro-Bd, -BdIt, -BdCn).
-    private static readonly Regex BoldSuffix = new(@"[-,]Bd(?=$|[A-Z])", RegexOptions.CultureInvariant);
+    private static readonly Regex BoldSuffix = new(@"[-,]Bd(?=$|[A-Z])", RegexOptions.CultureInvariant, RegexLimits.Timeout);
     private static readonly string[] ItalicNameParts = ["Ital", "Obli", "Slant"];
     // The TeX Computer Modern faces name their weight and slope in two or three letters
-    // (CMBX10 bold extended, CMTI10 text italic, CMMI10 math italic, CMBXTI10 bold italic);
-    // the URW Nimbus faces call their bold "Medi" (NimbusRomNo9L-Medi).
-    private static readonly Regex TexBold = new(@"^CM(BX|B|SSBX|MIB|BSY)(TI|SL)?\d", RegexOptions.CultureInvariant);
-    private static readonly Regex TexItalic = new(@"^CM(TI|MI|MIB|SL|SSI|ITT|FI|FIB|BXTI|BXSL|SLTT)\d", RegexOptions.CultureInvariant);
+    // (CMBX10 bold extended, CMTI10 text italic, CMMI10 math italic, CMBXTI10 bold italic); the
+    // URW Nimbus faces call their bold "Medi" (NimbusRomNo9L-Medi).
+    private static readonly Regex TexBold = new(@"^CM(BX|B|SSBX|MIB|BSY)(TI|SL)?\d", RegexOptions.CultureInvariant, RegexLimits.Timeout);
+    private static readonly Regex TexItalic = new(@"^CM(TI|MI|MIB|SL|SSI|ITT|FI|FIB|BXTI|BXSL|SLTT)\d", RegexOptions.CultureInvariant, RegexLimits.Timeout);
     private const string UrwPrefix = "Nimbus";
     private const string UrwBoldPart = "Medi";
     // Word halves a line break hyphenates that keep the hyphen when joined: a compound's
@@ -208,8 +208,7 @@ public partial class StructureElement
                     && ReferenceEquals(last.Element, owner) && ReferenceEquals(last.Page, page) && run is null
                     && runStarts?.Contains(index) != true)
                 {
-                    var r = last.Rectangle;
-                    last.Rectangle = new Rectangle(Math.Min(r.LLX, piece.Llx), Math.Min(r.LLY, piece.Lly), Math.Max(r.URX, piece.Urx), Math.Max(r.URY, piece.Ury));
+                    last.Rectangle = Grown(last.Rectangle, piece.Llx, piece.Lly, piece.Urx, piece.Ury);
                     // (paths of other colours paint it in none)
                     if (last.ForegroundColor is { } colour && !colour.Equals(Color.FromRgb(piece.R, piece.G, piece.B))) last.ForegroundColor = null;
                     continue;
@@ -245,7 +244,7 @@ public partial class StructureElement
                          || piece.Angle == 0 && HangsPastLabel(inked, piece, owner is not null && lineStarts.TryGetValue(owner, out var lines) ? lines : null);
             var shifted = Shifted(before0, along);
             var before = run?.Text ?? (result.Count > 0 && result[^1].Kind == MarkedContentKind.Text ? result[^1].Text : string.Empty);
-            var (separator, dropHyphen) = Separator(before0, along, before);
+            var (separator, dropHyphen) = Separator(before0, along, before, LineAhead(pieces, index, before.Length > 0 ? before : previous?.Text ?? string.Empty));
             if (dropHyphen)
             {
                 // The word goes on where the hyphen stood: the break is noted there.
@@ -265,10 +264,11 @@ public partial class StructureElement
             if (run is not null && ReferenceEquals(run.Element, owner) && ReferenceEquals(run.Page, page)
                 && SameStyle(runStyle!, piece) && !tabbed && !shifted && !wrapped)
             {
+#pragma warning disable S1643 // the open run is a published MarkedContentItem whose Text the next piece reads (its separator, a dropped hyphen)
                 run.Text += text;
-                var r = run.Rectangle;
+#pragma warning restore S1643
                 var box = BoxOf(piece);
-                run.Rectangle = new Rectangle(Math.Min(r.LLX, box.LLX), Math.Min(r.LLY, box.LLY), Math.Max(r.URX, box.URX), Math.Max(r.URY, box.URY));
+                run.Rectangle = Grown(run.Rectangle, box.LLX, box.LLY, box.URX, box.URY);
                 continue;
             }
             var style = piece.FontDict is null ? default : Style(reader, piece, fonts);
@@ -339,6 +339,10 @@ public partial class StructureElement
 
     /// <summary>The box a piece's text covers on the page as it is shown: from its baseline's start to its end, a descent
     /// under the baseline and an ascent over it - turned with the baseline.</summary>
+    /// <summary>The rectangle grown to take in the box from (llx, lly) to (urx, ury).</summary>
+    private static Rectangle Grown(Rectangle r, double llx, double lly, double urx, double ury) =>
+        new(Math.Min(r.LLX, llx), Math.Min(r.LLY, lly), Math.Max(r.URX, urx), Math.Max(r.URY, ury));
+
     private static Rectangle BoxOf(MarkedContentScan.Piece piece)
     {
         var (cos, sin) = (Math.Cos(piece.Angle * Math.PI / 180), Math.Sin(piece.Angle * Math.PI / 180));
@@ -350,7 +354,9 @@ public partial class StructureElement
 
     private static bool SameStyle(MarkedContentScan.Piece a, MarkedContentScan.Piece b)
         => ReferenceEquals(a.FontDict, b.FontDict) && Math.Abs(a.Size - b.Size) < 0.05
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
            && a.R == b.R && a.G == b.G && a.B == b.B && a.RenderMode == b.RenderMode && a.Angle == b.Angle;
+#pragma warning restore S1244
 
     /// <summary>Whether <paramref name="next"/> stands on the line of <paramref name="previous"/>
     /// set apart from it by a gap wider than a few spaces.</summary>
@@ -366,7 +372,9 @@ public partial class StructureElement
     /// joins a word - and whether that hyphen goes (<see cref="DropsHyphen"/>).</summary>
     /// <param name="before">The text read so far up to and including <paramref name="previous"/>
     /// (a string shown glyph by glyph makes the hyphen a piece of its own).</param>
-    private static (string Space, bool DropHyphen) Separator(MarkedContentScan.Piece? previous, MarkedContentScan.Piece next, string before)
+    /// <param name="ahead">The text of <paramref name="next"/>, and of the strings after it along its line where a hyphen
+    /// ends <paramref name="before"/> (see <see cref="LineAhead"/>): what a suspended hyphen is read against.</param>
+    private static (string Space, bool DropHyphen) Separator(MarkedContentScan.Piece? previous, MarkedContentScan.Piece next, string before, string ahead)
     {
         if (previous is null) return (string.Empty, false);
         if (before.Length < previous.Text.Length) before = previous.Text;
@@ -378,10 +386,70 @@ public partial class StructureElement
         if (sameLine) return (next.X0 - previous.X1 > WordGapEms * size ? " " : string.Empty, false);
         var hyphenated = before.Length >= 2 && before[^1] is '-' or SoftHyphen && char.IsLetter(before[^2])
                          && char.IsLetter(after[0]);
-        return hyphenated ? (string.Empty, DropsHyphen(before, after)) : (" ", false);
+        if (!hyphenated) return (" ", false);
+        // A hyphen standing before a conjunction is suspended - the head of a compound whose tail the words after it
+        // give (retro- and prospective): it stays, and a space parts the words as it does on one line.
+        return before[^1] == '-' && SuspendsHyphen(before, ahead) ? (" ", false) : (string.Empty, DropsHyphen(before, after));
     }
 
     private const char SoftHyphen = '\u00AD';
+
+    /// <summary>The text of the piece at <paramref name="index"/> - and, where <paramref name="before"/> ends in a hyphen,
+    /// of the pieces after it along its line as far as a word after a space: what the hyphen is read against, however the
+    /// line's words are shown (a conjunction as a string of its own, the word after it another).</summary>
+    private static string LineAhead(List<(StructureElement? Owner, Page? Page, MarkedContentScan.Piece Piece)> pieces, int index, string before)
+    {
+        var first = pieces[index].Piece;
+        if (before.Length == 0 || before[^1] is not ('-' or SoftHyphen)) return first.Text;
+        var text = new System.Text.StringBuilder(first.Text);
+        var last = OnLine(first, first.Angle)!;
+        for (var i = index + 1; i < pieces.Count && !WordAfterSpace(text); i++)
+        {
+            var piece = pieces[i].Piece;
+            if (piece.IsDrawing || piece.IsImage || piece.Text.Length == 0 || !ReferenceEquals(pieces[i].Page, pieces[index].Page)) break;
+            var along = OnLine(piece, first.Angle)!;
+            if (Math.Abs(along.Y - last.Y) >= SameLineEms * Math.Max(last.Size, along.Size) || along.X0 < last.X0) break;
+            var gap = along.X0 - last.X1 > WordGapEms * Math.Max(Math.Min(last.Size, along.Size), 1);
+            if (gap && !char.IsWhiteSpace(text[^1]) && !char.IsWhiteSpace(piece.Text[0])) text.Append(' ');
+            text.Append(piece.Text);
+            last = along;
+        }
+        return text.ToString();
+    }
+
+    /// <summary>Whether <paramref name="text"/> holds a word after a space past its first.</summary>
+    private static bool WordAfterSpace(System.Text.StringBuilder text)
+    {
+        for (var i = 1; i + 1 < text.Length; i++)
+            if (char.IsWhiteSpace(text[i]) && char.IsLetter(text[i + 1])) return true;
+        return false;
+    }
+
+    // The coordinating conjunctions a suspended hyphen stands before (pre- and post-war, Ein- und Ausgang, pr\u00E9- et
+    // post-, pre- o post-): English, German, French, Spanish, Italian and Portuguese.
+    private static readonly HashSet<string> SuspendingConjunctions = new(StringComparer.Ordinal)
+    {
+        "and", "or", "nor", "to", "und", "oder", "bis", "et", "ou", "y", "o", "e",
+    };
+
+    // The fewest letters a suspended compound's head has (retro-, pre-, Ein-): a shorter one is more often a word's first
+    // syllable whose rest is a conjunction's spelling (do- nor, to- e).
+    private const int SuspendedHeadLetters = 3;
+
+    /// <summary>Whether the text after a line break opens with a conjunction a hyphen ending the line before it is
+    /// suspended over: the whole word, then a space and the next word in the same show - a conjunction's spelling the
+    /// show ends on, or a comma or stop follows, is a broken word's rest (inter- or|ganizational, do- nor,) - after a head
+    /// of a few letters.</summary>
+    private static bool SuspendsHyphen(string before, string after)
+    {
+        var head = 0;
+        while (head < before.Length - 1 && char.IsLetter(before[before.Length - 2 - head])) head++;
+        if (head < SuspendedHeadLetters) return false;
+        var end = 0;
+        while (end < after.Length && char.IsLetter(after[end])) end++;
+        var whole = end + 1 < after.Length && char.IsWhiteSpace(after[end]) && char.IsLetter(after[end + 1]);
+        return whole && SuspendingConjunctions.Contains(after.Substring(0, end));
+    }
 
     /// <summary>Whether the hyphen ending <paramref name="before"/> only broke a word over the
     /// line: it goes when both halves are lower-case letters and neither half holds a hyphen of
@@ -406,8 +474,8 @@ public partial class StructureElement
         if (cache.TryGetValue(dict, out var known)) return known;
         var name = dict.GetName("BaseFont") ?? string.Empty;
         if (name.Length > 7 && name[6] == '+') name = name.Substring(7);
-        foreach (var suffix in new[] { "-Identity-H", "-Identity-V" })
-            if (name.EndsWith(suffix, StringComparison.Ordinal)) name = name.Substring(0, name.Length - suffix.Length);
+        foreach (var suffix in (new[] { "-Identity-H", "-Identity-V" }).Where(suffix => name.EndsWith(suffix, StringComparison.Ordinal)))
+            name = name.Substring(0, name.Length - suffix.Length);
 
         var descriptor = reader.ResolveDict(dict.Get("FontDescriptor"));
         if (descriptor is null && reader.Resolve(dict.Get("DescendantFonts")) is PdfArray { Count: > 0 } descendants)
@@ -419,12 +487,12 @@ public partial class StructureElement
 
         var bold = weight >= BoldWeight || (flags & ForceBoldFlag) != 0
                    || BoldNameParts.Any(p => name.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0)
-                   || BoldSuffix.IsMatch(name)
-                   || TexBold.IsMatch(name)
+                   || SafeRegex.IsMatch(BoldSuffix, name)
+                   || SafeRegex.IsMatch(TexBold, name)
                    || (name.StartsWith(UrwPrefix, StringComparison.Ordinal) && name.Contains(UrwBoldPart, StringComparison.Ordinal));
         var italic = angle != 0 || (flags & ItalicFlag) != 0
                      || ItalicNameParts.Any(p => name.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0)
-                     || TexItalic.IsMatch(name);
+                     || SafeRegex.IsMatch(TexItalic, name);
         var result = (new Aspose.Pdf.Text.Font(piece.FontKey ?? string.Empty, dict, reader), name, bold, italic);
         cache[dict] = result;
         return result;

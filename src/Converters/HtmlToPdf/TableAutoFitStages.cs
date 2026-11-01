@@ -21,8 +21,8 @@ internal static partial class HtmlToPdfConverter
         // A rule the cells carry from a style rule is shared with the neighbour, so the
         // column only advances by one of them; a rule the table's own BORDER attribute
         // put on every cell is the cell's alone, and costs both sides.
-        var border = t.HtmlCellBorderPt > 0
-            ? (t.HtmlCellBorderShared ? 1 : 2) * t.HtmlCellBorderPt : 0.0;
+        double border = 0.0;
+        if (t.HtmlCellBorderPt > 0) border = (t.HtmlCellBorderShared ? 1 : 2) * t.HtmlCellBorderPt;
         var mins = new double[cols];
         var maxs = new double[cols];
         // a cell that spans rows keeps holding its columns on the rows
@@ -93,7 +93,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (t.Rows.Count == 0 || string.IsNullOrEmpty(t.ColumnWidths)) return;
         var cols = new List<double>();
-        foreach (var w in t.ColumnWidths!.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var w in t.ColumnWidths.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             if (double.TryParse(w, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var wv))
                 cols.Add(wv);
@@ -132,7 +132,14 @@ internal static partial class HtmlToPdfConverter
                         || (ctf.TextState.Font?.FontName?.Contains("Bold", StringComparison.OrdinalIgnoreCase) ?? false);
                     var face = bold ? "Helvetica-Bold" : "Helvetica";
                     var lh = FaceLineHeight(face, size);
-                    var logicals = ctf.Text!.Replace("\r\n", "\n").Split('\n');
+                    // (a paragraph flowing as runs wraps with each run in its own weight, as it draws)
+                    if (ctf.TextState.FormattingOptions is { SegmentsFlowAsRuns: true } && ctf.Segments.Count > 1
+                        && ctf.Text.IndexOf('\n') < 0)
+                    {
+                        cellH += RunsWrappedLineCount(ctf, size, innerW, cell.HtmlNoWrap) * lh;
+                        continue;
+                    }
+                    var logicals = ctf.Text.Replace("\r\n", "\n").Split('\n');
                     for (var li = 0; li < logicals.Length; li++)
                     {
                         // a trailing break closes the last line, it does not open another
@@ -175,7 +182,7 @@ internal static partial class HtmlToPdfConverter
     {
         foreach (var p in c.Paragraphs)
             if (p is Aspose.Pdf.Text.TextFragment tf && !string.IsNullOrEmpty(tf.Text))
-                return tf.Text!.Length > 18 ? tf.Text![..18] : tf.Text!;
+                return tf.Text.Length > 18 ? tf.Text[..18] : tf.Text;
         return "";
     }
 
@@ -210,6 +217,51 @@ internal static partial class HtmlToPdfConverter
         return lines;
     }
 
+    /// <summary>The lines a paragraph of weight runs wraps to at the width: its words in order, each
+    /// piece measured in its run's face (the bold label wider than the regular value).</summary>
+    private static int RunsWrappedLineCount(Aspose.Pdf.Text.TextFragment tf, double size, double width, bool noWrap)
+    {
+        var regular = Aspose.Pdf.Text.FontRepository.TryFindFont("Helvetica");
+        var heavy = Aspose.Pdf.Text.FontRepository.TryFindFont("Helvetica-Bold") ?? regular;
+        var pieces = new List<(string Text, bool Bold)>();
+        foreach (Aspose.Pdf.Text.TextSegment s in tf.Segments)
+            if (!string.IsNullOrEmpty(s.Text)) pieces.Add((s.Text, s.TextState.IsBold || tf.TextState.IsBold));
+        double W(string t, bool bold)
+        {
+            if (t.Length == 0) return 0;
+            try { return (bold ? heavy : regular)?.MeasureString(t, size) ?? t.Length * size * 0.5; }
+            catch { return t.Length * size * 0.5; }
+        }
+        // Words across the runs: a piece glued to the one before it (no space between) joins its word.
+        var words = new List<(double Space, double W)>();
+        var pendingSpace = 0.0;
+        var glued = false;
+        foreach (var (text, bold) in pieces)
+        {
+            var i = 0;
+            while (i < text.Length)
+            {
+                if (text[i] == ' ') { pendingSpace += W(" ", bold); glued = false; i++; continue; }
+                var j = text.IndexOf(' ', i);
+                if (j < 0) j = text.Length;
+                var w = W(text.Substring(i, j - i), bold);
+                if (glued && words.Count > 0) words[^1] = (words[^1].Space, words[^1].W + w);
+                else words.Add((pendingSpace, w));
+                pendingSpace = 0;
+                glued = true;
+                i = j;
+            }
+        }
+        var lines = 1;
+        var lineW = 0.0;
+        foreach (var (space, w) in words)
+        {
+            if (!noWrap && lineW > 0 && lineW + space + w > width) { lines++; lineW = w; }
+            else lineW += (lineW > 0 ? space : 0) + w;
+        }
+        return lines;
+    }
+
     /// <summary>Marker left in a cell where a nested table was lifted out.</summary>
     private const string NestedMark = "\u0001NT[";
 
@@ -218,13 +270,13 @@ internal static partial class HtmlToPdfConverter
     /// <paramref name="captured"/>. The outer table's own structure is untouched.</summary>
     private static string ExtractNestedTables(string html, List<string> captured)
     {
-        var outerOpen = Regex.Match(html, @"<table[^>]*>", RegexOptions.IgnoreCase);
+        var outerOpen = SafeRegex.Match(html, @"<table[^>]*>", RegexOptions.IgnoreCase);
         if (!outerOpen.Success) return html;
         var sb = new StringBuilder(html[..(outerOpen.Index + outerOpen.Length)]);
         var i = outerOpen.Index + outerOpen.Length;
         while (i < html.Length)
         {
-            var open = Regex.Match(html[i..], @"<table[^>]*>", RegexOptions.IgnoreCase);
+            var open = SafeRegex.Match(html[i..], @"<table[^>]*>", RegexOptions.IgnoreCase);
             if (!open.Success) { sb.Append(html[i..]); break; }
             var start = i + open.Index;
             sb.Append(html[i..start]);
@@ -232,7 +284,7 @@ internal static partial class HtmlToPdfConverter
             var depth = 0;
             var j = start;
             var end = html.Length;
-            foreach (Match t in Regex.Matches(html[start..], @"</?table[^>]*>", RegexOptions.IgnoreCase))
+            foreach (Match t in SafeRegex.Matches(html[start..], @"</?table[^>]*>", RegexOptions.IgnoreCase))
             {
                 depth += t.Value.StartsWith("</", StringComparison.Ordinal) ? -1 : 1;
                 if (depth == 0) { end = start + t.Index + t.Length; break; }
@@ -253,7 +305,7 @@ internal static partial class HtmlToPdfConverter
     internal static double BandPaddingRightPt(string? html, HtmlLoadOptions? options)
     {
         if (string.IsNullOrEmpty(html)) return 0;
-        var holder = Regex.Match(html,
+        var holder = SafeRegex.Match(html,
             @"<div\b[^>]*class\s*=\s*(['""])(?<cls>[^'""]*header-right[^'""]*)\1",
             RegexOptions.IgnoreCase);
         if (!holder.Success) return 0;
@@ -261,7 +313,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var cls in holder.Groups["cls"].Value
                      .Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
-            var rule = Regex.Match(withCss,
+            var rule = SafeRegex.Match(withCss,
                 @"\." + Regex.Escape(cls) + @"\s*\{[^}]*padding-right\s*:\s*([\d.]+)\s*px",
                 RegexOptions.IgnoreCase);
             if (rule.Success && double.TryParse(rule.Groups[1].Value,

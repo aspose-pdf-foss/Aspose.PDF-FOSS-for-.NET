@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 internal sealed partial class TextStateModifier
 {
     /// <summary>Consumes one content token: operands accumulate (arrays and dictionaries skipped whole), a Tf remembers the font name span and its encoding, a show operator whose decoded text holds the search text yields the swap site - exactly when the show is the text alone, else as the containing candidate.</summary>
-    private bool ScanTfNameToken(TfNameRangeState tn)
+    private static bool ScanTfNameToken(TfNameRangeState tn)
     {
         var startPos = (int)tn.lexer.Position;
         var token = tn.lexer.NextToken();
@@ -90,7 +90,7 @@ internal sealed partial class TextStateModifier
     }
 
     /// <summary>A show operator: decodes its string with the current font's ToUnicode; when the text is inside and a Tf precedes it, records the swap site - the exact match ends the scan, a containing show is kept as the fallback. False to stop the scan.</summary>
-    private bool MatchTfShowOperator(TfNameRangeState tn, string op)
+    private static bool MatchTfShowOperator(TfNameRangeState tn, string op)
     {
         if (tn.operands.Count >= 1 && tn.operands[^1].obj is PdfString showStr)
         {
@@ -115,7 +115,7 @@ internal sealed partial class TextStateModifier
     }
 
     /// <summary>A Tf operator: remembers the font name's byte span and resolves its encoding for the shows that follow.</summary>
-    private bool NoteTfOperator(TfNameRangeState tn)
+    private static bool NoteTfOperator(TfNameRangeState tn)
     {
         if (tn.operands.Count >= 2 && tn.operands[0].obj is PdfName fn)
         {
@@ -134,8 +134,9 @@ internal sealed partial class TextStateModifier
             }
             tn.lastTfNameStart = tn.operands[0].startPos;
             tn.lastTfNameEnd = tn.operands[0].endPos;
-            tn.lastTfSize = tn.operands[1].obj is PdfInteger ti ? ti.Value
-                : tn.operands[1].obj is PdfReal tr ? tr.Value : 0;
+            if (tn.operands[1].obj is PdfInteger ti) tn.lastTfSize = ti.Value;
+            else if (tn.operands[1].obj is PdfReal tr) tn.lastTfSize = tr.Value;
+            else tn.lastTfSize = 0;
         }
         return true;
     }

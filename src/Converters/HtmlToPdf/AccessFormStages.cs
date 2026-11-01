@@ -61,43 +61,43 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Collects the form's items from the card markup: headings, question/answer pairs and intro paragraphs, flattened.</summary>
     private static void CollectAccessFormItems(AccessFormState af)
     {
-        foreach (Match m in Regex.Matches(af.content,
+        foreach (var groups in SafeRegex.Matches(af.content,
             @"<div class=['""](section|section-rule)['""]\s*>((?:(?!<div class=['""]section)[\s\S])*)",
-            RegexOptions.IgnoreCase))
+            RegexOptions.IgnoreCase).Select(m => m.Groups))
         {
-            if (m.Groups[1].Value.Equals("section-rule", StringComparison.OrdinalIgnoreCase))
+            if (groups[1].Value.Equals("section-rule", StringComparison.OrdinalIgnoreCase))
             {
                 af.items.Add(("hr", "", ""));
                 continue;
             }
-            var body = m.Groups[2].Value;
-            var hM = Regex.Match(body, @"class=['""]header['""]\s*>([\s\S]*?)</div>", RegexOptions.IgnoreCase);
-            if (hM.Success) af.items.Add(("head", Flat(af, hM.Groups[1].Value), ""));
-            foreach (Match part in Regex.Matches(body,
+            var body = groups[2].Value;
+            var hM = SafeRegex.Match(body, @"class=['""]header['""]\s*>([\s\S]*?)</div>", RegexOptions.IgnoreCase);
+            if (hM.Success) af.items.Add(("head", FlatKeepingNbsp(hM.Groups[1].Value), ""));
+            foreach (var partGroups in SafeRegex.Matches(body,
                 @"<div class=['""]questionContainer['""]\s*>([\s\S]*?)</div>\s*</div>|<pre\b[^>]*>([\s\S]*?)</pre>",
-                RegexOptions.IgnoreCase))
+                RegexOptions.IgnoreCase).Select(part => part.Groups))
             {
-                if (part.Groups[2].Success)
+                if (partGroups[2].Success)
                 {
-                    var lines = Regex.Replace(DecodeEntities(
-                        Regex.Replace(part.Groups[2].Value, @"<[^>]+>", "")), "\r", "").Split('\n');
+                    var lines = SafeRegex.Replace(DecodeEntities(
+                        SafeRegex.Replace(partGroups[2].Value, @"<[^>]+>", "")), "\r", "").Split('\n');
                     var real = new List<string>();
                     foreach (var l in lines) if (l.Trim().Length > 0) real.Add(l.Trim());
                     af.items.Add(("pre", real.Count > 0 ? real[0] : "",
                         real.Count > 1 ? string.Join(" ", real.GetRange(1, real.Count - 1)) : ""));
                     continue;
                 }
-                var qM = Regex.Match(part.Groups[1].Value, @"class=['""]question['""]\s*>([\s\S]*?)</div>",
+                var qM = SafeRegex.Match(partGroups[1].Value, @"class=['""]question['""]\s*>([\s\S]*?)</div>",
                     RegexOptions.IgnoreCase);
-                var aM = Regex.Match(part.Groups[1].Value, @"class=['""]answer['""]\s*>([\s\S]*?)$",
+                var aM = SafeRegex.Match(partGroups[1].Value, @"class=['""]answer['""]\s*>([\s\S]*?)$",
                     RegexOptions.IgnoreCase);
-                af.items.Add(("qa", qM.Success ? Flat(af, qM.Groups[1].Value) : "",
-                    aM.Success ? Flat(af, aM.Groups[1].Value) : ""));
+                af.items.Add(("qa", qM.Success ? FlatKeepingNbsp(qM.Groups[1].Value) : "",
+                    aM.Success ? FlatKeepingNbsp(aM.Groups[1].Value) : ""));
             }
             // an intro section holds a bare answer paragraph and no boxes
             if (!hM.Success && !body.Contains("questionContainer", StringComparison.Ordinal)
-                && Regex.Match(body, @"<p>([\s\S]*?)</p>", RegexOptions.IgnoreCase) is { Success: true } pIntro)
-                af.items.Add(("intro", Flat(af, pIntro.Groups[1].Value), ""));
+                && SafeRegex.Match(body, @"<p>([\s\S]*?)</p>", RegexOptions.IgnoreCase) is { Success: true } pIntro)
+                af.items.Add(("intro", FlatKeepingNbsp(pIntro.Groups[1].Value), ""));
         }
     }
 }

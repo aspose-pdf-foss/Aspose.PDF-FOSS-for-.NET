@@ -81,8 +81,9 @@ internal static partial class TiffDecoder
         if (tf.bps is not (1 or 2 or 4 or 8 or 16)) return null;
         // JPEG-in-TIFF. Both flavours in practice carry the frame as ONE complete
         // stream: old-style (6) points at a whole JFIF file through JPEGInterchangeFormat,
-        // and new-style (7) puts an abbreviated stream in a single strip whose quantisation
-        // and Huffman tables live in the shared JPEGTables tag. Rebuild the stream and hand
+        // and new-style (7) puts an abbreviated stream in each strip whose quantisation
+        // and Huffman tables live in the shared JPEGTables tag (several strips are joined
+        // into one stream, see JoinJpegStrips). Rebuild the stream and hand
         // it to the managed JPEG decoder rather than declining the frame - the decline used
         // to be covered by the platform codec, which does not exist off Windows, so these
         // files lost their picture entirely there.
@@ -90,6 +91,13 @@ internal static partial class TiffDecoder
         {
             var jpeg = AssembleJpegFrame(d, tf.compression, tf.stripOffsets, tf.stripCounts,
                 tf.jpegTables, tf.jpegIfOffset, tf.jpegIfLength);
+            if (jpeg is null && tf.compression == 7 && tf.stripOffsets is { Length: > 1 } offsets
+                && tf.stripCounts is { } counts && counts.Length == offsets.Length)
+            {
+                jpeg = JoinJpegStrips(d, offsets, counts, tf.jpegTables, tf.height);
+                // Strips coded with tables of their own cannot share one scan: each decodes on its own.
+                if (jpeg is null) return StackJpegStrips(d, offsets, counts, tf.jpegTables, tf.width, tf.height);
+            }
             if (jpeg is null) return null;
             // A baseline frame is a JPEG file in its own right: handed through, it embeds
             // as the DCT stream it already is — no decode, no re-encode (a nine-page
@@ -102,7 +110,7 @@ internal static partial class TiffDecoder
         tf.w = (int)tf.width;
         tf.h = (int)tf.height;
 
-        if (!ReadTiffRaster(tf, d, le)) return null;
+        if (!ReadTiffRaster(tf, d)) return null;
 
         tf.samples = ExpandTo8Bit(tf.raster, tf.w, tf.h, tf.rowBytes, tf.bps, tf.spp, le);
 
@@ -113,7 +121,7 @@ internal static partial class TiffDecoder
     /// <summary>Decode one strip/tile to exactly <paramref name="expected"/> bytes of
     /// packed rows. Throws when the payload is out of bounds, truncated or malformed —
     /// the caller skips the frame.</summary>
-    private static byte[] DecodeSegment(byte[] d, bool le, long stripOffset, long stripCount,
+    private static byte[] DecodeSegment(byte[] d, long stripOffset, long stripCount,
         long compression, int widthPx, int rowCount, int expected, long t4Options,
         long predictor, int sppChunky, int bps, long fillOrder, bool strictGroup4 = false)
     {
@@ -149,19 +157,8 @@ internal static partial class TiffDecoder
                 outBytes = CcittDecode(src, widthPx, rowCount, k: -1, encodedByteAlign: false, columnShift: !strictGroup4);
                 break;
             case 5:
-            {
-                var parms = new PdfDictionary();
-                parms.Set("EarlyChange", new PdfInteger(1));
-                if (predictor > 1)
-                {
-                    parms.Set("Predictor", new PdfInteger(predictor));
-                    parms.Set("Colors", new PdfInteger(sppChunky));
-                    parms.Set("BitsPerComponent", new PdfInteger(bps));
-                    parms.Set("Columns", new PdfInteger(widthPx));
-                }
-                outBytes = LzwDecodeFilter.Decode(src, parms);
+                outBytes = LzwDecodeFilter.Decode(src, earlyChange: 1, (int)predictor, widthPx, sppChunky, bps);
                 break;
-            }
             case 8:
             case 32946:
             {
@@ -289,7 +286,7 @@ internal static partial class TiffDecoder
     /// storage rule. RATIONALs and other types return their first LONG as a best effort.</summary>
     /// <summary>A tag's value as raw bytes (type 7, UNDEFINED - how JPEGTables is
     /// stored). Null when the value does not lie inside the file.</summary>
-    private static byte[]? RawBytes(byte[] d, bool le, int entryOffset, int type, long count)
+    private static byte[]? RawBytes(byte[] d, bool le, int entryOffset, long count)
     {
         if (count <= 0 || count > 1 << 20) return null;
         var at = count <= 4 ? entryOffset + 8 : (long)U32(d, entryOffset + 8, le);

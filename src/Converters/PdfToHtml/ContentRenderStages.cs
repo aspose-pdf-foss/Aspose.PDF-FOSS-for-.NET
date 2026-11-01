@@ -45,8 +45,6 @@ public sealed partial class PdfToHtmlConverter
         ct.groupTjNum = 0;
         ct.groupChars = 0;
 
-        ct.tx = 0;
-        ct.ty = 0;
         ct.tlm = new CtmState();
         ct.tm = new CtmState();
         ct.leading = 0;
@@ -80,7 +78,7 @@ public sealed partial class PdfToHtmlConverter
         ct.ctmStack = new Stack<CtmState>();
         ct.colorStack = new Stack<(double r, double g, double b,
             double fr, double fg, double fb, double sr, double sg, double sb)>();
-        ct.textSpacingStack = new Stack<(double cs, double ws)>();
+        ct.textStateStack = new Stack<SavedTextState>();
 
         ct.pathState = new PathState();
         ct.svgPaths = new StringBuilder();
@@ -90,15 +88,23 @@ public sealed partial class PdfToHtmlConverter
         ct.strokeTintMap = null;
         ct.cpx = 0;
         ct.cpy = 0;
-        ct.clipD = null;
+        ct.clipD = ct.initialClipD;
+        ct.clipId = ct.initialClipId;
         ct.pendingClipD = null;
-        ct.clipStack = new Stack<string?>();
+        ct.pendingClipEvenOdd = false;
+        ct.clipStack = new Stack<(string? D, string? Id)>();
         ct.shadingSeq = 0;
+        ct.clipSeq = 0;
         ct.maskGroupOpen = false;
         ct.maskOpenClipDepth = 0;
         ct.opacityGroupOpen = false;
         ct.opacityOpenClipDepth = 0;
         ct.opacityGroupValue = 1.0;
+        ct.paintSeq = 0;
+        ct.groupSeq = 0;
+        ct.singleRectPathLength = -1;
+        ct.blendMode = NormalBlend;
+        ct.blendStack = new Stack<string>();
         InitContentLineTrackers(ct);
     }
 

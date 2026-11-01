@@ -88,7 +88,7 @@ public partial class MarkupAnnotation : Annotation
         Dict.Set("State", StateString(state.ToString()));
         Dict.Set("StateModel", StateString("Review"));
         if (!string.IsNullOrEmpty(userName))
-            Dict.Set("T", new PdfString(System.Text.Encoding.UTF8.GetBytes(userName)));
+            Dict.Set("T", Forms.Field.EncodePdfTextString(userName));
         AttachStateReply(state.ToString(), "Review",
             string.IsNullOrEmpty(userName) ? (Title ?? string.Empty) : userName);
     }
@@ -118,8 +118,7 @@ public partial class MarkupAnnotation : Annotation
                 : ParsePdfDate(raw) ?? System.DateTime.MinValue;
         }
         set => Dict.Set("CreationDate",
-            new PdfString(Compat.Latin1.GetBytes(
-                "D:" + value.ToUniversalTime().ToString("yyyyMMddHHmmss") + "Z")));
+            new PdfString(Compat.Latin1.GetBytes(Document.FormatPdfDate(value))));
     }
 
     /// <summary>Opacity (0..1) carried in /CA.</summary>
@@ -149,7 +148,12 @@ public partial class MarkupAnnotation : Annotation
         set
         {
             if (value is null) Dict.Remove("Popup");
-            else Dict.Set("Popup", value.Dict);
+            else
+            {
+                // The popup is an object of its own that knows the annotation it belongs to.
+                Dict.Set("Popup", ReferenceTo(value));
+                value.Dict.Set("Parent", value.ReferenceTo(this));
+            }
         }
     }
 
@@ -162,8 +166,7 @@ public partial class MarkupAnnotation : Annotation
             "Group" => ReplyType.Group,
             _ => ReplyType.Undefined,
         };
-        set => Dict.Set("RT", new PdfName(value == ReplyType.Reply ? "R"
-            : value == ReplyType.Group ? "Group" : ""));
+        set => Dict.Set("RT", new PdfName(value switch { ReplyType.Reply => "R", ReplyType.Group => "Group", _ => "" }));
     }
 
     /// <summary>Rich-text contents (/RC), XHTML-formatted.</summary>
@@ -171,7 +174,7 @@ public partial class MarkupAnnotation : Annotation
     {
         get => (Dict.Get("RC") as PdfString)?.ToText();
         set => Dict.Set("RC",
-            new PdfString(System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty)));
+            Forms.Field.EncodePdfTextString(value ?? string.Empty));
     }
 
     /// <summary>Subject line (/Subj).</summary>
@@ -179,7 +182,7 @@ public partial class MarkupAnnotation : Annotation
     {
         get => (Dict.Get("Subj") as PdfString)?.ToText();
         set => Dict.Set("Subj",
-            new PdfString(System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty)));
+            Forms.Field.EncodePdfTextString(value ?? string.Empty));
     }
 
     /// <summary>Author / title carried in /T.</summary>
@@ -187,21 +190,22 @@ public partial class MarkupAnnotation : Annotation
     {
         get => (Dict.Get("T") as PdfString)?.ToText();
         set => Dict.Set("T",
-            new PdfString(System.Text.Encoding.UTF8.GetBytes(value ?? string.Empty)));
+            Forms.Field.EncodePdfTextString(value ?? string.Empty));
     }
 
-    /// <summary>Parse a PDF date string (D:YYYYMMDDHHmmSS) to .NET DateTime
-    /// (UTC); returns null on malformed input. Local to MarkupAnnotation —
-    /// the base Annotation type also declares one but with a nullable
+    /// <summary>Parse a PDF date string (D:YYYYMMDDHHmmSSOHH'mm') to the local time of that moment; returns
+    /// null on malformed input. The clock fields are taken at the offset the string gives, universal time when
+    /// it gives none. Local to MarkupAnnotation — the base Annotation type also declares one but with a nullable
     /// parameter, so a `new` keyword shields the local version.</summary>
     private static new System.DateTime? ParsePdfDate(string s)
     {
+        var offset = DocumentInfo.ParseTimeZone(s);
         if (s.StartsWith("D:")) s = s.Substring(2);
         if (s.Length >= 14
             && System.DateTime.TryParseExact(s.Substring(0, 14), "yyyyMMddHHmmss",
                 System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.AssumeUniversal, out var dt))
-            return dt;
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var clock))
+            return (clock - offset).ToLocalTime();
         return null;
     }
 }

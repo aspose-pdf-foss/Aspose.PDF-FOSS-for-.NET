@@ -46,10 +46,7 @@ public sealed partial class SoftwarePageRenderer
         if (di.destW < 0.01) di.destW = di.imgW;
         if (di.destH < 0.01) di.destH = di.imgH;
 
-        di.px = (int)Math.Round((di.destX - di.ctx.MediaBox.LLX) * di.ctx.Scale);
-        di.py = di.ctx.PixelH - (int)Math.Round((di.topPdfY - di.ctx.MediaBox.LLY) * di.ctx.Scale);
-        di.pw = Math.Max(1, (int)Math.Round(di.destW * di.ctx.Scale));
-        di.ph = Math.Max(1, (int)Math.Round(di.destH * di.ctx.Scale));
+        (di.px, di.py, di.pw, di.ph) = DeviceImageRect(di.ctx, di.destX, di.topPdfY, di.destW, di.destH);
 
         di.flipY = di.ctm[3] < 0;
         di.flipX = di.ctm[0] < 0;
@@ -60,4 +57,29 @@ public sealed partial class SoftwarePageRenderer
 
         BlitDecodedImage(di);
     }
+
+    /// <summary>
+    /// The device pixels an upright image covers: each EDGE rounded to the pixel grid, the far
+    /// ones included. Rounding the width and height on their own let the far edge of one image
+    /// and the near edge of the next - the same line on the page - land a pixel apart: a photo
+    /// set as one-row strips of 2.5 pixels each showed a white row between every two strips.
+    /// </summary>
+    private static (int px, int py, int pw, int ph) DeviceImageRect(RenderContext ctx, double destX, double topPdfY,
+        double destW, double destH)
+    {
+        var left = (int)Math.Round((destX - ctx.MediaBox.LLX) * ctx.Scale);
+        var right = (int)Math.Round((destX + destW - ctx.MediaBox.LLX) * ctx.Scale);
+        // Rows are counted up the page here. A line half way up a row leaves that row to both
+        // images it parts: the clip mask takes a row by its centre, and two computations of one
+        // line differ in their last bits, so either slice's clip may be the one that selects it.
+        var top = (int)Math.Floor((topPdfY - ctx.MediaBox.LLY) * ctx.Scale + HalfPixel + DeviceEdgeSlack);
+        var bottom = (int)Math.Floor((topPdfY - destH - ctx.MediaBox.LLY) * ctx.Scale + HalfPixel - DeviceEdgeSlack);
+        // A rectangle that is non-empty in user space covers at least one device pixel.
+        return (left, ctx.PixelH - top, Math.Max(1, right - left), Math.Max(1, top - bottom));
+    }
+
+    /// <summary>How far, in device pixels, an edge may lie off a row's centre and count as on it.</summary>
+    private const double DeviceEdgeSlack = 1.0 / 1024;
+
+    private const double HalfPixel = 0.5;
 }

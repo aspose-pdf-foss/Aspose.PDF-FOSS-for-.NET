@@ -328,20 +328,23 @@ public sealed partial class SoftwarePageRenderer
     /// scanner’s own dark background.</summary>
     private static void BlitCMYK(RenderContext ctx, byte[] src, int srcW, int srcH,
         int dstX, int dstY, int dstW, int dstH, byte[]? alpha = null, int alphaW = 0, int alphaH = 0,
-        double fillAlpha = 1.0, bool overprint = false)
+        double fillAlpha = 1.0, bool flipY = false, bool flipX = false, bool overprint = false)
     {
         var fa = (int)Math.Round(fillAlpha * 255);
         if (fa < 0) fa = 0; else if (fa > 255) fa = 255;
+        var colours = new CmykToRgbLut.Memo();
 
         for (int y = 0; y < dstH; y++)
         {
-            var sy = y * srcH / dstH;
+            // The rows are top-down and the columns left-to-right in the data; a CTM that mirrors the
+            // image (a negative height or width) reads them from the other end, as the RGB blit does.
+            var sy = flipY ? srcH - 1 - y * srcH / dstH : y * srcH / dstH;
             var dy = dstY + y;
             if (dy < 0 || dy >= ctx.PixelH) continue;
 
             for (int x = 0; x < dstW; x++)
             {
-                var sx = x * srcW / dstW;
+                var sx = flipX ? srcW - 1 - x * srcW / dstW : x * srcW / dstW;
                 var dx = dstX + x;
                 if (dx < 0 || dx >= ctx.PixelW) continue;
 
@@ -351,14 +354,13 @@ public sealed partial class SoftwarePageRenderer
                 var m = src[si + 1];
                 var yy = src[si + 2];
                 var k = src[si + 3];
-                // Simple CMYK→RGB: R = 255*(1-C/255)*(1-K/255)
-                var r = (byte)(255 * (255 - c) * (255 - k) / 65025);
-                var g = (byte)(255 * (255 - m) * (255 - k) / 65025);
-                var b = (byte)(255 * (255 - yy) * (255 - k) / 65025);
+                // The CMYK fills' conversion, so an image and the flat tint beside it agree;
+                // the plain (1-C)(1-K) turned rich greys slate blue and violets bright blue.
+                var (r, g, b) = colours.Convert(c, m, yy, k);
 
                 int a = fa;
                 if (alpha is not null && alphaW > 0 && alphaH > 0)
-                    a = (a * SampleAlpha(alpha, alphaW, alphaH, x, y, dstW, dstH, false, false)) / 255;
+                    a = (a * SampleAlpha(alpha, alphaW, alphaH, x, y, dstW, dstH, flipX, flipY)) / 255;
                 if (a == 0) continue;
                 if (overprint) SetPixelOverprint(ctx, dx, dy, r, g, b, (byte)a);
                 else SetPixel(ctx, dx, dy, r, g, b, (byte)a);
@@ -462,7 +464,12 @@ public sealed partial class SoftwarePageRenderer
     {
         var palette = csInfo.Palette!;
         var comps = csInfo.PaletteComponents;
-        var isCmyk = csInfo.BaseName == "DeviceCMYK";
+        if (csInfo.BaseName == "DeviceCMYK" && comps == CmykComponents)
+        {
+            // Each ink entry converted once, not once for every pixel that uses it.
+            palette = CmykPaletteToRgb(palette);
+            comps = RgbComponents;
+        }
         var isGray = comps == 1;
         var rowBytes = (srcW * bpc + 7) / 8;
         var paletteEntries = palette.Length / comps;
@@ -480,23 +487,13 @@ public sealed partial class SoftwarePageRenderer
                 var pbase = idx * comps;
                 // Guard on the components the branch below will READ, not on the entry
                 // stride: the RGB path dereferences three of them whatever the stride is.
-                var needed = isGray ? 1 : (isCmyk && comps == 4 ? 4 : 3);
+                var needed = isGray ? 1 : RgbComponents;
                 if (pbase + Math.Max(comps, needed) > palette.Length) continue;
 
                 byte r, g, b;
                 if (isGray)
                 {
                     r = g = b = palette[pbase];
-                }
-                else if (isCmyk && comps == 4)
-                {
-                    var c = palette[pbase];
-                    var m = palette[pbase + 1];
-                    var yy = palette[pbase + 2];
-                    var k = palette[pbase + 3];
-                    r = (byte)(255 * (255 - c) * (255 - k) / 65025);
-                    g = (byte)(255 * (255 - m) * (255 - k) / 65025);
-                    b = (byte)(255 * (255 - yy) * (255 - k) / 65025);
                 }
                 else
                 {
@@ -508,6 +505,19 @@ public sealed partial class SoftwarePageRenderer
                 rgb[di] = r; rgb[di + 1] = g; rgb[di + 2] = b;
             }
         }
+        return rgb;
+    }
+
+    private const int CmykComponents = 4;
+    private const int RgbComponents = 3;
+
+    /// <summary>A CMYK palette's entries as RGB, converted as CMYK fills are.</summary>
+    private static byte[] CmykPaletteToRgb(byte[] palette)
+    {
+        var entries = palette.Length / CmykComponents;
+        var rgb = new byte[entries * RgbComponents];
+        for (int i = 0, s = 0, d = 0; i < entries; i++, s += CmykComponents, d += RgbComponents)
+            (rgb[d], rgb[d + 1], rgb[d + 2]) = CmykToRgbLut.ConvertBytes(palette[s], palette[s + 1], palette[s + 2], palette[s + 3]);
         return rgb;
     }
 

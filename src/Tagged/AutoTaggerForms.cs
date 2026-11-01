@@ -25,7 +25,9 @@ internal static partial class AutoTagger
     /// page a stamp was laid over, a cover photo the producer wrapped, a vector figure.</summary>
     private sealed class FormUse
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public readonly Dictionary<PdfStream, int> Drawn = new(ReferenceEqualityComparer.Instance);
+#pragma warning restore S3218
         public readonly HashSet<PdfStream> LookedInto = new(ReferenceEqualityComparer.Instance);
         /// <summary>Whether a form drawn more than once draws and says nothing, and whether it paints a ground its
         /// marks and labels stand on (see <see cref="IsSymbol"/>).</summary>

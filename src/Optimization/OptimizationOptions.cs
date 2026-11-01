@@ -18,8 +18,9 @@ public class OptimizationOptions
     /// <summary>Consolidate duplicate resource streams into single objects.</summary>
     public bool LinkDuplicateStreams { get; set; } = true;
 
-    /// <summary>Pack PDF objects into Object Streams (PDF 1.5+ /ObjStm) with compression.
-    /// Stored only; the writer always emits xref + objects in the legacy format.</summary>
+    /// <summary>Pack PDF objects into Object Streams (PDF 1.5+ /ObjStm) with compression: the
+    /// next save writes its small objects into compressed object streams and a cross-reference
+    /// stream, even when the source had none.</summary>
     public bool CompressObjects { get; set; }
 
     /// <summary>Compress every content stream with Flate. Every stream the document writes without a filter is
@@ -56,12 +57,11 @@ public class OptimizationOptions
     public ImageCompressionOptions ImageCompressionOptions { get; } = new();
 
     /// <summary>Resize images that exceed <see cref="MaxResoultion"/>. Forwards to
-    /// <see cref="ImageCompressionOptions.CompressImages"/> — when on, images
-    /// above the max resolution are downsampled.</summary>
+    /// <see cref="ImageCompressionOptions.ResizeImages"/>.</summary>
     public bool ResizeImages
     {
-        get => ImageCompressionOptions.CompressImages;
-        set => ImageCompressionOptions.CompressImages = value;
+        get => ImageCompressionOptions.ResizeImages;
+        set => ImageCompressionOptions.ResizeImages = value;
     }
 
     /// <summary>Specifies the encoder used for image processing. Forwards to
@@ -88,11 +88,8 @@ public class OptimizationOptions
         set => ImageCompressionOptions.ImageQuality = value;
     }
 
-    internal int MaxImageDpi
-    {
-        get => ImageCompressionOptions.MaxResolution;
-        set => ImageCompressionOptions.MaxResolution = value;
-    }
+    // The resolution images are downsampled to; 0 unless compression and resizing are both on.
+    internal int MaxImageDpi => ImageCompressionOptions.ResizeResolution;
 
     internal bool ConvertImagesToGrayscale { get; set; }
 
@@ -116,7 +113,8 @@ public class OptimizationOptions
         LinkDuplicateStreams = true,
         CompressImages = true,
         ImageQuality = 50,
-        MaxImageDpi = 150,
+        ResizeImages = true,
+        MaxResoultion = 150,
         ConvertImagesToGrayscale = true,
         RemoveDuplicateImages = true,
         UnembedFonts = true,

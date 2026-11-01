@@ -21,7 +21,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (!sheet.TryGetValue(key, out var rule)) return;
             merged ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kv in rule) if (!merged.ContainsKey(kv.Key)) merged[kv.Key] = kv.Value;
+            foreach (var kv in rule.Where(kv => !merged.ContainsKey(kv.Key))) merged[kv.Key] = kv.Value;
         }
         for (var i = cfg.cssAncestors.Count - 1; i >= 0; i--)
         {
@@ -58,8 +58,8 @@ internal static partial class HtmlToPdfConverter
     /// font-size, else the font-size the sheet's chain rule gives a plain cell of this grid; null when neither.</summary>
     private static double? QuirksGridSizePt(TableStyleConfig cfg, string html)
     {
-        var rg = Regex.Match(html, @"<(?:tbody|thead|tfoot)\b[^>]*\bstyle\s*=\s*([""'])(?<v>[^""']*)\1", RegexOptions.IgnoreCase);
-        if (rg.Success && Regex.Match(rg.Groups["v"].Value, @"(?<![-\w])font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } rgFs
+        var rg = SafeRegex.Match(html, @"<(?:tbody|thead|tfoot)\b[^>]*\bstyle\s*=\s*([""'])(?<v>[^""']*)\1", RegexOptions.IgnoreCase);
+        if (rg.Success && SafeRegex.Match(rg.Groups["v"].Value, @"(?<![-\w])font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } rgFs
             && TryParseLength(rgFs.Groups[1].Value.Trim()) is { } rgPt && rgPt > 0)
             return rgPt;
         if (cfg.chainBase is not null
@@ -146,7 +146,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The size and family a `font:` shorthand VALUE names (px/pt size, the first family), or null.</summary>
     private static (double sizePt, string? family)? CssFontShorthandValue(string v)
     {
-        var m = Regex.Match(v, @"([\d.]+)\s*(px|pt)\s*(?:/\s*[^\s]+\s*)?([^;]*)");
+        var m = SafeRegex.Match(v, @"([\d.]+)\s*(px|pt)\s*(?:/\s*[^\s]+\s*)?([^;]*)");
         if (!m.Success) return null;
         var size = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         if (m.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase)) size *= PxToPt;

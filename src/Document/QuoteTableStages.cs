@@ -19,7 +19,7 @@ public sealed partial class Document
     }
 
     /// <summary>x</summary>
-    private void RenderQuoteRow(QuoteTableState qt, int ri)
+    private static void RenderQuoteRow(QuoteTableState qt, int ri)
     {
         // a table taller than a whole page still has to break somewhere
         if (qt.rowTop - qt.rowH[ri] < qt.qs.marginBottom)

@@ -32,6 +32,14 @@ internal static partial class HtmlToPdfConverter
                             MeasureFaceText(CellFaceName(fb.face, fb.boldFace, r[c]), r[c].Text,
                                 r[c].FontSize ?? fb.mps.fontSize));
                 }
+            // …and a cell whose content stands in div bands asks for its widest band's line (a column of
+            // div-wrapped cells is as wide as their text, not collapsed onto nothing)
+            foreach (var r in fb.rows)
+                if (c < r.Count && r[c].ColSpan <= 1 && r[c].DivSegs is { Count: > 0 } bands)
+                    foreach (var sg in bands)
+                        fb.naturalB[c] = Math.Max(fb.naturalB[c], MeasureFaceText(
+                            sg.Bold || r[c].Bold ? fb.boldFace : sg.Face ?? fb.face, sg.Text.Trim(),
+                            sg.FontSize ?? r[c].FontSize ?? fb.mps.fontSize));
             // …and a cell holding a nested grid asks for that grid's max-content, capped by the box
             // (measured on the case report: the label column beside a column of nested grids drew
             // every grid in a zero-width column, at the page's right edge)
@@ -41,6 +49,8 @@ internal static partial class HtmlToPdfConverter
                         foreach (var sub in natSubs)
                             fb.naturalB[c] = Math.Max(fb.naturalB[c],
                                 Math.Min(MetricGridMaxContentPt(fb.host, sub, r[c]), fb.availW - fb.chromeB));
+            // (…but never below the grids' min-content: the box cap must not squeeze a grid onto its neighbour)
+            fb.naturalB[c] = Math.Max(fb.naturalB[c], NestedGridsMinContent(fb, c));
             var share = fb.colPct[c] > 0 ? fb.colPct[c] / 100.0 * fb.innerW - 2 * fb.p - 2 * fb.bw : 0;
             // A pixel width attribute fixes the column (its text wraps at
             // that width instead of widening it) — but a larger declared
@@ -60,7 +70,9 @@ internal static partial class HtmlToPdfConverter
                 // inside itself (probed: the font-size ladder's 36 pt
                 // `size="10000"` cell keeps its whole 223.3 pt run past
                 // every 40…130 px width its column declares).
+#pragma warning disable S4143 // not a blind overwrite: the slot is seeded first, then raised or finalised
                 fb.colW[c] = Math.Max(fb.colW[c], MetricColumnMinContent(fb, c));
+#pragma warning restore S4143
                 continue;
             }
             // A percent share fixes its column too: the 20 % product column

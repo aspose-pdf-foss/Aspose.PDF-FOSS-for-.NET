@@ -214,24 +214,51 @@ public class ImageCollection : IReadOnlyList<ImageXObject>
     /// owning resources (page /Resources/XObject, recursing into nested form
     /// XObjects) and from this collection. The orphaned image stream becomes
     /// unreachable and is dropped when the document is saved, shrinking the file.
-    /// Returns true when an image was removed.</summary>
-    internal bool RemoveImageResource(string name)
+    /// Returns true when an image was removed. An image of the page's own resources
+    /// takes the <c>Do</c> operators that paint it out of the page content with it,
+    /// unless <paramref name="keepContents"/>: a viewer reports an operator left
+    /// naming a resource that is gone.</summary>
+    internal bool RemoveImageResource(string name, bool keepContents = false)
     {
         if (string.IsNullOrEmpty(name)) return false;
-        var removed = RemoveFromResources(InheritedResources(_ownerDict!, _ownerReader), name, new HashSet<PdfStream>());
+        var resources = InheritedResources(_ownerDict!, _ownerReader);
+        var paintedByPage = IsImageOf(resources, name);
+        // Only this page's paint goes, so only its listing may: other pages can share or inherit the dictionary.
+        if (paintedByPage && OwnerPage is not null) resources = Forms.Form.EnsureOwnPageXObjects(_ownerDict!, _ownerReader);
+        var removed = RemoveFromResources(resources, name, new HashSet<PdfStream>());
         if (removed)
         {
+            _ownerReader.MayHaveOrphansOnSave = true;
             var img = GetByName(name);
             if (img is not null) _images.Remove(img);
+            if (paintedByPage && !keepContents) RemoveDoReferences(name);
         }
         return removed;
     }
 
-    /// <summary>Remove the image at the given 1-based index. See <see cref="RemoveImageResource(string)"/>.</summary>
-    internal bool RemoveImageAt(int index)
+    private bool IsImageOf(PdfDictionary? resources, string name)
+    {
+        var xobjects = _ownerReader.ResolveDict(resources?.Get("XObject"));
+        return _ownerReader.ResolveStream(xobjects?.Get(name))?.Dict.GetName("Subtype") == "Image";
+    }
+
+    private void RemoveDoReferences(string name)
+    {
+        var contents = OwnerPage?.Contents;
+        if (contents is null) return;
+        contents.EnsureMaterialized();
+        var paints = new List<Operator>();
+        foreach (var op in contents)
+            if (op is Aspose.Pdf.Operators.Do d && d.Name == name)
+                paints.Add(op);
+        if (paints.Count > 0) contents.Delete(paints);
+    }
+
+    /// <summary>Remove the image at the given 1-based index. See <see cref="RemoveImageResource(string, bool)"/>.</summary>
+    internal bool RemoveImageAt(int index, bool keepContents = false)
     {
         if (index < 1 || index > _images.Count) return false;
-        return RemoveImageResource(_images[index - 1].Name);
+        return RemoveImageResource(_images[index - 1].Name, keepContents);
     }
 
     private bool RemoveFromResources(PdfDictionary? resources, string name, HashSet<PdfStream> visited)

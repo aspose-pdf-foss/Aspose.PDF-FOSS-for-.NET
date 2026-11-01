@@ -52,9 +52,11 @@ public sealed class Border
     /// <c>annotation.Border = border</c> still persists.</summary>
     public Dash? Dash
     {
-        get => Owner is Annotation a
-            ? (a.GetBorderDashValue() is { } p ? new Dash(p) : _dash)
-            : _dash;
+        get
+        {
+            if (Owner is Annotation a) return a.GetBorderDashValue() is { } p ? new Dash(p) : _dash;
+            return _dash;
+        }
         set { _dash = value; if (Owner is Annotation a) a.SetBorderDashValue(value?.Pattern); }
     }
     private Dash? _dash;

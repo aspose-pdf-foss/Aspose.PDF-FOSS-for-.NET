@@ -7,7 +7,7 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextFragmentAbsorber
 {
     /// <summary>A horizontal gap between two runs on the same line becomes a separator space. Returning early is what the enclosing loop used to reach by jumping to its skipSpaceInsert label.</summary>
-    private bool InsertSeparatorSpaceBetweenRuns(List<RawTextRun> rawFragments, int i, StringBuilder fullText, List<int> charToRun, int[] runStartChar, bool ignoreShadow, ref string? lastKeptText, ref double lastKeptX, ref double lastKeptY, bool[] letterTracked, bool[] squeezedGap)
+    private static bool InsertSeparatorSpaceBetweenRuns(List<RawTextRun> rawFragments, int i, StringBuilder fullText, List<int> charToRun, int[] runStartChar, bool ignoreShadow, ref string? lastKeptText, ref double lastKeptX, ref double lastKeptY, bool[] letterTracked, bool[] squeezedGap)
     {
         // Detect horizontal gaps between consecutive runs on the same line.
         // Skip \r\n sentinels to find the real previous run — BT/ET boundaries
@@ -35,10 +35,8 @@ public sealed partial class TextFragmentAbsorber
         }
         else
             deltaY = Math.Abs(rawFragments[i].Y - prev.Y);
-        if (deltaY < 2.0) // same line
-        {
-            if (InsertSameLineGapSpace(rawFragments, i, prevIdx, prev, deltaY, fullText, charToRun, runStartChar, ignoreShadow, ref lastKeptText, ref lastKeptX, ref lastKeptY, letterTracked, squeezedGap)) return true;
-        }
+        // same line
+        if (deltaY < 2.0 && InsertSameLineGapSpace(rawFragments, i, prevIdx, prev, deltaY, fullText, charToRun, runStartChar, ignoreShadow, ref lastKeptText, ref lastKeptX, ref lastKeptY, letterTracked, squeezedGap)) return true;
         return false;
     }
 }

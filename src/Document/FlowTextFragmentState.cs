@@ -28,10 +28,12 @@ private sealed class FlowTextFragmentState
     public string baseFont = null!;
     public float fontSize;
     // In column mode this is the current column's width; otherwise the
-    // full page content width. Wrapping uses the entry column's width;
-    // the test columns are equal-width so a fragment that flows into the
+    // full page content width. Wrapping uses the entry column's width; the
+    // test columns are equal-width so a fragment that flows into the
     // next column keeps the same break points.
     public double contentWidth;
+    // The fragment's own left margin: its lines start that far inside the region's left edge.
+    public double marginLeft;
     // WordWrapMode.NoWrap → each \n-delimited input line becomes one
     // output line, regardless of width: a
     // long line stays on one rendered line that overflows the page

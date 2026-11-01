@@ -64,7 +64,7 @@ public sealed partial class Document
     {
         static string? NonEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
         static string? XmpDate(DateTime dt)
-            => dt == DateTime.MinValue ? null : dt.ToString("yyyy-MM-ddTHH:mm:ss");
+            => dt == DateTime.MinValue ? null : dt.ToString("yyyy-MM-ddTHH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
 
         var info = Info;
         return key switch

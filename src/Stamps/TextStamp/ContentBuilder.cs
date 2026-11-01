@@ -33,7 +33,8 @@ public partial class TextStamp
         var displayRows = new System.Collections.Generic.List<System.Collections.Generic.List<(byte[] ttf, string name, string text)>>();
         foreach (var sourceRow in Text.Replace("\r\n", "\n").Split('\n'))
         {
-            var runs = SplitFontRuns(sourceRow, ttf, fontName);
+            // Arabic is drawn as a TextFragment draws it: shaped to its joining forms, in display order.
+            var runs = SplitFontRuns(ArabicShaper.ShapeForDisplay(sourceRow), ttf, fontName);
             if (wrapping && budget > 0)
                 displayRows.AddRange(FillCidRows(fontDict, runs, fontSize, budget, charLevel));
             else
@@ -73,12 +74,12 @@ public partial class TextStamp
         var x = HorizontalAlignment switch
         {
             HorizontalAlignment.Center => (page.Width - blockW) / 2,
-            HorizontalAlignment.Right => page.Width - blockW - XIndent - RightMargin,
+            HorizontalAlignment.Right => page.Width - blockW - RightMargin,
             _ => x0,
         };
         var y = VerticalAlignment switch
         {
-            VerticalAlignment.Top => page.Height - TopMargin - YIndent - pitch,
+            VerticalAlignment.Top => page.Height - TopMargin - pitch,
             VerticalAlignment.Center => (page.Height + n * pitch) / 2 - pitch,
             VerticalAlignment.Bottom => YIndent + BottomMargin + n * pitch - pitch,
             _ => YIndent + (n - 1) * pitch,
@@ -86,9 +87,10 @@ public partial class TextStamp
 
         var builder = new ContentStreamBuilder();
         builder.SaveState();
+        SetShownFrame(builder, page);
         if (Opacity < 1.0)
         {
-            var gsName = page.AddExtGState(new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
+            var gsName = SharedGraphicsState(page, new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
             builder.SetExtGState(gsName);
         }
         builder.BeginText()
@@ -112,6 +114,23 @@ public partial class TextStamp
         return builder.Build();
     }
 
+    /// <summary>Writes the stamp's one placement matrix, laid out in the page as shown, with the page's
+    /// shown-to-media frame folded in (see <see cref="Page.ShownPlacementToMedia"/>).</summary>
+    private static void SetPlacement(ContentStreamBuilder builder, Page page,
+        double a, double b, double c, double d, double e, double f)
+    {
+        var m = page.ShownPlacementToMedia(a, b, c, d, e, f);
+        builder.SetMatrix(m.A, m.B, m.C, m.D, m.E, m.F);
+    }
+
+    /// <summary>For a stamp placed by its text matrix alone: the page's shown-to-media frame as its one
+    /// matrix on a turned page, nothing on an unturned one.</summary>
+    private static void SetShownFrame(ContentStreamBuilder builder, Page page)
+    {
+        if (page.ShownToMediaMatrix() is { } m)
+            builder.SetMatrix(m.A, m.B, m.C, m.D, m.E, m.F);
+    }
+
     internal override byte[] BuildContentStream(Page page)
     {
         var cb = new StampContentState();
@@ -130,9 +149,10 @@ public partial class TextStamp
 
         cb.stampDeg = (int)Math.Round(Math.Abs(RotateAngle != 0 ? RotateAngle : (double)Rotate));
         cb.wrapVertical = cb.stampDeg % 180 == 90;
-        cb.mb = cb.page.MediaBox;
+        cb.mb = cb.page.ShownFrame;
         cb.advanceDim = cb.wrapVertical ? cb.mb.Height : cb.mb.Width;
-        cb.wrapLead = cb.wrapVertical ? (YIndent > 0 ? YIndent : BottomMargin) : (XIndent > 0 ? XIndent : LeftMargin);
+        if (cb.wrapVertical) cb.wrapLead = YIndent > 0 ? YIndent : BottomMargin;
+        else cb.wrapLead = XIndent > 0 ? XIndent : LeftMargin;
         cb.wrapTrail = cb.wrapVertical ? TopMargin : RightMargin;
         LayoutRows(cb);
         cb.rotQuarter = ((int)Math.Round(Math.Abs(cb.rotateDeg))) % 360;
@@ -170,10 +190,10 @@ public partial class TextStamp
         builder.SaveState();
         if (Opacity < 1.0)
         {
-            var gsName = page.AddExtGState(new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
+            var gsName = SharedGraphicsState(page, new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
             builder.SetExtGState(gsName);
         }
-        builder.SetMatrix(sX, 0, 0, sY, XIndent, YIndent);
+        SetPlacement(builder, page, sX, 0, 0, sY, XIndent, YIndent);
 
         // Background box: fills the whole natural block in block-local space, so the
         // cm scale above stretches it to exactly the Width×Height box.
@@ -219,11 +239,12 @@ public partial class TextStamp
         // An auto-fitted stamp must render the SAME wrap the fit was computed
         // against (trailing-space-trimmed rows) or the scales below distort what
         // the fit sized to be exact.
-        var rows = wrapping
-            ? (AutoFitToBox
+        List<byte[]> rows;
+        if (wrapping)
+            rows = AutoFitToBox
                 ? AutoFitWrap(encoded, baseFontName, fontSize, Width)
-                : WrapEncoded(encoded, baseFontName, fontSize, Width))
-            : new List<byte[]> { JoinToOneLine(encoded) };
+                : WrapEncoded(encoded, baseFontName, fontSize, Width);
+        else rows = new List<byte[]> { JoinToOneLine(encoded) };
         var rowWidths = rows.Select(r => MeasureRow(r, baseFontName, fontSize)).ToList();
         var blockWidth = rowWidths.Count > 0 ? rowWidths.Max() : 0.0;
         if (blockWidth <= 0) blockWidth = Width;
@@ -251,7 +272,7 @@ public partial class TextStamp
         // Anchoring is within the MEDIA BOX rectangle - a page whose box has a
         // non-zero origin (the mediabox-swap pattern leaves y running 247..842)
         // otherwise draws the stamp a full origin-offset below the visible page.
-        var pmb = page.MediaBox;
+        var pmb = page.ShownFrame;
         double cx = HorizontalAlignment switch
         {
             HorizontalAlignment.Center => pmb.LLX + pmb.Width / 2.0,
@@ -275,10 +296,10 @@ public partial class TextStamp
         builder.SaveState();
         if (Opacity < 1.0)
         {
-            var gsName = page.AddExtGState(new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
+            var gsName = SharedGraphicsState(page, new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
             builder.SetExtGState(gsName);
         }
-        builder.SetMatrix(sX * cos, sX * sin, -sY * sin, sY * cos, tx, ty);
+        SetPlacement(builder, page, sX * cos, sX * sin, -sY * sin, sY * cos, tx, ty);
         // The stamp's background fills the whole box (a FormattedText backdrop
         // colour paints behind every row, edge to edge).
         var boxBg = TextState?.BackgroundColor;
@@ -348,9 +369,10 @@ public partial class TextStamp
 
         var builder = new ContentStreamBuilder();
         builder.SaveState();                            // q
+        SetShownFrame(builder, page);
         if (Opacity < 1.0)
         {
-            var gsName = page.AddExtGState(new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
+            var gsName = SharedGraphicsState(page, new Content.ExtGState { FillAlpha = Opacity, StrokeAlpha = Opacity });
             builder.SetExtGState(gsName);
         }
         builder.Rectangle(boxX, boxY, boxW, boxH);      // re

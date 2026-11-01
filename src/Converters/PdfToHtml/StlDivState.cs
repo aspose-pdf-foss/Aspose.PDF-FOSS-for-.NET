@@ -78,6 +78,14 @@ private sealed class StlDivState
     public double turnedOverShiftLeftEm;
     public double turnedOverShiftTopEm;
     public bool emGrid;
+    // The save asked for no glyph grouping: each rendered glyph gets its own positioned div.
+    public bool perGlyph;
+    // The page's text-layer model, given every emitted part's box, and the paint ordinal of
+    // the line's first show.
+    public TextLayerModel? model;
+    public int seq;
+    // Whether a character was minted for a glyph (see SeparateStandInMarks).
+    public Func<char, bool>? isMintedStandIn;
     public Converters.PdfToHtmlConverter.StlLineGlyph g;
     public Converters.PdfToHtmlConverter.StlRunStyle st = null!;
     public double fs;
@@ -132,8 +140,7 @@ private sealed class StlDivState
     public bool slotFires;
     // The em-compensation dialect emits the css font-size ROUNDED to the
     // 0.01-em grid (drawn 11 → 0.92em, 15 → 1.25em, 40 → 3.33em); the ws
-    // solve above uses the TRUNCATED size — the dialect's own
-    // deliberate inconsistency, not to be reconciled.
+    // solve measures the face at that emitted size.
     public int fontNum;
     public int lhNum;
     public double lsMilli;

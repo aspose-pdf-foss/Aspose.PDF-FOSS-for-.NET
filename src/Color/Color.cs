@@ -98,8 +98,10 @@ public sealed class Color
     /// <inheritdoc/>
     public override int GetHashCode() => HashCode.Combine(AByte, R, G, B, ColorType);
 
+#pragma warning disable S3875 // public API: Color compares by value
     /// <summary>Value equality operator. Compares ARGB bytes plus ColorSpace.</summary>
     public static bool operator ==(Color? left, Color? right)
+#pragma warning restore S3875
     {
         if (ReferenceEquals(left, right)) return true;
         if (left is null || right is null) return false;
@@ -135,7 +137,8 @@ public sealed class Color
         // reference's own profile transform, sampled - so a CMYK colour resolves to one
         // RGB whichever API produced it (FromCmyk(...).ToRgb() equals the operator's).
         var (r, g, b) = Operators.CmykOperatorColors.Convert(c, m, y, k);
-        return new Color(255, (byte)r, (byte)g, (byte)b) { ColorType = ColorType.Cmyk };
+        // The four components stay the colour's data: written to a page it is the CMYK colour (k / K), not its RGB.
+        return new Color(255, (byte)r, (byte)g, (byte)b) { ColorType = ColorType.Cmyk, Data = [c, m, y, k] };
     }
 
     public static Color FromGray(double g) =>

@@ -1,10 +1,12 @@
 namespace Aspose.Pdf.Forms;
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Pairs a <see cref="Signature"/> (which carries the signing
 /// certificate) with the <see cref="DocMDPAccessPermissions"/> level a
 /// certifying signature will impose. Passed to
 /// <see cref="Facades.PdfFileSignature.Certify(int, string, string, string, bool, System.Drawing.Rectangle, DocMDPSignature)"/>.</summary>
 public class DocMDPSignature
+#pragma warning restore S101
 {
     public DocMDPSignature(Signature signature, DocMDPAccessPermissions accessPermissions)
     {

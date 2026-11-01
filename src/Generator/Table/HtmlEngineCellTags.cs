@@ -64,7 +64,7 @@ public partial class Table
                 if (closing) { if (hc.anchors.Count > 0) hc.anchors.Pop(); }
                 else
                 {
-                    var href = HrefRegex.Match(m.Value);
+                    var href = SafeRegex.Match(HrefRegex, m.Value);
                     hc.anchors.Push(href.Success ? href.Groups["u"].Value.Trim() : "");
                 }
                 break;

@@ -9,7 +9,7 @@ public sealed partial class TextParagraph
     /// <summary>The stages of the paragraph content build: trimming unwrapped lines to the default box, seating the block in its rectangle, and seating an unrotated block above the page origin.</summary>
     private void SeatUnrotatedBlock(ParagraphContentState pc)
     {
-        if (!pc.hasRotation && Rectangle is null)
+        if (!pc.hasRotation && Box is null)
         {
             var lastLine = pc.visualLines[pc.visualLines.Count - 1];
             var lastTs = lastLine.Count > 0 ? lastLine[0].ts : _lines[_lines.Count - 1].TextState;
@@ -52,7 +52,7 @@ public sealed partial class TextParagraph
         // The clip spans the content width and rises ClipLineBoxFactor × the
         // block height from the block bottom — past the rect top when the block
         // is taller than the rect — and never reaches below the rect bottom.
-        double clipBottom = Math.Max(blockBottom, Rectangle!.LLY + Margin.Bottom);
+        double clipBottom = Math.Max(blockBottom, Box!.LLY + Margin.Bottom);
         double clipTop = blockBottom + pc.blockHeight * ClipLineBoxFactor;
         if (clipTop > clipBottom)
         {

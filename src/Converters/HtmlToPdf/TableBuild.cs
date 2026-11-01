@@ -110,8 +110,8 @@ internal static partial class HtmlToPdfConverter
     // Control-widget draw seats (all measured on the expected borders): every
     // widget box starts 3.7 pt past the pen; the drop-down draws its
     // arrow-button band (+13 wide) and rides 2.3 higher; the textarea keeps its
-    // declared box 2.5 higher with the mono text tight under the top border;
-    // trailing text (the validation star) hugs the box's right border.
+    // declared box 2.5 higher with the mono text tight under the top border; trailing
+    // text (the validation star) hugs the box's right border.
     internal const double DwInputLeadPt = 3.7;
     internal const double DwSelectChromeWPt = 13.0;
     internal const double DwSelectLiftPt = 2.3;
@@ -229,15 +229,17 @@ internal static partial class HtmlToPdfConverter
     /// inline in its text via Table.InlineRadioChar markers. Null = radios are
     /// dropped from cell text, the pre-form-grid behaviour.
     /// </remarks>
-internal static (Table? result, double naturalWidthPt) BuildTableFromHtml(string html, double availWidthPt, HtmlLoadOptions? options, List<byte[]>? inlineSvgs, IReadOnlyDictionary<string, Dictionary<string, string>>? docCss, bool bandDialect = false, bool widenProbe = false, double cellLineHeightPt = 0, double defaultCellFontPt = 0, bool tightExtras = false, bool liftNestedTables = false, bool uaCellBoxes = false, string? cssRunFace = null, Color? bodyTextColor = null, bool uaSerifMin = false, bool authoredCellChrome = false, bool formGridDialect = false, bool ptCellWidths = false, bool redlineCells = false, bool dwFormCells = false, double formGridStrutPt = 0, double formGridStrutDropPt = 0, string? defaultCellFace = null, bool docElementGrid = false, bool fullWidthCjkMin = false, bool pinnedBodyGrid = false, bool overDeclaredDraw = false, List<CssChainRule>? chainRules = null, List<CssElem>? cssAncestors = null, Func<string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio = null, bool wordMailCells = false, Func<bool, Aspose.Pdf.Forms.CheckboxField>? makeCheckbox = null, bool nestedGrid = false, double uaLineFactor = 0, bool uaSheetGrid = false)
+internal static (Table? result, double naturalWidthPt) BuildTableFromHtml(string html, double availWidthPt, HtmlLoadOptions? options, List<byte[]>? inlineSvgs, IReadOnlyDictionary<string, Dictionary<string, string>>? docCss, bool bandDialect = false, bool widenProbe = false, double cellLineHeightPt = 0, double defaultCellFontPt = 0, bool tightExtras = false, bool liftNestedTables = false, bool uaCellBoxes = false, string? cssRunFace = null, Color? bodyTextColor = null, bool uaSerifMin = false, bool authoredCellChrome = false, bool formGridDialect = false, bool ptCellWidths = false, bool redlineCells = false, bool dwFormCells = false, double formGridStrutPt = 0, double formGridStrutDropPt = 0, string? defaultCellFace = null, bool docElementGrid = false, bool fullWidthCjkMin = false, bool pinnedBodyGrid = false, bool overDeclaredDraw = false, List<CssChainRule>? chainRules = null, List<CssElem>? cssAncestors = null, Func<string, string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio = null, bool wordMailCells = false, Func<bool, Aspose.Pdf.Forms.CheckboxField>? makeCheckbox = null, bool nestedGrid = false, double uaLineFactor = 0, bool uaSheetGrid = false, Func<GridFieldSpec, Aspose.Pdf.Forms.Field>? makeField = null, bool fieldCells = false, List<CssElem>? hostChain = null, string? hostBodyFace = null, bool bodyFaceGrid = false)
     {
         double naturalWidthPt = default;
-        naturalWidthPt = 0;
-        (var cfg, var ps, var colModel, var table, var tokens, cssRunFace) = BuildTableParseContext(html, availWidthPt, options, inlineSvgs, docCss, bandDialect, widenProbe, cellLineHeightPt, defaultCellFontPt, tightExtras, liftNestedTables, uaCellBoxes, cssRunFace, bodyTextColor, uaSerifMin, authoredCellChrome, formGridDialect, ptCellWidths, redlineCells, dwFormCells, formGridStrutPt, formGridStrutDropPt, defaultCellFace, docElementGrid, fullWidthCjkMin, pinnedBodyGrid, overDeclaredDraw, chainRules, cssAncestors, makeRadio, wordMailCells, makeCheckbox, nestedGrid: nestedGrid, uaLineFactor: uaLineFactor, uaSheetGrid: uaSheetGrid);
+        (var cfg, var ps, var colModel, var table, var tokens, cssRunFace) = BuildTableParseContext(html, availWidthPt, options, inlineSvgs, docCss, bandDialect, widenProbe, cellLineHeightPt, defaultCellFontPt, tightExtras, liftNestedTables, uaCellBoxes, cssRunFace, bodyTextColor, uaSerifMin, authoredCellChrome, formGridDialect, ptCellWidths, redlineCells, dwFormCells, formGridStrutPt, formGridStrutDropPt, defaultCellFace, docElementGrid, fullWidthCjkMin, pinnedBodyGrid, overDeclaredDraw, chainRules, cssAncestors, makeRadio, wordMailCells, makeCheckbox, nestedGrid: nestedGrid, uaLineFactor: uaLineFactor, uaSheetGrid: uaSheetGrid, hostChain: hostChain, hostBodyFace: hostBodyFace, bodyFaceGrid: bodyFaceGrid, fieldCells: fieldCells || makeField is not null);
+        cfg.makeField = makeField;
         table.HtmlUaControlGrid = ps.uaControlGrid;
         table.HtmlUaControlFontPt = cfg.cellFontSize;
         ps.chainOpenElems = cfg.chainBase is not null ? new List<CssElem>() : null;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var tok in tokens)
+#pragma warning restore S3267
             if (!BuildTableFromToken(cfg, ps, colModel, table, tok, cssRunFace)) break;
         CloseRow(ps, colModel, table, cfg.options, cfg.cellFontSize, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.breakAnywhereDoc, cfg.cellFontShorthand, cfg.chainBase, cfg.chainSpacingPt, cfg.chainUnbold, cfg.cssBaseFamily, cfg.cssBasePt, cfg.defaultCellFace, cfg.formGridStrutDropPt, cfg.hasBorder, cfg.inlineFaceRatio, cfg.overDeclaredDraw, cfg.padSide, cfg.uaDocGrid, cfg.widenProbe, cfg.uaSerifMin, cfg.ptCellWidths, cfg.redlineCells, cfg.bandDialect, cfg.cellLineHeightPt, cssRunFace, cfg.formGridDialect, cfg.formGridStrutPt, cfg.liftNestedTables, cfg.tightExtras, cfg.uaCellBoxes, cfg.borderWidth, cfg.pad);
         // Apply the deferred column-span constraints: a spanning cell only forces its
@@ -301,7 +303,7 @@ internal static (Table? result, double naturalWidthPt) BuildTableFromHtml(string
         // the rental question row's 50% column and the amounts grid's 15%/35%
         // groups both land within a point.)
         ApplyOverDeclaredColumnDraw(cfg, ps, colModel);
-        naturalWidthPt = SolveColumnWidths(colModel, table, cfg.tblStyle, cfg.tblTag, cfg.chainBase, cfg.availWidthPt, cfg.cellFontSize, cfg.cellFontShorthand, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.overDeclaredDraw, cfg.uaDocGrid, cfg.padSide, ps.rowPctDeclMax, ps.headerRows, cfg.ptCellWidths, cfg.uaCellBoxes, cfg.uaSerifMin, ps.rowPxAtMax, ps.rowPxCellsAtMax, naturalWidthPt, wordMailCells: cfg.wordMailCells, nestedGrid: cfg.nestedGrid);
+        naturalWidthPt = SolveColumnWidths(colModel, table, cfg.tblStyle, cfg.tblTag, cfg.chainBase, cfg.availWidthPt, cfg.cellFontSize, cfg.cellFontShorthand, cfg.dwFormCells, cfg.fullWidthCjkMin, cfg.overDeclaredDraw, cfg.uaDocGrid, cfg.padSide, ps.rowPctDeclMax, cfg.ptCellWidths, cfg.uaCellBoxes, cfg.uaSerifMin, ps.rowPxAtMax, ps.rowPxCellsAtMax, naturalWidthPt, wordMailCells: cfg.wordMailCells, nestedGrid: cfg.nestedGrid);
         if (ps.sheetTdBoxRule
             && SolveColumnsOnDeclaredPercents(colModel, table,
                 ps.minContentGrid ? 0 : cfg.availWidthPt - TableFrameSidesPt(table)) is > 0 and var pinnedW)

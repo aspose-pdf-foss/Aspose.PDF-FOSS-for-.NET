@@ -51,6 +51,10 @@ public partial class StructureElement
         _children[index].Detach();
     }
 
+    /// <summary>Takes this element out of the tree, its own children going with it; an element
+    /// with no parent stays as it is.</summary>
+    public void Remove() => Detach();
+
     /// <summary>This element's /K as an array, made one from a single entry or from nothing.</summary>
     private PdfArray KidsArray()
     {

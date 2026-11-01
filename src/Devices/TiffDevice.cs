@@ -9,6 +9,12 @@ public sealed partial class TiffDevice : ImageDevice
     /// <summary>TIFF encoding settings (color depth, compression).</summary>
     public TiffSettings Settings { get; }
 
+    /// <summary>A classic TIFF addresses its strips and directories through 32-bit offsets, so a
+    /// file past this size cannot be read back whole - a reader finds the frames whose offsets
+    /// wrapped missing or wrong. The write stops with an error instead of finishing such a file.
+    /// A test lowers it to meet the limit without a four-gigabyte output.</summary>
+    internal long ClassicTiffLimit { get; set; } = uint.MaxValue;
+
     /// <summary>Creates a TiffDevice that renders pages with the given <c>renderer</c> at the default resolution of 150 DPI. Uses the default TIFF settings.</summary>
     public TiffDevice(IPageRenderer renderer) : base(renderer)
     {
@@ -239,7 +245,7 @@ public sealed partial class TiffDevice : ImageDevice
     internal static void EncodeBilevelImage(byte[] rgba, int w, int h, Stream output, CompressionType compression)
     {
         var dev = new TiffDevice(new TiffSettings { Compression = compression, Depth = ColorDepth.Format1bpp });
-        dev.EncodeTiff(new[] { (rgba, w, h) }, output, compression);
+        dev.EncodeTiff(new[] { (rgba, w, h, dev.TaggedResolution) }, output, compression);
     }
 
     // The default-brightness bilevel output is a three-zone halftone of the plain render,
@@ -267,17 +273,47 @@ public sealed partial class TiffDevice : ImageDevice
     public override void Process(Page page, Stream output)
     {
         var rgba = RenderForOutput(page);
+        var dpi = RenderResolution(page);
         if (output.CanSeek)
         {
-            EncodeTiff(new[] { (rgba.Data, rgba.Width, rgba.Height) }, output, Settings.Compression);
+            EncodeTiff(new[] { (rgba.Data, rgba.Width, rgba.Height, dpi) }, output, Settings.Compression);
         }
         else
         {
             using var ms = new MemoryStream();
-            EncodeTiff(new[] { (rgba.Data, rgba.Width, rgba.Height) }, ms, Settings.Compression);
+            EncodeTiff(new[] { (rgba.Data, rgba.Width, rgba.Height, dpi) }, ms, Settings.Compression);
             ms.Position = 0;
             ms.CopyTo(output);
         }
+    }
+
+    /// <summary>
+    /// Render a range of pages to TIFF.    /// </summary>
+    public void Process(Document document, int fromPage, int toPage, Stream output)
+        => ProcessRange(document, fromPage, toPage, output);
+
+    /// <summary>
+    /// Render a range of pages to a TIFF file.    /// </summary>
+    public void Process(Document document, int startPage, int endPage, string outputFileName)
+    {
+        using var fs = new FileStream(outputFileName, FileMode.Create, FileAccess.Write);
+        ProcessRange(document, startPage, endPage, fs);
+    }
+
+    /// <summary>
+    /// Render all pages to a TIFF file.    /// </summary>
+    public void Process(Document document, string outputFileName)
+    {
+        document.LayOutXfaForm();
+        Process(document, 1, document.Pages.Count, outputFileName);
+    }
+
+    /// <summary>
+    /// Render all pages to a TIFF stream.    /// </summary>
+    public void Process(Document document, Stream output)
+    {
+        document.LayOutXfaForm();
+        ProcessRange(document, 1, document.Pages.Count, output);
     }
 
     // The ordinary render, turned to the requested frame shape. A bilevel depth packs
@@ -317,7 +353,7 @@ public sealed partial class TiffDevice : ImageDevice
     }
 
     // CCITT3/CCITT4 are bilevel-only fax encodings, so they imply 1-bit depth even
-    // when the caller leaves Settings.Depth at the (24bpp) default:
+    // when the caller leaves Settings.Depth at its default:
     // requesting CCITT compression produces a 1bpp TIFF.
     private static bool IsBilevelRequested(TiffSettings s)
         => s.Compression is CompressionType.CCITT3 or CompressionType.CCITT4
@@ -394,8 +430,10 @@ public sealed partial class TiffDevice : ImageDevice
     /// <param name="endPage">1-based end page (inclusive). Defaults to last page.</param>
     public byte[] ProcessRange(Document document, int startPage, int endPage = 0)
     {
+        // A form a viewer has to build from XFA packets is laid out before its pages are counted.
+        document.LayOutXfaForm();
         if (endPage <= 0) endPage = document.PageCount;
-        var pages = new List<(byte[] rgba, int w, int h)>();
+        var pages = new List<(byte[] rgba, int w, int h, (int X, int Y) dpi)>();
 
         for (var i = startPage; i <= endPage; i++)
         {
@@ -403,7 +441,7 @@ public sealed partial class TiffDevice : ImageDevice
             var rgba = RenderForOutput(page);
             if (Settings.SkipBlankPages && IsBlankRaster(rgba.Data))
                 continue;
-            pages.Add((rgba.Data, rgba.Width, rgba.Height));
+            pages.Add((rgba.Data, rgba.Width, rgba.Height, RenderResolution(page)));
         }
 
         // If every page in the range was blank, fall back to rendering the whole
@@ -414,29 +452,13 @@ public sealed partial class TiffDevice : ImageDevice
             {
                 var page = document.Pages.At(i);
                 var rgba = RenderForOutput(page);
-                pages.Add((rgba.Data, rgba.Width, rgba.Height));
+                pages.Add((rgba.Data, rgba.Width, rgba.Height, RenderResolution(page)));
             }
         }
 
         using var ms = new MemoryStream();
         EncodeTiff(pages.ToArray(), ms, Settings.Compression);
         return ms.ToArray();
-    }
-
-    // A page is "blank" for SkipBlankPages purposes when its rendered raster
-    // carries no visible ink — every pixel is at (or imperceptibly close to)
-    // paper white. Uses the same min-channel ink metric as the bilevel packer
-    // so a faint coloured mark still counts as content. Pure-white empty pages
-    // (the common "blank page" case) render with zero ink pixels and are dropped.
-    private static bool IsBlankRaster(byte[] rgba)
-    {
-        for (var i = 0; i + 2 < rgba.Length; i += 4)
-        {
-            var ink = System.Math.Min(rgba[i], System.Math.Min(rgba[i + 1], rgba[i + 2]));
-            if (ink < 250)
-                return false;
-        }
-        return true;
     }
 
     /// <summary>
@@ -474,7 +496,7 @@ public sealed partial class TiffDevice : ImageDevice
             var rgba = RenderForOutput(page);
             if (Settings.SkipBlankPages && IsBlankRaster(rgba.Data))
                 continue;
-            ifdOffsetPos = WriteTiffPage(bw, output, rgba.Data, rgba.Width, rgba.Height, ifdOffsetPos, Settings.Compression, EffectiveDepth(Settings));
+            ifdOffsetPos = WriteTiffPage(bw, output, (rgba.Data, rgba.Width, rgba.Height, RenderResolution(page)), ifdOffsetPos, Settings.Compression, EffectiveDepth(Settings));
             written++;
         }
 
@@ -484,36 +506,25 @@ public sealed partial class TiffDevice : ImageDevice
         {
             var page = document.Pages.At(startPage);
             var rgba = RenderForOutput(page);
-            WriteTiffPage(bw, output, rgba.Data, rgba.Width, rgba.Height, ifdOffsetPos, Settings.Compression, EffectiveDepth(Settings));
+            WriteTiffPage(bw, output, (rgba.Data, rgba.Width, rgba.Height, RenderResolution(page)), ifdOffsetPos, Settings.Compression, EffectiveDepth(Settings));
         }
         bw.Flush();
     }
 
-    /// <summary>
-    /// Render a range of pages to TIFF.    /// </summary>
-    public void Process(Document document, int fromPage, int toPage, Stream output)
-        => ProcessRange(document, fromPage, toPage, output);
-
-    /// <summary>
-    /// Render a range of pages to a TIFF file.    /// </summary>
-    public void Process(Document document, int startPage, int endPage, string outputFileName)
+    // A page is "blank" for SkipBlankPages purposes when its rendered raster
+    // carries no visible ink — every pixel is at (or imperceptibly close to)
+    // paper white. Uses the same min-channel ink metric as the bilevel packer
+    // so a faint coloured mark still counts as content. Pure-white empty pages
+    // (the common "blank page" case) render with zero ink pixels and are dropped.
+    private static bool IsBlankRaster(byte[] rgba)
     {
-        using var fs = new FileStream(outputFileName, FileMode.Create, FileAccess.Write);
-        ProcessRange(document, startPage, endPage, fs);
-    }
-
-    /// <summary>
-    /// Render all pages to a TIFF file.    /// </summary>
-    public void Process(Document document, string outputFileName)
-    {
-        Process(document, 1, document.Pages.Count, outputFileName);
-    }
-
-    /// <summary>
-    /// Render all pages to a TIFF stream.    /// </summary>
-    public void Process(Document document, Stream output)
-    {
-        ProcessRange(document, 1, document.Pages.Count, output);
+        for (var i = 0; i + 2 < rgba.Length; i += 4)
+        {
+            var ink = System.Math.Min(rgba[i], System.Math.Min(rgba[i + 1], rgba[i + 2]));
+            if (ink < 250)
+                return false;
+        }
+        return true;
     }
 
     private static byte[] RgbaToRgb(byte[] rgba, int width, int height)
@@ -538,10 +549,14 @@ public sealed partial class TiffDevice : ImageDevice
     internal static void EncodeRgbaImages((byte[] rgba, int w, int h)[] pages, Stream output, CompressionType compression)
     {
         var dev = new TiffDevice(new TiffSettings { Compression = compression, Depth = ColorDepth.Default });
-        dev.EncodeTiff(pages, output, compression);
+        dev.EncodeTiff(Array.ConvertAll(pages, p => (p.rgba, p.w, p.h, dev.TaggedResolution)), output, compression);
     }
 
-    private void EncodeTiff((byte[] rgba, int w, int h)[] pages, Stream output, CompressionType compression)
+    // The device's own resolution, tagged on pictures that were not rendered from a page.
+    private (int X, int Y) TaggedResolution => (Resolution.X, Resolution.Y);
+
+    // Each frame carries the resolution it was drawn at: the X/YResolution tags.
+    private void EncodeTiff((byte[] rgba, int w, int h, (int X, int Y) dpi)[] pages, Stream output, CompressionType compression)
     {
         // Requires a seekable stream because IFD offsets are back-patched.
         var bw = new BinaryWriter(output);
@@ -555,9 +570,9 @@ public sealed partial class TiffDevice : ImageDevice
         var ifdOffsetPos = output.Position;
         bw.Write((uint)0);
 
-        foreach (var (rgba, w, h) in pages)
+        foreach (var frame in pages)
         {
-            ifdOffsetPos = WriteTiffPage(bw, output, rgba, w, h, ifdOffsetPos, compression, EffectiveDepth(Settings));
+            ifdOffsetPos = WriteTiffPage(bw, output, frame, ifdOffsetPos, compression, EffectiveDepth(Settings));
         }
 
         bw.Flush();
@@ -571,14 +586,15 @@ public sealed partial class TiffDevice : ImageDevice
     // Input is the rendered RGBA buffer (4 bytes/pixel). The strip layout is
     // selected per ColorDepth so the same upstream pixels can land as 1bpp
     // bilevel, 8bpp palette, 24bpp RGB, or 32bpp RGBA without re-rendering.
-    private long WriteTiffPage(BinaryWriter bw, Stream output, byte[] rgba, int w, int h, long ifdOffsetPos, CompressionType compression, ColorDepth depth)
+    private long WriteTiffPage(BinaryWriter bw, Stream output, (byte[] rgba, int w, int h, (int X, int Y) dpi) frame, long ifdOffsetPos, CompressionType compression, ColorDepth depth)
     {
         var tp = new TiffPageWriteState();
         tp.bw = bw;
         tp.output = output;
-        tp.rgba = rgba;
-        tp.w = w;
-        tp.h = h;
+        tp.rgba = frame.rgba;
+        tp.w = frame.w;
+        tp.h = frame.h;
+        tp.dpi = frame.dpi;
         tp.ifdOffsetPos = ifdOffsetPos;
         tp.compression = compression;
         tp.depth = depth;
@@ -642,17 +658,30 @@ public sealed partial class TiffDevice : ImageDevice
         return output;
     }
 
+    private const uint TiffCompressionNone = 1;
+    private const uint TiffCompressionGroup3 = 3;
+    private const uint TiffCompressionGroup4 = 4;
+    private const uint TiffCompressionLzw = 5;
+
     // Encode a raw strip per the requested compression, returning both the
-    // bytes and the TIFF-tag Compression value to write in the IFD. Unsupported
-    // compressions fall back to uncompressed bytes with tag=1 so the file stays
-    // readable instead of advertising a compression we haven't actually applied.
+    // bytes and the TIFF-tag Compression value to write in the IFD. The fax
+    // codings take the packed 1bpp rows as they are (bit 1 = black, which is
+    // how WhiteIsZero stores them). Unsupported compressions fall back to
+    // uncompressed bytes with tag=1 so the file stays readable instead of
+    // advertising a compression we haven't actually applied.
     // The strip layout (RGB vs. palette-indexed) is decided by the caller.
-    private static (byte[] data, uint tag) EncodeStrip(byte[] bytes, CompressionType compression)
+    private static (byte[] data, uint tag) EncodeStrip(TiffPageWriteState tp)
     {
-        return compression switch
+        var bytes = tp.stripInput;
+        var rowBytes = (tp.w + 7) / 8;
+        return tp.compression switch
         {
-            CompressionType.LZW => (LzwTiffEncoder.Encode(bytes), 5u),
-            _ => (bytes, 1u),
+            CompressionType.LZW => (LzwTiffEncoder.Encode(bytes), TiffCompressionLzw),
+            CompressionType.CCITT3 when tp.isBilevel
+                => (IO.Filters.CcittG4Encoder.EncodeGroup3(bytes, tp.w, tp.h, rowBytes), TiffCompressionGroup3),
+            CompressionType.CCITT4 when tp.isBilevel
+                => (IO.Filters.CcittG4Encoder.Encode(bytes, tp.w, tp.h, rowBytes), TiffCompressionGroup4),
+            _ => (bytes, TiffCompressionNone),
         };
     }
 

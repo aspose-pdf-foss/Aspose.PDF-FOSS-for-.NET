@@ -13,6 +13,17 @@ internal sealed partial class PdfReader
         _overlayObjects[objectNumber] = obj;
     }
 
+    /// <summary>Every object read from the file so far, by number. An object never read cannot
+    /// have been edited, so an incremental save looks for edits among these only.</summary>
+    internal IEnumerable<KeyValuePair<(int objNum, int gen), PdfObject>> LoadedObjects => _cache;
+
+    /// <summary>The value, or the object a reference names when it was read already; null for an object
+    /// not read yet - which nothing can have edited - so asking reads nothing from the file.</summary>
+    internal PdfObject? LoadedValue(PdfObject? value)
+        => value is PdfIndirectRef r
+            ? _cache.GetValueOrDefault((r.ObjectNumber, r.Generation)) ?? _overlayObjects.GetValueOrDefault(r.ObjectNumber)
+            : value;
+
     private PdfObject? ResolveRef(int objectNumber, int generation)
     {
         var key = (objectNumber, generation);
@@ -39,12 +50,9 @@ internal sealed partial class PdfReader
                 var found = FindObjectAnywhere(objectNumber, generation);
                 if (found is not null) { _cache[key] = found; return found; }
             }
-            if (!_options.LenientMode)
-            {
-                if (entry is null)
-                    throw new InvalidOperationException(
-                        $"Object {objectNumber} {generation} not found in xref table");
-            }
+            if (!_options.LenientMode && entry is null)
+                throw new InvalidOperationException(
+                    $"Object {objectNumber} {generation} not found in xref table");
             return null;
         }
 
@@ -83,21 +91,38 @@ internal sealed partial class PdfReader
     /// null when the file holds no such header.</summary>
     private PdfObject? FindObjectAnywhere(int objectNumber, int generation)
     {
-        var target = Encoding.ASCII.GetBytes($"{objectNumber} {generation} obj");
-        for (var i = 0; i + target.Length <= _data.Length; i++)
+        foreach (var offset in HeaderIndex.Find(objectNumber, generation))
         {
-            if (_data[i] != target[0]) continue;
-            if (!_data.AsSpan(i, target.Length).SequenceEqual(target)) continue;
-            if (i > 0 && _data[i - 1] >= (byte)'0' && _data[i - 1] <= (byte)'9') continue;
-            try
-            {
-                _parser.Lexer.Position = i;
-                var ind = _parser.ParseIndirectObject();
-                if (ind.ObjectNumber == objectNumber) return ind.Value;
-            }
-            catch { /* keep scanning */ }
+            var found = TryParseObjectAt(offset, objectNumber);
+            if (found is not null) return found;
         }
         return null;
+    }
+
+    /// <summary>An object its xref entry does not lead to: by its header anywhere in the file, else in
+    /// whichever object stream holds it. Null when the file holds it nowhere.</summary>
+    private PdfObject? FindMisplacedObject(int objectNumber, int generation)
+        => FindObjectAnywhere(objectNumber, generation) ?? FindInObjectStreams(objectNumber);
+
+    // Every object header of the file, indexed on the first search that needs one.
+    private ObjectHeaderIndex? _headerIndex;
+
+    private ObjectHeaderIndex HeaderIndex => _headerIndex ??= new ObjectHeaderIndex(_data);
+
+    /// <summary>The object whose header sits at <paramref name="offset"/>, or null when
+    /// the bytes there do not parse as that object.</summary>
+    private PdfObject? TryParseObjectAt(long offset, int objectNumber)
+    {
+        try
+        {
+            _parser.Lexer.Position = offset;
+            var indirect = _parser.ParseIndirectObject();
+            return indirect.ObjectNumber == objectNumber ? indirect.Value : null;
+        }
+        catch
+        {
+            return null; // not an object after all - the caller tries the next header
+        }
     }
 
     private PdfObject? ResolveUncompressedObject(XRefEntry entry, int objectNumber, int generation)
@@ -123,7 +148,7 @@ internal sealed partial class PdfReader
             // mark objects of an earlier object stream as in use at offset 0). The object is
             // looked for elsewhere, never taken from what happens to sit at that offset.
             if (indirect.ObjectNumber != objectNumber)
-                return FindObjectAnywhere(objectNumber, generation) ?? FindInObjectStreams(objectNumber);
+                return FindMisplacedObject(objectNumber, generation);
 
             return indirect.Value;
         }
@@ -131,12 +156,11 @@ internal sealed partial class PdfReader
         {
             if (_options.LenientMode)
             {
-                // Try scanning nearby for the object header
-                var result = ScanForObject(objectNumber, entry.Offset);
-                if (result is not null) return result;
-
-                // In lenient mode, skip malformed objects
-                return null;
+                // Try scanning nearby for the object header, then the whole file: an offset that lands
+                // inside another object's data is as wrong as one landing on another object's header,
+                // and its object may sit anywhere, or in an object stream the entry does not name.
+                // In lenient mode an object found nowhere reads as absent.
+                return ScanForObject(objectNumber, entry.Offset) ?? FindMisplacedObject(objectNumber, generation);
             }
 
             throw new InvalidOperationException(
@@ -266,7 +290,7 @@ internal sealed partial class PdfReader
                     {
                         var newVal = DecryptObjectInner(val, objectNumber, generation);
                         if (!ReferenceEquals(val, newVal))
-                            dict.Set(key, newVal);
+                            dict.SetRead(key, newVal);
                     }
                 }
                 return dict;
@@ -277,7 +301,7 @@ internal sealed partial class PdfReader
                     var val = arr[i];
                     var newVal = DecryptObjectInner(val, objectNumber, generation);
                     if (!ReferenceEquals(val, newVal))
-                        arr.ReplaceAt(i, newVal);
+                        arr.ReplaceRead(i, newVal);
                 }
                 return arr;
 
@@ -323,7 +347,7 @@ internal sealed partial class PdfReader
             // stream that had been stripped), so look for its header before giving up. The
             // uncompressed path has scanned for a misplaced object for a while; this is the
             // compressed half of the same recovery.
-            var scanned = ScanForObject(objectNumber, 0, wholeFile: true);
+            var scanned = FindPlainObjectAnywhere(objectNumber);
             if (scanned is not null) return scanned;
 
             // Nothing to recover. In lenient mode a missing object reads as null, which the
@@ -388,14 +412,11 @@ internal sealed partial class PdfReader
     /// Scan nearby bytes for an object header pattern "N G obj" when the xref offset is wrong.
     /// Searches +/-1024 bytes around the expected offset.
     /// </summary>
-    private PdfObject? ScanForObject(int objectNumber, long expectedOffset, bool wholeFile = false)
+    private PdfObject? ScanForObject(int objectNumber, long expectedOffset)
     {
-        // A COMPRESSED entry carries no file offset to search around - its object lives in an
-        // object stream, and when that stream is missing there is nothing to centre a window
-        // on. Scan the whole file for the header instead.
         var searchRadius = 1024;
-        var startPos = wholeFile ? 0 : Math.Max(0, expectedOffset - searchRadius);
-        var endPos = wholeFile ? _data.Length : Math.Min(_data.Length, expectedOffset + searchRadius);
+        var startPos = Math.Max(0, expectedOffset - searchRadius);
+        var endPos = Math.Min(_data.Length, expectedOffset + searchRadius);
 
         // Build the pattern to search for: "objectNumber 0 obj"
         var pattern = Encoding.ASCII.GetBytes($"{objectNumber} 0 obj");
@@ -433,6 +454,21 @@ internal sealed partial class PdfReader
         return null;
     }
 
+    /// <summary>A generation-0 object found by its header anywhere in the file - for a
+    /// COMPRESSED entry, which carries no file offset to search around: its object lives in
+    /// an object stream, and when that stream is missing there is nothing to centre a window
+    /// on. The header must start the file or follow whitespace.</summary>
+    private PdfObject? FindPlainObjectAnywhere(int objectNumber)
+    {
+        foreach (var offset in HeaderIndex.Find(objectNumber, 0))
+        {
+            if (offset > 0 && !IsWhitespace(_data[offset - 1])) continue;
+            var found = TryParseObjectAt(offset, objectNumber);
+            if (found is not null) return found;
+        }
+        return null;
+    }
+
     /// <summary>
     /// Recover xref table by scanning the entire file for "N G obj" object headers.
     /// Used as a fallback when normal xref parsing fails.
@@ -453,25 +489,33 @@ internal sealed partial class PdfReader
 
             // Parse object number
             var numStart = pos;
+#pragma warning disable S127 // object-header scanner - a matched "n g obj" is consumed whole, the scan resumes after it
             while (pos < text.Length && IsDigit(text[pos])) pos++;
+#pragma warning restore S127
             if (pos >= text.Length || !IsWhitespace(text[pos])) continue;
 
             var objNumStr = Encoding.ASCII.GetString(text, (int)numStart, (int)(pos - numStart));
             if (!int.TryParse(objNumStr, out var objNum)) continue;
 
             // Skip whitespace
+#pragma warning disable S127 // object-header scanner - a matched "n g obj" is consumed whole, the scan resumes after it
             while (pos < text.Length && IsWhitespace(text[pos])) pos++;
+#pragma warning restore S127
 
             // Parse generation number
             var genStart = pos;
+#pragma warning disable S127 // object-header scanner - a matched "n g obj" is consumed whole, the scan resumes after it
             while (pos < text.Length && IsDigit(text[pos])) pos++;
+#pragma warning restore S127
             if (pos >= text.Length || !IsWhitespace(text[pos])) continue;
 
             var genStr = Encoding.ASCII.GetString(text, (int)genStart, (int)(pos - genStart));
             if (!int.TryParse(genStr, out var gen)) continue;
 
             // Skip whitespace
+#pragma warning disable S127 // object-header scanner - a matched "n g obj" is consumed whole, the scan resumes after it
             while (pos < text.Length && IsWhitespace(text[pos])) pos++;
+#pragma warning restore S127
 
             // Check for "obj" keyword
             if (pos + 3 > text.Length) continue;
@@ -495,7 +539,9 @@ internal sealed partial class PdfReader
             if (objNum > maxObjNum) maxObjNum = objNum;
 
             // Reset pos to just after "obj" so we continue scanning
+#pragma warning disable S127 // object-header scanner - a matched "n g obj" is consumed whole, the scan resumes after it
             pos = afterObj;
+#pragma warning restore S127
         }
 
         if (table.Entries.Count == 0)
@@ -600,7 +646,6 @@ internal sealed partial class PdfReader
             // Find the object with the lowest file offset — this is the first object in the body.
             long minOffset = long.MaxValue;
             int firstObjNum = -1;
-            int firstGen = 0;
             foreach (var kvp in _xref.Entries)
             {
                 var entry = kvp.Value;
@@ -609,7 +654,6 @@ internal sealed partial class PdfReader
                 {
                     minOffset = entry.Offset;
                     firstObjNum = kvp.Key;
-                    firstGen = entry.Generation;
                 }
             }
 

@@ -20,14 +20,14 @@ public sealed partial class TextBuilder
         if (!TrySeatFragment(fw, fragment, rewrite)) return;
         if (fragment.Segments.Count > 1 && !fragment.AttachedInline)
         {
-            var seats = BuildSegmentSeats(fragment, fw.fontSize, fw.x, fw.y);
+            var seats = BuildSegmentSeats(fragment, fw.x, fw.y);
             EmitFragmentBackground(fw.builder, fragment, seats);
             AppendSegmentRuns(fw.builder, fragment, seats, fw.fontResName, fw.fontSize,
                 fw.descentComp, fw.x, fw.y, addTrailingSpace);
         }
         else if (fragment.Segments.Count > 1 && SegmentStylesDiffer(fragment, fw.fontSize))
         {
-            EmitBackgroundRectangles(fw.builder, fragment, fw.fontResName, fw.fontSize, fw.x, fw.y);
+            EmitBackgroundRectangles(fw.builder, fragment, fw.fontSize, fw.x, fw.y);
             AppendStyledSegments(fragment, fw.builder, fw.fontResName, fw.fontSize, fw.descentComp, fw.x, fw.y);
         }
         else
@@ -75,8 +75,7 @@ public sealed partial class TextBuilder
     /// <summary>Seat every segment of <paramref name="fragment"/>. The first segment
     /// falls back to the fragment's own position; a later segment that was never
     /// positioned sits at the origin.</summary>
-    private static List<SegmentSeat> BuildSegmentSeats(TextFragment fragment,
-        double fragFontSize, double fragX, double fragY)
+    private static List<SegmentSeat> BuildSegmentSeats(TextFragment fragment, double fragX, double fragY)
     {
         var seats = new List<SegmentSeat>(fragment.Segments.Count);
         var index = 0;
@@ -102,18 +101,18 @@ public sealed partial class TextBuilder
         {
             if (seat.FontData is { TtfData: not null } fd) return fd.MeasureString(text, seat.FontSize);
             var name = seat.Segment.TextState?.FontName ?? fragment.TextState.FontName;
-            if (!string.IsNullOrEmpty(name) && Standard14Fonts.IsStandard14(name!))
+            if (!string.IsNullOrEmpty(name) && Standard14Fonts.IsStandard14(name))
             {
                 double w = 0;
                 foreach (var ch in text)
                 {
-                    var cw = Standard14Fonts.GetWidth(name!, ch < 256 ? ch : '?');
+                    var cw = Standard14Fonts.GetWidth(name, ch < 256 ? ch : '?');
                     w += (cw >= 0 ? cw : 500) * seat.FontSize / 1000.0;
                 }
                 return w;
             }
         }
-        catch { }
+        catch { /* a font whose widths cannot be read falls back to the half-em estimate below */ }
         return text.Length * seat.FontSize * 0.5;
     }
 
@@ -125,10 +124,10 @@ public sealed partial class TextBuilder
         List<SegmentSeat> seats)
     {
         var bg = fragment.TextState.BackgroundColor;
-        // Color.Empty is a COLOUR, not a null: it is new(0,0,0,0), so a null check alone lets
-        // it through and paints a fully opaque BLACK box behind the text. A caller assigning
-        // Empty is asking for no background at all.
-        if (bg is null || bg.IsEmpty) return;
+        // Color.Empty and Color.Transparent are COLOURS, not nulls: a null check alone lets them
+        // through and paints an opaque black or white box behind the text. A caller assigning a
+        // colour of no alpha is asking for no background at all.
+        if (bg is null || bg.AByte == 0) return;
 
         double llx = double.MaxValue, lly = double.MaxValue, urx = double.MinValue, ury = double.MinValue;
         var any = false;
@@ -146,6 +145,8 @@ public sealed partial class TextBuilder
         if (!any) return;
 
         builder.SaveState();
+        // A translucent background fills through an alpha state, as the text's own colour does.
+        if (TextParagraph.EnsureFillAlphaExtGState(_page, bg.AByte) is { } bgGs) builder.SetExtGState(bgGs);
         builder.SetFillColor(bg.R / 255.0, bg.G / 255.0, bg.B / 255.0);
         builder.SetMatrix(1, 0, 0, 1, llx, lly);
         builder.Rectangle(0, 0, urx - llx, ury - lly);
@@ -257,7 +258,7 @@ public sealed partial class TextBuilder
             return null;
         var styleSuffix = (state.IsBold ? " Bold" : string.Empty)
             + (state.IsItalic ? " Italic" : string.Empty);
-        var spaced = System.Text.RegularExpressions.Regex.Replace(family, "(?<=[a-z])(?=[A-Z])", " ");
+        var spaced = SafeRegex.Replace(family, "(?<=[a-z])(?=[A-Z])", " ");
         var styled = FontRepository.FindFontData(family + styleSuffix)
             ?? (spaced != family ? FontRepository.FindFontData(spaced + styleSuffix) : null);
         var wantTag = state.IsBold ? "Bold" : "Italic";
@@ -380,7 +381,8 @@ public sealed partial class TextBuilder
                 builder.ShowTextHex(bytes.ToArray());
                 continue;
             }
-            for (var k = 0; k < line.Length; k++)
+            var k = 0;
+            while (k < line.Length)
             {
                 int cp = line[k];
                 if (char.IsHighSurrogate(line[k]) && k + 1 < line.Length && char.IsLowSurrogate(line[k + 1]))
@@ -392,6 +394,7 @@ public sealed partial class TextBuilder
                 if (glyphParser.CMap.TryGetValue(cp, out var mapped)) gid = mapped;
                 bytes.Add((byte)(gid >> 8));
                 bytes.Add((byte)(gid & 0xFF));
+                k++;
             }
             var glyphIds = bytes.ToArray();
             ShowComposite(builder, glyphIds, CompositeWordSpacing(line, glyphIds, wordSpacing, fontSize));
@@ -405,8 +408,7 @@ public sealed partial class TextBuilder
     /// width is estimated from glyph metrics. This must be called BEFORE
     /// BT so the rectangles render behind the glyphs.
     /// </summary>
-    private void EmitBackgroundRectangles(ContentStreamBuilder builder, TextFragment fragment,
-        string fontResName, double fontSize, double defaultX, double defaultY)
+    private void EmitBackgroundRectangles(ContentStreamBuilder builder, TextFragment fragment, double fontSize, double defaultX, double defaultY)
     {
         // Check fragment-level background first, then per-segment.
         // Segment-level overrides fragment-level.
@@ -422,8 +424,8 @@ public sealed partial class TextBuilder
         foreach (var seg in fragment.Segments)
         {
             var bg = seg.TextState.BackgroundColor ?? fragBg;
-            // Color.Empty is a colour, not a null - see EmitFragmentBackground.
-            if (bg is { IsEmpty: false })
+            // A colour of no alpha is no background - see EmitFragmentBackground.
+            if (bg is { AByte: > 0 })
             {
                 var segX = seg.Position?.XIndent ?? curX;
                 var segY = seg.Position?.YIndent ?? curY;
@@ -431,7 +433,7 @@ public sealed partial class TextBuilder
                 // baseline); fontSize already carries a whole-fragment script's size.
                 var segBase = styledSegs && seg.TextState.FontSize > 0 ? seg.TextState.FontSize : fragment.TextState.FontSize;
                 var segFs = styledSegs && seg.TextState.FontSize > 0 ? ScriptSize(seg.TextState, seg.TextState.FontSize) : fontSize;
-                var rise = ScriptRise(styledSegs ? seg.TextState : fragment.TextState, segBase);
+                var rise = ScriptRise(styledSegs ? seg.TextState : ScriptStateOf(fragment), segBase);
 
                 // The face the run draws in: a fragment naming none draws in the Standard-14 face
                 // the writer maps it to, so its box measures with that face's widths.
@@ -442,12 +444,12 @@ public sealed partial class TextBuilder
                 {
                     if (fd is { TtfData: not null })
                         return fd.MeasureString(s, segFs);
-                    if (!string.IsNullOrEmpty(fontName) && Standard14Fonts.IsStandard14(fontName!))
+                    if (!string.IsNullOrEmpty(fontName) && Standard14Fonts.IsStandard14(fontName))
                     {
                         double w = 0;
                         foreach (var ch in s)
                         {
-                            var cw = Standard14Fonts.GetWidth(fontName!, ch < 256 ? ch : '?');
+                            var cw = Standard14Fonts.GetWidth(fontName, ch < 256 ? ch : '?');
                             w += (cw >= 0 ? cw : 500) * segFs / 1000.0;
                         }
                         return w;
@@ -463,9 +465,12 @@ public sealed partial class TextBuilder
                 var rectH = segFs * 1.1;
                 // Line pitch for a multi-line (\n-joined) chunk — matches the AppendText render.
                 var bgLineHeight = fragment.TextState.FlowLinePitch
-                    ?? (seg.TextState.LineSpacing > 0 ? segFs + seg.TextState.LineSpacing
-                    : fragment.TextState.LineSpacing > 0 ? segFs + fragment.TextState.LineSpacing
-                    : segFs * 1.2);
+                    ?? ((seg.TextState.LineSpacing, fragment.TextState.LineSpacing) switch
+                    {
+                        (> 0, _) => segFs + seg.TextState.LineSpacing,
+                        (_, > 0) => segFs + fragment.TextState.LineSpacing,
+                        _ => segFs * 1.2,
+                    });
 
                 var rotation = seg.TextState.Rotation != 0 ? seg.TextState.Rotation : fragment.TextState.Rotation;
                 var rad = rotation * Math.PI / 180.0;
@@ -479,14 +484,18 @@ public sealed partial class TextBuilder
                 // DrawTextRectangleBorder strokes the same box in the state's
                 // stroking colour — the colour pair is written before the matrix,
                 // and the box is painted with one fill-and-stroke.
+                // The border takes the stroking colour, else the text's own colour, else black: a border asked
+                // for is drawn whatever colours were set.
                 var borderColor = fragment.TextState.DrawTextRectangleBorder
                     ? seg.TextState.StrokingColor ?? fragment.TextState.StrokingColor
+                        ?? seg.TextState.ForegroundColor ?? fragment.TextState.ForegroundColor ?? Color.Black
                     : null;
                 for (var li = 0; li < segLines.Length; li++)
                 {
                     var lw = LineWidth(segLines[li]);
                     if (lw <= 0) continue;
                     builder.SaveState();
+                    if (TextParagraph.EnsureFillAlphaExtGState(_page, bg.AByte) is { } segGs) builder.SetExtGState(segGs);
                     builder.SetFillColor(bg.R / 255.0, bg.G / 255.0, bg.B / 255.0);
                     if (borderColor is not null)
                         builder.SetStrokeColor(borderColor.R / 255.0, borderColor.G / 255.0, borderColor.B / 255.0);
@@ -535,7 +544,7 @@ public sealed partial class TextBuilder
                 // must cancel it to the last hundredth of a point.
                 return (int)((double)ttp.Descent * 1000 / ttp.UnitsPerEm);
         }
-        catch { }
+        catch { /* a font program that does not parse leaves the fallback metrics in place */ }
         return 0;
     }
 

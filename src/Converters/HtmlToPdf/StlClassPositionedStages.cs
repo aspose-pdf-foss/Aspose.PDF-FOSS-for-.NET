@@ -50,7 +50,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var (left, top, inner) in sp.divs)
         {
             // the svg background object: its stroked paths are the page's rules
-            var objM = Regex.Match(inner,
+            var objM = SafeRegex.Match(inner,
                 @"<(object|embed)\b[^>]*(?:data|src)\s*=\s*""(?<h>[^""]+\.svg)""",
                 RegexOptions.IgnoreCase);
             if (objM.Success)
@@ -63,23 +63,23 @@ internal static partial class HtmlToPdfConverter
             // split the inline content into styled runs
             var lineRuns = new List<(StlClsStyle St, string Text)>();
             var idx = 0;
-            foreach (Match sm in Regex.Matches(inner,
+            foreach (Match sm in SafeRegex.Matches(inner,
                 @"<span\s+class=""(?<cls>[\w-]+)""\s*>(?<t>.*?)</span>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
             {
                 var before = inner[idx..sm.Index];
-                if (Regex.Replace(before, "<[^>]+>", "").Trim().Length > 0)
+                if (SafeRegex.Replace(before, "<[^>]+>", "").Trim().Length > 0)
                     lineRuns.Add((new StlClsStyle(),
-                        DecodeEntities(Regex.Replace(before, "<[^>]+>", ""))));
+                        DecodeEntities(SafeRegex.Replace(before, "<[^>]+>", ""))));
                 var st = sp.styles.TryGetValue(sm.Groups["cls"].Value, out var s0) ? s0 : new StlClsStyle();
                 lineRuns.Add((st, DecodeEntities(
-                    Regex.Replace(sm.Groups["t"].Value, "<[^>]+>", ""))));
+                    SafeRegex.Replace(sm.Groups["t"].Value, "<[^>]+>", ""))));
                 idx = sm.Index + sm.Length;
             }
             var tail = inner[idx..];
-            if (Regex.Replace(tail, "<[^>]+>", "").Trim().Length > 0)
+            if (SafeRegex.Replace(tail, "<[^>]+>", "").Trim().Length > 0)
                 lineRuns.Add((new StlClsStyle(),
-                    DecodeEntities(Regex.Replace(tail, "<[^>]+>", ""))));
+                    DecodeEntities(SafeRegex.Replace(tail, "<[^>]+>", ""))));
             if (lineRuns.Count == 0) continue;
 
             var drop = sp.strutDrop;
@@ -104,34 +104,34 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Read the stylesheet's class rules into the position and style tables.</summary>
     private static void ParseStlClassStyles(StlClassPositionedState sp)
     {
-        foreach (Match rm in Regex.Matches(sp.css, @"\.(?<name>[\w-]+)\s*\{(?<body>[^}]*)\}",
-            RegexOptions.Singleline))
+        foreach (var groups in SafeRegex.Matches(sp.css, @"\.(?<name>[\w-]+)\s*\{(?<body>[^}]*)\}",
+            RegexOptions.Singleline).Select(rm => rm.Groups))
         {
-            var body = rm.Groups["body"].Value;
-            var name = rm.Groups["name"].Value;
-            if (Regex.IsMatch(body, @"position\s*:\s*absolute", RegexOptions.IgnoreCase))
+            var body = groups["body"].Value;
+            var name = groups["name"].Value;
+            if (SafeRegex.IsMatch(body, @"position\s*:\s*absolute", RegexOptions.IgnoreCase))
             {
-                var lm = Regex.Match(body, @"left\s*:\s*(-?[\d.]+)pt", RegexOptions.IgnoreCase);
-                var tm = Regex.Match(body, @"top\s*:\s*(-?[\d.]+)pt", RegexOptions.IgnoreCase);
+                var lm = SafeRegex.Match(body, @"left\s*:\s*(-?[\d.]+)pt", RegexOptions.IgnoreCase);
+                var tm = SafeRegex.Match(body, @"top\s*:\s*(-?[\d.]+)pt", RegexOptions.IgnoreCase);
                 if (lm.Success && tm.Success)
                     sp.pos[name] = (
                         double.Parse(lm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture),
                         double.Parse(tm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
                 continue;
             }
-            if (!Regex.IsMatch(body, @"display\s*:\s*inline", RegexOptions.IgnoreCase)
-                && !Regex.IsMatch(body, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
+            if (!SafeRegex.IsMatch(body, @"display\s*:\s*inline", RegexOptions.IgnoreCase)
+                && !SafeRegex.IsMatch(body, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase))
                 continue;
             var st = new StlClsStyle();
-            var fs = Regex.Match(body, @"font-size\s*:\s*([\d.]+)pt", RegexOptions.IgnoreCase);
+            var fs = SafeRegex.Match(body, @"font-size\s*:\s*([\d.]+)pt", RegexOptions.IgnoreCase);
             if (fs.Success)
                 st.FontSize = double.Parse(fs.Groups[1].Value,
                     System.Globalization.CultureInfo.InvariantCulture);
-            var ff = Regex.Match(body, @"font-family\s*:\s*(?<v>[^;}]+)", RegexOptions.IgnoreCase);
+            var ff = SafeRegex.Match(body, @"font-family\s*:\s*(?<v>[^;}]+)", RegexOptions.IgnoreCase);
             if (ff.Success)
                 st.Family = ff.Groups["v"].Value.Split(',')[0].Trim().Trim('\'', '"');
-            st.Bold = Regex.IsMatch(body, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase);
-            var col = Regex.Match(body, @"color\s*:\s*#(?<h>[0-9a-fA-F]{6})");
+            st.Bold = SafeRegex.IsMatch(body, @"font-weight\s*:\s*bold", RegexOptions.IgnoreCase);
+            var col = SafeRegex.Match(body, @"color\s*:\s*#(?<h>[0-9a-fA-F]{6})");
             if (col.Success)
             {
                 var h = col.Groups["h"].Value;

@@ -108,9 +108,9 @@ public static partial class FieldDateTimeFormatter
 
     private enum TokenKind { Month, Day, Year, Hour, Minute, Literal }
 
-    private abstract class FormatToken { }
+    private interface IFormatToken { }
 
-    private class ComponentToken : FormatToken
+    private sealed class ComponentToken : IFormatToken
     {
         public TokenKind Kind;
         public int CompactDigits;
@@ -120,14 +120,14 @@ public static partial class FieldDateTimeFormatter
         public bool FourDigit;
     }
 
-    private class LiteralToken : FormatToken
+    private sealed class LiteralToken : IFormatToken
     {
         public string Text = "";
     }
 
-    private static List<FormatToken> TokeniseFormat(string fmt)
+    private static List<IFormatToken> TokeniseFormat(string fmt)
     {
-        var tokens = new List<FormatToken>();
+        var tokens = new List<IFormatToken>();
         int i = 0;
 
         while (i < fmt.Length)
@@ -225,7 +225,7 @@ public static partial class FieldDateTimeFormatter
         // Try full names first (longest match)
         for (int i = 0; i < MonthLong.Length; i++)
         {
-            var match = Regex.Match(input, MonthLong[i], RegexOptions.IgnoreCase);
+            var match = SafeRegex.Match(input, MonthLong[i], RegexOptions.IgnoreCase);
             if (match.Success)
             {
                 string rest = input.Remove(match.Index, match.Length).Insert(match.Index, " ");
@@ -235,7 +235,7 @@ public static partial class FieldDateTimeFormatter
         // Try abbreviated names
         for (int i = 0; i < MonthShort.Length; i++)
         {
-            var match = Regex.Match(input, @"\b" + MonthShort[i] + @"\b", RegexOptions.IgnoreCase);
+            var match = SafeRegex.Match(input, @"\b" + MonthShort[i] + @"\b", RegexOptions.IgnoreCase);
             if (match.Success)
             {
                 string rest = input.Remove(match.Index, match.Length).Insert(match.Index, " ");
@@ -266,7 +266,7 @@ public static partial class FieldDateTimeFormatter
             }
         }
 
-        var digitMatches = Regex.Matches(workInput, @"\d+");
+        var digitMatches = SafeRegex.Matches(workInput, @"\d+");
         var digitGroups = new List<string>();
         foreach (Match m in digitMatches)
             digitGroups.Add(m.Value);

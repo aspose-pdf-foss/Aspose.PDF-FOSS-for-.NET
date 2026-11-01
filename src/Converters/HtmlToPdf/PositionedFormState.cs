@@ -40,7 +40,6 @@ private sealed class PositionedFormState
     // the white wrapper band under everything, both pages
     public string p1Band = null!;
     public string html = default!;
-    public HtmlLoadOptions? options = null;
     public double pageHeight = 0;
 }
 }

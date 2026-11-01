@@ -23,7 +23,7 @@ internal static partial class HtmlToPdfConverter
         if (StlEmPositionedLineCount(html, classes) < 3) return false;
 
         var ownFaces = ParseFontFaces(css, html, options);
-        var pages = Regex.Matches(html, @"<div class=""" + Regex.Escape(container) + @"""[^>]*>");
+        var pages = SafeRegex.Matches(html, @"<div class=""" + Regex.Escape(container) + @"""[^>]*>");
         for (var p = 0; p < pages.Count; p++)
         {
             var segEnd = p + 1 < pages.Count ? pages[p + 1].Index : html.Length;
@@ -57,7 +57,7 @@ internal static partial class HtmlToPdfConverter
         var total = 0.0;
         // (positioned, counted): one entry per open div; the container itself is the first.
         var open = new List<(bool positioned, bool counted)>();
-        foreach (Match m in Regex.Matches(seg, @"<div(?<attrs>[^>]*)>|</div\s*>"))
+        foreach (Match m in SafeRegex.Matches(seg, @"<div(?<attrs>[^>]*)>|</div\s*>"))
         {
             if (m.Value[1] == '/')
             {
@@ -79,7 +79,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The explicit height a div's class rules declare, in pt (em against the dialect's em).</summary>
     private static double StlEmDeclaredHeightPt(string attrs, Dictionary<string, StlEmCls> classes, double emPt)
     {
-        if (Regex.Match(attrs, @"class=""(?<v>[^""]*)""") is not { Success: true } cm) return 0;
+        if (SafeRegex.Match(attrs, @"class=""(?<v>[^""]*)""") is not { Success: true } cm) return 0;
         var height = 0.0;
         foreach (var cn in cm.Groups["v"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -98,10 +98,10 @@ internal static partial class HtmlToPdfConverter
     /// </summary>
     private static (double LeftEm, double TopEm)? StlEmLineSeat(string attrs, Dictionary<string, StlEmCls> classes)
     {
-        var st = Regex.Match(attrs, @"style=""(?<v>[^""]*)""") is { Success: true } sm ? sm.Groups["v"].Value : "";
-        var absolute = Regex.IsMatch(st, @"position:\s*absolute");
+        var st = SafeRegex.Match(attrs, @"style=""(?<v>[^""]*)""") is { Success: true } sm ? sm.Groups["v"].Value : "";
+        var absolute = SafeRegex.IsMatch(st, @"position:\s*absolute");
         double? leftEm = StlEmNum(st, "left"), topEm = StlEmNum(st, "top");
-        if (Regex.Match(attrs, @"class=""(?<v>[^""]*)""") is { Success: true } cm)
+        if (SafeRegex.Match(attrs, @"class=""(?<v>[^""]*)""") is { Success: true } cm)
             foreach (var cn in cm.Groups["v"].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
                 if (!classes.TryGetValue(cn, out var c)) continue;
@@ -118,8 +118,8 @@ internal static partial class HtmlToPdfConverter
     private static int StlEmPositionedLineCount(string html, Dictionary<string, StlEmCls> classes)
     {
         var n = 0;
-        foreach (Match dm in Regex.Matches(html, @"<div(?<attrs>[^>]*)>"))
-            if (StlEmLineSeat(dm.Groups["attrs"].Value, classes) is not null) n++;
+        foreach (Match dm in SafeRegex.Matches(html, @"<div(?<attrs>[^>]*)>").Where(dm => StlEmLineSeat(dm.Groups["attrs"].Value, classes) is not null))
+            n++;
         return n;
     }
 
@@ -128,11 +128,11 @@ internal static partial class HtmlToPdfConverter
     /// &lt;object&gt; sidecar; the raster flavour carries one PNG per source page instead.</summary>
     private static byte[]? StlEmPageBackground(string seg, Dictionary<string, StlEmCls> classes, HtmlLoadOptions? options)
     {
-        foreach (Match im in Regex.Matches(seg, @"<img(?<attrs>[^>]*)>"))
+        foreach (Match im in SafeRegex.Matches(seg, @"<img(?<attrs>[^>]*)>"))
         {
             var attrs = im.Groups["attrs"].Value;
             if (StlEmLineSeat(attrs, classes) is not var (l, t) || l != 0 || t != 0) continue;
-            if (Regex.Match(attrs, @"src=""(?<v>[^""]*)""") is not { Success: true } sm) continue;
+            if (SafeRegex.Match(attrs, @"src=""(?<v>[^""]*)""") is not { Success: true } sm) continue;
             if (LoadConverterImage(DecodeEntities(sm.Groups["v"].Value), options) is { Length: > 0 } bytes)
                 return bytes;
         }
@@ -151,19 +151,19 @@ internal static partial class HtmlToPdfConverter
     private static void ReadStlEmClassSpans(string seg, Dictionary<string, StlEmCls> classes,
         Dictionary<string, List<OwnFace>> ownFaces, double emPt, FixedPageDiv div)
     {
-        foreach (Match dm in Regex.Matches(seg,
+        foreach (var groups in SafeRegex.Matches(seg,
             @"<div(?<attrs>[^>]*)>(?<body>(?:(?!</?div\b).)*?)</div>",
-            RegexOptions.Singleline))
+            RegexOptions.Singleline).Select(dm => dm.Groups))
         {
-            if (StlEmLineSeat(dm.Groups["attrs"].Value, classes) is not var (leftEm, topEm)) continue;
+            if (StlEmLineSeat(groups["attrs"].Value, classes) is not var (leftEm, topEm)) continue;
             var x = leftEm * emPt;
             var top = topEm * emPt;
-            foreach (Match sm in Regex.Matches(dm.Groups["body"].Value,
-                @"<span class=""(?<cls>[^""]*)""[^>]*>(?<text>.*?)</span>", RegexOptions.Singleline))
+            foreach (var smGroups in SafeRegex.Matches(groups["body"].Value,
+                @"<span class=""(?<cls>[^""]*)""[^>]*>(?<text>.*?)</span>", RegexOptions.Singleline).Select(sm => sm.Groups))
             {
-                var text = DecodeEntities(Regex.Replace(sm.Groups["text"].Value, "<[^>]+>", ""));
+                var text = DecodeEntities(SafeRegex.Replace(smGroups["text"].Value, "<[^>]+>", ""));
                 if (text.Length == 0) continue;
-                var span = StlEmClassSpan(sm.Groups["cls"].Value, classes, ownFaces, emPt, x, top, text);
+                var span = StlEmClassSpan(smGroups["cls"].Value, classes, ownFaces, emPt, x, top, text);
                 div.Spans.Add(span);
                 x += MeasureSpanLine(span, text);
             }

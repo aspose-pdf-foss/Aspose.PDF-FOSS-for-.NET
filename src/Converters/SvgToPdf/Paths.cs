@@ -15,9 +15,9 @@ internal static partial class SvgToPdfConverter
     private static double[]? ParseMatrixOnly(string transform)
     {
         if (string.IsNullOrEmpty(transform)) return null;
-        var m = Regex.Match(transform, @"^\s*matrix\s*\(([^)]*)\)\s*$");
+        var m = SafeRegex.Match(transform, @"^\s*matrix\s*\(([^)]*)\)\s*$");
         if (!m.Success) return null;
-        var nums = Regex.Matches(m.Groups[1].Value, @"-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+        var nums = SafeRegex.Matches(m.Groups[1].Value, @"-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
             .Cast<Match>()
             .Select(x => double.Parse(x.Value, CultureInfo.InvariantCulture))
             .ToArray();
@@ -28,7 +28,7 @@ internal static partial class SvgToPdfConverter
         List<(double X, double Y)>? vertices = null)
     {
         var sp = new SvgPathState();
-        sp.tokens = Regex.Matches(d, @"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?");
+        sp.tokens = SafeRegex.Matches(d, @"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?");
         sp.cx = 0;
         sp.cy = 0;
         sp.sx = 0;
@@ -42,9 +42,9 @@ internal static partial class SvgToPdfConverter
         sp.nums = new List<double>();
         sp.cmd = 'M';
 
-        foreach (Match token in sp.tokens)
+        foreach (var value in sp.tokens.Select(token => token.Value))
         {
-            var val = token.Value;
+            var val = value;
             if (val.Length == 1 && char.IsLetter(val[0]) && !char.IsDigit(val[0]))
             {
                 sp.cmd = val[0];
@@ -82,7 +82,9 @@ internal static partial class SvgToPdfConverter
         double rx, double ry, double rotDeg, bool largeArc, bool sweep,
         double x2, double y2, double pcx, double pcy)
     {
+#pragma warning disable S1244 // degenerate geometry (zero radius, coincident ends, horizontal edge) - only the exact case is degenerate
         if (rx == 0 || ry == 0 || (x1 == x2 && y1 == y2))
+#pragma warning restore S1244
         {
             sb.Append($"{F(x2)} {F(y2)} l ");
             bb.Add(x2, y2);
@@ -203,10 +205,10 @@ internal static partial class SvgToPdfConverter
 
     private static IEnumerable<double[]> EnumerateTransforms(string transform)
     {
-        foreach (Match fn in Regex.Matches(transform, @"(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)"))
+        foreach (var groups in SafeRegex.Matches(transform, @"(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)").Select(fn => fn.Groups))
         {
-            var op = fn.Groups[1].Value;
-            var args = Regex.Matches(fn.Groups[2].Value, @"-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+            var op = groups[1].Value;
+            var args = SafeRegex.Matches(groups[2].Value, @"-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
                 .Cast<Match>()
                 .Select(m => double.Parse(m.Value, CultureInfo.InvariantCulture))
                 .ToArray();
@@ -252,16 +254,18 @@ internal static partial class SvgToPdfConverter
 
     private static void AppendEllipsePath(StringBuilder sb, double cx, double cy, double rx, double ry)
     {
-        // Approximate ellipse with 4 cubic Bezier curves
+        // Approximate ellipse with 4 cubic Bezier curves. SVG starts a circle or an ellipse at its
+        // rightmost point and runs toward increasing y (3, 6, 9 and 12 o'clock on the page), which
+        // is where a dash pattern along its outline begins.
         const double k = 0.5522847498; // 4/3 * (sqrt(2) - 1)
         var kx = rx * k;
         var ky = ry * k;
 
-        sb.Append($"{F(cx - rx)} {F(cy)} m ");
-        sb.Append($"{F(cx - rx)} {F(cy - ky)} {F(cx - kx)} {F(cy - ry)} {F(cx)} {F(cy - ry)} c ");
-        sb.Append($"{F(cx + kx)} {F(cy - ry)} {F(cx + rx)} {F(cy - ky)} {F(cx + rx)} {F(cy)} c ");
+        sb.Append($"{F(cx + rx)} {F(cy)} m ");
         sb.Append($"{F(cx + rx)} {F(cy + ky)} {F(cx + kx)} {F(cy + ry)} {F(cx)} {F(cy + ry)} c ");
-        sb.Append($"{F(cx - kx)} {F(cy + ry)} {F(cx - rx)} {F(cy + ky)} {F(cx - rx)} {F(cy)} c h ");
+        sb.Append($"{F(cx - kx)} {F(cy + ry)} {F(cx - rx)} {F(cy + ky)} {F(cx - rx)} {F(cy)} c ");
+        sb.Append($"{F(cx - rx)} {F(cy - ky)} {F(cx - kx)} {F(cy - ry)} {F(cx)} {F(cy - ry)} c ");
+        sb.Append($"{F(cx + kx)} {F(cy - ry)} {F(cx + rx)} {F(cy - ky)} {F(cx + rx)} {F(cy)} c h ");
     }
 
     /// <summary>Length of an attribute; <c>%</c> resolves against <paramref name="refLen"/>.</summary>
@@ -270,7 +274,7 @@ internal static partial class SvgToPdfConverter
         var val = elem.GetAttribute(attr);
         if (string.IsNullOrEmpty(val)) return 0;
         val = val.Trim();
-        if (val.EndsWith("%"))
+        if (val.EndsWith('%'))
             return ParseLength(val[..^1]) / 100.0 * refLen;
         return ParseLength(val);
     }
@@ -283,7 +287,7 @@ internal static partial class SvgToPdfConverter
         var first = val.Split(new[] { ' ', ',', '\t', '\n', '\r' },
             StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
         if (string.IsNullOrEmpty(first)) return 0;
-        if (first.EndsWith("%"))
+        if (first.EndsWith('%'))
             return ParseLength(first[..^1]) / 100.0 * refLen;
         return ParseLength(first);
     }
@@ -295,8 +299,8 @@ internal static partial class SvgToPdfConverter
     {
         if (string.IsNullOrWhiteSpace(val)) return 0;
         val = val.Trim();
-        if (val.EndsWith("%")) return 0;
-        var m = Regex.Match(val, @"^([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?)\s*(px|pt|em|ex|cm|mm|in|pc)?$");
+        if (val.EndsWith('%')) return 0;
+        var m = SafeRegex.Match(val, @"^([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?)\s*(px|pt|em|ex|cm|mm|in|pc)?$");
         if (!m.Success) return 0;
         var num = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
         var factor = m.Groups[2].Value switch
@@ -318,11 +322,11 @@ internal static partial class SvgToPdfConverter
     private static double ParseLength(string val)
     {
         val = val.Trim();
-        var m = Regex.Match(val, @"^([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?)\s*(px|pt|em|ex|cm|mm|in|pc|%)?$");
+        var m = SafeRegex.Match(val, @"^([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][+-]?\d+)?)\s*(px|pt|em|ex|cm|mm|in|pc|%)?$");
         if (!m.Success)
         {
             // Fall back to the first number in the string.
-            var n = Regex.Match(val, @"[-+]?(?:\d*\.\d+|\d+\.?)");
+            var n = SafeRegex.Match(val, @"[-+]?(?:\d*\.\d+|\d+\.?)");
             return n.Success ? double.Parse(n.Value, CultureInfo.InvariantCulture) : 0;
         }
         var num = double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);

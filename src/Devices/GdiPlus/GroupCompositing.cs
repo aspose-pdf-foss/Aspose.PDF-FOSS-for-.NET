@@ -56,6 +56,19 @@ public sealed partial class GdiPlusPageRenderer
         return new Bitmap(w, h, PixelFormat.Format32bppArgb);
     }
 
+    /// <summary>A pooled page-sized layer whose <paramref name="region"/> holds the zero a new
+    /// bitmap holds. Drawing is per pixel, so the stale pixels outside it reach nothing a
+    /// caller reading only that region sees.</summary>
+    private Bitmap RentLayerCleared(int w, int h, System.Drawing.Rectangle region)
+    {
+        var layer = RentLayer(w, h);
+        using var g = Graphics.FromImage(layer);
+        g.CompositingMode = CompositingMode.SourceCopy;
+        using var clear = new SolidBrush(GdiColor.FromArgb(0, 0, 0, 0));
+        g.FillRectangle(clear, region);
+        return layer;
+    }
+
     private float[] RentCovFloat(int n)
     {
         while (_covFloatPool.Count > 0)
@@ -149,6 +162,7 @@ public sealed partial class GdiPlusPageRenderer
     // Cs' = (1−αb)·L + αb·Blend(B,L), αnew = (1−a)·αb + a·αl, a = groupAlpha·softMask.
     private void CompositeGroupLayer(Bitmap layer, GraphicsState state, string blendMode, System.Drawing.Rectangle bounds, float[]? covWeight = null, byte[]? stampMask = null, Bitmap? koBackdrop = null, bool koReplace = true)
     {
+        if (DeferToPageImage()) return;
         var cg = new GroupLayerCompositeState();
         cg.layer = layer;
         cg.state = state;

@@ -60,8 +60,6 @@ internal static partial class HtmlToPdfConverter
     // declares none at all - a float with no width takes the container's own,
     // measuring from its 65px indent rather than inside it
     private const double CtTextWrapFrac = 0.98;
-    private const double CtTextWrapPt = CtContentWPt * CtTextWrapFrac;
-    private const double CtSubTextWrapPt = CtContentWPt;
 
     // the grids. Each cell is its declared percentage of the table's 96% box,
     // plus the table's own default 2px cell spacing - which is what puts every
@@ -90,8 +88,6 @@ internal static partial class HtmlToPdfConverter
     private const double CtCostHeaderPt = 37.5;     // its 42px plate over an 8px pad
     private const double CtCostHeaderPadPt = 6.0;   // …with an 8px padding-top
     private const double CtCostBodyPt = 120.0;      // .auditReportCostBoxValue min-height: 160px
-    private const double CtCostGap1Pt = 15.0;       // the plate's inner 20px paddings
-    private const double CtCostGap2Pt = 1.5;
     private const double CtIconColFrac = 0.06;      // the narrow column's icon div: width 6%
     private const double CtIconGapPt = 7.5;         // …over its 10px gutter
     private const int CtCostBoxScanChars = 1400;    // the plate's own markup span
@@ -122,7 +118,9 @@ internal static partial class HtmlToPdfConverter
     private sealed class CtItem
     {
         public int Sheet;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double Y;          // line-box top
+#pragma warning restore S3218
         public double X;
         public double Size;
         public string Text = "";
@@ -144,14 +142,12 @@ internal static partial class HtmlToPdfConverter
             || !html.Contains("auditReportTitleMain", StringComparison.OrdinalIgnoreCase))
             return null;
         var ar = new AuditReportState();
-        ar.reg = (Text.FontRepository.FaceInstalled("Roboto-Regular")
-            ? Text.FontRepository.GetTtfData("Roboto-Regular")
-            : Text.FontRepository.FaceInstalled("Roboto")
-                ? Text.FontRepository.GetTtfData("Roboto")
-                : null)!;
+        if (Text.FontRepository.FaceInstalled("Roboto-Regular")) ar.reg = Text.FontRepository.GetTtfData("Roboto-Regular")!;
+        else if (Text.FontRepository.FaceInstalled("Roboto")) ar.reg = Text.FontRepository.GetTtfData("Roboto")!;
+        else ar.reg = null!;
         if (ar.reg is null) return null;
 
-        ar.bodyM = Regex.Match(html, @"<body\b[^>]*>([\s\S]*)</body", RegexOptions.IgnoreCase);
+        ar.bodyM = SafeRegex.Match(html, @"<body\b[^>]*>([\s\S]*)</body", RegexOptions.IgnoreCase);
         ar.body = ar.bodyM.Success ? ar.bodyM.Groups[1].Value : html;
 
         ar.pageW = CtMarginXPt + CtContentWPt + CtMarginXPt;
@@ -190,9 +186,9 @@ internal static partial class HtmlToPdfConverter
 
     private static string CtFlat(string frag)
     {
-        var t = Regex.Replace(frag, @"</?(?:b|i|u|span|a|strong|em)\b[^>]*>", "",
+        var t = SafeRegex.Replace(frag, @"</?(?:b|i|u|span|a|strong|em)\b[^>]*>", "",
             RegexOptions.IgnoreCase);
-        return Regex.Replace(DecodeEntities(Regex.Replace(t, "<[^>]+>", " ")), @"\s+", " ").Trim();
+        return SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(t, "<[^>]+>", " ")), @"\s+", " ").Trim();
     }
 
     /// <summary>A block's own lines: `&lt;br&gt;` splits them, and two in a row
@@ -200,7 +196,7 @@ internal static partial class HtmlToPdfConverter
     private static List<string> CtSegments(string frag)
     {
         var outp = new List<string>();
-        foreach (var part in Regex.Split(frag, @"<br\s*/?>", RegexOptions.IgnoreCase))
+        foreach (var part in SafeRegex.Split(frag, @"<br\s*/?>", RegexOptions.IgnoreCase))
             outp.Add(CtFlat(part));
         while (outp.Count > 0 && outp[^1].Length == 0) outp.RemoveAt(outp.Count - 1);
         return outp;
@@ -210,7 +206,7 @@ internal static partial class HtmlToPdfConverter
     /// declares, converted at 96 dpi.</summary>
     private static double CtChartHeight(string inner)
     {
-        var m = Regex.Match(inner, @"height\s*:\s*(\d+)px", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(inner, @"height\s*:\s*(\d+)px", RegexOptions.IgnoreCase);
         return m.Success && int.TryParse(m.Groups[1].Value, out var px) ? px * CtPxPt : 0.0;
     }
 
@@ -218,7 +214,7 @@ internal static partial class HtmlToPdfConverter
     /// falling back to the class's own.</summary>
     private static double CtInlinePadTop(string markup, string cls, double dflt)
     {
-        var m = Regex.Match(markup,
+        var m = SafeRegex.Match(markup,
             Regex.Escape(cls) + @"[""'][^>]*padding-top\s*:\s*(\d+)px", RegexOptions.IgnoreCase);
         return m.Success ? int.Parse(m.Groups[1].Value) * CtPxPt : dflt;
     }
@@ -226,7 +222,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A background colour a cell names inline, or null.</summary>
     private static Color? CtInlineBg(string cellCls)
     {
-        var m = Regex.Match(cellCls, @"background-color\s*:\s*#([0-9a-fA-F]{6})",
+        var m = SafeRegex.Match(cellCls, @"background-color\s*:\s*#([0-9a-fA-F]{6})",
             RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         var v = m.Groups[1].Value;
@@ -238,7 +234,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A floated column's declared share of its container.</summary>
     private static double CtColumnFrac(string tag)
     {
-        var m = Regex.Match(tag, @"width\s*:\s*(\d+)%", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(tag, @"width\s*:\s*(\d+)%", RegexOptions.IgnoreCase);
         return m.Success && int.TryParse(m.Groups[1].Value, out var pc) ? pc / 100.0 : 1.0;
     }
 
@@ -247,19 +243,19 @@ internal static partial class HtmlToPdfConverter
     private static List<(string Text, double Size, double PadTop)> CtCostLines(string frag)
     {
         var outp = new List<(string, double, double)>();
-        var head = Regex.Match(frag, @"CostBoxSpanHeader[""'][^>]*>([^<]*)<", RegexOptions.IgnoreCase);
+        var head = SafeRegex.Match(frag, @"CostBoxSpanHeader[""'][^>]*>([^<]*)<", RegexOptions.IgnoreCase);
         if (head.Success) outp.Add((CtFlat(head.Groups[1].Value), 17.0, 0.0));
         // each value sits in its own div, and THAT div's padding-top is the gap
-        foreach (Match m in Regex.Matches(frag,
+        foreach (var groups in SafeRegex.Matches(frag,
                      @"<div\b[^>]*style\s*=\s*[""']([^""']*)[""'][^>]*>\s*<span\b[^>]*"
                      + @"CostBoxSpanValue[""']\s*style\s*=\s*[""']font-size:\s*([\d.]+)pt[^""']*[""'][^>]*>([^<]*)<",
-                     RegexOptions.IgnoreCase))
+                     RegexOptions.IgnoreCase).Select(m => m.Groups))
         {
-            var t = CtFlat(m.Groups[3].Value);
+            var t = CtFlat(groups[3].Value);
             if (t.Length == 0) continue;
-            if (!double.TryParse(m.Groups[2].Value, System.Globalization.NumberStyles.Float,
+            if (!double.TryParse(groups[2].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var sz)) continue;
-            var pt = Regex.Match(m.Groups[1].Value, @"padding-top\s*:\s*(\d+)px",
+            var pt = SafeRegex.Match(groups[1].Value, @"padding-top\s*:\s*(\d+)px",
                 RegexOptions.IgnoreCase);
             outp.Add((t, sz, pt.Success ? int.Parse(pt.Groups[1].Value) * CtPxPt : 0.0));
         }
@@ -289,23 +285,23 @@ internal static partial class HtmlToPdfConverter
     private static List<List<(string Cls, string SpanCls, string Text)>> CtTableRows(string frag)
     {
         var outp = new List<List<(string, string, string)>>();
-        foreach (Match r in Regex.Matches(frag, @"<tr\b[^>]*>([\s\S]*?)</tr\s*>",
+        foreach (Match r in SafeRegex.Matches(frag, @"<tr\b[^>]*>([\s\S]*?)</tr\s*>",
                      RegexOptions.IgnoreCase))
         {
             var cells = new List<(string, string, string)>();
-            foreach (Match c in Regex.Matches(r.Groups[1].Value,
-                         @"<td\b([^>]*)>([\s\S]*?)</td\s*>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(r.Groups[1].Value,
+                         @"<td\b([^>]*)>([\s\S]*?)</td\s*>", RegexOptions.IgnoreCase).Select(c => c.Groups))
             {
-                var ccls = Regex.Match(c.Groups[1].Value, @"class\s*=\s*[""']([^""']*)",
+                var ccls = SafeRegex.Match(groups[1].Value, @"class\s*=\s*[""']([^""']*)",
                     RegexOptions.IgnoreCase);
-                var style = Regex.Match(c.Groups[1].Value, @"style\s*=\s*[""']([^""']*)",
+                var style = SafeRegex.Match(groups[1].Value, @"style\s*=\s*[""']([^""']*)",
                     RegexOptions.IgnoreCase);
-                var scls = Regex.Match(c.Groups[2].Value, @"<span\b[^>]*class\s*=\s*[""']([^""']*)",
+                var scls = SafeRegex.Match(groups[2].Value, @"<span\b[^>]*class\s*=\s*[""']([^""']*)",
                     RegexOptions.IgnoreCase);
                 cells.Add((
                     (ccls.Success ? ccls.Groups[1].Value : "")
                         + (style.Success ? " " + style.Groups[1].Value : ""),
-                    scls.Success ? scls.Groups[1].Value : "", CtFlat(c.Groups[2].Value)));
+                    scls.Success ? scls.Groups[1].Value : "", CtFlat(groups[2].Value)));
             }
             if (cells.Count > 0) outp.Add(cells);
         }
@@ -314,9 +310,9 @@ internal static partial class HtmlToPdfConverter
 
     private static (string Label, string Value) CtRowPair(string frag)
     {
-        var lab = Regex.Match(frag, @"class\s*=\s*[""']auditReportRowLabel[""'][^>]*>([\s\S]*?)</div",
+        var lab = SafeRegex.Match(frag, @"class\s*=\s*[""']auditReportRowLabel[""'][^>]*>([\s\S]*?)</div",
             RegexOptions.IgnoreCase);
-        var val = Regex.Match(frag, @"class\s*=\s*[""']auditReportRowValue[""'][^>]*>([\s\S]*?)</div",
+        var val = SafeRegex.Match(frag, @"class\s*=\s*[""']auditReportRowValue[""'][^>]*>([\s\S]*?)</div",
             RegexOptions.IgnoreCase);
         return (lab.Success ? CtFlat(lab.Groups[1].Value) : "",
             val.Success ? CtFlat(val.Groups[1].Value) : "");
@@ -331,21 +327,21 @@ internal static partial class HtmlToPdfConverter
             @"<div\b[^>]*class\s*=\s*[""'](auditReportHeading|auditReportTitleMain|"
             + @"auditReportTitleSub|auditReportSubHeading|auditReportSubSubHeading|"
             + @"auditReportText|auditReportSubText|auditReportHeadingMain|"
-            + @"auditReportTwoColumnDiv)[""'][^>]*>", RegexOptions.IgnoreCase);
+            + @"auditReportTwoColumnDiv)[""'][^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var tableRx = new Regex(
             @"<table\b[^>]*class\s*=\s*[""']auditReportTableDiv[""'][^>]*>",
-            RegexOptions.IgnoreCase);
-        var chartRx = new Regex(@"<div\b[^>]*data-highcharts-chart\s*=", RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        var chartRx = new Regex(@"<div\b[^>]*data-highcharts-chart\s*=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var breakRx = new Regex(@"<div\b[^>]*page-break-before\s*:\s*always[^>]*>",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var colRx = new Regex(
             @"<div\b[^>]*style\s*=\s*[""'][^""']*float\s*:\s*left\s*;\s*width\s*:\s*(\d+)%",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var costRx = new Regex(
             @"<div\b[^>]*class\s*=\s*[""']auditReportCostBoxHeader[""'][^>]*>",
-            RegexOptions.IgnoreCase);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var found = new List<(int At, string Cls, string Inner, string Meta)>();
-        foreach (Match m in rx.Matches(body))
+        foreach (Match m in SafeRegex.Matches(rx, body))
         {
             // the block's own tag and the markup just before it: a section may
             // override its class paddings inline, and its icon div sits in that
@@ -353,31 +349,31 @@ internal static partial class HtmlToPdfConverter
             var lead = body[Math.Max(0, m.Index - CtLeadScanChars)..m.Index];
             found.Add((m.Index, m.Groups[1].Value, VrDivAt(body, m.Index), lead + m.Value));
         }
-        foreach (Match m in tableRx.Matches(body))
+        foreach (var index in SafeRegex.Matches(tableRx, body).Select(m => m.Index))
         {
-            var end = body.IndexOf("</table", m.Index, StringComparison.OrdinalIgnoreCase);
+            var end = body.IndexOf("</table", index, StringComparison.OrdinalIgnoreCase);
             if (end < 0) end = body.Length;
-            found.Add((m.Index, "auditReportTableDiv", body[m.Index..end], ""));
+            found.Add((index, "auditReportTableDiv", body[index..end], ""));
         }
-        foreach (Match m in chartRx.Matches(body))
+        foreach (var mIndex in SafeRegex.Matches(chartRx, body).Select(m => m.Index))
         {
             // charts come in pairs of 45% columns, one floated left and one
             // right - the right-hand one sits BESIDE its partner and so adds
             // no height of its own
-            var lead = body[Math.Max(0, m.Index - CtChartLookbackChars)..m.Index];
+            var lead = body[Math.Max(0, mIndex - CtChartLookbackChars)..mIndex];
             var paired = lead.Contains("float:right", StringComparison.OrdinalIgnoreCase)
                 || lead.Contains("float: right", StringComparison.OrdinalIgnoreCase);
-            found.Add((m.Index, paired ? "chartpair" : "chart", VrDivAt(body, m.Index), ""));
+            found.Add((mIndex, paired ? "chartpair" : "chart", VrDivAt(body, mIndex), ""));
         }
-        foreach (Match m in colRx.Matches(body))
+        foreach (Match m in SafeRegex.Matches(colRx, body))
             found.Add((m.Index, "col", m.Value, ""));
-        foreach (Match m in costRx.Matches(body))
+        foreach (var costAt in SafeRegex.Matches(costRx, body).Select(m => m.Index))
         {
-            var to = body.IndexOf("auditReportTableDiv", m.Index, StringComparison.OrdinalIgnoreCase);
-            if (to < 0) to = Math.Min(body.Length, m.Index + CtCostBoxScanChars);
-            found.Add((m.Index, "costbox", body[m.Index..to], ""));
+            var to = body.IndexOf("auditReportTableDiv", costAt, StringComparison.OrdinalIgnoreCase);
+            if (to < 0) to = Math.Min(body.Length, costAt + CtCostBoxScanChars);
+            found.Add((costAt, "costbox", body[costAt..to], ""));
         }
-        var breaks = breakRx.Matches(body);
+        var breaks = SafeRegex.Matches(breakRx, body);
         for (var bi = 0; bi < breaks.Count; bi++)
         {
             var from = breaks[bi].Index;

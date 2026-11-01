@@ -37,6 +37,10 @@ public sealed partial class PdfFileStamp
             if (stamp.ImageHeight > 0) pdfPageStamp.Height = stamp.ImageHeight;
         }
 
+        // One image stamp serves every page of this call: the picture is decoded once and its pages draw the
+        // one image XObject it embeds. A stamp added again is an image of its own, so each addition
+        // can be found and extracted apart.
+        ImageStamp? imageStamp = null;
         foreach (var page in _document.Pages)
         {
             if (pages is not null && pages.Length > 0)
@@ -55,7 +59,7 @@ public sealed partial class PdfFileStamp
             }
             else if (stamp.LogoImage is not null)
             {
-                ApplyImageStamp(page, stamp);
+                ApplyImageStamp(page, stamp, imageStamp ??= DecodeStampImage(stamp));
             }
             else if (pdfPageStamp is not null)
             {
@@ -234,81 +238,6 @@ public sealed partial class PdfFileStamp
         return name;
     }
 
-    // Ensure a Type1 base font named <paramref name="fontName"/> is present in the
-    // page's /Resources/Font dictionary, returning its resource key (e.g. "F1").
-    // Mirrors PdfFileMend.EnsureFont — a text stamp must reference a font that
-    // actually exists in the page resources or the glyphs won't render.
-    private static string EnsureFont(Page page, string fontName)
-    {
-        var pageDict = page.Dict;
-
-        // A page's /Resources is frequently inherited from the /Pages tree (the page
-        // dict itself carries no /Resources). Resolve the effective resources, and
-        // when they are inherited give the page a private copy seeded with the
-        // inherited entries — otherwise setting a fresh /Resources here would shadow
-        // (and thereby drop from rendering) the page's existing embedded fonts.
-        var resources = page.Reader.ResolveDict(pageDict.Get("Resources"));
-        var resourcesWereInherited = false;
-        if (resources is null)
-        {
-            var inherited = ResolveInheritedResources(page);
-            resources = new PdfDictionary();
-            if (inherited is not null)
-                foreach (var key in inherited.Keys)
-                {
-                    var v = inherited.Get(key);
-                    if (v is not null) resources.Set(key, v);
-                }
-            pageDict.Set("Resources", resources);
-            resourcesWereInherited = true;
-        }
-
-        var fontDict = page.Reader.ResolveDict(resources.Get("Font"))
-            ?? resources.Get("Font") as PdfDictionary;
-        if (fontDict is null)
-        {
-            fontDict = new PdfDictionary();
-            resources.Set("Font", fontDict);
-        }
-        else if (resourcesWereInherited)
-        {
-            // The /Font dict came from the inherited resources and is shared with
-            // sibling pages — copy it page-local so the new stamp font does not leak
-            // into (or collide on) their inherited resources.
-            var localFonts = new PdfDictionary();
-            foreach (var key in fontDict.Keys)
-            {
-                var v = fontDict.Get(key);
-                if (v is not null) localFonts.Set(key, v);
-            }
-            fontDict = localFonts;
-            resources.Set("Font", fontDict);
-        }
-
-        // Reuse an existing entry for the same base font when present.
-        int count = 0;
-        foreach (var key in fontDict.Keys)
-        {
-            count++;
-            var existing = page.Reader.ResolveDict(fontDict.Get(key));
-            if (existing is not null)
-            {
-                var baseName = existing.GetName("BaseFont");
-                if (baseName == fontName || baseName == "/" + fontName)
-                    return key;
-            }
-        }
-
-        var pdfFontName = $"F{count}";
-        var newFont = new PdfDictionary();
-        newFont.Set("Type", new PdfName("Font"));
-        newFont.Set("Subtype", new PdfName("Type1"));
-        newFont.Set("BaseFont", new PdfName(fontName));
-        newFont.Set("Encoding", new PdfName("WinAnsiEncoding"));
-        fontDict.Set(pdfFontName, newFont);
-        return pdfFontName;
-    }
-
     // Resolve a page's /Resources inherited from the /Pages tree, walking the
     // /Parent chain (mirrors Page's inherited-attribute lookup). Returns null when
     // no ancestor declares /Resources.
@@ -338,10 +267,35 @@ public sealed partial class PdfFileStamp
     private static string EscapePdfString(string s) =>
         s.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
 
-    private static string Format(double v) =>
-        v.ToString("G", System.Globalization.CultureInfo.InvariantCulture);
+    // A plain decimal: the cosine of a right angle is 6.1E-17, and exponent form is a syntax error in content.
+    private static string Format(double v) => new Core.PdfReal(v).ToString();
 
-    private static void ApplyImageStamp(Page page, Stamp stamp)
+    private static void ApplyImageStamp(Page page, Stamp stamp, ImageStamp imgStamp)
+    {
+        imgStamp.X = stamp.XOrigin;
+        imgStamp.Y = stamp.YOrigin;
+        // The size SetImageSize asked for is the size the image is drawn at, in points; without
+        // it the image keeps its pixel size, which ran a large logo off the page.
+        if (stamp.ImageWidth > 0) imgStamp.DisplayWidth = stamp.ImageWidth;
+        if (stamp.ImageHeight > 0) imgStamp.DisplayHeight = stamp.ImageHeight;
+        // Carry the facade stamp's JPEG quality through to the embedded image.
+        imgStamp.Quality = stamp.Quality;
+        // Honour the facade stamp's rotation/opacity/background so an image stamp
+        // configured via Stamp.Rotation/Opacity/IsBackground renders as requested
+        // (e.g. a 90-degree-rotated logo) rather than always upright/opaque/foreground.
+        imgStamp.RotateAngle = stamp.Rotation;
+        imgStamp.Opacity = stamp.Opacity;
+        imgStamp.Background = stamp.IsBackground;
+        // ImageStamp.ApplyTo emits the stamp as its own content stream and writes a
+        // %StampId marker comment into it (always — id 0 when the caller did not
+        // assign one) so PdfContentEditor.GetStamps can recover even unnamed stamps.
+        imgStamp.StampId = stamp.StampId;
+        imgStamp.ForceStampIdComment = true;
+        imgStamp.ApplyTo(page);
+    }
+
+    /// <summary>The picture a facade stamp is bound to, decoded by the format its bytes announce.</summary>
+    private static ImageStamp DecodeStampImage(Stamp stamp)
     {
         var imageData = stamp.LogoImage!;
         // Auto-detect JPEG vs PNG vs raw RGB by header bytes; falls back to raw RGB
@@ -384,22 +338,7 @@ public sealed partial class PdfFileStamp
             }
             imgStamp = ImageStamp.FromRgb(imageData, w, h);
         }
-        imgStamp.X = stamp.XOrigin;
-        imgStamp.Y = stamp.YOrigin;
-        // Carry the facade stamp's JPEG quality through to the embedded image.
-        imgStamp.Quality = stamp.Quality;
-        // Honour the facade stamp's rotation/opacity/background so an image stamp
-        // configured via Stamp.Rotation/Opacity/IsBackground renders as requested
-        // (e.g. a 90-degree-rotated logo) rather than always upright/opaque/foreground.
-        imgStamp.RotateAngle = stamp.Rotation;
-        imgStamp.Opacity = stamp.Opacity;
-        imgStamp.Background = stamp.IsBackground;
-        // ImageStamp.ApplyTo emits the stamp as its own content stream and writes a
-        // %StampId marker comment into it (always — id 0 when the caller did not
-        // assign one) so PdfContentEditor.GetStamps can recover even unnamed stamps.
-        imgStamp.StampId = stamp.StampId;
-        imgStamp.ForceStampIdComment = true;
-        imgStamp.ApplyTo(page);
+        return imgStamp;
     }
 
     private static void AppendContent(Page page, byte[] contentBytes)
@@ -426,13 +365,5 @@ public sealed partial class PdfFileStamp
         {
             page.SetContentStream(contentBytes);
         }
-    }
-
-    private static byte[] GetPageContentBytes(Page page)
-    {
-        var contentsObj = page.Reader.Resolve(page.Dict.Get("Contents"));
-        if (contentsObj is PdfStream stream)
-            return page.Reader.DecodeStream(stream);
-        return [];
     }
 }

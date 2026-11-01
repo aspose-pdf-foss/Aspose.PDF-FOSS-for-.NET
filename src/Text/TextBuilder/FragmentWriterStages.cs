@@ -37,16 +37,16 @@ public sealed partial class TextBuilder
         // makes the save-time sync see a phantom text change — TextReplacer then
         // re-writes the run without shaping.
         fragment.LastWrittenText = fragment.Text + (addTrailingSpace ? " " : "");
-        if (rewrite is null) _page.RegisterAttachedFragment(fragment);
+        if (rewrite is null) _page.RegisterAttachedFragment(fragment, inView: fw.viewTurn is not null);
 
         fw.underline = fragment.TextState.UnderlineRequested;
         fw.strikeOut = fragment.TextState.StrikeOut;
         if (fragment.Segments is { } segs)
         {
-            foreach (var seg in segs)
+            foreach (var textState in segs.Select(seg => seg.TextState))
             {
-                if (seg.TextState.UnderlineRequested) fw.underline = true;
-                if (seg.TextState.StrikeOut) fw.strikeOut = true;
+                if (textState.UnderlineRequested) fw.underline = true;
+                if (textState.StrikeOut) fw.strikeOut = true;
             }
         }
         // A rotated run's decorations must rotate with it: the save-time rule
@@ -69,10 +69,20 @@ public sealed partial class TextBuilder
     {
         fw.descentComp = fw.needsCid
             ? ComputeCidDescentCompensation(fragment.TextState, fw.fontSize)
-            : ComputeDescentCompensation(fragment.TextState, fw.fontSize);
+            : fw.hostlessDescent is { } descent
+                ? descent * fw.fontSize / 1000.0
+                : ComputeDescentCompensation(fragment.TextState, fw.fontSize);
 
         fw.builder = new ContentStreamBuilder();
         fw.builder.SaveState();
+        // A caller appending to a page viewed turned gives the position in the view, as the reader reports text
+        // there: the run is drawn through the turn back to the page's own space, upright in the view. A rewrite
+        // keeps the seat the first write took, which the fragment's frame records.
+        fw.viewTurn = rewrite is not null
+            ? fragment.PositionFrame is { Written: true, Unrotate: { } unrotate } ? unrotate : null
+            : ContentSink is null && !SeatsInPageSpace && !fragment.AttachedInline && _page.RotationQuarter != 0
+                ? _page.RotationMatrix.Inverse() : null;
+        if (fw.viewTurn is { } turn) fw.builder.SetMatrix(turn.A, turn.B, turn.C, turn.D, turn.E, turn.F);
 
         // Tab-stop line: the text is a sequence of runs separated by #$TAB markers,
         // each run seated against its stop — ending at it, centred on it, or starting
@@ -83,6 +93,7 @@ public sealed partial class TextBuilder
             AppendTabbedLine(fw.builder, fragment, stops, fw.fontResName, fw.fontSize, fw.x, fw.y, fw.descentComp);
             fw.builder.RestoreState();
             if (rewrite is not null) rewrite.ReplaceData(fw.builder.Build());
+            else if (ContentSink is { } sink) sink(fw.builder.Build());
             else
             {
                 _page.AddContentStream(fw.builder.Build());
@@ -132,6 +143,10 @@ public sealed partial class TextBuilder
                        > FontRepository.CoverCount(fontData.TtfData, fw.text))
                     fontData = substitute;
             }
+            // The face that took over is the one every later step encodes with: a
+            // multi-line run re-encodes line by line, and glyph numbers of the face
+            // the caller named would index the wrong glyphs of the one embedded.
+            fw.embeddableFontData = fontData;
             (fw.fontResName, fw.hexGlyphIds) = EnsureEmbeddedCIDFont(fontData, fw.text);
             // Per-LINE covering hand-off: a line the chosen
             // face cannot cover is drawn WHOLE in a covering host face (Times
@@ -159,7 +174,7 @@ public sealed partial class TextBuilder
         {
             fw.fontResName = EnsureEmbeddedTrueTypeFont(fontData2);
         }
-        else
+        else if (!TryShowInFontWithoutProgram(fw, fragment))
         {
             var baseFontName = fragment.TextState.Std14FaceOverride
                 ?? MapToStandard14(fragment.TextState);
@@ -167,7 +182,7 @@ public sealed partial class TextBuilder
                 fragment.TextState.Std14Widths);
         }
 
-        fw.fontSize = (float)ScriptSize(fragment.TextState, fragment.TextState.FontSize);
+        fw.fontSize = (float)ScriptSize(ScriptStateOf(fragment), fragment.TextState.FontSize);
         fw.x = fragment.Position?.XIndent ?? 0;
         fw.y = fragment.Position?.YIndent ?? 0;
 
@@ -204,6 +219,16 @@ public sealed partial class TextBuilder
         fw.embeddableFontData = fragment.TextState.FontData is { TtfData: not null } licenceProbe
             && RefuseUnlicensedEmbedding(licenceProbe, _page) ? null : fragment.TextState.FontData;
         fw.needsCid = fw.embeddableFontData is { TtfData: not null };
+        // A run left to a Standard-14 face that cannot encode some of its characters is
+        // drawn in a covering installed face instead: the core face would write them as '?'.
+        if (fragment.TextState.FontData is null && fragment.TextState.Std14FaceOverride is null
+            && FontRepository.SubstituteForUnencodableStandard14Text(fw.text, fragment.TextState.Font,
+                MapToStandard14(fragment.TextState)) is { TtfData: not null } covering)
+        {
+            fragment.TextState.FontData = covering;
+            fw.embeddableFontData = covering;
+            fw.needsCid = true;
+        }
 
         // Arabic is cursive: the embedded-font path resolves each character through the
         // font's cmap to a single glyph, so the base letters must first be replaced with
@@ -219,7 +244,7 @@ public sealed partial class TextBuilder
         var mw = new MixedSegmentsState();
         mw.fw = fw;
         mw.fragment = fragment;
-        EmitBackgroundRectangles(mw.fw.builder, mw.fragment, mw.fw.fontResName, mw.fw.fontSize, mw.fw.x, mw.fw.y);
+        EmitBackgroundRectangles(mw.fw.builder, mw.fragment, mw.fw.fontSize, mw.fw.x, mw.fw.y);
         mw.fg = mw.fragment.TextState.ForegroundColor;
         if (mw.fg?.PatternColorSpace is Aspose.Pdf.Drawing.GradientAxialShading grad)
         {
@@ -234,7 +259,7 @@ public sealed partial class TextBuilder
         {
             var fgGs = TextParagraph.EnsureFillAlphaExtGState(_page, mw.fg.AByte);
             if (fgGs is not null) mw.fw.builder.SetExtGState(fgGs);
-            mw.fw.builder.SetFillColor(mw.fg.R / 255.0, mw.fg.G / 255.0, mw.fg.B / 255.0);
+            mw.fw.builder.SetFillColor(mw.fg);
         }
 
         mw.sc = mw.fragment.TextState.StrokingColor;
@@ -247,11 +272,13 @@ public sealed partial class TextBuilder
             or Aspose.Pdf.Text.TextRenderingMode.StrokeTextAndAddPathToClipping
             or Aspose.Pdf.Text.TextRenderingMode.FillThenStrokeTextAndAddPathToClipping;
         // A pen the state names wins over the size-derived one.
+#pragma warning disable S1244 // only the exact default value is skipped - any other value is written as is
         if (mw.strokes) mw.fw.builder.SetLineWidth(mw.fragment.TextState.LineWidth != 1.0 ? mw.fragment.TextState.LineWidth : mw.fw.fontSize / SyntheticBoldPenRatio);
+#pragma warning restore S1244
 
         mw.fw.builder.BeginText();
         mw.fw.builder.SetFont(mw.fw.fontResName, mw.fw.fontSize);
-        if (ScriptRise(mw.fragment.TextState, mw.fragment.TextState.FontSize) is not 0 and var rise)
+        if (ScriptRise(ScriptStateOf(mw.fragment), mw.fragment.TextState.FontSize) is not 0 and var rise)
             mw.fw.builder.SetTextRise(rise);
         if (mw.mode != Aspose.Pdf.Text.TextRenderingMode.FillText)
             mw.fw.builder.SetTextRenderingMode((int)mw.mode);
@@ -307,7 +334,7 @@ public sealed partial class TextBuilder
             // but newlines came in as char positions, not byte positions. Re-build
             // per-line hex slices from the original text using the same mapping.
             if (mw.hasNewlines)
-                WriteCidLinesWithBreaks(mw.fw.builder, mw.fragment.TextState.FontData!, mw.normalised,
+                WriteCidLinesWithBreaks(mw.fw.builder, mw.fw.embeddableFontData!, mw.normalised,
                     mw.fw.fontResName, mw.fw.fontSize, mw.fragment.TextState.WordSpacing);
             else
                 ShowComposite(mw.fw.builder, mw.fw.hexGlyphIds,

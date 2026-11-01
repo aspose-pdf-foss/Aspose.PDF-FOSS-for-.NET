@@ -64,9 +64,10 @@ public sealed partial class Document
             var regionWidth = CurWidth;
             var (ml, mr) = (box.Margin.Left, box.Margin.Right);
             var sides = bl + br + open.Padding.Left + open.Padding.Right;
-            var contentWidth = box.Width <= 0 ? Math.Max(0, regionWidth - ml - mr - sides)
-                : box.WidthIsFraction ? box.Width * regionWidth
-                : box.Width;
+            double contentWidth;
+            if (box.Width <= 0) contentWidth = Math.Max(0, regionWidth - ml - mr - sides);
+            else if (box.WidthIsFraction) contentWidth = box.Width * regionWidth;
+            else contentWidth = box.Width;
             open.Width = contentWidth + sides;
             var slack = regionWidth - ml - mr - open.Width;
             open.Left = regionLeft + ml + (slack > 0 ? box.HorizontalAlignment switch
@@ -174,10 +175,10 @@ public sealed partial class Document
             var box = open.Box;
             var rect = new Rectangle(open.Left, bottom, open.Left + open.Width, top);
             var fill = box.BackgroundColor;
-            var alpha = fill is null ? null
-                : box.BackgroundOpacity is { } opacity
-                ? Text.TextParagraph.EnsureAlphaExtGState(_startPage, opacity, strokeToo: false)
-                : Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, fill.AByte);
+            string? alpha;
+            if (fill is null) alpha = null;
+            else if (box.BackgroundOpacity is { } opacity) alpha = Text.TextParagraph.EnsureAlphaExtGState(_startPage, opacity, strokeToo: false);
+            else alpha = Text.TextParagraph.EnsureFillAlphaExtGState(_startPage, fill.AByte);
             var pictures = BackgroundPicturePainter.Prepare(box.BackgroundPictures, _startPage, rect,
                 open.Bands, box.Padding);
             var paint = BuildBlockPaint(box.Border, rect, fill,

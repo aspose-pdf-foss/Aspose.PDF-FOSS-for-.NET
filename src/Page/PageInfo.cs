@@ -78,9 +78,23 @@ public sealed class PageInfo
 
     /// <summary>The geometry the orientation logic works on: the box of a sized bound
     /// page, the A4 default of a size-inherited or free-standing one.</summary>
-    private double BoxWidth => _page is not null ? (_page.SizeInherited ? _width : _page.MediaBox.Width) : _width;
+    private double BoxWidth
+    {
+        get
+        {
+            if (_page is not null) return _page.SizeInherited ? _width : _page.MediaBox.Width;
+            return _width;
+        }
+    }
 
-    private double BoxHeight => _page is not null ? (_page.SizeInherited ? _height : _page.MediaBox.Height) : _height;
+    private double BoxHeight
+    {
+        get
+        {
+            if (_page is not null) return _page.SizeInherited ? _height : _page.MediaBox.Height;
+            return _height;
+        }
+    }
 
     /// <summary>Page height in points. See <see cref="Width"/> for the
     /// size-inherited rule.</summary>
@@ -124,7 +138,8 @@ public sealed class PageInfo
         // media box FIRST, so the test below reads the box itself and a page the setter
         // already turned is not turned back.
         _authoredWidth = _authoredHeight = null;
-        if (LandscapeRequested && BoxHeight > BoxWidth)
+        // A page carrying content keeps its box here as well (see the setter).
+        if (LandscapeRequested && BoxHeight > BoxWidth && _page is not { CarriesContent: true })
             SwapDimensions();
     }
 
@@ -172,6 +187,11 @@ public sealed class PageInfo
             // (an HTML conversion's auto-sized wide media box must not be
             // rotated back under its laid-out content).
             if (_page is not null && !value) return;
+            // A bound page that already carries content (an imported or loaded page)
+            // keeps its box: that content was laid out for it, and turning the box
+            // under it would push the top of the page out of sight. The request
+            // stays recorded for a layout that may still consume it.
+            if (_page is { CarriesContent: true }) return;
             var isCurrentlyLandscape = BoxWidth > BoxHeight;
             if (isCurrentlyLandscape == value) return;
             var authoredW = BoxWidth;
@@ -191,7 +211,7 @@ public sealed class PageInfo
         get => _margin;
         set { _margin = value; MarginAssigned = true; }
     }
-    private MarginInfo _margin = new MarginInfo();
+    private MarginInfo _margin;
 
     /// <summary>True when the caller ASSIGNED a MarginInfo (even an untouched
     /// all-zero one) — an HTML load treats that as explicit zero margins, distinct

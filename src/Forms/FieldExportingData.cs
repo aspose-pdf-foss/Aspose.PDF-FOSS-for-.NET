@@ -313,9 +313,7 @@ namespace Aspose.Pdf.Forms
         {
             if (field.Reader.ResolveDict(field.Dict.Get("AP")) is not { } ap) return null;
             if (field.Reader.ResolveDict(ap.Get("N")) is not { } n) return null;
-            foreach (var key in n.Keys)
-                if (key != "Off") return key;
-            return null;
+            return n.Keys.FirstOrDefault(key => key != "Off");
         }
 
         private static string? ReadMkString(Field field, string key)

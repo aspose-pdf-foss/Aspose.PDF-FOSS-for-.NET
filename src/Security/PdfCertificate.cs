@@ -75,13 +75,19 @@ public sealed class PdfCertificate
         }
     }
 
+    /// <summary>Load from a PFX file path.</summary>
+    public static PdfCertificate FromPfx(string path, string password)
+        => FromPfx(File.ReadAllBytes(path), password);
+
     /// <summary>Fallback loader that uses the platform PKCS#12 reader. Supports
     /// DSA/ECDSA keys (and RSA PFX variants the hand-rolled parser rejects); the
     /// resulting <see cref="DotNetCert"/> carries the private key for signing.</summary>
     private static PdfCertificate FromDotNet(byte[] pfxData, string password)
     {
-        var flags = System.Security.Cryptography.X509Certificates.X509KeyStorageFlags.Exportable
-                    | Compat.EphemeralKeySet;
+        // macOS keeps private keys in a keychain and refuses an ephemeral key set with
+        // PlatformNotSupportedException; there the key goes to the loader's temporary keychain.
+        var flags = System.Security.Cryptography.X509Certificates.X509KeyStorageFlags.Exportable;
+        if (!Compat.IsMacOS()) flags |= Compat.EphemeralKeySet;
         var cert = Compat.LoadPkcs12(pfxData, password, flags);
         var kind = cert.GetKeyAlgorithm() switch
         {
@@ -111,10 +117,6 @@ public sealed class PdfCertificate
         return new PdfCertificate(cert.RawData, privateKey: null, subject, issuer, serial, issuerDer,
             kind, cert);
     }
-
-    /// <summary>Load from a PFX file path.</summary>
-    public static PdfCertificate FromPfx(string path, string password)
-        => FromPfx(File.ReadAllBytes(path), password);
 
     /// <summary>Load from raw DER certificate bytes and a PKCS#8 DER private key.</summary>
     public static PdfCertificate FromDerFiles(byte[] certificateDer, byte[] pkcs8PrivateKeyDer)

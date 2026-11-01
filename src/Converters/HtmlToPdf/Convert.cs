@@ -16,19 +16,50 @@ internal static partial class HtmlToPdfConverter
             var open = html.IndexOf("<svg", pos, System.StringComparison.OrdinalIgnoreCase);
             if (open < 0)
             {
-                sb.Append(Regex.Replace(html[pos..], pattern, replacement, RegexOptions.IgnoreCase));
+                sb.Append(SafeRegex.Replace(html[pos..], pattern, replacement, RegexOptions.IgnoreCase));
                 break;
             }
-            sb.Append(Regex.Replace(html[pos..open], pattern, replacement, RegexOptions.IgnoreCase));
+            sb.Append(SafeRegex.Replace(html[pos..open], pattern, replacement, RegexOptions.IgnoreCase));
             var close = html.IndexOf("</svg", open, System.StringComparison.OrdinalIgnoreCase);
-            var end = close < 0 ? html.Length : html.IndexOf('>', close) is var gt && gt >= 0 ? gt + 1 : html.Length;
+            int end;
+            if (close < 0) end = html.Length;
+            else if (html.IndexOf('>', close) is var gt && gt >= 0) end = gt + 1;
+            else end = html.Length;
             sb.Append(html, open, end - open);
             pos = end;
         }
         return sb.ToString();
     }
 
+    /// <summary>A table tag that carries the <c>border</c> attribute without a value: the attribute's
+    /// default, a border of one pixel, which every table rule reads from the valued form.</summary>
+    private static readonly Regex TableWithBareBorder = new(@"<table\b[^>]*?\sborder(?=[\s/>])(?!\s*=)[^>]*>",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+
+    /// <summary>Inside such a tag: a quoted attribute value (kept as it is) or the bare attribute name.</summary>
+    private static readonly Regex BareBorderOrQuoted = new(@"(""[^""]*""|'[^']*')|(?<=\s)border(?=[\s/>])(?!\s*=)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+
+    /// <summary>Paragraphs written straight inside a table, between its open tag and its first row part.
+    /// A table holds rows only, so the parser of a browser moves such content in front of the table.</summary>
+    private static readonly Regex ParagraphsAheadOfTableRows = new(
+        @"(<table\b[^>]*>\s*)((?:<p\b[^>]*>(?:(?!<(?:table|tr|td|th|p)\b)[\s\S])*?</p\s*>\s*)+)(?=<(?:tr|tbody|thead|tfoot|caption|colgroup|col)\b)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+
     private static Document ConvertFromHtml(string html, HtmlLoadOptions? options)
+    {
+        // The long base64 payloads leave the markup before the first scan of it (HoistBase64Payloads):
+        // every pass over the document then reads the page, not its pictures. A conversion started from
+        // inside another keeps the outer one's table for when the outer one resumes.
+        var outer = HoistedPayloads;
+        var outerBase = DocumentBaseHref;
+        HoistedPayloads = null;
+        DocumentBaseHref = ReadBaseHref(html);
+        try { return WithFetchSession(options, () => ConvertMarkup(HoistBase64Payloads(html), options)); }
+        finally { HoistedPayloads = outer; DocumentBaseHref = outerBase; }
+    }
+
+    private static Document ConvertMarkup(string html, HtmlLoadOptions? options)
     {
         // HTML produced by this library's own PDF→HTML converter (absolutely-positioned
         // pdf-text spans inside fixed-size pdf-page divs) round-trips through a
@@ -52,6 +83,9 @@ internal static partial class HtmlToPdfConverter
         // the mojibake lays out as ONE anonymous Times 12 pt
         // paragraph on a page WIDENED to its min-content width. C0 control bytes are
         // the signature — real HTML text never carries them.
+        // A body that is one frame carrying its document converts as that document, and a head
+        // a heading opens inside closes there (see FrameSrcdoc.cs) - before any scan of the markup.
+        html = CloseHeadAtFlowContent(UnwrapSoleSrcdocFrame(html));
         if (TryConvertSpecialHtmlForm(html, options) is { } special) return special;
         // The archaic <image> tag parses as <img> (the HTML standard's alias) —
         // without it a legacy page's pictures never reach the image pipeline.
@@ -59,6 +93,9 @@ internal static partial class HtmlToPdfConverter
         // element there (an exported page's photo rides one), and rewriting it
         // to <img> silently drops the picture from the SVG render.
         html = ReplaceOutsideSvg(html, @"<image\b", "<img");
+        html = SafeRegex.Replace(TableWithBareBorder, html, m => SafeRegex.Replace(BareBorderOrQuoted, m.Value,
+            part => part.Groups[1].Success ? part.Value : "border=\"1\""));
+        html = SafeRegex.Replace(ParagraphsAheadOfTableRows, html, "$2$1");
 
         // A table-part tag AFTER the document's LAST </table> is IGNORED by the
         // HTML5 "in body" insertion mode (its text content still flows). A stray
@@ -66,17 +103,15 @@ internal static partial class HtmlToPdfConverter
         // not reach the flow — its break class would page-break a document the
         // reference keeps whole. Only the TRAILING junk is dropped: a stray part
         // in the middle of the document rides markup too broken to re-balance here.
-        {
-            var lastTableClose = -1;
-            foreach (Match tc in Regex.Matches(html, @"</table\s*>", RegexOptions.IgnoreCase))
-                lastTableClose = tc.Index + tc.Length;
-            if (lastTableClose >= 0
-                && !Regex.IsMatch(html[lastTableClose..], @"<table\b", RegexOptions.IgnoreCase)
-                && Regex.IsMatch(html[lastTableClose..], @"<t[rdh]\b", RegexOptions.IgnoreCase))
-                html = html[..lastTableClose] + Regex.Replace(html[lastTableClose..],
-                    @"</?(tr|td|th|tbody|thead|tfoot|caption|colgroup|col)\b[^>]*>", "",
-                    RegexOptions.IgnoreCase);
-        }
+        var lastTableClose = -1;
+        foreach (Match tc in SafeRegex.Matches(html, @"</table\s*>", RegexOptions.IgnoreCase))
+            lastTableClose = tc.Index + tc.Length;
+        if (lastTableClose >= 0
+            && !SafeRegex.IsMatch(html[lastTableClose..], @"<table\b", RegexOptions.IgnoreCase)
+            && SafeRegex.IsMatch(html[lastTableClose..], @"<t[rdh]\b", RegexOptions.IgnoreCase))
+            html = html[..lastTableClose] + SafeRegex.Replace(html[lastTableClose..],
+                @"</?(tr|td|th|tbody|thead|tfoot|caption|colgroup|col)\b[^>]*>", "",
+                RegexOptions.IgnoreCase);
 
         // Page scripts run before layout: a straight-line
         // script that only builds a string and appends a text node contributes that
@@ -90,8 +125,17 @@ internal static partial class HtmlToPdfConverter
         cv.html = html;
         // A bogus comment (`<!SUMMARY TOTALS>` - a `<!` that opens neither a comment, a doctype nor a
         // conditional block) is dropped whole, the way the browser's tokenizer drops it.
-        cv.html = Regex.Replace(cv.html, @"<!(?!--|\[|doctype)[^>]*>", "", RegexOptions.IgnoreCase);
-        cv.wikiExportDoc = cv.html.Contains("mw-parser-output", StringComparison.Ordinal) && cv.html.Contains("mw-list-item", StringComparison.Ordinal) && cv.html.Contains("load.php", StringComparison.Ordinal);
+        cv.html = SafeRegex.Replace(cv.html, @"<!(?!--|\[|doctype)[^>]*>", "", RegexOptions.IgnoreCase);
+        // A class attribute is a list on ANY whitespace: one written over a line break, literal or as the
+        // character reference an XML writer puts in an attribute (the XML tree view's `class="t&#xA;   "`), names
+        // the same class as `class="t"` - the value is read as the single-spaced list every class reader expects.
+        cv.html = SafeRegex.Replace(cv.html, @"(\bclass\s*=\s*)(""|')([^""']*(?:[\t\r\n]|&#)[^""']*)\2",
+            m => m.Groups[1].Value + m.Groups[2].Value
+                + string.Join(" ", SafeRegex.Replace(m.Groups[3].Value, @"&#(?:x0*[9ad]|0*(?:9|10|13));", " ", RegexOptions.IgnoreCase)
+                    .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+                + m.Groups[2].Value,
+            RegexOptions.IgnoreCase);
+        cv.wikiExportDoc =cv.html.Contains("mw-parser-output", StringComparison.Ordinal) && cv.html.Contains("mw-list-item", StringComparison.Ordinal) && cv.html.Contains("load.php", StringComparison.Ordinal);
         if (cv.wikiExportDoc)
         {
             ConvertWikiExportDoc(cv);

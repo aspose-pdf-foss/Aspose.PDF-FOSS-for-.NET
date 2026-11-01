@@ -14,7 +14,7 @@ internal static partial class HtmlToPdfConverter
         {
             case "title":
             {
-                var w = MW(ic, it.Text, 18, true);
+                var w = IpdMW(it.Text, 18, true);
                 Run(ic, 18, IpdLeft + (IpdSheetW - w) / 2, IpdTitleBaseTd, it.Text, true);
                 Line(ic, IpdLeft, IpdTitleRuleTd, IpdLeft + IpdSheetW, IpdTitleRuleTd, 1.5, "0 0 0");
                 ic.y = IpdTitleRuleTd + 0.75;
@@ -23,7 +23,7 @@ internal static partial class HtmlToPdfConverter
             }
             case "sectitle":
             {
-                var lines = Wrap(ic, it.Text, 12, IpdSheetW, true);
+                var lines = IpdWrap(it.Text, 12, IpdSheetW, true);
                 var boxH = 2 * IpdSecBorder + 2 * IpdSecPad + lines.Count * IpdSecLinePitch;
                 if (ic.y + Math.Max(ic.pendingMargin, IpdBlockMargin) + boxH > IpdContentBottom)
                     BreakPage(ic);
@@ -153,7 +153,7 @@ internal static partial class HtmlToPdfConverter
                     for (var c = 0; c < row.Count && c < fr.Length; c++)
                     {
                         var budget = tw * fr[c] - 2 * IpdCellPad;
-                        var wl = row[c].Length > 0 ? Wrap(ic, row[c], 10, budget) : new List<string> { "" };
+                        var wl = row[c].Length > 0 ? IpdWrap(row[c], 10, budget) : new List<string> { "" };
                         wraps.Add(wl);
                         if (wl.Count > maxLines) maxLines = wl.Count;
                     }
@@ -181,7 +181,7 @@ internal static partial class HtmlToPdfConverter
             {
                 var x0 = ic.inSub ? 96.75 + IpdSubPad : IpdLeft + 0.75;
                 var t = Open(ic, 0);
-                var lines = Wrap(ic, it.Text, it.Fs, IpdSheetW - 2 * IpdSubPad);
+                var lines = IpdWrap(it.Text, it.Fs, IpdSheetW - 2 * IpdSubPad);
                 foreach (var ln in lines)
                 {
                     var pitch = it.Fs * 1.15;

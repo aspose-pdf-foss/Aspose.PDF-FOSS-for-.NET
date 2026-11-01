@@ -31,23 +31,20 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Consume one tag of the letter body: opening and closing divs, tables and textareas become typed items with their sub-box depth.</summary>
     private static bool ParseIpdToken(IpdClaimLetterState ic)
     {
-        var m = ic.tagRx.Match(ic.seg, ic.pos);
+        var m = SafeRegex.Match(ic.tagRx, ic.seg, ic.pos);
         if (!m.Success) return false;
         ic.pos = m.Index + m.Length;
         var closing = m.Groups[1].Value.Length > 0;
         var tag = m.Groups[2].Value.ToLowerInvariant();
         var attrs = m.Groups[3].Value;
-        var clsM = Regex.Match(attrs, @"class\s*=\s*""([^""]*)""", RegexOptions.IgnoreCase);
+        var clsM = SafeRegex.Match(attrs, @"class\s*=\s*""([^""]*)""", RegexOptions.IgnoreCase);
         var cls = clsM.Success ? clsM.Groups[1].Value : "";
-        if (tag == "div")
-        {
-            if (ParseIpdDivTag(ic, closing, cls)) return true;
-        }
+        if (tag == "div" && ParseIpdDivTag(ic, closing, cls)) return true;
         if (tag == "textarea")
         {
             var end = ic.seg.IndexOf("</textarea>", ic.pos, StringComparison.OrdinalIgnoreCase);
             if (end < 0) end = ic.seg.Length;
-            ic.items.Add(new IpdItem { Kind = "text", Text = Flat(ic, ic.seg[ic.pos..end]), Fs = 9 });
+            ic.items.Add(new IpdItem { Kind = "text", Text = Flat(ic.seg[ic.pos..end]), Fs = 9 });
             ic.pos = end;
             return true;
         }
@@ -63,20 +60,19 @@ internal static partial class HtmlToPdfConverter
             {
                 it.Kind = "form";
                 it.Framed = cls.Contains("slfFramed");
-                it.Cols = cls.Contains("slfFormLayoutCol2")
-                    ? (cls.Contains("slfGeneralPayment") ? IpdCol2Pay : IpdCol2)
-                    : IpdCol4;
+                if (cls.Contains("slfFormLayoutCol2")) it.Cols = cls.Contains("slfGeneralPayment") ? IpdCol2Pay : IpdCol2;
+                else it.Cols = IpdCol4;
                 if (cls.Contains("slfCoverage")) { it.Kind = "coverage"; }
             }
-            foreach (Match rm in Regex.Matches(body, @"<tr\b[^>]*>([\s\S]*?)</tr>",
+            foreach (Match rm in SafeRegex.Matches(body, @"<tr\b[^>]*>([\s\S]*?)</tr>",
                 RegexOptions.IgnoreCase))
             {
                 var cells = new List<string>();
-                foreach (Match cm in Regex.Matches(rm.Groups[1].Value,
-                    @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase))
+                foreach (var groups in SafeRegex.Matches(rm.Groups[1].Value,
+                    @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(cm => cm.Groups))
                 {
-                    cells.Add(Flat(ic, cm.Groups[2].Value));
-                    var spanM = Regex.Match(cm.Groups[1].Value, @"colspan\s*=\s*""?(\d+)",
+                    cells.Add(Flat(groups[2].Value));
+                    var spanM = SafeRegex.Match(groups[1].Value, @"colspan\s*=\s*""?(\d+)",
                         RegexOptions.IgnoreCase);
                     if (spanM.Success && int.TryParse(spanM.Groups[1].Value, out var sp))
                         for (var k = 1; k < sp; k++) cells.Add("");
@@ -103,20 +99,20 @@ internal static partial class HtmlToPdfConverter
         }
         if (cls.Contains("ipdPageTitle"))
         {
-            (var titleInner, ic.pos) = DivInner(ic, ic.seg, ic.pos);
-            ic.items.Add(new IpdItem { Kind = "title", Text = Flat(ic, titleInner) });
+            (var titleInner, ic.pos) = DivInner(ic.seg, ic.pos);
+            ic.items.Add(new IpdItem { Kind = "title", Text = Flat(titleInner) });
             return true;
         }
         if (cls.Contains("ipdSectionTitle"))
         {
-            (var sectionInner, ic.pos) = DivInner(ic, ic.seg, ic.pos);
-            ic.items.Add(new IpdItem { Kind = "sectitle", Text = Flat(ic, sectionInner) });
+            (var sectionInner, ic.pos) = DivInner(ic.seg, ic.pos);
+            ic.items.Add(new IpdItem { Kind = "sectitle", Text = Flat(sectionInner) });
             return true;
         }
         if (cls.Contains("ipdSubSectionTitle"))
         {
-            (var inner, ic.pos) = DivInner(ic, ic.seg, ic.pos);
-            var t = Flat(ic, inner);
+            (var inner, ic.pos) = DivInner(ic.seg, ic.pos);
+            var t = Flat(inner);
             if (ic.items.Count > 0 && ic.items[^1].Kind == "subbegin") ic.items[^1].Text = t;
             return true;
         }
@@ -130,9 +126,9 @@ internal static partial class HtmlToPdfConverter
         // a plain inner div carrying bare text (the "nodata" messages)
         ic.depthNow++;
         var tail = ic.seg[ic.pos..];
-        var nextTag = ic.tagRx.Match(tail);
+        var nextTag = SafeRegex.Match(ic.tagRx, tail);
         var lead = nextTag.Success ? tail[..nextTag.Index] : tail;
-        if (Flat(ic, lead) is { Length: > 0 } bare
+        if (Flat(lead) is { Length: > 0 } bare
             && !cls.Contains("ipdSection") && !cls.Contains("Contents")
             && !cls.Contains("slfGeneralPayment") && !cls.Contains("slfOverPay"))
             ic.items.Add(new IpdItem { Kind = "text", Text = bare, Fs = 9 });

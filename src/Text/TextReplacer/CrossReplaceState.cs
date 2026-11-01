@@ -29,7 +29,6 @@ private sealed class CrossReplaceState
     public int lastWrite;
     public bool replaced;
     public byte[] streamBytes = null!;
-    public string search = null!;
     public string replacement = null!;
     public PdfDictionary pageDict = null!;
     public PdfReader reader = null!;
@@ -37,5 +36,7 @@ private sealed class CrossReplaceState
     public List<CrossTextOp> textOps = null!;
     public int searchIdx;
     public int searchLen;
+    /// <summary>Follower shifts the rewrites owe the line, applied after the last match.</summary>
+    public List<PendingShift> pendingShifts = new();
 }
 }

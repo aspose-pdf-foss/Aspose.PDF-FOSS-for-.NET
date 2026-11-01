@@ -10,6 +10,7 @@ namespace Aspose.Pdf.Annotations.JavascriptExtensions;
 /// </summary>
 public class FieldNumberCurrencyFormatter
 {
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>
     /// Format <paramref name="fieldValue"/> as a currency string.
     /// </summary>
@@ -23,6 +24,7 @@ public class FieldNumberCurrencyFormatter
     /// <param name="fieldValue">Numeric string to format (may start with "-").</param>
     /// <returns>Formatted currency string.</returns>
     public string Format(int precision, int sepStyle, int negStyle, string currencySymbol, bool isPrependCurrency, string fieldValue)
+#pragma warning restore S2325
     {
         double num = double.Parse(fieldValue, CultureInfo.InvariantCulture);
         bool isNeg = num < 0;

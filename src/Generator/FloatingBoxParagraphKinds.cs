@@ -9,7 +9,7 @@ namespace Aspose.Pdf;
 public partial class FloatingBox : BaseParagraph
 {
     /// <summary>Floating box paragraph kinds: the text fragment, the table and the image.</summary>
-    private bool TryBuildImageParagraph(FloatingBoxBuildState bx, Image image)
+    private static bool TryBuildImageParagraph(FloatingBoxBuildState bx, Image image)
     {
         // Read the image bytes (stream or file).
         byte[]? data = null;
@@ -32,14 +32,11 @@ public partial class FloatingBox : BaseParagraph
         // size scaled by ImageScale (the page-level flow path applies the
         // same factor to a box-contained image).
         double imgW = image.FixWidth, imgH = image.FixHeight;
-        if (imgW <= 0 || imgH <= 0)
+        if ((imgW <= 0 || imgH <= 0) && Document.TryGetImageNaturalSizePt(data) is (var natW, var natH))
         {
-            if (Document.TryGetImageNaturalSizePt(data) is (var natW, var natH))
-            {
-                var imScale = image.ImageScale > 0 ? image.ImageScale : 1.0;
-                if (imgW <= 0) imgW = natW * imScale;
-                if (imgH <= 0) imgH = natH * imScale;
-            }
+            var imScale = image.ImageScale > 0 ? image.ImageScale : 1.0;
+            if (imgW <= 0) imgW = natW * imScale;
+            if (imgH <= 0) imgH = natH * imScale;
         }
         if (imgW <= 0 || imgH <= 0) return true;
 
@@ -54,7 +51,7 @@ public partial class FloatingBox : BaseParagraph
         // how the nested-table branch above orders its content.
         bx.builder.RestoreState();
         bx.page.AddContentStream(bx.builder.Build());
-        bx.page.AddImage(data, new Rectangle(ix, iy, ix + imgW, iy + imgH));
+        bx.page.AddLayoutImage(data, new Rectangle(ix, iy, ix + imgW, iy + imgH));
         bx.contentY -= imgH + imBottom;
         bx.builder = new ContentStreamBuilder();
         bx.builder.SaveState();
@@ -104,7 +101,7 @@ public partial class FloatingBox : BaseParagraph
                 bx.page.AddContentStream(gc);
         if (table.LastImageDraws.Count > 0)
             foreach (var (data, rect) in table.LastImageDraws[0])
-                bx.page.AddImage(data, rect);
+                bx.page.AddLayoutImage(data, rect);
         bx.contentY -= table.LastRenderedHeight;
         // Start a new builder for remaining paragraphs
         bx.builder = new ContentStreamBuilder();
@@ -115,19 +112,27 @@ public partial class FloatingBox : BaseParagraph
     private bool BuildTextParagraph(FloatingBoxBuildState bx, TextFragment textFragment)
     {
         var fontSize = textFragment.TextState.FontSize;
-        var faceName = textFragment.TextState.FontName ?? "Helvetica";
+        var faceName = textFragment.TextState.FontName ?? DefaultTextFace;
         var fontResName = EnsureFontResource(bx.page, faceName);
         // A fragment's text carries its own hard breaks; each is a LINE of the box,
         // not part of one long run. Drawing the whole string as a single show ran it
         // off the box (and off the page) and left the newlines in the extracted text.
         var fragLines = (textFragment.Text ?? string.Empty).Split((char)10);
-        // Apply foreground color if set
-        if (textFragment.TextState.ForegroundColor is { } fg)
-            bx.builder.SetFillColor(fg.R / 255.0, fg.G / 255.0, fg.B / 255.0);
-
-        for (var li = 0; li < fragLines.Length; li++)
+        // The fragment's own colour, else black: the text used to inherit whatever fill
+        // was current, the box's background colour included.
+        var fg = textFragment.TextState.ForegroundColor ?? Color.Black;
+        bx.builder.SetFillColor(fg.R / 255.0, fg.G / 255.0, fg.B / 255.0);
+        if (textFragment.TextState.Rotation % FullTurn != 0)
         {
-            var lineText = fragLines[li].TrimEnd((char)13);
+            BuildTurnedTextParagraph(bx, textFragment, faceName, fontResName, fragLines);
+            return true;
+        }
+
+        // …and each hard line wraps at the box's content width (see TextLines).
+        var lines = TextLines(textFragment);
+        for (var li = 0; li < lines.Count; li++)
+        {
+            var lineText = lines[li];
             // Move down by font size for each line (PDF text is baseline-positioned)
             bx.contentY -= fontSize;
             if (bx.contentY < bx.boxY + bx.padBottom)
@@ -137,9 +142,8 @@ public partial class FloatingBox : BaseParagraph
                 // is carried onto a fresh page where the box re-seats at
                 // the page's content top with the same Height - the same rule a
                 // breakable table inside a fixed-height box already follows.
-                for (var lj = li; lj < fragLines.Length; lj++)
-                    bx.overflowLines.Add((fragLines[lj].TrimEnd((char)13), fontSize,
-                        fontResName, textFragment.TextState.ForegroundColor));
+                for (var lj = li; lj < lines.Count; lj++)
+                    bx.overflowLines.Add((lines[lj], fontSize, fontResName, textFragment.TextState.ForegroundColor));
                 break;
             }
             // Where this LINE's own box bottoms, per the box's alignment. Each line of
@@ -176,9 +180,42 @@ public partial class FloatingBox : BaseParagraph
         // Add line spacing after the text
         var lineSpacing = textFragment.TextState.LineSpacing > 0
             ? textFragment.TextState.LineSpacing
-            : fontSize * 0.2; // Default 20% of font size as inter-paragraph spacing
+            : fontSize * DefaultParagraphSpacingEm;
         bx.contentY -= lineSpacing;
         if (bx.overflowLines.Count > 0) return false;
         return true;
+    }
+
+    private const double FullTurn = 360;
+
+    /// <summary>A turned fragment: its lines laid out unturned, a font size apart, turned about
+    /// the first baseline as one block, and seated with the turned block's top-left corner at the
+    /// content cursor, which moves below it. It used to be drawn upright, its rotation dropped.</summary>
+    private static void BuildTurnedTextParagraph(FloatingBoxBuildState bx, TextFragment textFragment,
+        string faceName, string fontResName, string[] fragLines)
+    {
+        var fontSize = textFragment.TextState.FontSize;
+        var measure = Aspose.Pdf.Text.TextPaginator.CreateMeasurer(faceName, fontSize, null);
+        double longest = 0;
+        for (var li = 0; li < fragLines.Length; li++)
+        {
+            fragLines[li] = fragLines[li].TrimEnd((char)13);
+            longest = Math.Max(longest, measure(fragLines[li]));
+        }
+        var ascent = Standard14Fonts.GetAscent(faceName) / Table.EmUnits * fontSize;
+        var (originX, originY, _, height) = Table.TurnedBlockExtent(textFragment.TextState.Rotation, longest,
+            ascent, DescentEm(faceName) * fontSize, fragLines.Length, fontSize);
+        bx.builder.BeginText();
+        bx.builder.SetFont(fontResName, fontSize);
+        bx.builder.SetLeading(fontSize);
+        Table.SetTurnedTextMatrix(bx.builder, textFragment.TextState.Rotation,
+            bx.contentX + originX, bx.contentY - height + originY);
+        for (var li = 0; li < fragLines.Length; li++)
+        {
+            if (li > 0) bx.builder.NextLine();
+            bx.builder.ShowText(fragLines[li]);
+        }
+        bx.builder.EndText();
+        bx.contentY -= height;
     }
 }

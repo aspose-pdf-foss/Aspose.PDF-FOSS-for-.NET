@@ -13,6 +13,8 @@ private sealed class AbsoluteRenderState
     // Precompute max line width for bg rects (all lines get uniform width).
     public double maxLineWidth;
     public bool anyBg;
+    // The widest line as laid out: a line a justification spreads fills its band.
+    public double maxLaidOutWidth;
     public double textY;
     public double minY;
     public ContentStreamBuilder builder = default!;
@@ -42,5 +44,7 @@ private sealed class AbsoluteRenderState
     public Color? bg;
     // Draw the line's chunks left-to-right, sharing the baseline textY.
     public double penX;
+    // What each word gap of a justified line gains so the line fills its band.
+    public double wordStretch;
 }
 }

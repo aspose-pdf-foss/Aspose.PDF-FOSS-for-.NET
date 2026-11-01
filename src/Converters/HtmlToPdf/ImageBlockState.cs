@@ -11,6 +11,8 @@ internal static partial class HtmlToPdfConverter
 private sealed class ImageBlockState
 {
     public double natW;
+    /// <summary>The image sits on the line of the inline image before it, right of that image.</summary>
+    public bool joinsRow;
     public double natH;
     public double w;
     public double h;
@@ -29,5 +31,8 @@ private sealed class ImageBlockState
     // rather than beside it.
     public double floatDropY;
     public double imgFlowY;
+    // The clockwise turn the picture's EXIF orientation asks for: the layout box is
+    // the turned picture's, the raster is drawn turned inside it.
+    public int exifRotateDeg;
 }
 }

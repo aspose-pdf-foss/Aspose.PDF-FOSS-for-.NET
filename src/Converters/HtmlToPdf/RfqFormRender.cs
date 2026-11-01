@@ -15,15 +15,15 @@ internal static partial class HtmlToPdfConverter
         if (!rq.html.Contains("REQUEST FOR QUOTATION", StringComparison.Ordinal)
             || !rq.html.Contains("#8d98b2", StringComparison.OrdinalIgnoreCase)
             || !rq.html.Contains("#eef7f8", StringComparison.OrdinalIgnoreCase)
-            || !Regex.IsMatch(rq.html, "cellpadding=\"7\"[ ]+cellspacing=\"1\"", RegexOptions.IgnoreCase))
+            || !SafeRegex.IsMatch(rq.html, "cellpadding=\"7\"[ ]+cellspacing=\"1\"", RegexOptions.IgnoreCase))
             return null;
 
 
-        rq.tables = Regex.Matches(rq.html, "<table\\b[^>]*>((?:(?!<table)[\\s\\S])*?)</table[ ]*>",
+        rq.tables = SafeRegex.Matches(rq.html, "<table\\b[^>]*>((?:(?!<table)[\\s\\S])*?)</table[ ]*>",
             RegexOptions.IgnoreCase).Cast<Match>().Select(m => m.Groups[1].Value).ToList();
         if (rq.tables.Count < 5) return null;
 
-        rq.logoM = Regex.Match(rq.html, "<img[^>]*alt[ ]*=[ ]*[\"']([^\"']*)", RegexOptions.IgnoreCase);
+        rq.logoM = SafeRegex.Match(rq.html, "<img[^>]*alt[ ]*=[ ]*[\"']([^\"']*)", RegexOptions.IgnoreCase);
         rq.titleLabels = RqLabels(rq.tables[0]);           // [Arabic title, English title]
         rq.band1Cells = RqCells(rq.tables[1]);             // REQ NO cell, Date cell
         rq.band2Labels = RqLabels(rq.tables[2]);           // Closing:, ar, Delivery Date:, ar

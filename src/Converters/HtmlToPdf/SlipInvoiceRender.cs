@@ -6,13 +6,12 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>Render the percent-width till-slip invoice, or null.</summary>
-    private static Document? TryRenderSlipInvoice(string html, HtmlLoadOptions? options,
+    private static Document? TryRenderSlipInvoice(string html,
         IReadOnlyDictionary<string, Dictionary<string, string>> css,
         double pageWidth, double pageHeight)
     {
         var si = new SlipInvoiceState();
         si.html = html;
-        si.options = options;
         si.css = css;
         si.pageWidth = pageWidth;
         si.pageHeight = pageHeight;
@@ -38,9 +37,9 @@ internal static partial class HtmlToPdfConverter
         if (bodyRule.TryGetValue("font-size", out var fsv)
             && TryParseLength(fsv.Trim()) is { } fsPt && fsPt > 0) si.fs = fsPt;
 
-        si.bodyM = Regex.Match(si.html, @"<body\b[^>]*>([\s\S]*)</body\s*>", RegexOptions.IgnoreCase);
+        si.bodyM = SafeRegex.Match(si.html, @"<body\b[^>]*>([\s\S]*)</body\s*>", RegexOptions.IgnoreCase);
         si.body = si.bodyM.Success ? si.bodyM.Groups[1].Value : si.html;
-        if (!Regex.IsMatch(si.body, @"<table\b", RegexOptions.IgnoreCase)) return null;
+        if (!SafeRegex.IsMatch(si.body, @"<table\b", RegexOptions.IgnoreCase)) return null;
 
         si.lineH = MetricLineHeight(si.fs, HheaLineSumFor(si.face) ?? fm.sum);
         si.drop = MetricBaselineDrop(si.fs, si.lineH, fm);
@@ -67,13 +66,15 @@ internal static partial class HtmlToPdfConverter
         si.rowAdvance = si.lineH + 2 * SlipPadPt + SlipSpacingPt;
         si.y = si.padTop + UaBodyMarginPt + SlipSpacingPt + SlipPadPt;
         si.drewAny = false;
-        foreach (Match tm in Regex.Matches(si.body, @"<table\b[^>]*>([\s\S]*?)</table\s*>",
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match tm in SafeRegex.Matches(si.body, @"<table\b[^>]*>([\s\S]*?)</table\s*>",
+#pragma warning restore S3267
                      RegexOptions.IgnoreCase))
         {
             if (!DrawSlipTable(si, tm)) break;
         }
         // the sheet's closing <hr>, drawn across the body box
-        if (si.drewAny && Regex.IsMatch(si.body, @"<hr\b", RegexOptions.IgnoreCase))
+        if (si.drewAny && SafeRegex.IsMatch(si.body, @"<hr\b", RegexOptions.IgnoreCase))
         {
             var hy = si.y - SlipTableGapPt + SlipHrGapPt;
             si.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(si.invc,

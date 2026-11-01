@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Aspose.Pdf.Core;
@@ -14,22 +14,34 @@ namespace Aspose.Pdf.Text;
 /// The font program is embedded ONCE per (resource dict, ttf) — repeated <see cref="Embed"/>
 /// calls for the same font on the same page reuse that single Type0 resource and grow its
 /// /W widths + /ToUnicode incrementally. Without this, a CJK-heavy document (one call per
-/// line) would write the full multi-MB font program hundreds of times.
+/// line) would write the full multi-MB font program hundreds of times. A caller that names the
+/// document the dictionary belongs to shares the one Type0 font across all its pages.
 /// </summary>
 internal static class Type0FontEmbedder
 {
     // Per resource-dict (≈ per page) → per ttf-program → the one embedded Type0 font.
     private static readonly ConditionalWeakTable<PdfDictionary, PageFonts> _cache = new();
 
+    // Per document → per ttf-program → the Type0 font every page of that document files: a face
+    // drawn on a thousand pages is one font with one program, not a thousand copies of it.
+    private static readonly ConditionalWeakTable<object, Dictionary<byte[], FontState>> _byDocument = new();
+
     private sealed class PageFonts
     {
-        public readonly Dictionary<byte[], FontState> ByTtf =
+        public readonly Dictionary<byte[], FontSeat> ByTtf =
             new(ReferenceEqualityComparer.Instance);
+    }
+
+    /// <summary>A font as one resource dictionary files it: the font, under the name that
+    /// dictionary gives it.</summary>
+    private sealed class FontSeat
+    {
+        public FontState St = null!;
+        public string ResName = "";
     }
 
     private sealed class FontState
     {
-        public string ResName = "";
         public GlyphOutlineParser Parser = null!;
         public double Upm = 1000;
         public readonly Dictionary<int, int> UsedGlyphs = new(); // charCode → glyphId
@@ -47,12 +59,18 @@ internal static class Type0FontEmbedder
         public PdfStream FontFile = null!;   // the embedded program: /FontFile2, or /FontFile3 for CFF
         public byte[] Ttf = null!;           // the ORIGINAL font program (subset source)
         public bool SubsetDirty;             // new glyphs since the last sparse subset
+        public int Growth;                   // counts the calls that added glyphs
+        public bool Cut;                     // FontFile holds a subset, not Ttf
         public bool WholeUnits;              // advances in whole units (WholeUnitAdvances)
+        public bool Whole;                   // the program ships whole: the save leaves it unsubset
     }
 
     // Live embedded fonts across all documents — walked at save time so the
     // multi-MB system font program shrinks to a GID-preserving sparse subset
     // of the glyphs actually shown (the full font program is never shipped).
+    // A save therefore reaches fonts that another document is still drawing into
+    // on another thread: a font's glyph set is written and read under the font's
+    // own lock (Embed, RegisterShapedGlyphs, SparseSubset, KeepWhole).
     private static readonly List<WeakReference<FontState>> _liveFonts = new();
 
     /// <summary>
@@ -70,32 +88,67 @@ internal static class Type0FontEmbedder
             for (var i = _liveFonts.Count - 1; i >= 0; i--)
             {
                 if (!_liveFonts[i].TryGetTarget(out var st)) { _liveFonts.RemoveAt(i); continue; }
-                if (!st.SubsetDirty || (st.UsedGlyphs.Count == 0 && st.ShapedGlyphs.Count == 0)) continue;
-                // The subsetter cuts a 'glyf' table; a CFF program has none and is embedded whole.
-                if (FontProgramFlavour.IsOpenTypeCff(st.Ttf)) { st.SubsetDirty = false; continue; }
-                try
-                {
-                    var gids = new HashSet<int> { 0 }; // keep .notdef
-                    foreach (var (_, gid) in st.UsedGlyphs) gids.Add(gid);
-                    // A conjunct or reph the shaper put in the stream must survive the
-                    // subset too — it is reachable from no character map.
-                    foreach (var gid in st.ShapedGlyphs) gids.Add(gid);
-                    var parser = new TrueTypeParser(st.Ttf);
-                    parser.Parse();
-                    var subset = new TrueTypeSubsetter(st.Ttf, parser).SubsetSparse(gids);
-                    if (subset.Length > 0 && subset.Length < st.Ttf.Length)
-                    {
-                        st.FontFile.ReplaceData(subset);
-                        st.FontFile.Dict.Set("Length1", new PdfInteger(subset.Length));
-                    }
-                    st.SubsetDirty = false;
-                }
-                catch
-                {
-                    // A malformed program keeps its full embed — correctness over size.
-                }
+                SparseSubset(st);
             }
         }
+    }
+
+    // The glyph set is copied under the font's lock and the subset cut outside it, so a thread
+    // drawing into the font never waits on the cut. A font that grew meanwhile keeps its old
+    // program and stays dirty: marked up to date, it would ship without the new glyphs.
+    private static void SparseSubset(FontState st)
+    {
+        HashSet<int> gids;
+        int growth;
+        lock (st)
+        {
+            if (st.Whole || !st.SubsetDirty || (st.UsedGlyphs.Count == 0 && st.ShapedGlyphs.Count == 0)) return;
+            // The subsetter cuts a 'glyf' table; a CFF program has none and is embedded whole.
+            if (FontProgramFlavour.IsOpenTypeCff(st.Ttf)) { st.SubsetDirty = false; return; }
+            gids = new HashSet<int> { 0 }; // keep .notdef
+            foreach (var (_, gid) in st.UsedGlyphs) gids.Add(gid);
+            // A conjunct or reph the shaper put in the stream must survive the
+            // subset too — it is reachable from no character map.
+            foreach (var gid in st.ShapedGlyphs) gids.Add(gid);
+            growth = st.Growth;
+        }
+        byte[] subset;
+        try
+        {
+            var parser = new TrueTypeParser(st.Ttf);
+            parser.Parse();
+            subset = new TrueTypeSubsetter(st.Ttf, parser).SubsetSparse(gids);
+        }
+        catch
+        {
+            return; // A malformed program keeps its full embed — correctness over size.
+        }
+        lock (st)
+        {
+            if (st.Growth != growth || st.Whole) return;
+            if (subset.Length > 0 && subset.Length < st.Ttf.Length)
+            {
+                st.FontFile.ReplaceData(subset);
+                st.FontFile.Dict.Set("Length1", new PdfInteger(subset.Length));
+                st.Cut = true;
+            }
+            st.SubsetDirty = false;
+        }
+    }
+
+    /// <summary>Cut the program <paramref name="fontFile"/> holds, when it is one this session embedded, to the
+    /// glyphs drawn so far, before a page that draws through it is copied into another document: the copy is
+    /// written with that document, whose save does not reach the source's fonts.</summary>
+    internal static void CutBeforeCopy(PdfStream fontFile)
+    {
+        if (_byFontFile.TryGetValue(fontFile, out var st)) SparseSubset(st);
+    }
+
+    private static void Grew(FontState st)
+    {
+        RefreshWidthsAndToUnicode(st);
+        st.SubsetDirty = true;
+        st.Growth++;
     }
 
     /// <summary>
@@ -105,28 +158,69 @@ internal static class Type0FontEmbedder
     /// is true the /BaseFont name has its spaces removed (PDF base-font names are space-free,
     /// so the extracted Font.FontName reads back cleanly, e.g. "ArialUnicodeMS").
     /// </summary>
+    /// <param name="document">The document <paramref name="fontDict"/> belongs to, when the caller knows it:
+    /// every dictionary of that document then files the same font for the program.</param>
     public static (string resName, byte[] hexGlyphIds) Embed(
         PdfDictionary fontDict, byte[] ttfData, string fontName, string text,
         bool stripSpacesInBaseFont = false, string? resNameHint = null,
-        IReadOnlyList<string>? features = null)
+        IReadOnlyList<string>? features = null, object? document = null)
     {
-        var pageFonts = _cache.GetValue(fontDict, static _ => new PageFonts());
-        if (!pageFonts.ByTtf.TryGetValue(ttfData, out var st))
-        {
-            st = BuildFont(fontDict, ttfData, fontName, stripSpacesInBaseFont, resNameHint);
-            pageFonts.ByTtf[ttfData] = st;
-        }
+        var seat = Seat(fontDict, ttfData, fontName, stripSpacesInBaseFont, resNameHint, document);
         // A caller naming its resource gets that name even when the face was first embedded
         // under another (a band's Arial as F1): the same font object is filed under the hint
         // too, so content that continues onto an overflow page - which inherits fonts by
         // NAME and owns a default F1 of its own - still reaches this face.
-        if (resNameHint is { Length: > 0 } && st.ResName != resNameHint && !fontDict.ContainsKey(resNameHint)
-            && fontDict.Get(st.ResName) is { } fontObj)
+        if (resNameHint is { Length: > 0 } && seat.ResName != resNameHint && !fontDict.ContainsKey(resNameHint)
+            && fontDict.Get(seat.ResName) is { } fontObj)
         {
             fontDict.Set(resNameHint, fontObj);
-            st.ResName = resNameHint;
+            seat.ResName = resNameHint;
         }
+        var st = seat.St;
+        lock (st) return (seat.ResName, EncodeRun(st, text, features));
+    }
 
+    /// <summary>The font <paramref name="fontDict"/> files for the program: the one it filed before, else the
+    /// one the document's other dictionaries file (put under a free name of this one), else a new font.</summary>
+    private static FontSeat Seat(PdfDictionary fontDict, byte[] ttfData, string fontName,
+        bool stripSpacesInBaseFont, string? resNameHint, object? document)
+    {
+        var pageFonts = _cache.GetValue(fontDict, static _ => new PageFonts());
+        if (pageFonts.ByTtf.TryGetValue(ttfData, out var seat)) return seat;
+        FontState? st = null;
+        Dictionary<byte[], FontState>? shared = null;
+        if (document is not null)
+        {
+            shared = _byDocument.GetValue(document,
+                static _ => new Dictionary<byte[], FontState>(ReferenceEqualityComparer.Instance));
+            lock (shared) shared.TryGetValue(ttfData, out st);
+        }
+        if (st is null)
+        {
+            st = BuildFont(ttfData, fontName, stripSpacesInBaseFont);
+            if (shared is not null) lock (shared) shared[ttfData] = st;
+        }
+        var name = FreeName(fontDict, resNameHint);
+        fontDict.Set(name, st.Type0Font);
+        seat = new FontSeat { St = st, ResName = name };
+        pageFonts.ByTtf[ttfData] = seat;
+        return seat;
+    }
+
+    // A caller with its own naming convention (the SVG converter's C0_0/C1_0 …)
+    // gets its name when it is still free; everything else keeps F1, F2, ….
+    private static string FreeName(PdfDictionary fontDict, string? resNameHint)
+    {
+        var name = resNameHint is { Length: > 0 } && !fontDict.ContainsKey(resNameHint)
+            ? resNameHint : "F1";
+        var counter = 1;
+        while (fontDict.ContainsKey(name))
+            name = $"F{++counter}";
+        return name;
+    }
+
+    private static byte[] EncodeRun(FontState st, string text, IReadOnlyList<string>? features)
+    {
         // Encode the text to 2-byte glyph ids (CID = GID under Identity), accumulating any
         // newly-seen glyphs so the shared font's /W + /ToUnicode grow to cover them.
         // Iterate by CODEPOINT: a surrogate pair (emoji, CJK Ext-B) is ONE glyph — walking
@@ -167,8 +261,8 @@ internal static class Type0FontEmbedder
                 hex.Add((byte)(gid >> 8));
                 hex.Add((byte)(gid & 0xFF));
             }
-            if (added) { RefreshWidthsAndToUnicode(st); st.SubsetDirty = true; }
-            return (st.ResName, hex.ToArray());
+            if (added) Grew(st);
+            return hex.ToArray();
         }
 
         // A complex script (Devanagari, Telugu, …) is not one glyph per codepoint: its
@@ -183,8 +277,14 @@ internal static class Type0FontEmbedder
                 hex.Add((byte)(gid >> 8));
                 hex.Add((byte)(gid & 0xFF));
             }
-            if (added) { RefreshWidthsAndToUnicode(st); st.SubsetDirty = true; }
-            return (st.ResName, hex.ToArray());
+            // A glyph the shaping left as a character's own (moved, not substituted) reads
+            // back as that character.
+            foreach (var ch in text)
+                if (st.Parser.GlyphIdOrLookAlike(ch) is var own && own != 0 && Array.IndexOf(shaped, (ushort)own) >= 0
+                    && st.UsedGlyphs.TryAdd(ch, own))
+                    added = true;
+            if (added) Grew(st);
+            return hex.ToArray();
         }
         for (var i = 0; i < text.Length; i++)
         {
@@ -192,16 +292,54 @@ internal static class Type0FontEmbedder
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
             {
                 cp = char.ConvertToUtf32(text[i], text[i + 1]);
+#pragma warning disable S127 // a surrogate pair is one code point - the scan steps over its low half
                 i++;
+#pragma warning restore S127
             }
             var gid = st.Parser.GlyphIdOrLookAlike(cp);
             if (st.UsedGlyphs.TryAdd(cp, gid)) added = true;
             hex.Add((byte)(gid >> 8));
             hex.Add((byte)(gid & 0xFF));
         }
-        if (added) { RefreshWidthsAndToUnicode(st); st.SubsetDirty = true; }
-        return (st.ResName, hex.ToArray());
+        if (added) Grew(st);
+        return hex.ToArray();
     }
+
+    /// <summary>Ship the program embedded from <paramref name="ttfData"/> in <paramref name="fontDict"/> whole,
+    /// under its bare name: a form's default-resource face is one a viewer types new values with, so it
+    /// keeps every glyph while its /W and /ToUnicode still grow with the values drawn through it.</summary>
+    internal static void KeepWhole(PdfDictionary fontDict, byte[] ttfData)
+    {
+        if (!_cache.TryGetValue(fontDict, out var pageFonts) || !pageFonts.ByTtf.TryGetValue(ttfData, out var seat)) return;
+        var st = seat.St;
+        lock (st)
+        {
+            st.Whole = true;
+            // A save (this document's, or another's on another thread) may have cut it already.
+            if (st.Cut)
+            {
+                st.FontFile.ReplaceData(st.Ttf);
+                st.FontFile.Dict.Set("Length1", new PdfInteger(st.Ttf.Length));
+                st.Cut = false;
+            }
+        }
+        var tagged = st.Type0Font.GetName("BaseFont") ?? "";
+        var plus = tagged.IndexOf('+');
+        if (plus < 0) return;
+        var bare = new PdfName(tagged[(plus + 1)..]);
+        st.Type0Font.Set("BaseFont", bare);
+        st.CidFont.Set("BaseFont", bare);
+        if (st.CidFont.Get("FontDescriptor") is PdfDictionary descriptor) descriptor.Set("FontName", bare);
+    }
+
+    /// <summary>The source program of a font this session embedded, found by its font-file stream, so more
+    /// text can be drawn through the same font; null for a font read from a file.</summary>
+    internal static byte[]? SourceProgramOf(PdfStream fontFile) =>
+        _byFontFile.TryGetValue(fontFile, out var st) ? st.Ttf : null;
+
+    /// <summary>True when <paramref name="ttfData"/> is already embedded in <paramref name="fontDict"/>.</summary>
+    internal static bool IsEmbedded(PdfDictionary fontDict, byte[] ttfData) =>
+        _cache.TryGetValue(fontDict, out var pageFonts) && pageFonts.ByTtf.ContainsKey(ttfData);
 
     /// <summary>
     /// Measure <paramref name="text"/> at <paramref name="fontSize"/> using the same
@@ -210,14 +348,10 @@ internal static class Type0FontEmbedder
     /// side rounds: see PdfWidth for why the fraction is worth carrying.
     /// </summary>
     public static double MeasureText(PdfDictionary fontDict, byte[] ttfData, string fontName,
-        string text, double fontSize, bool stripSpacesInBaseFont = false, string? resNameHint = null)
+        string text, double fontSize, bool stripSpacesInBaseFont = false, string? resNameHint = null,
+        object? document = null)
     {
-        var pageFonts = _cache.GetValue(fontDict, static _ => new PageFonts());
-        if (!pageFonts.ByTtf.TryGetValue(ttfData, out var st))
-        {
-            st = BuildFont(fontDict, ttfData, fontName, stripSpacesInBaseFont, resNameHint);
-            pageFonts.ByTtf[ttfData] = st;
-        }
+        var st = Seat(fontDict, ttfData, fontName, stripSpacesInBaseFont, resNameHint, document).St;
         double total = 0;
         // Measure what will actually be WRITTEN: a shaped run is a different glyph
         // sequence (a conjunct is one glyph where the text had three), so measuring the
@@ -233,7 +367,8 @@ internal static class Type0FontEmbedder
             return total * fontSize / 1000.0;
         }
         // Same codepoint walk as Embed: a surrogate pair is ONE glyph.
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
             int cp = text[i];
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
@@ -243,23 +378,15 @@ internal static class Type0FontEmbedder
             }
             var gid = st.Parser.GlyphIdOrLookAlike(cp);
             total += WholeUnitAdvances.PerMille(st.Parser.GetAdvanceWidth(gid), st.Upm, st.WholeUnits);
+            i++;
         }
         return total * fontSize / 1000.0;
     }
 
-    // Build the Type0 font structure once (descriptor + FontFile2 + CIDFont + Type0), register
-    // it under a free F-name, and return the mutable state used to grow /W + /ToUnicode later.
-    private static FontState BuildFont(PdfDictionary fontDict, byte[] ttfData, string fontName,
-        bool stripSpacesInBaseFont, string? resNameHint = null)
+    // Build the Type0 font structure once (descriptor + FontFile2 + CIDFont + Type0) and return
+    // the mutable state used to grow /W + /ToUnicode later.
+    private static FontState BuildFont(byte[] ttfData, string fontName, bool stripSpacesInBaseFont)
     {
-        // A caller with its own naming convention (the SVG converter's C0_0/C1_0 …)
-        // gets its name when it is still free; everything else keeps F1, F2, ….
-        var name = resNameHint is { Length: > 0 } && !fontDict.ContainsKey(resNameHint)
-            ? resNameHint : "F1";
-        var counter = 1;
-        while (fontDict.ContainsKey(name))
-            name = $"F{++counter}";
-
         var nameForBaseFont = stripSpacesInBaseFont ? fontName.Replace(" ", "") : fontName;
         var baseFontName = $"{GenerateSubsetTag()}+{nameForBaseFont}";
 
@@ -276,7 +403,7 @@ internal static class Type0FontEmbedder
             if (hheaParser.Ascent != 0) ascent = (int)(hheaParser.Ascent * hheaScale);
             if (hheaParser.Descent != 0) descent = (int)(hheaParser.Descent * hheaScale);
         }
-        catch { }
+        catch { /* a font program that does not parse leaves the fallback metrics in place */ }
 
         var descriptorDict = new PdfDictionary();
         descriptorDict.Set("Type", new PdfName("FontDescriptor"));
@@ -334,10 +461,8 @@ internal static class Type0FontEmbedder
         descendantFonts.Add(cidFont);
         type0Font.Set("DescendantFonts", descendantFonts);
 
-        fontDict.Set(name, type0Font);
         var state = new FontState
         {
-            ResName = name,
             Parser = glyphParser,
             Upm = glyphParser.UnitsPerEm > 0 ? glyphParser.UnitsPerEm : 1000,
             CidFont = cidFont,
@@ -347,8 +472,15 @@ internal static class Type0FontEmbedder
             WholeUnits = WholeUnitAdvances.Holds(ttfData),
         };
         lock (_liveFonts) _liveFonts.Add(new WeakReference<FontState>(state));
+        // The state lives as long as the program's stream, which the document holds until the
+        // save writes it. Held only through the page's font dictionary it could be collected
+        // before the save - a converter that assembles fonts in a working dictionary drops that
+        // one - and the program then shipped whole, or not, as the collector happened to run.
+        _byFontFile.Add(fontFileStream, state);
         return state;
     }
+
+    private static readonly ConditionalWeakTable<PdfStream, FontState> _byFontFile = new();
 
     // Rebuild /W (per-glyph advances) and /ToUnicode from the accumulated glyph set. Cheap
     // relative to the one-time font-program embed; only runs when a call introduced new glyphs.
@@ -367,9 +499,12 @@ internal static class Type0FontEmbedder
             {
                 if (!_liveFonts[i].TryGetTarget(out var st)) { _liveFonts.RemoveAt(i); continue; }
                 if (!ReferenceEquals(st.Ttf, ttfData)) continue;
-                var added = false;
-                foreach (var g in glyphs) if (st.ShapedGlyphs.Add(g)) added = true;
-                if (added) { RefreshWidthsAndToUnicode(st); st.SubsetDirty = true; }
+                lock (st)
+                {
+                    var added = false;
+                    foreach (var g in glyphs.Where(g => st.ShapedGlyphs.Add(g))) added = true;
+                    if (added) Grew(st);
+                }
             }
         }
     }
@@ -424,7 +559,9 @@ internal static class Type0FontEmbedder
     /// face that is drawn at 1000.
     /// </summary>
     private static PdfObject PdfWidth(double width) =>
+#pragma warning disable S1244 // integrality test - exact by definition
         width == Math.Floor(width)
+#pragma warning restore S1244
             ? new PdfInteger((int)width)
             : new PdfReal(width);
 
@@ -445,6 +582,7 @@ internal static class Type0FontEmbedder
         // advances — no character maps to them, so UsedGlyphs never sees them.
         foreach (var gid in st.ShapedGlyphs) AddWidth(gid);
         if (wArray.Count > 0) st.CidFont.Set("W", wArray);
+        FontMetrics.Forget(st.Type0Font);
 
         var toUnicode = BuildToUnicodeCMap(st.UsedGlyphs, st.GlyphText);
         st.Type0Font.Set("ToUnicode", new PdfStream(new PdfDictionary(),
@@ -510,9 +648,11 @@ internal static class Type0FontEmbedder
         return sb.ToString();
     }
 
-    private static string GenerateSubsetTag()
+    internal static string GenerateSubsetTag()
     {
+#pragma warning disable S2245 // a font subset tag (ISO 32000-1 9.6.4) needs uniqueness, not unpredictability
         var random = new Random();
+#pragma warning restore S2245
         var chars = new char[6];
         for (int i = 0; i < 6; i++)
             chars[i] = (char)('A' + random.Next(26));

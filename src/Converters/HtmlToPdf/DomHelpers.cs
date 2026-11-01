@@ -11,13 +11,17 @@ internal static partial class HtmlToPdfConverter
     /// that face at their UA size inside the same flow (probed: h1 ArialBold 24, h2 CourierNewBold
     /// 18, a ArialBlack 12), so such a rule does not take the document off the UA flow.</summary>
     private static bool IsRunScopedFamilySelector(string selector)
-        => Regex.IsMatch(selector.Trim().TrimStart('<', '!', '-', ' '),
+        => SafeRegex.IsMatch(selector.Trim().TrimStart('<', '!', '-', ' '),
             @"^(?:h[1-6]|a|span|b|i|em|strong|small|big|u|s|label|font|sup|sub|code|tt)(?:\s*,\s*(?:h[1-6]|a|span|b|i|em|strong|small|big|u|s|label|font|sup|sub|code|tt))*$",
             RegexOptions.IgnoreCase);
 
+    /// <summary>A selector addressing horizontal rules only (hr, with any class, id, attribute or pseudo-class suffix).</summary>
+    private static bool IsRuleSelector(string selector)
+        => SafeRegex.IsMatch(selector.Trim(), @"^hr(?:\[[^\]]*\]|[.#][\w-]+|:[\w-]+)*(?:\s*,\s*hr(?:\[[^\]]*\]|[.#][\w-]+|:[\w-]+)*)*$", RegexOptions.IgnoreCase);
+
     /// <summary>A selector addressing a form control only (input, textarea, select, button).</summary>
     private static bool IsControlSelector(string selector)
-        => Regex.IsMatch(selector.Trim(), @"^(?:input|textarea|select|button)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+)*(?:\s*,\s*(?:input|textarea|select|button)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+)*)*$", RegexOptions.IgnoreCase);
+        => SafeRegex.IsMatch(selector.Trim(), @"^(?:input|textarea|select|button)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+)*(?:\s*,\s*(?:input|textarea|select|button)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+)*)*$", RegexOptions.IgnoreCase);
 
     private static bool IsInlineBlockColumnRule(Dictionary<string, string> rule)
         => rule.TryGetValue("display", out var d)
@@ -27,7 +31,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A CSS percent value as a fraction (0 when the value is not a percent).</summary>
     private static double PercentFraction(string value)
     {
-        var m = Regex.Match(value, @"^\s*([\d.]+)\s*%\s*$");
+        var m = SafeRegex.Match(value, @"^\s*([\d.]+)\s*%\s*$");
         return m.Success && double.TryParse(m.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var pct) && pct > 0
@@ -66,7 +70,8 @@ internal static partial class HtmlToPdfConverter
     /// <summary>True when the token holds any full-width codepoint, surrogate pairs included.</summary>
     private static bool HasFullWidthCp(string word)
     {
-        for (var i = 0; i < word.Length; i++)
+        var i = 0;
+        while (i < word.Length)
         {
             int cp = word[i];
             if (char.IsHighSurrogate(word[i]) && i + 1 < word.Length && char.IsLowSurrogate(word[i + 1]))
@@ -75,6 +80,7 @@ internal static partial class HtmlToPdfConverter
                 i++;
             }
             if (IsFullWidthCp(cp)) return true;
+            i++;
         }
         return false;
     }
@@ -93,20 +99,22 @@ internal static partial class HtmlToPdfConverter
     {
         if (face.parser is null || !Text.ArabicTextShaper.ContainsArabic(s)) return s;
         var shaped = Text.ArabicTextShaper.Shape(s);
-        foreach (var ch in shaped)
-            if (ch is >= '\uFB50' and <= '\uFEFF' && !face.parser.CMap.ContainsKey(ch))
-                return s;
+        if (shaped.Any(ch => ch is >= '\uFB50' and <= '\uFEFF' && !face.parser.CMap.ContainsKey(ch)))
+            return s;
         return shaped;
     }
 
     /// <summary>The dash-delimited unbreakable segments of a text: pieces bounded by
     /// spaces and by after-dash positions (a segment keeps its trailing dash). The
-    /// widest of these is a line's min-content — the quirks CSS-run wrap limit.</summary>
-    private static IEnumerable<string> DashSegments(string text)
+    /// widest of these is a line's min-content — the quirks CSS-run wrap limit. With
+    /// <paramref name="ideographBreaks"/> every full-width (CJK) character is a segment of its own.</summary>
+    private static IEnumerable<string> DashSegments(string text, bool ideographBreaks = false)
     {
         var start = 0;
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
+            var unit = 1;
             // (a zero-width space is a break opportunity that draws nothing - measured on the case
             // report: `zzzzz&#8203;zzzzz` chains wrap at the joins and their column shrinks to a chunk)
             if (text[i] is ' ' or '\u200B')
@@ -121,8 +129,26 @@ internal static partial class HtmlToPdfConverter
                 yield return text[start..(i + 1)];
                 start = i + 1;
             }
+            // (an ideograph is a break opportunity on both sides: a spaceless CJK paragraph is a run of
+            // one-character segments, never one segment as wide as the whole paragraph)
+            else if (ideographBreaks && FullWidthUnitLength(text, i) is > 0 and var len)
+            {
+                if (i > start) yield return text[start..i];
+                yield return text.Substring(i, len);
+                unit = len;
+                start = i + len;
+            }
+            i += unit;
         }
         if (start < text.Length) yield return text[start..];
+    }
+
+    /// <summary>The UTF-16 length of the full-width (CJK) character at <paramref name="i"/>: 2 for one
+    /// outside the basic plane, 1 inside it, 0 when the character there is not full-width.</summary>
+    private static int FullWidthUnitLength(string text, int i)
+    {
+        if (!char.IsSurrogatePair(text, i)) return IsFullWidthCp(text[i]) ? 1 : 0;
+        return IsFullWidthCp(char.ConvertToUtf32(text, i)) ? 2 : 0;
     }
 
     /// <summary>Greedy word wrap with REAL font advances (the metric flow's wrap — the
@@ -148,8 +174,8 @@ internal static partial class HtmlToPdfConverter
             _ => 0,
         };
         if (pt > 0) return pt;
-        if (System.Text.RegularExpressions.Regex.IsMatch(v.Trim(), @"^0+(?:\.0+)?\s*(?:px|pt|em|rem|in|cm|mm)?$")) return 0;
-        return (TryParseLength(v) is { } len && (pt = len) > 0) ? pt : null;
+        if (SafeRegex.IsMatch(v.Trim(), @"^0+(?:\.0+)?\s*(?:px|pt|em|rem|in|cm|mm)?$")) return 0;
+        return TryParseLength(v) is { } len && len > 0 ? len : null;
     }
 
     /// <summary>Parse a legacy font size attribute ("2", "+1", "-1") to points.
@@ -175,12 +201,12 @@ internal static partial class HtmlToPdfConverter
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var sb = new StringBuilder();
         foreach (var block in new[] { first, second })
-            foreach (Match d in StyleDeclRx.Matches(block))
+            foreach (var groups in SafeRegex.Matches(StyleDeclRx, block).Select(d => d.Groups))
             {
-                var prop = d.Groups[1].Value.Trim();
+                var prop = groups[1].Value.Trim();
                 if (!seen.Add(prop)) continue;
                 if (sb.Length > 0) sb.Append(';');
-                sb.Append(prop).Append(':').Append(d.Groups[2].Value.Trim());
+                sb.Append(prop).Append(':').Append(groups[2].Value.Trim());
             }
         return sb.Length > 0 ? sb.ToString() : first;
     }
@@ -191,17 +217,21 @@ internal static partial class HtmlToPdfConverter
         // full HTML named-entity table. &nbsp; becomes a real no-break space (U+00A0) so
         // Trim() leaves it in place; an &nbsp;-only paragraph is a deliberate vertical
         // spacer in many CMS-generated HTMLs and should occupy a line.
-        text = Regex.Replace(text, @"&#(\d+);", m =>
+        text = SafeRegex.Replace(text, @"&#(\d+);", m =>
             int.TryParse(m.Groups[1].Value, out var code) ? char.ConvertFromUtf32(Cp1252Ref(code)) : m.Value);
-        text = Regex.Replace(text, @"&#x([0-9A-Fa-f]+);", m =>
+        text = SafeRegex.Replace(text, @"&#x([0-9A-Fa-f]+);", m =>
             int.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.HexNumber, null, out var code)
                 ? char.ConvertFromUtf32(Cp1252Ref(code)) : m.Value);
         // A numeric reference missing its semicolon still decodes (the WHATWG
         // parse-error recovery): form generators emit "&#8202<div".
-        text = Regex.Replace(text, @"&#(\d+)(?![\d;])", m =>
+        text = SafeRegex.Replace(text, @"&#(\d+)(?![\d;])", m =>
             int.TryParse(m.Groups[1].Value, out var code) ? char.ConvertFromUtf32(Cp1252Ref(code)) : m.Value);
+        // A legacy named reference decodes without its semicolon (the parser's rule for text). An
+        // alphanumeric right after it is left alone for the names a URL query can start a parameter
+        // with (`&region=`), while `&nbsp` begins no other name and no query: `Type:&nbspEmail`
+        // is a no-break space and the word.
         if (text.Contains('&'))
-            text = Regex.Replace(text, @"&(nbsp|amp|lt|gt|quot|copy|reg)(?![;A-Za-z0-9])", "&$1;", RegexOptions.IgnoreCase);
+            text = SafeRegex.Replace(text, @"&(nbsp(?!;)|(?:amp|lt|gt|quot|copy|reg)(?![;A-Za-z0-9]))", "&$1;", RegexOptions.IgnoreCase);
         return text.Contains('&') ? System.Net.WebUtility.HtmlDecode(text) : text;
     }
 
@@ -296,14 +326,16 @@ internal static partial class HtmlToPdfConverter
         double Len(string v)
         {
             v = v.Trim();
-            var em = Regex.Match(v, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*em$", RegexOptions.IgnoreCase);
+            var em = SafeRegex.Match(v, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*em$", RegexOptions.IgnoreCase);
             if (em.Success)
                 return double.Parse(em.Groups[1].Value,
                     System.Globalization.CultureInfo.InvariantCulture) * emPt;
-            return v == "0" ? 0 : TryParseLength(v) is { } pt ? pt : 0;
+            if (v == "0") return 0;
+            if (TryParseLength(v) is { } pt) return pt;
+            return 0;
         }
         double top = 0, right = 0, bottom = 0, left = 0;
-        var sh = Regex.Match(decl, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var sh = SafeRegex.Match(decl, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (sh.Success)
         {
             var parts = sh.Groups[1].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
@@ -326,7 +358,7 @@ internal static partial class HtmlToPdfConverter
                      ("margin-bottom", x => bottom = x), ("margin-left", x => left = x),
                  })
         {
-            var m = Regex.Match(decl, @"(?<![-\w])" + name + @"\s*:\s*([^;]+)",
+            var m = SafeRegex.Match(decl, @"(?<![-\w])" + name + @"\s*:\s*([^;]+)",
                 RegexOptions.IgnoreCase);
             if (m.Success) set(Len(m.Groups[1].Value));
         }
@@ -394,10 +426,8 @@ internal static partial class HtmlToPdfConverter
             var parts = sh.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             switch (parts.Length)
             {
-                case 1: top = bottom = ParsePxValue(parts[0]); break;
-                case 2: top = bottom = ParsePxValue(parts[0]); break;
-                case 3: top = ParsePxValue(parts[0]); bottom = ParsePxValue(parts[2]); break;
-                case 4: top = ParsePxValue(parts[0]); bottom = ParsePxValue(parts[2]); break;
+                case 1 or 2: top = bottom = ParsePxValue(parts[0]); break;
+                case 3 or 4: top = ParsePxValue(parts[0]); bottom = ParsePxValue(parts[2]); break;
             }
         }
         var t2 = DomDecl(el, box + "-top", css);
@@ -415,7 +445,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (string.IsNullOrEmpty(familyStack)) return null;
         var fam = familyStack.Split(',')[0].Trim().Trim('"', '\'').Trim();
-        fam = Regex.Replace(fam, @"^[A-Z]{6}\+", "");
+        fam = SafeRegex.Replace(fam, @"^[A-Z]{6}\+", "");
         return fam.Length > 0 && PosFace(fam).parser is not null ? fam : null;
     }
 
@@ -491,11 +521,17 @@ internal static partial class HtmlToPdfConverter
 
     private const double ThaiToneNudgeEm = 1.64 / 11.0;
 
+    /// <summary>The widest piece of a text no line can break: a space-delimited word, or one
+    /// CJK segment of a word that holds CJK text.</summary>
     private static double MaxSpaceWordWidth(string text, string face, double sizePt)
     {
         double mx = 0;
         foreach (var w in text.Split(' '))
-            mx = Math.Max(mx, MeasureFaceText(face, w, sizePt));
+        {
+            if (!HasIdeograph(w)) { mx = Math.Max(mx, MeasureFaceText(face, w, sizePt)); continue; }
+            foreach (var piece in IdeographSegments(w))
+                mx = Math.Max(mx, MeasureFaceText(face, piece, sizePt));
+        }
         return mx;
     }
 
@@ -522,7 +558,7 @@ internal static partial class HtmlToPdfConverter
     {
         v = v.Trim();
         var c = ParseCssColor(v);
-        if (c is null && Regex.IsMatch(v, @"^[0-9a-fA-F]{6}$")) c = ParseCssColor("#" + v);
+        if (c is null && SafeRegex.IsMatch(v, @"^[0-9a-fA-F]{6}$")) c = ParseCssColor("#" + v);
         return c;
     }
 
@@ -537,10 +573,10 @@ internal static partial class HtmlToPdfConverter
         // their shared row band (measured on the complaint report: 51.0 against 45.0).
         var s = MetricNestedSpacingPt(inner);
         var h = s;
-        foreach (Match rm in Regex.Matches(inner, @"<tr\b[^>]*>([\s\S]*?)(?=<tr\b|</table|$)", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(inner, @"<tr\b[^>]*>([\s\S]*?)(?=<tr\b|</table|$)", RegexOptions.IgnoreCase).Select(rm => rm.Groups))
         {
-            var rowText = DecodeEntities(Regex.Replace(rm.Groups[1].Value, "<[^>]+>", " ")).Trim();
-            h += (rowText.Length > 0 || Regex.IsMatch(rm.Groups[1].Value, @"<table\b|<img\b", RegexOptions.IgnoreCase)
+            var rowText = DecodeEntities(SafeRegex.Replace(groups[1].Value, "<[^>]+>", " ")).Trim();
+            h += (rowText.Length > 0 || SafeRegex.IsMatch(groups[1].Value, @"<table\b|<img\b", RegexOptions.IgnoreCase)
                 ? rowPitch : bareRowPitch) + s;
         }
         foreach (var sub in subs) h += EstimateNestedTableHeight(sub, rowPitch, bareRowPitch);
@@ -551,9 +587,9 @@ internal static partial class HtmlToPdfConverter
     /// it states one - zero included - and the UA's 2 px otherwise.</summary>
     private static double MetricNestedSpacingPt(string html)
     {
-        var tag = Regex.Match(html, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(html, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
         if (!tag.Success) return MetricDefaultSpacingPt;
-        var cs = Regex.Match(tag.Value, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+        var cs = SafeRegex.Match(tag.Value, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
         return cs.Success && PresentationalLengthPt(cs.Groups[1].Value) is { } csv
             ? csv : MetricDefaultSpacingPt;
     }
@@ -573,7 +609,7 @@ internal static partial class HtmlToPdfConverter
     {
         // the nearest unclosed <table> before this one is its host
         var depth = 0;
-        foreach (Match m in Regex.Matches(html[..tableIndex], @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.RightToLeft))
+        foreach (Match m in SafeRegex.Matches(html[..tableIndex], @"<(/?)table\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.RightToLeft))
         {
             if (m.Groups[1].Value.Length > 0) { depth++; continue; }
             if (depth > 0) { depth--; continue; }
@@ -599,7 +635,7 @@ internal static partial class HtmlToPdfConverter
     private static (double Lead, double Gap, double Trail) TableInkChromePt(string tableHtml, IReadOnlyDictionary<string, Dictionary<string, string>>? css = null)
     {
         var (s, p) = TableSpacingAndPaddingPt(tableHtml);
-        var tag = Regex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
         double frame = 0, rule = 0;
         // A sheet that COLLAPSES the grid and rules its cells (`table { border-collapse: collapse }
         // table td { border: 1px solid; padding: 0 }`): every column boundary is one shared rule,
@@ -611,17 +647,19 @@ internal static partial class HtmlToPdfConverter
                 || tdRule.TryGetValue("border-collapse", out var cbc) && cbc.Contains("collapse", StringComparison.OrdinalIgnoreCase))
             && tdRule.TryGetValue("border", out var tdBorder) && CssBorderShorthand(tdBorder.Trim()) is { } tdSide && tdSide.W > 0)
         {
-            var cp = tdRule.TryGetValue("padding", out var tdPad) && TryParseLength(tdPad.Trim().Split(' ')[0]) is { } tdPadPt ? tdPadPt
-                : IsZeroLength(tdPad ?? "") ? 0.0 : p;
+            double cp;
+            if (tdRule.TryGetValue("padding", out var tdPad) && TryParseLength(tdPad.Trim().Split(' ')[0]) is { } tdPadPt) cp = tdPadPt;
+            else if (IsZeroLength(tdPad ?? "")) cp = 0.0;
+            else cp = p;
             return (tdSide.W + cp, 2 * cp + tdSide.W, tdSide.W + cp);
         }
         if (tag.Success)
         {
-            var ba = Regex.Match(tag.Value, @"\bborder\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+            var ba = SafeRegex.Match(tag.Value, @"\bborder\s*=\s*[""']?(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
             if (ba.Success && double.TryParse(ba.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var bpx) && bpx > 0)
             { frame = bpx * PxPt; rule = PxPt; }
-            var st = Regex.Match(tag.Value, @"\bstyle\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
+            var st = SafeRegex.Match(tag.Value, @"\bstyle\s*=\s*[""']([^""']*)[""']", RegexOptions.IgnoreCase);
             if (st.Success && TableStyleFrameWidthPt(st.Groups[1].Value) is { } fw) frame = fw;
         }
         return (frame + s + rule + p, 2 * p + 2 * rule + s, frame > 0 ? p + rule + s + frame : 0);
@@ -631,11 +669,11 @@ internal static partial class HtmlToPdfConverter
     /// border-width (thin / medium / thick or a length) under a border-style that is not none.</summary>
     private static double? TableStyleFrameWidthPt(string style)
     {
-        var sh = Regex.Match(style, @"(?<![-\w])border\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var sh = SafeRegex.Match(style, @"(?<![-\w])border\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (sh.Success && CssBorderShorthand(sh.Groups[1].Value.Trim()) is { } side) return side.W;
-        var bs = Regex.Match(style, @"(?<![-\w])border-style\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
-        if (!bs.Success || Regex.IsMatch(bs.Groups[1].Value, @"^\s*(none|hidden)\b", RegexOptions.IgnoreCase)) return null;
-        var bw = Regex.Match(style, @"(?<![-\w])border-width\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var bs = SafeRegex.Match(style, @"(?<![-\w])border-style\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        if (!bs.Success || SafeRegex.IsMatch(bs.Groups[1].Value, @"^\s*(none|hidden)\b", RegexOptions.IgnoreCase)) return null;
+        var bw = SafeRegex.Match(style, @"(?<![-\w])border-width\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         return bw.Success ? CssBorderWidthOf(bw.Groups[1].Value.Trim().Split(' ')[0]) : CssBorderMediumPt;
     }
 
@@ -643,12 +681,12 @@ internal static partial class HtmlToPdfConverter
     /// the tag states none.</summary>
     private static (double Spacing, double Padding) TableSpacingAndPaddingPt(string tableHtml)
     {
-        var tag = Regex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
         double s = MetricDefaultSpacingPt, p = MetricDefaultPaddingPt;
         if (!tag.Success) return (s, p);
-        var cs = Regex.Match(tag.Value, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+        var cs = SafeRegex.Match(tag.Value, @"cellspacing\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
         if (cs.Success && PresentationalLengthPt(cs.Groups[1].Value) is { } csv) s = csv;
-        var cp = Regex.Match(tag.Value, @"cellpadding\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+        var cp = SafeRegex.Match(tag.Value, @"cellpadding\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
         if (cp.Success && PresentationalLengthPt(cp.Groups[1].Value) is { } cpv) p = cpv;
         return (s, p);
     }

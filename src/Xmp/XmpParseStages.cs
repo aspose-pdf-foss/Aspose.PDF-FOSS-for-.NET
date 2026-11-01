@@ -15,7 +15,7 @@ public sealed partial class XmpMetadata
         if (!body.Contains("pdfaSchema:prefix")) return;
         string Field(string name)
         {
-            var m = System.Text.RegularExpressions.Regex.Match(
+            var m = SafeRegex.Match(
                 body, $"<pdfaSchema:{name}>(.*?)</pdfaSchema:{name}>",
                 System.Text.RegularExpressions.RegexOptions.Singleline);
             return m.Success ? m.Groups[1].Value.Trim() : string.Empty;
@@ -35,7 +35,7 @@ public sealed partial class XmpMetadata
 
         if (_properties.ContainsKey(key)) return;
 
-        var items = ListItemPattern().Matches(innerXml);
+        var items = SafeRegex.Matches(ListItemPattern(), innerXml);
         if (items.Count > 0)
         {
             var values = items.Cast<Match>().Select(li => li.Groups[1].Value.Trim())

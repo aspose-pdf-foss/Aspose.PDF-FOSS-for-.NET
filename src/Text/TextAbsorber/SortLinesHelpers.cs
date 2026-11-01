@@ -8,7 +8,7 @@ namespace Aspose.Pdf.Text;
 public sealed partial class TextAbsorber
 {
 // The line sort's row-tolerance and blank-row helpers.
-    private bool EdgeAdjacent(SortLinesState sl, int blankIdx, int textIdx) =>
+    private static bool EdgeAdjacent(SortLinesState sl, int blankIdx, int textIdx) =>
         !double.IsNaN(sl.lineEdgeX[blankIdx]) && !double.IsNaN(sl.lineEdgeX[textIdx])
         && Math.Abs(sl.lineEdgeX[blankIdx] - sl.lineEdgeX[textIdx]) <= sl.adjacencyTol;
 
@@ -21,11 +21,13 @@ public sealed partial class TextAbsorber
     // (RotatedRowY), so the per-line effective sizes scale it just as they
     // do upright. Only a MINORITY rotated line on an upright page keeps its
     // raw anchor - its box points up from there, never down a descender.
-    private double DescLineY(SortLinesState sl, double y, int idx) =>
-        double.IsNaN(y) || sl.pageRot[idx] ? y
-        : y - sl.pageDesc[idx] * (double.IsNaN(sl.pageFs[idx]) || sl.pageFs[idx] <= 0 ? 10.0 : sl.pageFs[idx]);
+    private static double DescLineY(SortLinesState sl, double y, int idx)
+    {
+        if (double.IsNaN(y) || sl.pageRot[idx]) return y;
+        return y - sl.pageDesc[idx] * (double.IsNaN(sl.pageFs[idx]) || sl.pageFs[idx] <= 0 ? 10.0 : sl.pageFs[idx]);
+    }
 
-    private int BlankRowsFor(SortLinesState sl, double prevY, double curY, double curFs = double.NaN)
+    private static int BlankRowsFor(SortLinesState sl, double prevY, double curY, double curFs = double.NaN)
     {
         if (sl.blankFs <= 0 || double.IsNaN(prevY) || double.IsNaN(curY)) return 0;
         // The line-height that gates a blank is the ARRIVING line's own
@@ -35,7 +37,9 @@ public sealed partial class TextAbsorber
         // sizes and their row coordinates device positions.
         var f = !double.IsNaN(curFs) && curFs > 0 ? curFs : sl.blankFs;
         var gap = prevY - curY;
-        var r = gap <= 2 * f ? 0 : gap > 4 * f ? 2 : 1;
+        int r = 1;
+        if (gap <= 2 * f) r = 0;
+        else if (gap > 4 * f) r = 2;
         if (GridDebug && r > 0)
             Console.Error.WriteLine($"[blank] prevY={prevY:F2} curY={curY:F2} f={f:F2} curFs={curFs:F2} -> {r}");
         return r;
@@ -75,10 +79,13 @@ public sealed partial class TextAbsorber
             // pairs — implementing the line-box model is the remaining work.
             return 0.5 * hi;
         }
-        var fs = double.IsNaN(fsA) ? fsB : double.IsNaN(fsB) ? fsA : Math.Max(fsA, fsB);
+        double fs;
+        if (double.IsNaN(fsA)) fs = fsB;
+        else if (double.IsNaN(fsB)) fs = fsA;
+        else fs = Math.Max(fsA, fsB);
         return SameRowTol(sl, y, fs);
     }
 
     /// <summary>The x a line anchors at: its recorded x, else where its text starts.</summary>
-    private double AnchorX(SortLinesState sl, int idx2) => double.IsNaN(sl.pageXs[idx2]) ? sl.lineStartXs[idx2] : sl.pageXs[idx2];
+    private static double AnchorX(SortLinesState sl, int idx2) => double.IsNaN(sl.pageXs[idx2]) ? sl.lineStartXs[idx2] : sl.pageXs[idx2];
 }

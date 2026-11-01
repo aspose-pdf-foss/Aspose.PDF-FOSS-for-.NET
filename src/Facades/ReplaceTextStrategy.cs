@@ -54,10 +54,12 @@ public sealed class ReplaceTextStrategy
     /// <summary>How many matches to replace; default <see cref="Scope.ReplaceFirst"/>.</summary>
     public Scope ReplaceScope
     {
-        get => Owner is null
-            ? _scope
-            : (Owner.TextReplaceOptions.ReplaceScope == Aspose.Pdf.Text.TextReplaceOptions.Scope.REPLACE_ALL
-                ? Scope.ReplaceAll : Scope.ReplaceFirst);
+        get
+        {
+            if (Owner is null) return _scope;
+            return Owner.TextReplaceOptions.ReplaceScope == Aspose.Pdf.Text.TextReplaceOptions.Scope.REPLACE_ALL
+                ? Scope.ReplaceAll : Scope.ReplaceFirst;
+        }
         set
         {
             if (Owner is null) _scope = value;

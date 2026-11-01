@@ -12,7 +12,7 @@ internal static partial class MarkdownToPdfConverter
 /// invocation; never shared.</summary>
 private sealed class MarkdownBlocksState
 {
-    public List<Aspose.Pdf.Converters.MarkdownToPdfConverter.Blk> blocks = null!;
+    public List<Aspose.Pdf.Converters.MarkdownToPdfConverter.IBlk> blocks = null!;
     public int i;
     // An `<p align="center">` opener and its content can sit in separate HTML
     // chunks (a blank line between them); the alignment carries until its `</p>`.

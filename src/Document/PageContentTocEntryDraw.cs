@@ -143,14 +143,14 @@ public sealed partial class Document
                 // An entry's footprint carries its level format's top AND
                 // bottom margins — the fit rule below requires the bottom
                 // margin to clear the page margin too.
-                var gH = (double)(te.fmt?.Margin?.Top ?? gh.Margin?.Top ?? 0)
+                var gH = (te.fmt?.Margin?.Top ?? gh.Margin?.Top ?? 0)
                     + System.Math.Max(1, gLines) * te.lineH
-                    + (double)(te.fmt?.Margin?.Bottom ?? gh.Margin?.Bottom ?? 0);
+                    + (te.fmt?.Margin?.Bottom ?? gh.Margin?.Bottom ?? 0);
                 groupH += gH;
                 grpCount++;
                 if (grpCount <= 2) firstTwoH += gH;
             }
-            var tocPageCapacity = pl.page.Height - pl.marginTop - pl.marginBottom;
+            var tocPageCapacity = pl.page.LayoutFrameHeight - pl.marginTop - pl.marginBottom;
             var tocRemaining = startY - pl.marginBottom;
             if (grpCount >= 2 && groupH <= tocPageCapacity + 0.5
                 && firstTwoH > tocRemaining + 0.5)
@@ -173,7 +173,7 @@ public sealed partial class Document
                 // anchors at the page's top margin cursor, first entry
                 // one pitch below it (LLY = top − pitch, same rule as
                 // any other line).
-                pl.tocTopY = pl.page.Height - pl.marginTop;
+                pl.tocTopY = pl.page.LayoutFrameHeight - pl.marginTop;
                 te.entryY = pl.tocTopY.Value
                     - (te.fmt?.Margin?.Top ?? h.Margin?.Top ?? 0)
                     - te.lineH + te.descFrac * te.entrySize;
@@ -185,8 +185,8 @@ public sealed partial class Document
             }
             te.colLeft = pl.tocColLefts[pl.tocCol];
             te.colWidth = pl.tocColWidths[pl.tocCol];
-            te.indent = te.colLeft + (double)(te.fmt?.Margin?.Left ?? 0);
-            te.rightStop = te.colLeft + te.colWidth - (double)(te.fmt?.Margin?.Right ?? 0);
+            te.indent = te.colLeft + (te.fmt?.Margin?.Left ?? 0);
+            te.rightStop = te.colLeft + te.colWidth - (te.fmt?.Margin?.Right ?? 0);
             te.pageNumX = te.rightStop - te.pageNumWidth;
             te.wrapped = WrapEntryLines(te);
         }
@@ -225,7 +225,9 @@ public sealed partial class Document
         te.entryBody = te.headingText ?? string.Empty;
         te.entryAdvance = null;
         te.segFont0 = null;
+#pragma warning disable S1751 // takes the first segment
         foreach (Text.TextSegment hseg0 in h.Segments) { te.segFont0 = hseg0.TextState.Font; break; }
+#pragma warning restore S1751
         if (te.segFont0?.SourceFontData?.TtfData is { Length: > 0 } segTtf)
         {
             try
@@ -238,7 +240,8 @@ public sealed partial class Document
                     te.entryAdvance = s =>
                     {
                         double units = 0;
-                        for (var ci = 0; ci < s.Length; ci++)
+                        var ci = 0;
+                        while (ci < s.Length)
                         {
                             int cp = s[ci];
                             if (char.IsHighSurrogate(s[ci]) && ci + 1 < s.Length
@@ -247,6 +250,7 @@ public sealed partial class Document
                             units += segParser.CMap.TryGetValue(cp, out var gid) && gid > 0
                                 ? segParser.GetAdvanceWidth(gid)
                                 : upm / 2.0;
+                            ci++;
                         }
                         return units / upm * sizeForMeasure;
                     };
@@ -261,15 +265,15 @@ public sealed partial class Document
 
         te.colLeft = pl.tocColLefts[pl.tocCol];
         te.colWidth = pl.tocColWidths[pl.tocCol];
-        te.indent = te.colLeft + (double)(te.fmt?.Margin?.Left ?? 0);
-        te.rightStop = te.colLeft + te.colWidth - (double)(te.fmt?.Margin?.Right ?? 0);
+        te.indent = te.colLeft + (te.fmt?.Margin?.Left ?? 0);
+        te.rightStop = te.colLeft + te.colWidth - (te.fmt?.Margin?.Right ?? 0);
         te.pageNumX = te.rightStop - te.pageNumWidth;
 
         te.prefixWidth = MeasureEntry(te.prefix, te.entrySize, te.entryFace);
 
         te.wrapped = WrapEntryLines(te);
 
-        te.entryMarginBottom = (double)(te.fmt?.Margin?.Bottom ?? h.Margin?.Bottom ?? 0);
+        te.entryMarginBottom = (te.fmt?.Margin?.Bottom ?? h.Margin?.Bottom ?? 0);
         te.forceTocGroupBreak = false;
     }
 
@@ -285,24 +289,25 @@ public sealed partial class Document
         te.fmtState = te.fmt?.TextState;
         te.segSize = null;
         te.segSpacing = 0;
-        foreach (Text.TextSegment hs in h.Segments)
+        foreach (var textState in h.Segments.Select(hs => hs.TextState))
         {
-            if (te.segSize is null && hs.TextState.FontSizeTouched) te.segSize = hs.TextState.FontSize;
-            if (te.segSpacing == 0) te.segSpacing = hs.TextState.LineSpacing;
+            if (te.segSize is null && textState.FontSizeTouched) te.segSize = textState.FontSize;
+            if (te.segSpacing == 0) te.segSpacing = textState.LineSpacing;
             if (te.segSize is not null && te.segSpacing != 0) break;
         }
         te.entrySize = te.fmtState is { FontSizeTouched: true } fts
             ? (double)fts.FontSize
             : te.segSize ?? DefaultTocEntrySize;
-        te.entryFace = te.fmtState is null ? "Helvetica"
-            : EntryFace((te.fmtState.IsBold ? Text.FontStyles.Bold : 0)
+        if (te.fmtState is null) te.entryFace = "Helvetica";
+        else
+            te.entryFace = EntryFace((te.fmtState.IsBold ? Text.FontStyles.Bold : 0)
                 | (te.fmtState.IsItalic ? Text.FontStyles.Italic : 0));
         te.entryLeader = te.fmt?.LineDash
             ?? pl.page.TocInfo?.LineDash ?? Text.TabLeaderType.Dot;
         te.subIndent = (double)(te.fmt?.SubsequentLinesIndent ?? 0);
-        te.lineSpacing = te.fmtState is { } fmtTs && fmtTs.LineSpacing != 0
-            ? (double)fmtTs.LineSpacing
-            : te.segSpacing != 0 ? te.segSpacing : (double)h.TextState.LineSpacing;
+        if (te.fmtState is { } fmtTs && fmtTs.LineSpacing != 0) te.lineSpacing = (double)fmtTs.LineSpacing;
+        else if (te.segSpacing != 0) te.lineSpacing = te.segSpacing;
+        else te.lineSpacing = (double)h.TextState.LineSpacing;
         te.lineH = te.entrySize + te.lineSpacing;
         te.descFrac = -Text.Standard14Fonts.GetDescent("Helvetica") / 1000.0;
         // The level format's (or heading's) Margin.Top is leading reserved

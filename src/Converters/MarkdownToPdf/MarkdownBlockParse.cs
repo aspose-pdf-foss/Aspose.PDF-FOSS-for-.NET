@@ -28,7 +28,7 @@ internal static partial class MarkdownToPdfConverter
         }
 
         // Thematic break: 3+ of the same * - _ character, spaces allowed between.
-        if (Regex.IsMatch(mb.line, @"^\s*([-*_])(\s*\1){2,}\s*$"))
+        if (SafeRegex.IsMatch(mb.line, @"^\s*([-*_])(\s*\1){2,}\s*$"))
         {
             mb.blocks.Add(new HrBlk());
             mb.i++;
@@ -50,7 +50,7 @@ internal static partial class MarkdownToPdfConverter
             }
         }
 
-        mb.headingMatch = Regex.Match(mb.line, @"^(#{1,6})\s+(.+)$");
+        mb.headingMatch = SafeRegex.Match(mb.line, @"^(#{1,6})\s+(.+)$");
         if (mb.headingMatch.Success)
         {
             mb.blocks.Add(new HeadBlk(mb.headingMatch.Groups[1].Value.Length,
@@ -62,8 +62,8 @@ internal static partial class MarkdownToPdfConverter
         // Block quote.
         if (ParseMarkdownBlockQuote(mb)) return true;
 
-        mb.ulMatch = Regex.Match(mb.line, @"^(\s*)[*+\-]\s+(.+)$");
-        mb.olMatch = Regex.Match(mb.line, @"^(\s*)(\d+)[.)]\s+(.+)$");
+        mb.ulMatch = SafeRegex.Match(mb.line, @"^(\s*)[*+\-]\s+(.+)$");
+        mb.olMatch = SafeRegex.Match(mb.line, @"^(\s*)(\d+)[.)]\s+(.+)$");
         if (ParseMarkdownList(mb)) return true;
 
         // Indented code (4 spaces or a tab).

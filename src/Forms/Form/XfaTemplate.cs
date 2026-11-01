@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -152,6 +152,8 @@ public sealed partial class Form
         _xfaTemplateSource = null;
         _xfaTemplateXml = null;
         _xfaTemplateDoc = null;
+        // Pages laid out from the packets are behind once the template changes.
+        OwnerDocument?.XfaPacketsChanged();
         var reader = _reader ?? OwnerDocument?.Reader;
         if (reader is null) return;
         var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
@@ -195,7 +197,7 @@ public sealed partial class Form
         XmlNode current = doc.DocumentElement;
         foreach (var rawSeg in SplitSomPath(fieldName))
         {
-            var seg = System.Text.RegularExpressions.Regex.Replace(rawSeg, @"\[\d+\]$", "");
+            var seg = SafeRegex.Replace(rawSeg, @"\[\d+\]$", "");
             var next = FindNamedTemplateNode(current, seg);
             if (next is null) return false;
             current = next;
@@ -233,7 +235,7 @@ public sealed partial class Form
         XmlNode current = doc.DocumentElement;
         foreach (var rawSeg in SplitSomPath(fieldName))
         {
-            var seg = System.Text.RegularExpressions.Regex.Replace(rawSeg, @"\[\d+\]$", "");
+            var seg = SafeRegex.Replace(rawSeg, @"\[\d+\]$", "");
             var next = FindNamedTemplateNode(current, seg);
             if (next is null) return false;
             current = next;
@@ -283,15 +285,28 @@ public sealed partial class Form
     /// when the form's /XFA is a single-stream XDP (no named parts), the <c>&lt;template&gt;</c>
     /// element extracted from that XDP. <see cref="GetXfaTemplateXml"/> only handles the
     /// array form and returns null for a single-stream XDP.</summary>
-    internal string? GetXfaTemplateXmlResolved()
+    internal string? GetXfaTemplateXmlResolved() => GetXfaTemplateXml() ?? GetXfaSingleStreamTemplateXml();
+
+    // The template of a single-stream XDP, extracted once per stream content: the XDP is parsed
+    // whole to find it, and a form fill asks for it at every field.
+    private PdfStream? _xfaSingleSource;
+    private byte[]? _xfaSingleRaw;
+    private string? _xfaSingleTemplateXml;
+    private XmlDocument? _xfaSingleTemplateDoc;
+
+    private string? GetXfaSingleStreamTemplateXml()
     {
-        var direct = GetXfaTemplateXml();
-        if (direct is not null) return direct;
         var reader = _reader ?? OwnerDocument?.Reader;
         if (reader is null) return null;
         var acroForm = reader.ResolveDict(reader.Catalog.Get("AcroForm"));
         if (acroForm is null) return null;
         if (reader.Resolve(acroForm.Get("XFA")) is not PdfStream single) return null;
+        if (ReferenceEquals(single, _xfaSingleSource) && ReferenceEquals(single.RawData, _xfaSingleRaw))
+            return _xfaSingleTemplateXml;
+        _xfaSingleSource = single;
+        _xfaSingleRaw = single.RawData;
+        _xfaSingleTemplateDoc = null;
+        _xfaSingleTemplateXml = null;
         try
         {
             var xdp = StripBom(Encoding.UTF8.GetString(reader.DecodeStream(single)));
@@ -301,9 +316,25 @@ public sealed partial class Form
             // <common><template><base>. element (a different, xci namespace).
             var t = d.DocumentElement?.SelectSingleNode(
                 "//*[local-name()='template' and contains(namespace-uri(),'xfa-template')]");
-            return (t as XmlElement)?.OuterXml;
+            _xfaSingleTemplateXml = (t as XmlElement)?.OuterXml;
         }
-        catch { return null; }
+        catch { /* an XDP that does not parse has no template */ }
+        return _xfaSingleTemplateXml;
+    }
+
+    /// <summary>The resolved template parsed once, for the walks that only read it.</summary>
+    private XmlDocument? GetXfaTemplateDocumentResolved()
+    {
+        if (GetXfaTemplateXml() is not null) return GetXfaTemplateDocument();
+        var xml = GetXfaSingleStreamTemplateXml();
+        if (xml is null) return null;
+        if (_xfaSingleTemplateDoc is null)
+        {
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+            _xfaSingleTemplateDoc = doc;
+        }
+        return _xfaSingleTemplateDoc;
     }
 
     /// <summary>Strictly resolve a dotted SOM path against the XFA template — follow the
@@ -315,11 +346,9 @@ public sealed partial class Form
     internal bool XfaTemplateFieldExists(string path)
     {
         if (string.IsNullOrEmpty(path)) return false;
-        var xml = GetXfaTemplateXmlResolved();
-        if (xml is null) return false;
-        XmlDocument doc = new();
-        try { doc.LoadXml(xml); } catch { return false; }
-        if (doc.DocumentElement is null) return false;
+        XmlDocument? doc;
+        try { doc = GetXfaTemplateDocumentResolved(); } catch { return false; }
+        if (doc?.DocumentElement is null) return false;
         var node = ResolveXfaTemplateStrict(doc.DocumentElement, SplitSomPath(path), 0);
         return node is XmlElement el && (el.LocalName == "field" || el.LocalName == "exclGroup");
     }
@@ -341,6 +370,7 @@ public sealed partial class Form
 
         // Phase 1: a direct child matching this segment's @name (or #local-name).
         int count = 0;
+        XmlNode? last = null;
         foreach (XmlNode child in current.ChildNodes)
         {
             if (child.NodeType != XmlNodeType.Element) continue;
@@ -353,7 +383,14 @@ public sealed partial class Form
                 var r = ResolveXfaTemplateStrict(child, parts, idx + 1);
                 if (r is not null) return r;
             }
+            last = child;
             count++;
+        }
+        // An instance beyond the declared copies is one more occurrence of the last of them, when it may repeat that often.
+        if (last is not null && occ >= count && occ - count + 1 < MaxXfaOccurrences(last))
+        {
+            var r = ResolveXfaTemplateStrict(last, parts, idx + 1);
+            if (r is not null) return r;
         }
         // Phase 2: descend transparently through containers the SOM data path collapses —
         // anonymous unnamed subforms, the always-structural pageSet/pageArea, AND named
@@ -364,7 +401,8 @@ public sealed partial class Form
             if (child.NodeType != XmlNodeType.Element) continue;
             bool structural = child.LocalName is "pageArea" or "pageSet";
             bool named = !structural && child.Attributes?["name"] is not null;
-            if (named && !HasBindNone(child)) continue;
+            // An area groups what it holds on the page alone: no SOM name or data level passes through it.
+            if (named && !HasBindNone(child) && child.LocalName != "area") continue;
             if (child.LocalName is "subform" or "subformSet" or "area" or "pageSet" or "pageArea")
             {
                 var r = ResolveXfaTemplateStrict(child, parts, idx);
@@ -372,6 +410,18 @@ public sealed partial class Form
             }
         }
         return null;
+    }
+
+    /// <summary>How many instances a container's &lt;occur&gt; allows: its max, unbounded for -1; without a max,
+    /// its min and initial count, and one at least.</summary>
+    private static int MaxXfaOccurrences(XmlNode container)
+    {
+        var occur = container.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "occur");
+        if (occur is null) return 1;
+        static int Count(XmlElement e, string name) =>
+            int.TryParse(e.GetAttribute(name), System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0;
+        if (occur.HasAttribute("max")) return Count(occur, "max") < 0 ? int.MaxValue : Count(occur, "max");
+        return Math.Max(1, Math.Max(Count(occur, "min"), Count(occur, "initial")));
     }
 
     /// <summary>Mark every XFA template field read-only (<c>access="readOnly"</c>) and persist
@@ -418,7 +468,7 @@ public sealed partial class Form
         XmlNode current = templateRoot;
         foreach (var rawSeg in SplitSomPath(somPath))
         {
-            var m = Regex.Match(rawSeg, @"^(.*?)(?:\[(\d+)\])?$");
+            var m = SafeRegex.Match(rawSeg, @"^(.*?)(?:\[(\d+)\])?$");
             var seg = m.Groups[1].Value;
             var idx = m.Groups[2].Success ? int.Parse(m.Groups[2].Value) : 0;
             var next = seg.StartsWith('#')
@@ -469,7 +519,7 @@ public sealed partial class Form
         XmlDocument tdoc = new();
         try { tdoc.LoadXml(xml); } catch { return; }
         if (tdoc.DocumentElement is null) return;
-        if (WalkTemplateBySomPath(tdoc.DocumentElement, fullName!) is not XmlElement fieldEl
+        if (WalkTemplateBySomPath(tdoc.DocumentElement, fullName) is not XmlElement fieldEl
             || fieldEl.LocalName != "field") return;
 
         var doc = OwnerDocument;
@@ -543,7 +593,7 @@ public sealed partial class Form
             };
             double capY = (r.LLY + r.URY) / 2 - fs / 2;
             fontRes ??= Annotations.RedactionAnnotation.RegisterOverlayFont(page);
-            var esc = caption!.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+            var esc = caption.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
             sb.Append("BT\n0 g\n/").Append(fontRes).Append(' ').Append(F(fs)).Append(" Tf\n")
               .Append(F(capX)).Append(' ').Append(F(capY)).Append(" Td\n(")
               .Append(esc).Append(") Tj\nET\n");
@@ -654,7 +704,7 @@ public sealed partial class Form
         if (partIndex < parts.Length && parts.Length > 1)
         {
             var lastSeg = parts[^1];
-            var idxMatch = Regex.Match(lastSeg, @"^(.+)\[(\d+)\]$");
+            var idxMatch = SafeRegex.Match(lastSeg, @"^(.+)\[(\d+)\]$");
             var leafName = idxMatch.Success ? idxMatch.Groups[1].Value : lastSeg;
             var leafIdx = idxMatch.Success ? int.Parse(idxMatch.Groups[2].Value) : 0;
             // Search by name attribute (field, exclGroup, subform)

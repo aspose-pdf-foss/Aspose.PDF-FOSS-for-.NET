@@ -24,9 +24,10 @@ public sealed partial class Document
     private const int FlatDctPaletteSlots = 256;
 
     /// <summary>Re-encode every ≤256-colour DCTDecode DeviceRGB image in the page's
-    /// XObject resources as /Indexed /DeviceRGB with a 256-slot palette. See the
+    /// XObject resources as /Indexed /DeviceRGB with a 256-slot palette, and so every
+    /// one-component (greyscale) JPEG too, whether labelled DeviceRGB or DeviceGray. See the
     /// conversion step 12c note for the measured behaviour.</summary>
-    private static byte[] FlatDctFlate(byte[] data) => IO.Filters.ManagedDeflater.DeflateZlib(data);
+    private static byte[] FlatDctFlate(byte[] data) => IO.Filters.ManagedDeflater.DeflateSamples(data);
 
     private void PalettizeFlatDctImages(Page page)
     {
@@ -38,7 +39,8 @@ public sealed partial class Document
             if (_reader.Resolve(xobjects.Get(key)) is not PdfStream img) continue;
             if (img.Dict.GetName("Subtype") != "Image") continue;
             if (img.Dict.GetName("Filter") != "DCTDecode") continue;
-            if (img.Dict.GetName("ColorSpace") != "DeviceRGB") continue;
+            var colorSpace = img.Dict.GetName("ColorSpace");
+            if (colorSpace is not ("DeviceRGB" or "DeviceGray")) continue;
             if (img.Dict.ContainsKey("SMask") || img.Dict.GetBool("ImageMask")) continue;
             var w = (int)img.Dict.GetInt("Width", 0);
             var h = (int)img.Dict.GetInt("Height", 0);
@@ -48,6 +50,9 @@ public sealed partial class Document
             try { (pixels, jw, jh, comp) = IO.Filters.JpegDecoder.Decode(img.RawData); }
             catch { continue; }
             if (jw != w || jh != h || (comp != 3 && comp != 1)) continue;
+            // A DeviceGray image is taken only as the greyscale JPEG it is: the same picture an
+            // RGB-labelled one-component JPEG gives this pass.
+            if (colorSpace == "DeviceGray" && comp != 1) continue;
             if (comp == 1)
             {
                 // Grayscale-decoded JPEG: expand to RGB so the palette carries the
@@ -109,10 +114,12 @@ public sealed partial class Document
     /// A page with inline images is wrapped at the byte level and its
     /// coordinates left untouched: materialising such a stream through the
     /// typed operator list would drop the inline-image binary payload.</summary>
-    private void NormalizePdfA1PageContent(Page page)
+    private static void NormalizePdfA1PageContent(Page page)
     {
         const double limit = short.MaxValue; // 32767
+#pragma warning disable S1244 // integrality test - exact by definition
         static bool OutOfRange(double v) => Math.Abs(v) >= limit && v != Math.Truncate(v);
+#pragma warning restore S1244
         static double Clamp(double v) => OutOfRange(v) ? Math.Round(v) : v;
 
         // Pre-scan: does any path coordinate exceed the PDF/A-1 real limit? Pages
@@ -262,10 +269,11 @@ public sealed partial class Document
     private static string UnescapePdfLiteral(string s)
     {
         var sb = new StringBuilder(s.Length);
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             var c = s[i];
-            if (c != '\\' || i + 1 >= s.Length) { sb.Append(c); continue; }
+            if (c != '\\' || i + 1 >= s.Length) { sb.Append(c); i++; continue; }
             var n = s[++i];
             switch (n)
             {
@@ -286,6 +294,7 @@ public sealed partial class Document
                     else sb.Append(n);
                     break;
             }
+            i++;
         }
         return sb.ToString();
     }
@@ -356,10 +365,15 @@ public sealed partial class Document
         var fonts = _reader.ResolveDict(nd.resources.Get("Font"));
         if (fonts is null) return null;
         nd.fonts = fonts;
+        // Only a Type1 face can give a show a verdict (see the state's note): a stream whose
+        // fonts are all of other kinds has nothing to find and is not scanned.
+        if (!fonts.Keys.Any(key => _reader.ResolveDict(fonts.Get(key)) is { } font
+                && (font.GetName("Subtype") is "Type1" or "MMType1" || _notdefCidFonts?.Contains(font) == true)))
+            return null;
 
         nd.encodings = new Dictionary<string, string?[]?>(StringComparer.Ordinal);
         nd.text = Compat.Latin1.GetString(nd.contentBytes);
-        nd.deletions = new List<(int start, int end)>();
+        nd.deletions = new List<(int start, int end, string? instead)>();
         nd.lastName = null;      // most recent /Name token (Tf operand)
         nd.currentFont = null;   // font selected by the last Tf
         nd.operandStart = -1;        // offset of the first operand token since the last operator
@@ -376,10 +390,11 @@ public sealed partial class Document
 
         nd.output = new List<byte>(nd.contentBytes.Length);
         nd.copyFrom = 0;
-        foreach (var (start, end) in nd.deletions)
+        foreach (var (start, end, instead) in nd.deletions)
         {
             for (var i = nd.copyFrom; i < start; i++) nd.output.Add(nd.contentBytes[i]);
             nd.output.Add((byte)' '); // keep neighbouring tokens separated
+            if (instead is not null) nd.output.AddRange(Compat.Latin1.GetBytes(instead));
             nd.copyFrom = end;
         }
         for (var i = nd.copyFrom; i < nd.contentBytes.Length; i++) nd.output.Add(nd.contentBytes[i]);
@@ -391,10 +406,11 @@ public sealed partial class Document
     private static byte[] DecodeLiteralStringBytes(string text, int start, int end)
     {
         var bytes = new List<byte>(end - start);
-        for (var i = start; i < end && i < text.Length; i++)
+        var i = start;
+        while (i < end && i < text.Length)
         {
             var ch = text[i];
-            if (ch != '\\') { bytes.Add((byte)ch); continue; }
+            if (ch != '\\') { bytes.Add((byte)ch); i++; continue; }
             if (++i >= end) break;
             var e = text[i];
             switch (e)
@@ -404,7 +420,7 @@ public sealed partial class Document
                 case 't': bytes.Add((byte)'\t'); break;
                 case 'b': bytes.Add((byte)'\b'); break;
                 case 'f': bytes.Add((byte)'\f'); break;
-                case '\r': if (i + 1 < end && text[i + 1] == '\n') i++; break; // line continuation
+                case '\r': if (i + 1 < end && text[i + 1] == '\n') { i++; } break; // line continuation
                 case '\n': break;
                 case >= '0' and <= '7':
                 {
@@ -416,6 +432,7 @@ public sealed partial class Document
                 }
                 default: bytes.Add((byte)e); break;
             }
+            i++;
         }
         return bytes.ToArray();
     }
@@ -452,9 +469,9 @@ public sealed partial class Document
     /// Form XObject (each against its own resources). Streams with inline images
     /// keep their bytes untouched.
     /// </summary>
-    private void SuppressAlphaZeroPaint(Page page)
+    private void SuppressAlphaZeroPaint(Page page, HashSet<(PdfDictionary Form, PdfDictionary Resources)> done)
     {
-        var resources = _reader.ResolveDict(page.Dict.Get("Resources"));
+        var resources = Devices.SoftwarePageRenderer.ResolveInheritedPageResources(page.Dict, _reader);
         if (resources is null) return;
         var visited = new HashSet<PdfDictionary>();
 
@@ -463,10 +480,14 @@ public sealed partial class Document
             && RewriteAlphaZeroPaint(pageBytes, resources) is { } rewritten)
             page.SetContentStream(rewritten);
 
-        SuppressAlphaZeroPaintInForms(resources, visited);
+        SuppressAlphaZeroPaintInForms(resources, visited, done);
     }
 
-    private void SuppressAlphaZeroPaintInForms(PdfDictionary resources, HashSet<PdfDictionary> visited)
+    /// <summary>Rewrites the forms reachable from <paramref name="resources"/>: each once per page
+    /// (<paramref name="visited"/>), and once in all for the resources it is drawn under
+    /// (<paramref name="done"/>) - a second pass over a rewritten form finds nothing to change.</summary>
+    private void SuppressAlphaZeroPaintInForms(PdfDictionary resources, HashSet<PdfDictionary> visited,
+        HashSet<(PdfDictionary Form, PdfDictionary Resources)> done)
     {
         var xobjects = _reader.ResolveDict(resources.Get("XObject"));
         if (xobjects is null) return;
@@ -477,6 +498,7 @@ public sealed partial class Document
                 || !visited.Add(form.Dict))
                 continue;
             var formRes = _reader.ResolveDict(form.Dict.Get("Resources")) ?? resources;
+            if (!done.Add((form.Dict, formRes))) continue;
             byte[] data;
             try { data = _reader.DecodeStream(form); } catch { continue; }
             if (RewriteAlphaZeroPaint(data, formRes) is { } rewritten)
@@ -486,7 +508,7 @@ public sealed partial class Document
                 form.Dict.Set("Length", new PdfInteger(rewritten.Length));
                 form.ReplaceData(rewritten);
             }
-            SuppressAlphaZeroPaintInForms(formRes, visited);
+            SuppressAlphaZeroPaintInForms(formRes, visited, done);
         }
     }
 
@@ -504,12 +526,11 @@ public sealed partial class Document
         if (fillZero.Count == 0 && strokeZero.Count == 0) return null;
 
         az.text = Compat.Latin1.GetString(contentBytes);
-        az.output = new StringBuilder(az.text.Length);
+        az.edits = new List<(int start, int end, string replacement)>();
         az.stack = new Stack<(bool fill0, bool stroke0)>();
         az.fill0 = false;
         az.stroke0 = false;
         az.lastName = null;
-        az.changed = false;
         az.pos = 0;
 
         while (az.pos < az.text.Length)
@@ -517,8 +538,17 @@ public sealed partial class Document
             if (!RewriteAlphaZeroToken(az, fillZero, strokeZero, fillSet, strokeSet)) break;
         }
 
-        if (az.bailOut) return null;
-        return az.changed ? Compat.Latin1.GetBytes(az.output.ToString()) : null;
+        if (az.bailOut || az.edits.Count == 0) return null;
+        // The stream with the replacements spliced in; everything between them stands.
+        var output = new StringBuilder(az.text.Length);
+        var copyFrom = 0;
+        foreach (var (start, end, replacement) in az.edits)
+        {
+            output.Append(az.text, copyFrom, start - copyFrom).Append(replacement);
+            copyFrom = end;
+        }
+        output.Append(az.text, copyFrom, az.text.Length - copyFrom);
+        return Compat.Latin1.GetBytes(output.ToString());
     }
 
     /// <summary>
@@ -529,10 +559,9 @@ public sealed partial class Document
     /// of failing validation. Recurses into nested Form XObjects; the visited set guards
     /// against shared dictionaries and reference cycles.
     /// </summary>
-    private void NeutralizeExtGStateTransparency(PdfDictionary container,
+    private void NeutralizeExtGStateTransparency(PdfDictionary? resources,
         PdfFormatConversionOptions options, int pageNumber, bool fix, HashSet<PdfDictionary> visited)
     {
-        var resources = _reader.ResolveDict(container.Get("Resources"));
         if (resources is null) return;
 
         var extGStates = _reader.ResolveDict(resources.Get("ExtGState"));
@@ -586,7 +615,17 @@ public sealed partial class Document
                 && form.Dict.GetName("Subtype") == "Form"
                 && visited.Add(form.Dict))
             {
-                NeutralizeExtGStateTransparency(form.Dict, options, pageNumber, fix, visited);
+                if (_reader.ResolveDict(form.Dict.Get("Group")) is { } group && group.GetName("S") == "Transparency")
+                {
+                    options.ConversionLog.Add(new PdfAViolation
+                    {
+                        Rule = "Transparency",
+                        Description = $"Page {pageNumber} draws a form with a transparency group (not allowed in PDF/A-1).",
+                        PageNumber = pageNumber,
+                    });
+                    if (fix) form.Dict.Remove("Group");
+                }
+                NeutralizeExtGStateTransparency(_reader.ResolveDict(form.Dict.Get("Resources")), options, pageNumber, fix, visited);
             }
         }
     }
@@ -709,7 +748,7 @@ public sealed partial class Document
     /// whose shown text contains the 2-byte code 0000 references the .notdef glyph.
     /// One problem per font (its Type0 dict's object number as ObjectID, the first
     /// page it is seen on, the BaseFont name without its subset prefix).</summary>
-    private void ReportNotdefGlyphReferences(PdfFormatConversionOptions options)
+    private void ReportNotdefGlyphReferences(List<PdfAViolation> log, bool rememberFonts)
     {
         var reported = new HashSet<int>();
         int pageCount;
@@ -726,7 +765,7 @@ public sealed partial class Document
 
             // resource name -> (Type0 dict object number, display name) for
             // Identity-encoded Type0 fonts on this page.
-            var identityFonts = new Dictionary<string, (int Num, string Name)>(StringComparer.Ordinal);
+            var identityFonts = new Dictionary<string, (int Num, string Name, PdfDictionary Font)>(StringComparer.Ordinal);
             foreach (var key in fonts.Keys)
             {
                 var raw = fonts.Get(key);
@@ -735,21 +774,33 @@ public sealed partial class Document
                 if (fd.GetName("Encoding") is not ("Identity-H" or "Identity-V")) continue;
                 var num = raw is PdfIndirectRef ir ? ir.ObjectNumber : FindObjectNumber(fd);
                 if (num <= 0) continue;
-                identityFonts[key] = (num, StripSubsetPrefix(fd.GetName("BaseFont") ?? string.Empty));
+                identityFonts[key] = (num, StripSubsetPrefix(fd.GetName("BaseFont") ?? string.Empty), fd);
             }
             if (identityFonts.Count == 0) continue;
 
+            // The operators are read as text, the name being the last token: only a font
+            // selection and a show under one of the fonts in question is parsed in full.
             string? currentFont = null;
-            System.Collections.Generic.IEnumerable<Operator> ops;
-            try { ops = page.Contents; } catch { continue; }
-            foreach (var op in ops)
+            IReadOnlyList<string> texts;
+            try { texts = page.Contents.OperatorTexts(); } catch { continue; }
+            foreach (var text in texts)
             {
-                if (op is Aspose.Pdf.Operators.SelectFont sf) { currentFont = sf.FontName; continue; }
-                if (op is not Aspose.Pdf.Operators.TextShowOperator show || currentFont is null) continue;
+                var space = text.LastIndexOf(' ');
+                var name = space < 0 ? text : text.Substring(space + 1);
+                if (name == "Tf")
+                {
+                    currentFont = (TypedOperatorParser.Parse(text) as Aspose.Pdf.Operators.SelectFont)?.FontName;
+                    continue;
+                }
+                if (name is not ("Tj" or "TJ" or "'" or "\"") || currentFont is null) continue;
                 if (!identityFonts.TryGetValue(currentFont, out var info) || reported.Contains(info.Num)) continue;
-                if (!HasAlignedCidZero(show.Text)) continue;
+                if (TypedOperatorParser.Parse(text) is not Aspose.Pdf.Operators.TextShowOperator show
+                    || !HasAlignedCidZero(show.Text)) continue;
                 reported.Add(info.Num);
-                options.ConversionLog.Add(new Optimization.PdfAViolation
+                // Remembered for the conversion pass that takes such shows out of the content.
+                if (rememberFonts)
+                    (_notdefCidFonts ??= new HashSet<PdfDictionary>(ReferenceEqualityComparer.Instance)).Add(info.Font);
+                log.Add(new Optimization.PdfAViolation
                 {
                     Rule = "FontNotdefGlyph",
                     Clause = "6.2.11.8",
@@ -790,18 +841,16 @@ public sealed partial class Document
         return (fillZero, strokeZero, fillSet, strokeSet);
     }
 
-    /// <summary>One token of the content: names remembered, the q/Q stack followed, a gs that zeroes an alpha noted, and a paint under a zero alpha dropped.</summary>
-    private bool RewriteAlphaZeroToken(AlphaZeroRewriteState az, HashSet<string> fillZero, HashSet<string> strokeZero, HashSet<string> fillSet, HashSet<string> strokeSet)
+    /// <summary>One token of the content: names remembered, the q/Q stack followed, a gs that zeroes an alpha noted, and a paint under a zero alpha noted for replacement; everything else is passed by, it stands as it is.</summary>
+    private static bool RewriteAlphaZeroToken(AlphaZeroRewriteState az, HashSet<string> fillZero, HashSet<string> strokeZero, HashSet<string> fillSet, HashSet<string> strokeSet)
     {
         var c = az.text[az.pos];
-        // Delimiters and non-token content are copied verbatim.
         if (char.IsWhiteSpace(c) || c is '[' or ']' or '{' or '}')
-        { az.output.Append(c); az.pos++; return true; }
+        { az.pos++; return true; }
         if (c == '%') // comment to end-of-line
         {
-            var eol = az.pos;
-            while (eol < az.text.Length && az.text[eol] != '\n' && az.text[eol] != '\r') eol++;
-            az.output.Append(az.text, az.pos, eol - az.pos); az.pos = eol; return true;
+            while (az.pos < az.text.Length && az.text[az.pos] != '\n' && az.text[az.pos] != '\r') az.pos++;
+            return true;
         }
         if (c == '(') // literal string, with escapes and balanced parens
         {
@@ -815,18 +864,18 @@ public sealed partial class Document
                 else if (sc == ')') depth--;
                 end++;
             }
-            az.output.Append(az.text, az.pos, end - az.pos); az.pos = end; return true;
+            az.pos = end; return true;
         }
         if (c == '<')
         {
             if (az.pos + 1 < az.text.Length && az.text[az.pos + 1] == '<') // dict
-            { az.output.Append("<<"); az.pos += 2; return true; }
+            { az.pos += 2; return true; }
             var end = az.text.IndexOf('>', az.pos + 1);
             if (end < 0) end = az.text.Length - 1;
-            az.output.Append(az.text, az.pos, end - az.pos + 1); az.pos = end + 1; return true;
+            az.pos = end + 1; return true;
         }
         if (c == '>' && az.pos + 1 < az.text.Length && az.text[az.pos + 1] == '>')
-        { az.output.Append(">>"); az.pos += 2; return true; }
+        { az.pos += 2; return true; }
         if (c == '/') // name token
         {
             var end = az.pos + 1;
@@ -834,47 +883,46 @@ public sealed partial class Document
                    && az.text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
                 end++;
             az.lastName = az.text[(az.pos + 1)..end];
-            az.output.Append(az.text, az.pos, end - az.pos); az.pos = end; return true;
+            az.pos = end; return true;
         }
 
         // Regular token (number or operator).
+        var tokEnd = az.pos;
+        while (tokEnd < az.text.Length && !char.IsWhiteSpace(az.text[tokEnd])
+               && az.text[tokEnd] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
+            tokEnd++;
+        if (Compat.IsAsciiDigit(c) || c is '+' or '-' or '.') // a number
+        { az.pos = tokEnd; return true; }
+        var token = az.text[az.pos..tokEnd];
+        string? replacement = null;
+        switch (token)
         {
-            var end = az.pos;
-            while (end < az.text.Length && !char.IsWhiteSpace(az.text[end])
-                   && az.text[end] is not ('/' or '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '%'))
-                end++;
-            var token = az.text[az.pos..end];
-            string? replacement = null;
-            switch (token)
-            {
-                case "BI":
-                    az.bailOut = true; // inline image: bail out, keep original bytes
-                    return false;
-                case "q":
-                    az.stack.Push((az.fill0, az.stroke0));
-                    break;
-                case "Q":
-                    if (az.stack.Count > 0) (az.fill0, az.stroke0) = az.stack.Pop();
-                    break;
-                case "gs" when az.lastName is not null:
-                    if (fillZero.Contains(az.lastName)) az.fill0 = true;
-                    else if (fillSet.Contains(az.lastName)) az.fill0 = false;
-                    if (strokeZero.Contains(az.lastName)) az.stroke0 = true;
-                    else if (strokeSet.Contains(az.lastName)) az.stroke0 = false;
-                    break;
-                case "f" or "F" or "f*" when az.fill0:
-                case "S" or "s" when az.stroke0:
-                case "B" or "B*" or "b" or "b*" when az.fill0 && az.stroke0:
-                    replacement = "n";
-                    break;
-                case "B" or "B*" when az.fill0: replacement = "S"; break;
-                case "b" or "b*" when az.fill0: replacement = "s"; break;
-                case "B" or "B*" or "b" or "b*" when az.stroke0: replacement = "f"; break;
-            }
-            if (replacement is not null) { az.output.Append(replacement); az.changed = true; }
-            else az.output.Append(token);
-            az.pos = end;
+            case "BI":
+                az.bailOut = true; // inline image: bail out, keep original bytes
+                return false;
+            case "q":
+                az.stack.Push((az.fill0, az.stroke0));
+                break;
+            case "Q":
+                if (az.stack.Count > 0) (az.fill0, az.stroke0) = az.stack.Pop();
+                break;
+            case "gs" when az.lastName is not null:
+                if (fillZero.Contains(az.lastName)) az.fill0 = true;
+                else if (fillSet.Contains(az.lastName)) az.fill0 = false;
+                if (strokeZero.Contains(az.lastName)) az.stroke0 = true;
+                else if (strokeSet.Contains(az.lastName)) az.stroke0 = false;
+                break;
+            case "f" or "F" or "f*" when az.fill0:
+            case "S" or "s" when az.stroke0:
+            case "B" or "B*" or "b" or "b*" when az.fill0 && az.stroke0:
+                replacement = "n";
+                break;
+            case "B" or "B*" when az.fill0: replacement = "S"; break;
+            case "b" or "b*" when az.fill0: replacement = "s"; break;
+            case "B" or "B*" or "b" or "b*" when az.stroke0: replacement = "f"; break;
         }
+        if (replacement is not null) az.edits.Add((az.pos, tokEnd, replacement));
+        az.pos = tokEnd;
         return true;
     }
 }

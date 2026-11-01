@@ -59,7 +59,7 @@ internal static partial class MarkdownRenderer
         // Cluster paints whose boxes (with a small slack) touch.
         var parent = new int[paints.Count];
         for (var i = 0; i < parent.Length; i++) parent[i] = i;
-        int Find(int a) { while (parent[a] != a) a = parent[a] = parent[parent[a]]; return a; }
+        int Find(int a) { while (parent[a] != a) { a = parent[a] = parent[parent[a]]; } return a; }
         for (var i = 0; i < paints.Count; i++)
             for (var j = i + 1; j < paints.Count; j++)
             {
@@ -309,7 +309,7 @@ internal static partial class MarkdownRenderer
         // Union-find on segment bboxes expanded by a small slack.
         var parent = new int[segs.Count];
         for (var i = 0; i < parent.Length; i++) parent[i] = i;
-        int Find(int a) { while (parent[a] != a) a = parent[a] = parent[parent[a]]; return a; }
+        int Find(int a) { while (parent[a] != a) { a = parent[a] = parent[parent[a]]; } return a; }
         void Union(int a, int b) { a = Find(a); b = Find(b); if (a != b) parent[a] = b; }
         for (var i = 0; i < segs.Count; i++)
             for (var j = i + 1; j < segs.Count; j++)
@@ -462,7 +462,9 @@ internal static partial class MarkdownRenderer
     private static double[] Operands(string op, int count)
     {
         var parts = op.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+#pragma warning disable S1168 // null means "none", distinct from an empty result
         if (parts.Length < count + 1) return null;
+#pragma warning restore S1168
         var result = new double[count];
         for (var i = 0; i < count; i++)
         {

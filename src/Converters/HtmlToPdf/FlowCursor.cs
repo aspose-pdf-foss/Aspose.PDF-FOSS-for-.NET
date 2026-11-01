@@ -13,6 +13,8 @@ internal static partial class HtmlToPdfConverter
     {
         /// <summary>The page a content band belongs to, when it is not the page being written.</summary>
         public Page? contentPage;
+        /// <summary>The page the last declared page break opened, while it may still be the last page.</summary>
+        public Page? breakPage;
         /// <summary>Width available to the flow between the left and right margins.</summary>
         public double contentWidth;
         public bool afterEscapedRule;
@@ -25,6 +27,12 @@ internal static partial class HtmlToPdfConverter
         public int declaredBoxDepth;
         public double certElementTopY;
         public double floatBottomY;
+        /// <summary>The line the last in-flow image stood on: its page, the right edge of the image, and
+        /// the line's top and bottom - an inline image after it in the same run sits beside it.</summary>
+        public Page? imageRowPage;
+        public double imageRowEndX;
+        public double imageRowTopY;
+        public double imageRowBottomY;
         public double floatIndentPt;
         /// <summary>The page the left float was placed on: its band ends with that page
         /// (the sheet-typography flow; the legacy flow carries the band over).</summary>
@@ -54,8 +62,12 @@ internal static partial class HtmlToPdfConverter
         public double pendingFloatRightW;
         public double pendingFloatLabelY;
         public bool pendingTableDrop;
+        // …left by a stylesheet form's field grid (not by another table or a band)
+        public bool pendingTableDropFieldGrid;
         public bool pendingTableDropBordered;
         public bool pendingTopDrop;
+        // the block just laid out was a table: the cursor stands on its bottom edge
+        public bool lastBlockWasTable;
         public bool prevBlockWasText;
         // the previous text block held no ink (a blank spacer paragraph)
         public bool prevBlockWasBlank;

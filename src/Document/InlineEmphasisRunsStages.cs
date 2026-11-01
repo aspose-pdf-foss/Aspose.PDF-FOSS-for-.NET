@@ -15,7 +15,7 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>The stages of the inline emphasis runs: tokenising the runs, wrapping the atoms and emitting one line.</summary>
-    private bool EmitInlineEmphasisLine(InlineEmphasisRunsState ie, int li)
+    private static bool EmitInlineEmphasisLine(InlineEmphasisRunsState ie, int li)
     {
         var baseline = ie.frameTop - ie.firstBaselinePt - li * ie.linePitchPt;
         // Merge adjacent same-style atoms into one show per run.
@@ -33,7 +33,7 @@ public sealed partial class Document
             var runW = line[rj].Item4 + line[rj].Item5 - xOff;
             var bold2 = line[ri].Item2;
             var (res2, hex2) = Text.Type0FontEmbedder.Embed(ie.fontDict2,
-                bold2 ? ie.boldTtf! : ie.regTtf!,
+                bold2 ? ie.boldTtf : ie.regTtf!,
                 bold2 ? ie.iface + " Bold" : ie.iface,
                 textRun, stripSpacesInBaseFont: true);
             ie.b2.BeginText();
@@ -61,7 +61,7 @@ public sealed partial class Document
     }
 
     /// <summary></summary>
-    private void WrapInlineEmphasisAtoms(InlineEmphasisRunsState ie)
+    private static void WrapInlineEmphasisAtoms(InlineEmphasisRunsState ie)
     {
         foreach (var at in ie.atoms)
         {
@@ -81,7 +81,7 @@ public sealed partial class Document
     }
 
     /// <summary></summary>
-    private void TokeniseInlineEmphasisRuns(InlineEmphasisRunsState ie)
+    private static void TokeniseInlineEmphasisRuns(InlineEmphasisRunsState ie)
     {
         foreach (var run in ie.iruns)
         {

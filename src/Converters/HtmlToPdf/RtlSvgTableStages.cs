@@ -9,8 +9,8 @@ internal static partial class HtmlToPdfConverter
     private static List<HtmlNode> Cells(HtmlNode tr)
     {
         var cells = new List<HtmlNode>();
-        foreach (var c in tr.Children)
-            if (c.Tag is "td" or "th") cells.Add(c);
+        foreach (var c in tr.Children.Where(c => c.Tag is "td" or "th"))
+            cells.Add(c);
         return cells;
     }
 

@@ -44,9 +44,67 @@ public partial class FontRepository
         if (curTtf is { Length: > 0 } && Covers(curTtf, probe)) return null;
 
         if (SubstituteFromCurrentFace(probe, curTtf, current) is { } own) return own;
-        if (SubstituteFromSources(probe, text) is { } registered) return registered;
+        if (SubstituteFromSources(probe, text, CurrentIsFixedPitch(curTtf, current)) is { } registered) return registered;
         if (SubstituteFromHostFaces(probe, text) is { } host) return host;
         return null;
+    }
+
+    /// <summary>
+    /// A covering face for text that would be written in the Standard-14 face
+    /// <paramref name="standard14Face"/> although its WinAnsi encoding cannot carry some
+    /// character - written so, the character becomes '?' or loses its accent. Null when
+    /// every character encodes (the en dash and curly quotes do), for the symbolic faces
+    /// (they draw through their own encodings), or when no installed face covers the text.
+    /// </summary>
+    internal static FontData? SubstituteForUnencodableStandard14Text(string? text, Font? current, string standard14Face)
+    {
+        if (string.IsNullOrEmpty(text) || Standard14Fonts.IsSymbolic(standard14Face)) return null;
+        var unencodable = false;
+        foreach (var ch in text!)
+        {
+            if (char.IsControl(ch) || Cp1252.TryGetByte(ch) is not null) continue;
+            unencodable = true;
+            break;
+        }
+        if (!unencodable || SubstituteForMissingGlyphs(text!, current) is not { } face) return null;
+        // A face read from a font file comes back as a fresh copy on every scan: the first
+        // copy stands for the file, so every run moved to it embeds and measures one program.
+        if (face.FilePath is not { } path) return face;
+        lock (Standard14CoveringFaces)
+        {
+            if (Standard14CoveringFaces.TryGetValue(path, out var first)) return first;
+            Standard14CoveringFaces[path] = face;
+        }
+        return face;
+    }
+
+    private static readonly Dictionary<string, FontData> Standard14CoveringFaces = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Whether the fragment's own font is fixed-pitch: its program says so, or it is
+    /// the Standard-14 Courier.</summary>
+    private static bool CurrentIsFixedPitch(byte[]? curTtf, Font? current)
+        => curTtf is { Length: > 0 }
+            ? IsFixedPitchFace(curTtf)
+            : (current?.FontName ?? "").StartsWith("Courier", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Whether a font program declares itself fixed-pitch (the post table's
+    /// isFixedPitch; a collection answers for its first face). False for an unreadable program.</summary>
+    internal static bool IsFixedPitchFace(byte[] ttf)
+    {
+        var baseOff = 0;
+        if (ttf.Length >= 16 && ttf[0] == (byte)'t' && ttf[1] == (byte)'t' && ttf[2] == (byte)'c' && ttf[3] == (byte)'f')
+            baseOff = (int)ReadUInt32BE(ttf, 12);
+        if (baseOff < 0 || baseOff + 12 > ttf.Length) return false;
+        int numTables = (ttf[baseOff + 4] << 8) | ttf[baseOff + 5];
+        for (var i = 0; i < numTables; i++)
+        {
+            var record = baseOff + 12 + i * 16;
+            if (record + 16 > ttf.Length) break;
+            if (ttf[record] != (byte)'p' || ttf[record + 1] != (byte)'o' || ttf[record + 2] != (byte)'s' || ttf[record + 3] != (byte)'t') continue;
+            var offset = (int)ReadUInt32BE(ttf, record + 8);
+            return offset >= 0 && offset + 16 <= ttf.Length && ReadUInt32BE(ttf, offset + 12) != 0;
+        }
+        return false;
     }
 
     /// <summary>The family name of the first CALLER-registered face (folder/file/
@@ -88,10 +146,21 @@ public partial class FontRepository
     /// char of <paramref name="text"/>. True for null/empty probes.</summary>
     internal static bool CoversText(byte[]? ttf, string text)
     {
-        if (ttf is not { Length: > 0 } || string.IsNullOrEmpty(text)) return true;
+        if (ttf is not { Length: > 0 } || string.IsNullOrEmpty(text) || IsAscii(text)) return true;
         var probe = ProbeCodePoints(text);
         return probe.Count == 0 || Covers(ttf, probe);
     }
+
+    /// <summary>Whether every character is ASCII, which any usable face draws: the common
+    /// run needs no coverage probe.</summary>
+    private static bool IsAscii(string text)
+    {
+        foreach (var ch in text)
+            if (ch > AsciiMax) return false;
+        return true;
+    }
+
+    private const char AsciiMax = '\u007F';
 
     /// <summary>How many distinct non-ASCII chars of <paramref name="text"/> the face
     /// maps to a real glyph (0 for an unreadable face).</summary>
@@ -101,10 +170,10 @@ public partial class FontRepository
         var probe = ProbeCodePoints(text);
         try
         {
-            var parser = new GlyphOutlineParser(ttf);
+            var cmap = CMapOf(ttf);
             var n = 0;
             foreach (var c in probe)
-                if (parser.CMap.TryGetValue(c, out var gid) && gid > 0) n++;
+                if (cmap.TryGetValue(c, out var gid) && gid > 0) n++;
             return n;
         }
         catch { return 0; }
@@ -116,7 +185,8 @@ public partial class FontRepository
     private static HashSet<int> ProbeCodePoints(string text)
     {
         var probe = new HashSet<int>();
-        for (var i = 0; i < text.Length; i++)
+        var i = 0;
+        while (i < text.Length)
         {
             int cp = text[i];
             if (char.IsHighSurrogate(text[i]) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
@@ -125,12 +195,13 @@ public partial class FontRepository
                 i++;
             }
             else if (char.IsSurrogate(text[i]) || char.IsControl(text[i]))
-                continue;
+                { i++; continue; }
             // Zero-width format characters (joiners, the byte-order mark) draw
             // nothing: no face needs a glyph for them.
             if (cp == 0xFEFF || (cp >= 0x200B && cp <= 0x200F) || cp == 0x2060 || cp == 0x00AD)
-                continue;
+                { i++; continue; }
             if (cp > 0x7F) probe.Add(cp);
+            i++;
         }
         return probe;
     }
@@ -148,9 +219,7 @@ public partial class FontRepository
     /// <summary>Whether the probe holds a plane-2 ideograph (U+20000 and above).</summary>
     private static bool HasSupplementaryIdeographs(HashSet<int> probe)
     {
-        foreach (var cp in probe)
-            if (cp >= 0x20000) return true;
-        return false;
+        return probe.Any(cp => cp >= 0x20000);
     }
 
     /// <summary>Whether <paramref name="ttf"/> has a real glyph for every probe char.</summary>
@@ -158,22 +227,36 @@ public partial class FontRepository
     {
         try
         {
-            var parser = new GlyphOutlineParser(ttf);
+            var cmap = CMapOf(ttf);
             foreach (var c in probe)
-                if (!parser.CMap.TryGetValue(c, out var gid) || gid <= 0)
+                if (!cmap.TryGetValue(c, out var gid) || gid <= 0)
                     return false;
             return true;
         }
         catch { return false; }
     }
 
+    // One parser per font program: the coverage scan asks the same installed faces about
+    // every run it substitutes, and a parser reads the program's tables when it is made.
+    // Held by the program's bytes, so a face the caller drops goes with it.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], GlyphOutlineParser> CoverageParsers = new();
+
+    /// <summary>The character map of a font program, parsed once; throws for an unreadable program.</summary>
+    private static Dictionary<int, int> CMapOf(byte[] ttf)
+        => CoverageParsers.GetValue(ttf, static program => new GlyphOutlineParser(program)).CMap;
+
+    // One FontData per substituted program: every run moved to the same face shares the
+    // object, so the writer's per-face caches and the page's font resource serve them all.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], FontData> SubstituteFaces = new();
+
     /// <summary>Wrap raw font bytes as a FontData named by the face's family name.</summary>
     private static FontData MakeSubstituteFontData(byte[] ttf)
-    {
-        var fd = new FontData(ReadTtfFamilyName(ttf), FontType.TrueType);
-        fd.SetTtfData(ttf);
-        return fd;
-    }
+        => SubstituteFaces.GetValue(ttf, static program =>
+        {
+            var fd = new FontData(ReadTtfFamilyName(program), FontType.TrueType);
+            fd.SetTtfData(program);
+            return fd;
+        });
 
     // Installed faces tried, in order, when the requested one has no glyph for some
     // character of a line. Times New Roman first: it is the expected fallback

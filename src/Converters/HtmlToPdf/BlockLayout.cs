@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Text;
 
@@ -58,58 +59,54 @@ internal static partial class HtmlToPdfConverter
 
         // float:left prose column — greedy serif wrap in its box, clipped
         // to the declared height (overflow:hidden drops whole lines)
+        var boxW = pk.pc.TextWPx * PosCardPxPt;
+        var proseLines = new List<string>();
+        var cur = "";
+        foreach (var w in pk.pc.ParaText.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
-            var boxW = pk.pc.TextWPx * PosCardPxPt;
-            var proseLines = new List<string>();
-            var cur = "";
-            foreach (var w in pk.pc.ParaText.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var cand = cur.Length == 0 ? w : cur + " " + w;
-                if (cur.Length > 0 && CWidth(cand, false, 12.0) > boxW)
-                { proseLines.Add(cur); cur = w; }
-                else cur = cand;
-            }
-            if (cur.Length > 0) proseLines.Add(cur);
-            var clipBot = pk.mediaBot - pk.pc.TextHPx * PosCardPxPt;
-            var proseBox = PxLinePt(12.0, SerifWinLineRatio);
-            for (var li = 0; li < proseLines.Count; li++)
-            {
-                var boxTop = pk.mediaBot - CardParaFirstPt - li * proseBox;
-                if (boxTop - 12.0 * SerifWinLineRatio < clipBot) break;
-                CDrawText(pk, proseLines[li], false, pk.cx0, boxTop - CSerifDrop(12.0), 12.0,
-                    Color.FromArgb(0, 0, 0));
-            }
+            var cand = cur.Length == 0 ? w : cur + " " + w;
+            if (cur.Length > 0 && CWidth(cand, false, 12.0) > boxW)
+            { proseLines.Add(cur); cur = w; }
+            else cur = cand;
+        }
+        if (cur.Length > 0) proseLines.Add(cur);
+        var clipBot = pk.mediaBot - pk.pc.TextHPx * PosCardPxPt;
+        var proseBox = PxLinePt(12.0, SerifWinLineRatio);
+        for (var li = 0; li < proseLines.Count; li++)
+        {
+            var boxTop = pk.mediaBot - CardParaFirstPt - li * proseBox;
+            if (boxTop - 12.0 * SerifWinLineRatio < clipBot) break;
+            CDrawText(pk, proseLines[li], false, pk.cx0, boxTop - CSerifDrop(12.0), 12.0,
+                Color.FromArgb(0, 0, 0));
         }
 
         // float:right info panel — label column left-anchored, value
         // column right-aligned on the card's right edge; both walk their
         // paragraph slots on the measured pitch chain
+        var infoX = pk.cardRight - pk.pc.InfoWPx * PosCardPxPt;
+        var colTop = pk.mediaBot - pk.pc.InfoMtPx * PosCardPxPt - CardInfoStartPt;
+        void WalkColumn(List<(string Text, bool Bold, double MtPx, int Kind)> slots, bool rightAlign)
         {
-            var infoX = pk.cardRight - pk.pc.InfoWPx * PosCardPxPt;
-            var colTop = pk.mediaBot - pk.pc.InfoMtPx * PosCardPxPt - CardInfoStartPt;
-            void WalkColumn(List<(string Text, bool Bold, double MtPx, int Kind)> slots, bool rightAlign)
+            var boxTop = colTop;
+            var first = true;
+            foreach (var slot in slots)
             {
-                var boxTop = colTop;
-                var first = true;
-                foreach (var slot in slots)
-                {
-                    if (slot.Kind == 1) { boxTop -= CardInfoEmptyPt; continue; }
-                    if (slot.Kind == 2) { boxTop -= CardInfoEmptyFullPt; continue; }
-                    if (!first)
-                        boxTop -= slot.MtPx > 0
-                            ? slot.MtPx * PosCardPxPt + CardInfoLineBoxPt
-                            : CardInfoPitchPt;
-                    first = false;
-                    var tx = rightAlign
-                        ? pk.cardRight - CWidth(slot.Text, slot.Bold, 9.0)
-                        : infoX;
-                    CDrawText(pk, slot.Text, slot.Bold, tx,
-                        boxTop - 9.0 * SerifWinAscent, 9.0, Color.FromArgb(0, 0, 0));
-                }
+                if (slot.Kind == 1) { boxTop -= CardInfoEmptyPt; continue; }
+                if (slot.Kind == 2) { boxTop -= CardInfoEmptyFullPt; continue; }
+                if (!first)
+                    boxTop -= slot.MtPx > 0
+                        ? slot.MtPx * PosCardPxPt + CardInfoLineBoxPt
+                        : CardInfoPitchPt;
+                first = false;
+                var tx = rightAlign
+                    ? pk.cardRight - CWidth(slot.Text, slot.Bold, 9.0)
+                    : infoX;
+                CDrawText(pk, slot.Text, slot.Bold, tx,
+                    boxTop - 9.0 * SerifWinAscent, 9.0, Color.FromArgb(0, 0, 0));
             }
-            WalkColumn(pk.pc.Labels, rightAlign: false);
-            WalkColumn(pk.pc.Values, rightAlign: true);
         }
+        WalkColumn(pk.pc.Labels, rightAlign: false);
+        WalkColumn(pk.pc.Values, rightAlign: true);
 
         pk.flow.y = pk.mediaTop - (pk.pc.ContainerHPx > 0 ? pk.pc.ContainerHPx : pk.pc.MediaHPx * 2) * PosCardPxPt;
         pk.flow.lastWasHardBreak = false;
@@ -121,7 +118,6 @@ internal static partial class HtmlToPdfConverter
     private static void LayoutPositionedSlide(
         PositionedSlide slide, HtmlFlowCursor flow, HtmlLoadOptions? options, System.Collections.Generic.Dictionary<string, System.Collections.Generic.Dictionary<string, string>> css, double marginLeft, double marginTop, double pageHeight)
     {
-            const double PxPt = 0.75;
             var slX = marginLeft + CardBodyPadPt;
             var slTopY = pageHeight - marginTop - CardBodyPadPt;
             // The slide sheet's own type for free text runs: the body rule's
@@ -131,7 +127,7 @@ internal static partial class HtmlToPdfConverter
             if (css.TryGetValue("body", out var slBody))
             {
                 if (slBody.TryGetValue("font-size", out var slFs)
-                    && Regex.Match(slFs, @"([\d.]+)\s*px") is { Success: true } sfm
+                    && SafeRegex.Match(slFs, @"([\d.]+)\s*px") is { Success: true } sfm
                     && double.TryParse(sfm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out var sfPx) && sfPx > 0)
                     slFontPt = sfPx * PxPt;
@@ -187,7 +183,7 @@ internal static partial class HtmlToPdfConverter
                     // the slide fixture's free-text run.
                     var halfLead = (slLinePt - slFontPt * (SlideTextAscEm + SlideTextDescEm)) / 2;
                     var baseline = iTop - halfLead - slFontPt * SlideTextAscEm;
-                    var ops = FormattableString.Invariant(
+                    var ops = Compat.Format(CultureInfo.InvariantCulture,
                         $"BT /F1 {slFontPt:0.##} Tf {slColor.R / 255.0:0.###} {slColor.G / 255.0:0.###} {slColor.B / 255.0:0.###} rg 1 0 0 1 {ix:0.##} {baseline:0.##} Tm ({EscapePdfString(it.Text)}) Tj ET\n");
                     flow.page.AddContentStream(Encoding.ASCII.GetBytes(ops));
                     flow.contentPage = flow.page;
@@ -230,7 +226,6 @@ internal static partial class HtmlToPdfConverter
     private static void LayoutTopicsList(
         RtlTopicsTable tp, HtmlFlowCursor flow, HtmlDocProfile profile, Document doc, Core.PdfDictionary docFontDict, double marginBottom, double marginLeft, double marginTop, double pageHeight, double pageWidth, List<byte[]> inlineSvgs)
     {
-            const double PxPt = 0.75;
             var invT = System.Globalization.CultureInfo.InvariantCulture;
             var serifR = PosFace("Times New Roman");
             var serifB = PosFace("Times New Roman Bold");
@@ -269,8 +264,8 @@ internal static partial class HtmlToPdfConverter
                 return total * pt / face.upm;
             }
 
-            // penRight > 0: right-align the shaped text on that pen edge;
-            // penRight = 0 with leftX: draw left-anchored (bullet markers).
+            // penRight > 0: right-align the shaped text on that pen edge; penRight
+            // = 0 with leftX: draw left-anchored (bullet markers).
             void DrawSerif((byte[]? ttf, Text.GlyphOutlineParser? parser, double upm) face,
                 string baseName, string text, double penRight, double leftX,
                 double baseline, double pt)
@@ -300,7 +295,7 @@ internal static partial class HtmlToPdfConverter
                     {
                         flow.page.AddImage(figBytes, new Rectangle(figRight - figW, flow.y - figH, figRight, flow.y));
                     }
-                    catch { }
+                    catch { /* an image the page cannot take is left out - the layout carries on */ }
                 }
             }
 
@@ -328,7 +323,6 @@ internal static partial class HtmlToPdfConverter
         sm.cv = cv;
         sm.sf = sf;
         sm.options = options;
-        const double PxPt = 0.75;
         sm.invf = System.Globalization.CultureInfo.InvariantCulture;
         sm.totalH = (sm.sf.MarginTopPx + sm.sf.InputHeightPx + sm.sf.GapPx + sm.sf.ButtonHeightPx + sm.sf.MarginBottomPx) * PxPt;
         if (sm.cv.flow.y - sm.totalH < sm.cv.marginBottom)
@@ -358,7 +352,7 @@ internal static partial class HtmlToPdfConverter
                 var ih2 = sm.sf.IconHPx * PxPt;
                 var ix = sm.cellX + sm.inputW - sm.sf.IconRightPx * PxPt - iw;
                 var iy = sm.cv.flow.y - sm.sf.IconTopPx * PxPt;
-                try { sm.cv.flow.page.AddImage(ib, new Rectangle(ix, iy - ih2, ix + iw, iy)); } catch { }
+                try { sm.cv.flow.page.AddImage(ib, new Rectangle(ix, iy - ih2, ix + iw, iy)); } catch { /* an image the page cannot take is left out - the layout carries on */ }
             }
         }
 
@@ -399,7 +393,6 @@ internal static partial class HtmlToPdfConverter
         // entry to the calibration's own convention (measured:
         // title-label ink 103.11 with the lift, 115.35 without).
         if (rd.cv.profile.uaStdSerif && !rd.cv.profile.deadExternalCss) rd.cv.flow.y += DgUaEntryLiftPt;
-        const double PxPt = 0.75;
         rd.invd = System.Globalization.CultureInfo.InvariantCulture;
         rd.canvasW = rd.dg.WidthPx * PxPt;
         rd.canvasRight = rd.cv.marginLeft + rd.cv.flow.contentWidth;
@@ -493,7 +486,9 @@ internal static partial class HtmlToPdfConverter
         xg.rowGap = xg.fg.TableFlavor ? 1.5 : 0.0;
         xg.labelDy = xg.fg.TableFlavor ? 1.39 : 0.64;
         xg.valueInset = xg.fg.TableFlavor ? 2.62 : FlexValueInsetPt;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var frow in xg.fg.Rows)
+#pragma warning restore S3267
         {
             if (!LayoutFlexRow(xg, frow)) break;
         }

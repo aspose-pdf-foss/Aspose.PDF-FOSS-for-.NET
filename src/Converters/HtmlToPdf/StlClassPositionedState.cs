@@ -20,7 +20,7 @@ private sealed class StlClassPositionedState
     // pure inline content (spans / text / the svg object). Any inline style=
     // positioning or table structure means a different dialect.
     public List<(double Left, double Top, string Inner)> divs = null!;
-    public System.Text.RegularExpressions.MatchCollection divMatches = null!;
+    public SafeMatchCollection divMatches = null!;
     // Positioned text divs must dominate the body — a page merely CONTAINING
     // a few absolute classes keeps its own flow.
     public int totalDivs;

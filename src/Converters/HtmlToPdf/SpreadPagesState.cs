@@ -9,7 +9,7 @@ internal static partial class HtmlToPdfConverter
 /// invocation; never shared.</summary>
 private sealed class SpreadPagesState
 {
-    public System.Text.RegularExpressions.MatchCollection spreads = null!;
+    public SafeMatchCollection spreads = null!;
     public double bodyEmPx;
     public double contentEmPx;
     public double bodyFs;
@@ -30,7 +30,6 @@ private sealed class SpreadPagesState
     public double h1Asc;
     public double h1MarginY;
     public double bodyDrop;
-    public double bodyDesc;
     public double natAsc;
     public double capDrop;
     public double pageWidth;

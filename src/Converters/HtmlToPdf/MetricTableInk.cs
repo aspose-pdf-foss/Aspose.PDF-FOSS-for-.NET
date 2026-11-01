@@ -21,7 +21,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var b in cv.blocks)
         {
             if (b.TableHtml is not { Length: > 0 } th) continue;
-            var tag = Regex.Match(th, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+            var tag = SafeRegex.Match(th, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
             if (!tag.Success || Math.Abs(DeclaredTableWidthPt(tag.Value) - cv.declaredTableW) >= 1e-6) continue;
             if (TableIsPainted(th)) return 0;
             ink = Math.Max(ink, MetricTableInkRightPt(cv, options, th, cv.declaredTableW));
@@ -32,21 +32,21 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The markup without its `display: none` spans: hidden content paints nothing, so an image
     /// inside one cannot make a table painted (the evaluation form's edit-icon spans).</summary>
     private static string StripHiddenSpans(string html)
-        => Regex.Replace(html, @"<span\b[^>]*display\s*:\s*none[^>]*>.*?</span\s*>", "",
+        => SafeRegex.Replace(html, @"<span\b[^>]*display\s*:\s*none[^>]*>.*?</span\s*>", "",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
     /// <summary>Whether every cell width the table's cells declare is a width ATTRIBUTE (none by style),
     /// with at least one such attribute on the grid.</summary>
     private static bool AttributeColumnsOnly(string tableHtml)
     {
-        var tag = Regex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(tableHtml, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
         // (a table stating any width of its own - a percent included - is another law's)
-        if (tag.Success && Regex.IsMatch(tag.Value, @"\bwidth\s*[=:]", RegexOptions.IgnoreCase)) return false;
+        if (tag.Success && SafeRegex.IsMatch(tag.Value, @"\bwidth\s*[=:]", RegexOptions.IgnoreCase)) return false;
         var any = false;
-        foreach (Match cm in Regex.Matches(tableHtml, @"<t[dh]\b[^>]*>", RegexOptions.IgnoreCase))
+        foreach (var value in SafeRegex.Matches(tableHtml, @"<t[dh]\b[^>]*>", RegexOptions.IgnoreCase).Select(cm => cm.Value))
         {
-            if (Regex.IsMatch(DivStyleOf(cm.Value), @"(?<![-\w])width\s*:", RegexOptions.IgnoreCase)) return false;
-            var wa = Regex.Match(cm.Value, @"\bwidth\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
+            if (SafeRegex.IsMatch(DivStyleOf(value), @"(?<![-\w])width\s*:", RegexOptions.IgnoreCase)) return false;
+            var wa = SafeRegex.Match(value, @"\bwidth\s*=\s*[""']?([^""'\s>]+)", RegexOptions.IgnoreCase);
             if (!wa.Success) continue;
             // (a percent share is not a pixel hint)
             if (wa.Groups[1].Value.Contains('%')) return false;
@@ -64,18 +64,18 @@ internal static partial class HtmlToPdfConverter
         // enterprise summary: an unpainted 800 px table round three framed 200 px grids pages
         // 736.75 = 96 + 2 x 200 + 150.75 + 90, not the 786 its box would make)
         var own = StripHiddenSpans(ExtractNestedTables(tableHtml).result);
-        return Regex.IsMatch(own, @"\bbgcolor\s*=|(?<![-\w])background(?:-color|-image)?\s*:\s*(?!transparent|none)"
+        return SafeRegex.IsMatch(own, @"\bbgcolor\s*=|(?<![-\w])background(?:-color|-image)?\s*:\s*(?!transparent|none)"
                 + @"|\bborder\s*=\s*[""']?[1-9]|(?<![-\w])border(?:-(?:top|left|right|bottom))?\s*:\s*(?!none|0)"
                 + @"|(?<![-\w])border-style\s*:\s*(?!none)|<hr\b|<input\b|<textarea\b|<select\b",
             RegexOptions.IgnoreCase)
-        || Regex.IsMatch(own, @"<img\b(?![^>]*\bsrc\s*=\s*[""']?https?:)", RegexOptions.IgnoreCase);
+        || SafeRegex.IsMatch(own, @"<img\b(?![^>]*\bsrc\s*=\s*[""']?https?:)", RegexOptions.IgnoreCase);
     }
 
     /// <summary>The box a nested grid paints, from the host cell's content edge: its declared width
     /// plus the rule it strokes; 0 when it paints nothing or declares no width.</summary>
     private static double NestedGridInkBoxPt(string sub)
     {
-        var tag = Regex.Match(sub, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+        var tag = SafeRegex.Match(sub, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
         if (!tag.Success) return 0;
         if (TableIsPainted(sub))
         {
@@ -105,8 +105,8 @@ internal static partial class HtmlToPdfConverter
     private static double GridPaintOutsetPt(string sub)
     {
         var own = ExtractNestedTables(sub).result;
-        var ruled = Regex.IsMatch(own, @"<hr\b", RegexOptions.IgnoreCase);
-        var framed = Regex.IsMatch(own, @"\bborder\s*=\s*[""']?[1-9]|(?<![-\w])border(?:-(?:top|left|right|bottom))?\s*:\s*(?!none|0)"
+        var ruled = SafeRegex.IsMatch(own, @"<hr\b", RegexOptions.IgnoreCase);
+        var framed = SafeRegex.IsMatch(own, @"\bborder\s*=\s*[""']?[1-9]|(?<![-\w])border(?:-(?:top|left|right|bottom))?\s*:\s*(?!none|0)"
             + @"|(?<![-\w])border-style\s*:\s*(?!none)", RegexOptions.IgnoreCase);
         return ruled && !framed ? 2 * MetricDefaultRulePt : MetricDefaultRulePt;
     }
@@ -274,9 +274,10 @@ internal static partial class HtmlToPdfConverter
                 {
                     var lw = (sg.Runs is not null ? MeasureStyledLine(mt.face, mt.boldFace, probe, fs, lines[i], offs![i], sg.Runs)
                         : MeasureFaceText(faceN, lines[i], fs)) + overhang;
-                    var lx = sg.AlignRight || (!sg.AlignCenter && mc.Align == HorizontalAlignment.Right) ? colX + boxW - padR - sg.PadRight - lw
-                        : sg.AlignCenter || mc.Align == HorizontalAlignment.Center ? colX + padL + sg.PadLeft + (wrapW - lw) / 2
-                        : colX + mc.BorderLeftW + padL + sg.PadLeft;
+                    double lx;
+                    if (sg.AlignRight || (!sg.AlignCenter && mc.Align == HorizontalAlignment.Right)) lx = colX + boxW - padR - sg.PadRight - lw;
+                    else if (sg.AlignCenter || mc.Align == HorizontalAlignment.Center) lx = colX + padL + sg.PadLeft + (wrapW - lw) / 2;
+                    else lx = colX + mc.BorderLeftW + padL + sg.PadLeft;
                     right = Math.Max(right, lx + lw);
                 }
             }
@@ -308,7 +309,7 @@ internal static partial class HtmlToPdfConverter
         var fs = mt.baseFontSize;
         var probe = new MetricCell { FontSize = fs };
         var faceN = CellFaceName(mt.face, mt.boldFace, probe);
-        var res = ResOfFlatOn(mt.mps, mt.flatRes, mt.face, mt.boldFace, mt.cursor.page, new MetricCell { Face = mt.face, FontSize = fs });
+        var res = ResOfFlatOn(mt.flatRes, mt.face, mt.boldFace, mt.cursor.page, new MetricCell { Face = mt.face, FontSize = fs });
         var lineH = (HheaLineSumFor(mt.face) ?? mt.fm.sum) * fs;
         var boxW = (mt.nCols + 1) * mt.s;
         foreach (var w in mt.colW) boxW += w + 2 * mt.p;

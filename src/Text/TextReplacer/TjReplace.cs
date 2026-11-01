@@ -10,7 +10,7 @@ public sealed partial class TextReplacer
 {
     private PdfArray? TryReplaceTJArray(PdfArray arr, string search, string replacement,
         Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader,
-        double fontSize)
+        double fontSize, bool penCarriesOn = false)
     {
         PdfArray? newArr = default;
         var tj = new TjReplaceState();
@@ -21,6 +21,7 @@ public sealed partial class TextReplacer
         tj.fontDict = fontDict;
         tj.reader = reader;
         tj.fontSize = fontSize;
+        tj.penCarriesOn = penCarriesOn;
         var ok = TryReplaceTJArrayCore(tj);
         newArr = tj.newArr;
         return (ok) ? newArr : null;
@@ -65,7 +66,6 @@ public sealed partial class TextReplacer
         tj.charMap = new List<int>(tj.combinedText.Length);
         BuildTjCharMap(tj);
 
-        tj.prefixText = tj.combinedText.Substring(0, tj.matchStart);
         tj.suffixStart = tj.matchStart + tj.matchLen;
         tj.suffixText = tj.combinedText.Substring(tj.suffixStart);
 
@@ -78,12 +78,19 @@ public sealed partial class TextReplacer
 
         tj.startArrIdx = tj.charMap[tj.matchStart];
         tj.endArrIdx = tj.charMap[tj.matchStart + tj.matchLen - 1];
-        tj.startOffset = CountCharsUpTo(tj, tj.matchStart, tj.startArrIdx);
-        tj.endOffset = CountCharsUpTo(tj, tj.matchStart + tj.matchLen - 1, tj.endArrIdx);
+        // Byte offsets: the match's first byte, and the last byte of its last code.
+        tj.codespace = ShowCodespace.Of(tj.fontDict, tj.reader);
+        tj.startOffset = ByteOffsetOfChars(tj, tj.startArrIdx, CountCharsUpTo(tj, tj.matchStart, tj.startArrIdx));
+        tj.endOffset = ByteOffsetOfChars(tj, tj.endArrIdx, CountCharsUpTo(tj, tj.matchStart + tj.matchLen - 1, tj.endArrIdx) + 1) - 1;
 
         tj.useHex2 = tj.parts.Count > 0 && tj.parts[0].isHex;
 
-        tj.kernCompensation = ComputeTJReplaceKern(tj.arr, tj.startArrIdx, tj.startOffset,
+        // A reflowing replacement lets the tail of the run close up behind the new
+        // text (the line's followers move with it); the compensating kern that holds
+        // the tail at its old place is for the anchored modes - and for a run whose
+        // pen carries straight into the next show operator, which the reference keeps
+        // where it was.
+        tj.kernCompensation = ReflowLineOnReplace && !tj.penCarriesOn ? 0 : ComputeTJReplaceKern(tj.arr, tj.startArrIdx, tj.startOffset,
             tj.endArrIdx, tj.endOffset, tj.replacement,
             tj.toUnicode, tj.fontDict, tj.reader, tj.fontSize);
 
@@ -109,7 +116,7 @@ public sealed partial class TextReplacer
     /// aren't available — caller then emits no kerning, preserving the current
     /// behaviour for the no-font-metrics fallback path).
     /// </summary>
-    private int ComputeTJReplaceKern(PdfArray arr,
+    private static int ComputeTJReplaceKern(PdfArray arr,
         int startArrIdx, int startOffset, int endArrIdx, int endOffset,
         string replacement,
         Dictionary<int, string>? toUnicode, PdfDictionary? fontDict, PdfReader reader,
@@ -165,7 +172,7 @@ public sealed partial class TextReplacer
         double newAdvance;
         try
         {
-            var repBytes = EncodeString(replacement, toUnicode, fontDict);
+            var repBytes = EncodeString(replacement, toUnicode, fontDict, reader);
             newAdvance = metrics.MeasureString(repBytes, fontSize);
         }
         catch { return 0; }
@@ -213,9 +220,8 @@ public sealed partial class TextReplacer
             if (el is not PdfString ps) continue;
             var dec = DecodeString(ps.Value, toUnicode, fontDict, reader);
             if (dec.Length >= 2) return true;
-            foreach (var c in dec)
-                if (!char.IsUpper(c) && !char.IsPunctuation(c))
-                    return true;
+            if (dec.Any(c => !char.IsUpper(c) && !char.IsPunctuation(c)))
+                return true;
         }
         return false;
     }
@@ -290,7 +296,18 @@ public sealed partial class TextReplacer
     /// A bare show op (Tj/TJ) instead continues from the suffix's pen, so a restore
     /// would misplace it; an absolute Tm, BT/ET, or end-of-stream makes the
     /// clobbered Tlm irrelevant.</summary>
-    private static bool NeedsTlmRestore(byte[] streamBytes, int fromPos)
+    private static bool NeedsTlmRestore(byte[] streamBytes, int fromPos) =>
+        NextPositionConsumer(streamBytes, fromPos) is "Td" or "TD" or "T*" or "'" or "\"";
+
+    /// <summary>Whether the show operator after <paramref name="fromPos"/> draws from the
+    /// pen this one leaves, with no seat of its own in between: its place then depends on
+    /// this run's advance.</summary>
+    private static bool PenCarriesOn(byte[] streamBytes, int fromPos) =>
+        NextPositionConsumer(streamBytes, fromPos) is "Tj" or "TJ";
+
+    /// <summary>The next operator after <paramref name="fromPos"/> that consumes or sets the
+    /// text position, or null at the end of the stream.</summary>
+    private static string? NextPositionConsumer(byte[] streamBytes, int fromPos)
     {
         var lexer = new PdfLexer(streamBytes) { Position = fromPos };
         try
@@ -298,17 +315,16 @@ public sealed partial class TextReplacer
             while (true)
             {
                 var token = lexer.NextToken();
-                if (token.Kind == TokenKind.Eof) return false;
+                if (token.Kind == TokenKind.Eof) return null;
                 if (token.Kind != TokenKind.Keyword) continue;
                 switch (token.StringValue)
                 {
                     case "Td": case "TD": case "T*": case "'": case "\"":
-                        return true;
                     case "Tj": case "TJ": case "Tm": case "BT": case "ET":
-                        return false;
+                        return token.StringValue;
                 }
             }
         }
-        catch { return false; }
+        catch { return null; }
     }
 }

@@ -31,7 +31,7 @@ private sealed class DnnReportState
     public string dateText = null!;
     // ── module content: every ModuleContainer in document order (the page
     // stacks several modules; their boxes render flush as one) ───────────
-    public List<Aspose.Pdf.Converters.HtmlToPdfConverter.DnnBlock> blocks = null!;
+    public List<Aspose.Pdf.Converters.HtmlToPdfConverter.IDnnBlock> blocks = null!;
     // ── layout + draw ──────────────────────────────────────────────────
     public Document doc = null!;
     public Aspose.Pdf.Core.PdfDictionary fontDict = null!;

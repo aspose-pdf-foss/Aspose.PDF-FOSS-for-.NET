@@ -95,7 +95,7 @@ public class TextFragmentState : TextState
         get => !FontTouched
             && SharedBySegments(segment => segment.TextState.FontTouched ? segment.TextState.Font?.FontName : null, skipEmpty: false) is (true, not null)
             ? _fragment.Segments[1].TextState.Font
-            : base.Font as Aspose.Pdf.Text.Font;
+            : base.Font;
         set
         {
             base.Font = value;

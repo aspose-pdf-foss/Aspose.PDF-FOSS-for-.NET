@@ -28,9 +28,11 @@ internal static partial class AutoTagger
     /// edge, and how much further (or less) its first line starts.</summary>
     private readonly record struct ParagraphLayout(LS.AttributeName? Align, double StartIndent, double TextIndent)
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         /// <summary>The space between this block and the one above it, beyond the gap between
         /// two lines of body text.</summary>
         public double SpaceBefore { get; init; }
+#pragma warning restore S3218
 
         /// <summary>How far the block's lines end in from the column's right edge (a block set
         /// to a narrower measure, an abstract); 0 when they run to the edge.</summary>
@@ -69,8 +71,8 @@ internal static partial class AutoTagger
                            && (body.Count == 1 ? Math.Abs(ends[0] - right) <= tol && !StartsAsAParagraph(pa, body[0], left, right, tol)
                                : ends.Max() - ends.Min() <= tol && starts.Max() - starts.Min() > tol);
         // Lines ending together at the column's edge, the last starting further in than the first, are set flush right
-        // however near the column's left edge the first starts (a column found from these very lines starts there);
-        // a paragraph's last line ends short of the edge. So are such lines whose first starts further in than a first
+        // however near the column's left edge the first starts (a column found from these very lines starts there); a
+        // paragraph's last line ends short of the edge. So are such lines whose first starts further in than a first
         // line is ever set in (a short name over a long title): no paragraph's first line, filling it to the edge.
         rightAligned |= body.Count > 1 && ends.Max() - ends.Min() <= tol && Math.Abs(ends.Max() - right) <= tol
                         && (starts[^1] - starts[0] > tol || starts[0] - starts.Skip(1).Min() > MaxIndentEms * size);
@@ -88,10 +90,10 @@ internal static partial class AutoTagger
                      && body.Take(body.Count - 1).All(l => ColumnBounds(pa, l).Right - End(l) <= hang && Start(l) - ColumnBounds(pa, l).Left <= MaxIndentEms * size);
         var endIndent = justified && narrower ? right - blockRight : 0;
 
-        LS.AttributeName? align = centred ? LS.AttributeName.TextAlign_Center
-            : rightAligned ? LS.AttributeName.TextAlign_End
-            : justified ? LS.AttributeName.TextAlign_Justify
-            : null;
+        LS.AttributeName? align = null;
+        if (centred) align = LS.AttributeName.TextAlign_Center;
+        else if (rightAligned) align = LS.AttributeName.TextAlign_End;
+        else if (justified) align = LS.AttributeName.TextAlign_Justify;
         if (centred || rightAligned) return new ParagraphLayout(align, 0, 0);
 
         // The paragraph's own left edge is where its lines after the first start.
@@ -108,7 +110,9 @@ internal static partial class AutoTagger
     /// column starts there and runs to the column's edge, and the line after it starts at the column's left edge.</summary>
     private static bool StartsAsAParagraph(PageAnalysisState pa, Line line, double left, double right, double tol)
     {
+#pragma warning disable S1244 // both sides copy one stored value - exact equality is the grouping
         var column = pa.lines.Where(l => l.Running == 0 && l.Frags.Count > 0 && l.ColumnRight == line.ColumnRight).ToList();
+#pragma warning restore S1244
         for (var i = 0; i + 1 < column.Count; i++)
         {
             var (first, next) = (column[i], column[i + 1]);
@@ -143,7 +147,9 @@ internal static partial class AutoTagger
         var first = lines[0];
         // The block above is in its column, or stands over it across (a title across the columns).
         return SpaceAbove(pa, first.Y + first.Size, first.Size,
+#pragma warning disable S1244 // both sides copy one stored value - exact equality is the grouping
             l => l.ColumnRight == first.ColumnRight || (l.Frags.Count > 0 && l.MinX < first.Frags[^1].R && l.Frags[^1].R > first.MinX),
+#pragma warning restore S1244
             r => first.MinX < r.URX && first.Frags[^1].R > r.LLX);
     }
 
@@ -235,8 +241,16 @@ internal static partial class AutoTagger
     /// then each is a shade of its own; a null region: the page's.</summary>
     private static IEnumerable<PageContentScan.Rule> ShadeEdges(PageWork pw, Aspose.Pdf.Rectangle? table, List<Line> lines)
     {
-        bool RuledAt(bool horizontal, double at) => pw.Rules.Any(r => r.Horizontal == horizontal && r.Drawn && Math.Abs(r.At - at) <= GridLineTolerance
-                                                                      && (table is null || (r.From <= table.URX && r.To >= table.LLX)));
+        // (the drawn rules' places across and down, in order: a page of glyphs drawn as paths holds thousands of fills to join)
+        var drawn = pw.Rules.Where(r => r.Drawn && (table is null || (r.From <= table.URX && r.To >= table.LLX))).ToLookup(r => r.Horizontal, r => r.At);
+        var (acrossAt, downAt) = (drawn[true].OrderBy(a => a).ToArray(), drawn[false].OrderBy(a => a).ToArray());
+        bool RuledAt(bool horizontal, double at)
+        {
+            var places = horizontal ? acrossAt : downAt;
+            var first = Array.BinarySearch(places, at - GridLineTolerance);
+            if (first < 0) first = ~first;
+            return first < places.Length && places[first] <= at + GridLineTolerance;
+        }
         bool RunsTo(double x, double bottom, double top) => lines.Any(l => l.Baseline >= bottom && l.Baseline <= top
             && l.Frags.Any(f => !string.IsNullOrWhiteSpace(f.Text) && (Math.Abs(f.R - x) <= RunsToEdgeEms * f.Size || Math.Abs(f.X - x) <= RunsToEdgeEms * f.Size)));
         bool PartedAcross(double x, double bottom, double top) => RuledAt(false, x) && !RunsTo(x, bottom, top);

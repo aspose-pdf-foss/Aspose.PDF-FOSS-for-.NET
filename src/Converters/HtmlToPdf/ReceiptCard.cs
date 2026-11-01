@@ -80,33 +80,33 @@ internal static partial class HtmlToPdfConverter
             || !rk.html.Contains("receiptDetail-head", StringComparison.Ordinal))
             return null;
 
-        rk.agentM = Regex.Match(rk.html, @"class=[""']agencyHeading[""'][^>]*>([\s\S]*?)</span>",
+        rk.agentM = SafeRegex.Match(rk.html, @"class=[""']agencyHeading[""'][^>]*>([\s\S]*?)</span>",
             RegexOptions.IgnoreCase);
         rk.addrItems = new List<string>();
-        rk.addrM = Regex.Match(rk.html, @"class=[""']addressList[""'][\s\S]*?<ul>([\s\S]*?)</ul>",
+        rk.addrM = SafeRegex.Match(rk.html, @"class=[""']addressList[""'][\s\S]*?<ul>([\s\S]*?)</ul>",
             RegexOptions.IgnoreCase);
         ParseReceiptAddress(rk);
 
         rk.sections = new List<List<(string Label, string Value)>>();
         CollectReceiptSections(rk);
 
-        rk.headM = Regex.Match(rk.html, @"receiptDetail-head[""'][\s\S]*?<table>([\s\S]*?)</table>",
+        rk.headM = SafeRegex.Match(rk.html, @"receiptDetail-head[""'][\s\S]*?<table>([\s\S]*?)</table>",
             RegexOptions.IgnoreCase);
         rk.authVal = "";
         rk.rcptVal = "";
         if (rk.headM.Success)
         {
-            var tds = Regex.Matches(rk.headM.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>",
+            var tds = SafeRegex.Matches(rk.headM.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>",
                 RegexOptions.IgnoreCase);
             // [img][Auth Code][value][Receipt Number][value]
             if (tds.Count >= 5)
             {
-                rk.authVal = Flat(rk, tds[2].Groups[1].Value);
-                rk.rcptVal = Flat(rk, tds[4].Groups[1].Value);
+                rk.authVal = FlatKeepingNbsp(tds[2].Groups[1].Value);
+                rk.rcptVal = FlatKeepingNbsp(tds[4].Groups[1].Value);
             }
         }
 
-        rk.bodyM = Regex.Match(rk.html, @"receiptDetail-body[""'][\s\S]*?<table>([\s\S]*)</table>\s*</div>",
+        rk.bodyM = SafeRegex.Match(rk.html, @"receiptDetail-body[""'][\s\S]*?<table>([\s\S]*)</table>\s*</div>",
             RegexOptions.IgnoreCase);
         if (!rk.bodyM.Success) return null;
         rk.bodyRows = new List<(string Label, string Value, bool Amount, bool Total, bool Fees)>();
@@ -140,17 +140,17 @@ internal static partial class HtmlToPdfConverter
         rk.runs = new StringBuilder();
         rk.hdrLeft = rk.pageWidth - RcCardSidePt - 3.75 - RcHeaderWPt;
         if (rk.agentM.Success)
-            Emit(rk, "F2", RcAgentFs, rk.hdrLeft + RcAgentOffPt, RcAgentBase, Flat(rk, rk.agentM.Groups[1].Value));
+            Emit(rk, "F2", RcAgentFs, rk.hdrLeft + RcAgentOffPt, RcAgentBase, FlatKeepingNbsp(rk.agentM.Groups[1].Value));
         rk.ax = rk.hdrLeft + RcAddrOffPt;
         foreach (var item in rk.addrItems)
         {
             Emit(rk, "F1", RcAddrFs, rk.ax, RcAddrBase, item);
-            rk.ax += W(rk, item + " ", RcAddrFs, bold: false) + RcAddrGapPt;
+            rk.ax += ReceiptW(item + " ", RcAddrFs, bold: false) + RcAddrGapPt;
         }
         EmitReceiptSections(rk);
-        Emit(rk, "F1", RcBodyFs, RcAuthLabelRight - W(rk, "Auth Code", RcBodyFs, false), RcAuthBase, "Auth Code");
+        Emit(rk, "F1", RcBodyFs, RcAuthLabelRight - ReceiptW("Auth Code", RcBodyFs, false), RcAuthBase, "Auth Code");
         if (rk.authVal.Length > 0) Emit(rk, "F2", RcBodyFs, RcAuthValueX, RcAuthBase, rk.authVal);
-        Emit(rk, "F1", RcBodyFs, RcRcptLabelRight - W(rk, "Receipt Number", RcBodyFs, false), RcAuthBase, "Receipt Number");
+        Emit(rk, "F1", RcBodyFs, RcRcptLabelRight - ReceiptW("Receipt Number", RcBodyFs, false), RcAuthBase, "Receipt Number");
         if (rk.rcptVal.Length > 0) Emit(rk, "F2", RcBodyFs, RcRcptValueX, RcAuthBase, rk.rcptVal);
 
         rk.by = RcBodyBase;

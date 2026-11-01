@@ -284,14 +284,16 @@ public sealed class StructureAttribute
                 return new PdfName(_name!.Value);
             case Kind.Number:
                 var number = _number!.Value;
+#pragma warning disable S1244 // integrality test - exact by definition
                 return number == Math.Floor(number) ? new PdfInteger((long)number) : new PdfReal(number);
+#pragma warning restore S1244
             case Kind.Array:
                 var array = new PdfArray();
                 foreach (var item in _array!)
                     array.Add(item is { } n ? new PdfReal(n) : PdfNull.Instance);
                 return array;
             case Kind.String:
-                return new PdfString(System.Text.Encoding.UTF8.GetBytes(_string ?? string.Empty));
+                return Aspose.Pdf.Forms.Field.EncodePdfTextString(_string ?? string.Empty);
             default:
                 return null;
         }
@@ -445,6 +447,13 @@ public sealed class StructureElementAttributes
 
     private PdfObject? Resolve(PdfObject? obj) => _reader?.Resolve(obj) ?? obj;
 
+    /// <summary>An entry that holds one object or an array of them, as the objects it holds.</summary>
+    private IEnumerable<PdfObject> OneOrMany(PdfObject? value)
+    {
+        if (Resolve(value) is PdfArray array) return array;
+        return value is null ? [] : [value];
+    }
+
     private void Parse()
     {
         switch (Resolve(_element.Get("A")))
@@ -480,7 +489,7 @@ public sealed class StructureElementAttributes
     {
         var entries = new List<PdfObject>();
         var existing = _element.Get("A");
-        foreach (var entry in Resolve(existing) is PdfArray array ? array : existing is null ? [] : [existing])
+        foreach (var entry in OneOrMany(existing))
         {
             if (entry is null || Resolve(entry) is not PdfDictionary dict) continue;
             if (TryParseOwner(dict.GetName("O")) is { } owner && _byOwner.ContainsKey(owner)) continue;

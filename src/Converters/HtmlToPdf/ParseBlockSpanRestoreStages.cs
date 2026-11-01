@@ -24,7 +24,7 @@ internal static partial class HtmlToPdfConverter
                 pb.floatRightSpanDepths.Pop();
                 pb.floatRightFlush = true;
             }
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             pb.floatRightFlush = false;
         }
         // The ledger's absolute column closes: its text flushes as its
@@ -40,7 +40,7 @@ internal static partial class HtmlToPdfConverter
             var lgBefore = pb.blocks.Count;
             lgTop.LeftIndent = Math.Max(0, pb.absSpanLeftPt - UaBodyMarginPt);
             lgTop.TextInsetPt = 0;
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, lgTop);
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, lgTop);
             lgTop.LeftIndent = lgSavLi;
             lgTop.TextInsetPt = lgSavTi;
             // An EMPTY column emitted nothing — the label must advance
@@ -58,7 +58,7 @@ internal static partial class HtmlToPdfConverter
             // (a field label ends in its `:after` suffix)
             if (pb.fieldLabelOpen && pb.cv?.profile.fieldLabelSuffix is { Length: > 0 } labelSuffix)
                 pb.currentText.Append(labelSuffix);
-            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+            Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
             if (pb.blocks.Count > 0 && !pb.blocks[^1].IsHardBreak
                 && pb.blocks[^1].Text.Length > 0)
             {

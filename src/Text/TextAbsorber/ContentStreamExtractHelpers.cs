@@ -18,7 +18,6 @@ public sealed partial class TextAbsorber
         var slice = xs.atSpan.Substring(xs.atOffset, take).Replace('\t', ' ');
         xs.atOffset += take;
         _ocrRuns.Add((slice, xDev, yDev, fsDev, wDev));
-        _type3SpanRuns++;
     }
 
     private bool Type3SpanActive(ExtractState xs) => _collectOcrRuns && xs.atSpan is not null
@@ -27,24 +26,28 @@ public sealed partial class TextAbsorber
 
     // The single character a show operand (string or TJ array) decodes to,
     // or null when it decodes to zero or 2+ characters.
-    private char? DecodedSingleShowChar(ExtractState xs, PdfObject showOperand)
+    private static char? DecodedSingleShowChar(ExtractState xs, PdfObject showOperand)
     {
         string d = string.Empty;
         if (showOperand is PdfString ps1)
-            d = NormalizeDecoded(DecodeString(ps1.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine));
+            d = NormalizeDecoded(DecodeString(ps1.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader));
         else if (showOperand is PdfArray pa1)
+        {
+            var shown = new StringBuilder();
             foreach (var it in pa1)
             {
                 if (it is not PdfString ps2) continue;
-                d += NormalizeDecoded(DecodeString(ps2.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine));
-                if (d.Length > 1) break;
+                shown.Append(NormalizeDecoded(DecodeString(ps2.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader)));
+                if (shown.Length > 1) break;
             }
+            d = shown.ToString();
+        }
         return d.Length == 1 ? d[0] : null;
     }
 
     // True when the pending single-char ActualText should yield to the
     // show's own decode (same letter, different case only).
-    private bool ActualTextYieldsToDecode(ExtractState xs, PdfObject showOperand)
+    private static bool ActualTextYieldsToDecode(ExtractState xs, PdfObject showOperand)
         => DecodedSingleShowChar(xs, showOperand) is char dc
            && dc != xs.actualText![0]
            && char.ToUpperInvariant(dc) == char.ToUpperInvariant(xs.actualText[0]);
@@ -77,6 +80,7 @@ public sealed partial class TextAbsorber
                 if (tailIsVictim)
                 {
                     _text.Length = xs.dedupPrevOffset;
+                    ForgetLineStart();
                     while (_pageRunSpans.Count > 0 && _pageRunSpans[^1].Offset >= xs.dedupPrevOffset)
                         _pageRunSpans.RemoveAt(_pageRunSpans.Count - 1);
                     replaced = true;
@@ -93,7 +97,13 @@ public sealed partial class TextAbsorber
     // every line reposition (Tm/Td/T*). Upright text filters on the baseline Y
     // (X is clipped per glyph); sideways text swaps the roles — the baseline's
     // page X is the line coordinate and the advance axis is clipped per glyph.
-    private bool LineFiltered(ExtractState xs, double upY)
+    // The height of a found fragment's box, in em, from its descent line up.
+    private const double FragmentBoxEms = 1.1;
+    // How far (points) a line may overshoot a rectangle edge that was computed from it: the
+    // rounding of the numbers a producer writes a link or box with.
+    private const double RectEdgeRounding = 0.01;
+
+    private static bool LineFiltered(ExtractState xs, double upY)
     {
         // tmE/tmF are TRUE page coordinates (composed Tm×CTM) — no cm re-add.
         // The upright branch composes the CTM's linear scale too: content nested
@@ -120,12 +130,17 @@ public sealed partial class TextAbsorber
             // keeps y ≤ 192, drops 193 — the AFM ascender 0.718 em; the same
             // law at fs 20 and on Type3 rows). The BOTTOM edge stays
             // baseline-based (a baseline ON LLY is kept).
-            var fsEffUp = xs.fontSize * Math.Abs(xs.tmRotated ? xs.tmN : xs.tmD > 0 ? xs.tmD : xs.tmN)
+            var fsEffUp = xs.fontSize * Math.Abs((xs.tmRotated, xs.tmD) switch { (true, _) => xs.tmN, (_, > 0) => xs.tmD, _ => xs.tmN })
                           * Math.Abs(cmSy);
             var ascEm = xs.currentMetrics is { Ascent: > 0 } m ? m.Ascent / 1000.0 : 0.718;
+            // A found fragment's box tops out 1.1 em above its descent line, below the ascent
+            // of a font that states a tall one: the line passes when that box fits, so a
+            // fragment's own rectangle (a link drawn over a phrase) selects its text.
+            if (xs.currentMetrics is { Descent: < 0 } d)
+                ascEm = Math.Min(ascEm, FragmentBoxEms + d.Descent / 1000.0);
             skip = xs.tmRotated
                 ? px < xs.searchRect.LLX || px > xs.searchRect.URX
-                : py < xs.searchRect.LLY || py + ascEm * fsEffUp > xs.searchRect.URY;
+                : py < xs.searchRect.LLY || py + ascEm * fsEffUp > xs.searchRect.URY + RectEdgeRounding;
         }
         if (GridDebug && xs.searchRect is not null)
             Console.Error.WriteLine($"[linefilt] upY={upY:F2} py={py:F2} px={px:F2} tmF={xs.tmF:F2} tmE={xs.tmE:F2} cmTy={xs.localCmTy:F2} cmD={xs.localCmD:F2} rot={xs.tmRotated} skip={skip}");
@@ -138,15 +153,15 @@ public sealed partial class TextAbsorber
     // otherwise drifts by n·Tc — enough to flip the word-gap law both ways
     // ("Leverings Datum" read as one word at Tc −0.035; a positive-Tc run
     // read as two).
-    private double SpacingAdvance(ExtractState xs, byte[] bytes)
+    private static double SpacingAdvance(ExtractState xs, byte[] bytes)
     {
         if (xs.charSpacing == 0 && xs.wordSpacing == 0) return 0;
         var isCidRun = xs.currentMetrics?.IsCid ?? false;
         var n = isCidRun ? bytes.Length / 2 : bytes.Length;
         var adv = n * xs.charSpacing;
         if (!isCidRun && xs.wordSpacing != 0)
-            foreach (var b in bytes)
-                if (b == 32) adv += xs.wordSpacing;
+            foreach (var b in bytes.Where(b => b == 32))
+                adv += xs.wordSpacing;
         return adv;
     }
 
@@ -154,7 +169,7 @@ public sealed partial class TextAbsorber
     // the page Y axis for rotated text) lies inside the rectangle's Y band. The
     // X band was already enforced at line level by LineFiltered.
     /// <returns>The text-space pen after the run's glyph advances.</returns>
-    private double AppendClippedRunRot(ExtractState xs, StringBuilder sb, byte[] bytes, double penText)
+    private static double AppendClippedRunRot(ExtractState xs, StringBuilder sb, byte[] bytes, double penText)
     {
         const double eps = 0.05;
         var isCid = xs.currentMetrics?.IsCid ?? false;
@@ -163,7 +178,7 @@ public sealed partial class TextAbsorber
         {
             var code = isCid ? ((bytes[i] << 8) | bytes[i + 1]) : bytes[i];
             var seg = isCid ? new[] { bytes[i], bytes[i + 1] } : new[] { bytes[i] };
-            var glyph = NormalizeDecoded(DecodeString(seg, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine), foldNbsp: false);
+            var glyph = NormalizeDecoded(DecodeString(seg, xs.currentToUnicode, xs.currentFontDict, xs.reader), foldNbsp: false);
             var w = ((xs.currentMetrics is not null
                 ? xs.currentMetrics.GetWidth(code) * xs.fontSize / 1000.0
                 : xs.fontSize * 0.5 * Math.Max(1, glyph.Length))

@@ -71,7 +71,7 @@ public partial class TextFragment
     /// paragraph's own line ending became when the lines were joined.</summary>
     private static string? StraddlingReplace(string paragraph, string oldText, string newText)
     {
-        var words = System.Text.RegularExpressions.Regex.Split(oldText.Trim(), @"\s+");
+        var words = SafeRegex.Split(oldText.Trim(), @"\s+");
         var sb = new System.Text.StringBuilder();
         foreach (var w in words)
         {
@@ -81,9 +81,9 @@ public partial class TextFragment
         }
         var pattern = sb.ToString();
         if (pattern.Length == 0) return null;
-        var rx = new System.Text.RegularExpressions.Regex(pattern);
-        if (!rx.IsMatch(paragraph)) return null;
-        return rx.Replace(paragraph, newText.Replace("$", "$$"), 1);
+        var rx = new System.Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.None, RegexLimits.Timeout);
+        if (!SafeRegex.IsMatch(rx, paragraph)) return null;
+        return SafeRegex.Replace(rx, paragraph, newText.Replace("$", "$$"), 1);
     }
 
     /// <summary>The X a reflow wraps against: the PAGE'S OWN TEXT COLUMN — the widest text
@@ -178,7 +178,9 @@ public partial class TextFragment
             || string.IsNullOrEmpty(newText))
             return;
 
+#pragma warning disable S3267 // a first-match search over a value type - FirstOrDefault cannot tell no match from a default item
         foreach (var ch in newText)
+#pragma warning restore S3267
             if (!font.CanRepresent(ch))
                 throw new InvalidOperationException(
                     $"Font '{font.FontName}' does not contain a glyph for character " +
@@ -198,7 +200,9 @@ public partial class TextFragment
             var m = font.Metrics;
             foreach (var ch in text)
             {
-                var code = m.IsCid ? ch : (ch < 256 ? ch : '?');
+                char code;
+                if (m.IsCid) code = ch;
+                else code = ch < 256 ? ch : '?';
                 if (!m.HasExplicitWidth(code)) { covered = false; break; }
             }
         }
@@ -207,8 +211,8 @@ public partial class TextFragment
         {
             try
             {
-                // Measure with the system face's raw TTF metrics (FontData.MeasureString);
-                // Font.MeasureString would consult the synthetic font dict, which carries
+                // Measure with the system face's raw TTF metrics (FontData.MeasureString); Font.MeasureString
+                // would consult the synthetic font dict, which carries
                 // no widths for a repository-resolved face.
                 var real = FontRepository.TryFindFont(name, ignoreCase: true);
                 if (real?.SourceFontData is { } fd)
@@ -217,10 +221,36 @@ public partial class TextFragment
                     if (w > 0) return w;
                 }
             }
-            catch { }
+            catch { /* a font that cannot be found or read leaves the fallback in place */ }
         }
         try { return font.MeasureString(text, fontSize); }
         catch { return -1; }
+    }
+
+    /// <summary>Under ReplaceAdjustment.None and ShiftRestOfLine the fragment spans the new text, so its rectangle
+    /// takes the old-to-new advance DELTA (not the absolute advance: a Tc/kern-spread table row is far wider than its
+    /// natural advance and swapping one word keeps that spread, the stream keeps its kerns). A replacement written
+    /// across several runs closes the gaps between them, so it spans its own advance. True when it was resized.</summary>
+    private bool TrackReplacementAdvance(string oldText, string value, bool rewroteAcrossRuns)
+    {
+        if (_rectangle is null
+            || _replaceOptions?.ReplaceAdjustmentAction is not (TextReplaceOptions.ReplaceAdjustment.None
+                or TextReplaceOptions.ReplaceAdjustment.ShiftRestOfLine)
+            || TextState.Font is not { } font || TextState.FontSize <= 0)
+            return false;
+        double newWidth;
+        try
+        {
+            var oldWidth = font.MeasureString(oldText, TextState.FontSize);
+            newWidth = font.MeasureString(value, TextState.FontSize);
+            // Spread detection: a rect wider than the old natural advance by more than a
+            // point means positioning ops pad the run - keep them.
+            if (!rewroteAcrossRuns && _rectangle.Width > oldWidth + 1.0)
+                newWidth = Math.Max(0, _rectangle.Width + newWidth - oldWidth);
+        }
+        catch { return false; }
+        _rectangle = new Rectangle(_rectangle.LLX, _rectangle.LLY, _rectangle.LLX + newWidth, _rectangle.URY);
+        return true;
     }
 
     /// <summary>The (negative) page-space descent between this fragment's box
@@ -230,7 +260,9 @@ public partial class TextFragment
     private double SeatDescent()
     {
         var metrics = TextState.Font?.GetMetrics();
-        var fs = TextState.FontSize;
+        // (a negative size - glyphs turned over by the size, under a mirroring scale or a flipped page - seats the box
+        // by its magnitude, as the absorber does: the baseline stands over the box's bottom all the same)
+        var fs = Math.Abs(TextState.FontSize);
         return metrics is not null && metrics.Descent != 0 ? metrics.Descent * fs / 1000.0 : 0;
     }
 

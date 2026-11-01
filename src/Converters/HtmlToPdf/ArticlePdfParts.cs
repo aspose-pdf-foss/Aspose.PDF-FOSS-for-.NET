@@ -11,22 +11,22 @@ internal static partial class HtmlToPdfConverter
            && TryParseLength(v) is { } pt ? pt : fallback;
 
     private static string Inner(ArticlePdfState ap, string cls)
-        => Regex.Match(ap.html,
+        => SafeRegex.Match(ap.html,
             @"<(?<tag>h1|div|footer)\b[^>]*class\s*=\s*[""'][^""']*" + Regex.Escape(cls) +
             @"[^""']*[""'][^>]*>(?<body>[\s\S]*?)</\k<tag>>",
             RegexOptions.IgnoreCase) is { Success: true } m ? m.Groups["body"].Value : "";
 
-    private static string Flat(ArticlePdfState ap, string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
+    private static string Flat(string frag)
+        => SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
 
-    private static void ParseBlocksInto(ArticlePdfState ap, string frag, List<ApBlock> into)
+    private static void ParseBlocksInto(string frag, List<ApBlock> into)
     {
-        foreach (Match bm in Regex.Matches(frag,
-            @"<(?<tag>p|h2|h3|li)\b[^>]*>(?<body>[\s\S]*?)</\k<tag>>", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(frag,
+            @"<(?<tag>p|h2|h3|li)\b[^>]*>(?<body>[\s\S]*?)</\k<tag>>", RegexOptions.IgnoreCase).Select(bm => bm.Groups))
         {
-            var txt = Flat(ap, bm.Groups["body"].Value);
+            var txt = Flat(groups["body"].Value);
             if (txt.Length > 0)
-                into.Add(new ApBlock { Kind = bm.Groups["tag"].Value.ToLowerInvariant(), Text = txt });
+                into.Add(new ApBlock { Kind = groups["tag"].Value.ToLowerInvariant(), Text = txt });
         }
     }
 

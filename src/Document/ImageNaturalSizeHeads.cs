@@ -19,7 +19,6 @@ public sealed partial class Document : IDisposable
     {
         double widthPt = default;
         double heightPt = default;
-        widthPt = heightPt = 0;
         double dpiX = 72, dpiY = 72; int pw = 0, ph = 0;
         int p = 2;
         while (p + 4 < d.Length)
@@ -62,7 +61,6 @@ public sealed partial class Document : IDisposable
     {
         double widthPt = default;
         double heightPt = default;
-        widthPt = heightPt = 0;
         int pw = BE32(d, 16), ph = BE32(d, 20);
         if (pw <= 0 || ph <= 0) return null;
         double dpiX = 72, dpiY = 72;

@@ -46,21 +46,22 @@ internal static partial class TextPaginator
             else if (sep) { current.Append(' '); currentWidth += tl.spaceWidth; }
             if (current.Length == 0 && wordWidth > effectiveMax && CharacterFillApplies(fontData))
             {
-                var rest = word;
-                while (rest.Length > 0)
+                // An offset walks the token, as in WrapToWidth (re-slicing is quadratic).
+                var start = 0;
+                while (start < word.Length)
                 {
                     effectiveMax = tl.globalLineCount == 0 && paraLines.Count == 0
                         ? maxWidth - firstLineIndent : maxWidth;
-                    (var take, var pieceWidth) = LongestFittingPrefix(rest, tl.measurer, effectiveMax);
-                    if (take >= rest.Length)
+                    (var take, var pieceWidth) = LongestFittingPrefix(word, start, tl.measurer, effectiveMax);
+                    if (start + take >= word.Length)
                     {
-                        current.Append(rest);
+                        current.Append(word, start, word.Length - start);
                         currentWidth = pieceWidth;
                         break;
                     }
                     keptBreakSpace.Add(false);
-                    paraLines.Add((rest.Substring(0, take), pieceWidth));
-                    rest = rest.Substring(take);
+                    paraLines.Add((word.Substring(start, take), pieceWidth));
+                    start += take;
                 }
             }
             else

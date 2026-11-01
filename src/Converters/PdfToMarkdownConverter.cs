@@ -105,8 +105,6 @@ public sealed partial class PdfToMarkdownConverter
 
         cp.horizontalRules = DetectHorizontalRules(cp.page);
 
-        cp.baseFontNames = ResolveBaseFontNames(cp.page);
-
         // Extract images
         ExtractImages(cp.page, cp.sb);
 
@@ -143,7 +141,7 @@ public sealed partial class PdfToMarkdownConverter
         return cp.sb.ToString();
     }
 
-    private List<LinkInfo> CollectLinks(Page page)
+    private static List<LinkInfo> CollectLinks(Page page)
     {
         var links = new List<LinkInfo>();
         foreach (var annotation in page.Annotations)
@@ -173,7 +171,7 @@ public sealed partial class PdfToMarkdownConverter
         return null;
     }
 
-    private List<double> DetectHorizontalRules(Page page)
+    private static List<double> DetectHorizontalRules(Page page)
     {
         var rules = new List<double>();
         var pageWidth = page.MediaBox.Width;
@@ -276,7 +274,6 @@ public sealed partial class PdfToMarkdownConverter
     /// rectangle spans at least <paramref name="minRuleWidth"/> and is under 3 pt tall.</summary>
     private static void AddThinRectRule(List<PdfObject> operands, double minRuleWidth, List<double> rules)
     {
-        var rx = Num(operands[0]);
         var ry = Num(operands[1]);
         var rw = Num(operands[2]);
         var rh = Num(operands[3]);
@@ -347,34 +344,6 @@ public sealed partial class PdfToMarkdownConverter
             sb.AppendLine();
             i++;
         }
-    }
-
-    private static Dictionary<string, string> ResolveBaseFontNames(Page page)
-    {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        try
-        {
-            var reader = page.Reader;
-            var resources = reader.ResolveDict(page.Dict.Get("Resources"));
-            if (resources is null) return result;
-            var fontDict = reader.ResolveDict(resources.Get("Font"));
-            if (fontDict is null) return result;
-            foreach (var key in fontDict.Keys)
-            {
-                var font = reader.ResolveDict(fontDict.Get(key));
-                if (font is not null)
-                {
-                    var baseFont = font.GetName("BaseFont");
-                    if (baseFont is not null)
-                        result[key] = baseFont;
-                }
-            }
-        }
-        catch
-        {
-            // If font resolution fails, return empty
-        }
-        return result;
     }
 
     private static List<byte[]> GetContentStreams(Page page)

@@ -142,9 +142,9 @@ internal static partial class HtmlToPdfConverter
         // a row with no cell at all has no padding box: its band is the spacing alone
         // (…except the pt form's empty row under a spanning cell: it takes its share of the span
         //  and its padding box - probed: the title's rowspan=2 over an empty row bands 11.25 + 11.25)
-        mr.rowBoxH = mr.r.Count == 0
-            ? (mr.mps.ptFormCells && ri < mr.rowSpanExtra.Length && mr.rowSpanExtra[ri] > 0 ? mr.rowSpanExtra[ri] + 2 * mr.p : 0)
-            : mr.rowContentH + 2 * mr.p + (mr.mps.collapsedGrid ? 0.75 : 0);
+        if (mr.r.Count == 0)
+            mr.rowBoxH = mr.mps.ptFormCells && ri < mr.rowSpanExtra.Length && mr.rowSpanExtra[ri] > 0 ? mr.rowSpanExtra[ri] + 2 * mr.p : 0;
+        else mr.rowBoxH = mr.rowContentH + 2 * mr.p + (mr.mps.collapsedGrid ? 0.75 : 0);
         mr.rowNaturalBoxH = mr.rowBoxH;
         mr.rowCellClassH = 0;
         mr.rowHasText = false;
@@ -153,9 +153,10 @@ internal static partial class HtmlToPdfConverter
             // (a UA cell's inline STYLE height is its CONTENT box: its own paddings and the collapsed
             //  rule stand on top - probed on the e-mail cards: `height: 30px` cells with 5 px class
             //  pads in a collapsed grid pitch 41 px; a height ATTRIBUTE keeps the calibrated band)
-            var cellClassH = mr.stdSerif && mr.mps.collapsedGrid && mc.HeightStylePt > 0 && (mc.PadTopPt > 0 || mc.PadBottomPt > 0)
-                ? Math.Max(mc.HeightPt, mc.HeightStylePt + mc.PadTopPt + mc.PadBottomPt + (mr.mps.collapsedGrid ? 0.75 : 0))
-                : mc.HeightPt;
+            double cellClassH;
+            if (mr.stdSerif && mr.mps.collapsedGrid && mc.HeightStylePt > 0 && (mc.PadTopPt > 0 || mc.PadBottomPt > 0))
+                cellClassH = Math.Max(mc.HeightPt, mc.HeightStylePt + mc.PadTopPt + mc.PadBottomPt + (mr.mps.collapsedGrid ? 0.75 : 0));
+            else cellClassH = mc.HeightPt;
             if (mc.RowSpan <= 1 || !mr.stdSerif) mr.rowCellClassH = Math.Max(mr.rowCellClassH, cellClassH);
             // A cell holds its ink in SEGMENTS and images as well as in text, and a
             // declared row height is a MIN wherever there is ink - only a row holding
@@ -210,8 +211,7 @@ internal static partial class HtmlToPdfConverter
             {
                 if (mc.SubTables is { Count: > 0 } || mc.DivSegs is { Count: > 0 }
                     || mc.ImgHPt > 0) { allWsRow = false; break; }
-                foreach (var ch in mc.Text)
-                    if (ch is not (' ' or '\u00A0' or '\u0001')) { allWsRow = false; break; }
+                if (mc.Text.Any(ch => ch is not (' ' or '\u00A0' or '\u0001'))) { allWsRow = false; }
                 if (!allWsRow) break;
             }
             if (allWsRow) mr.rowBoxH = mr.mps.rowHeights[ri];
@@ -293,8 +293,8 @@ internal static partial class HtmlToPdfConverter
         if (ri < mr.rowSpanExtra.Length) mr.rowContentH += mr.rowSpanExtra[ri];
         // A row whose every cell is TRULY empty (no text, not even an
         // &nbsp;) keeps no line strut — its band is the padding alone
-        // (measured: the empty spacer row is exactly 2p + s;
-        // nbsp spacer rows keep their calibrated line boxes).
+        // (measured: the empty spacer row is exactly 2p + s; nbsp
+        // spacer rows keep their calibrated line boxes).
         if (mr.stdSerif && mr.wrapperStacks && mr.rowContentH > 0
             && MetricRowIsBare(mr.r))
             mr.rowContentH = ri < mr.rowSpanExtra.Length ? mr.rowSpanExtra[ri] : 0;
@@ -310,8 +310,9 @@ internal static partial class HtmlToPdfConverter
         if (mr.collapseBoxW > 0)
         {
             var cbRowHasText = false;
+            // (a nested grid is content too: its row bands on the grid)
             foreach (var mc in mr.r)
-                if (mc.Text.Trim().Length > 0) { cbRowHasText = true; break; }
+                if (mc.Text.Trim().Length > 0 || mc.SubTables is { Count: > 0 }) { cbRowHasText = true; break; }
             if (!cbRowHasText) mr.rowContentH = 0;
         }
     }

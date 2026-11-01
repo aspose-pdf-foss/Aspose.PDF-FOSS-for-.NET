@@ -47,6 +47,16 @@ public sealed class Line : Shape
         _coords = Array.ConvertAll(positionArray, f => (double)f);
     }
 
+    /// <summary>
+    /// Create a line (or polyline) from a flat coordinate array [x0, y0, x1, y1, ...].
+    /// </summary>
+    public Line(double[] coordinates)
+    {
+        if (coordinates is null || coordinates.Length < 4)
+            throw new ArgumentException("coordinates must have at least 4 elements", nameof(coordinates));
+        _coords = (double[])coordinates.Clone();
+    }
+
     /// <summary>Polyline vertices as a flat [x0, y0, x1, y1, ...] array.</summary>
     public float[] PositionArray
     {
@@ -68,16 +78,6 @@ public sealed class Line : Shape
         return true;
     }
 
-    /// <summary>
-    /// Create a line (or polyline) from a flat coordinate array [x0, y0, x1, y1, ...].
-    /// </summary>
-    public Line(double[] coordinates)
-    {
-        if (coordinates is null || coordinates.Length < 4)
-            throw new ArgumentException("coordinates must have at least 4 elements", nameof(coordinates));
-        _coords = (double[])coordinates.Clone();
-    }
-
     internal override void Render(ContentStreamBuilder builder, Page? page = null)
     {
         ApplyOpacity(builder, page);
@@ -85,10 +85,10 @@ public sealed class Line : Shape
         // A dashed line dashes (probed: DashArray {2, 2} writes `[2 2] 0 d`).
         if (GraphInfo.DashPattern is { Length: > 0 })
             builder.SetDashPattern(GraphInfo.DashPattern, GraphInfo.DashStart);
-        if (GraphInfo.StrokeColor is { } sc)
-            builder.SetStrokeColor(sc.R, sc.G, sc.B);
-        if (GraphInfo.FillColorInternal is { } fc)
-            builder.SetFillColor(fc.R, fc.G, fc.B);
+        if (GraphInfo.Color is { } sc)
+            builder.SetStrokeColor(sc);
+        if (GraphInfo.FillColor is { } fc)
+            builder.SetFillColor(fc);
 
         AppendOutline(builder);
 

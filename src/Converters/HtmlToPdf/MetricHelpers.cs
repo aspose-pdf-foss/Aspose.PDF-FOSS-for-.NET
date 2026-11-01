@@ -8,14 +8,16 @@ internal static partial class HtmlToPdfConverter
 // The table parser's working set, lifted out of BuildTableFromHtml: each
 // method takes the parse state, the column model and the settled dialect
 // scalars it reads. Bodies are verbatim.
-    private static string CellFaceName(string face, string boldFace, MetricCell mc) => mc.Face is { } cf
-        ? cf + (mc.Bold ? " Bold" : "") + (mc.Italic ? " Italic" : "")
-        : (mc.Bold ? boldFace : face);
+    private static string CellFaceName(string face, string boldFace, MetricCell mc)
+    {
+        if (mc.Face is { } cf) return cf + (mc.Bold ? " Bold" : "") + (mc.Italic ? " Italic" : "");
+        return mc.Bold ? boldFace : face;
+    }
 
     private static (double asc, double sum) CellFm((double asc, double sum) fm, MetricCell mc) => mc.Face is { } cf
         ? (WinMetricsFor(cf) ?? fm) : fm;
 
-    private static double CellLineOf(MetricParseState mps, bool stdSerif, bool wrapperStacks, double hheaSum, string face, (double asc, double sum) fm, MetricCell mc, double cellFs)
+    private static double CellLineOf(MetricParseState mps, bool stdSerif, bool wrapperStacks, string face, (double asc, double sum) fm, MetricCell mc, double cellFs)
     {
         // the collapsed class grid's LINE-HEIGHT pitches every cell line
         if (mps.collapsedLineH > 0) return mps.collapsedLineH;
@@ -49,7 +51,7 @@ internal static partial class HtmlToPdfConverter
     /// plain number or em of the cell's font size; null for `normal` or anything else.</summary>
     private static double? CellRuleLineHeightPt(string value, double cellFs)
     {
-        var m = Regex.Match(value.Trim(), @"^(\d+(?:\.\d+)?|\.\d+)\s*(px|pt|em|%)?$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(value.Trim(), @"^(\d+(?:\.\d+)?|\.\d+)\s*(px|pt|em|%)?$", RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         var n = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         return m.Groups[2].Value.ToLowerInvariant() switch
@@ -78,9 +80,8 @@ internal static partial class HtmlToPdfConverter
     /// its canonical name, so the cell draws the real face rather than a literally-named Type1 no rasteriser maps.</summary>
     private static string CanonicalStandardFaceName(string face)
     {
-        foreach (var canon in new[] { "Helvetica", "Arial", "Courier", "Times", "Times New Roman", "Courier New" })
-            if (face.Equals(canon, StringComparison.OrdinalIgnoreCase)) return canon;
-        return face;
+        return new[] { "Helvetica", "Arial", "Courier", "Times", "Times New Roman", "Courier New" }
+            .FirstOrDefault(canon => face.Equals(canon, StringComparison.OrdinalIgnoreCase)) ?? face;
     }
 
     /// <summary>Every text-bearing cell of the row holds its text in floated spans only (no line box, no strut).</summary>
@@ -160,10 +161,10 @@ internal static partial class HtmlToPdfConverter
         return any;
     }
 
-    private static double CellDropOf(MetricParseState mps, bool stdSerif, (double asc, double sum) fm, MetricCell mc, double cellFs, double box)
+    private static double CellDropOf((double asc, double sum) fm, MetricCell mc, double cellFs, double box)
         => MetricBaselineDrop(cellFs, box, CellFm(fm, mc));
 
-    private static string ResOfFlatOn(MetricParseState mps, Dictionary<string, string> flatRes, string face, string boldFace, Page pg, MetricCell mc)
+    private static string ResOfFlatOn(Dictionary<string, string> flatRes, string face, string boldFace, Page pg, MetricCell mc)
     {
         var fn = CellFaceName(face, boldFace, mc);
         if (!flatRes.TryGetValue(fn, out var rn))
@@ -174,9 +175,7 @@ internal static partial class HtmlToPdfConverter
             var fd = (pg.Dict.Get("Resources") as Core.PdfDictionary)?
                 .Get("Font") as Core.PdfDictionary;
             var idx = 8 + flatRes.Count;
-            while (fd?.Get("F" + idx) is { } takenObj
-                   && (takenObj is not Core.PdfDictionary taken
-                       || taken.GetName("BaseFont") != fn.Replace(" ", "")))
+            while (fd?.Get("F" + idx) is { } takenObj && !HoldsFace(pg, takenObj, fn.Replace(" ", "")))
                 idx++;
             rn = "F" + idx;
             flatRes[fn] = rn;

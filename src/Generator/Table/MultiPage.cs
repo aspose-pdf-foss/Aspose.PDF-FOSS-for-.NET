@@ -54,7 +54,7 @@ public partial class Table : BaseParagraph
             if (col == targetCol)
             {
                 var padding = EffectivePad(cell, row);
-                var dp = DefaultPad(cell, row);
+                var dp = DefaultPad;
                 return (cellX, padding?.Left ?? dp, padding?.Top ?? 0);
             }
             cellX += cellWidth + CellSpacingH;
@@ -69,9 +69,9 @@ public partial class Table : BaseParagraph
     /// the declared font ships no program to embed.</summary>
     private static (byte[] Ttf, string Name)? DeclaredReplacementFace(Aspose.Pdf.Text.TextFragment tf)
     {
-        foreach (var seg in tf.Segments)
+        foreach (var textEditOptions in tf.Segments.Select(seg => seg.TextEditOptions))
         {
-            var opts = seg.TextEditOptions;
+            var opts = textEditOptions;
             if (opts.NoCharacterBehavior != Aspose.Pdf.Text.TextEditOptions.NoCharacterAction.UseCustomReplacementFont)
                 continue;
             if (opts.ReplacementFont?.SourceFontData?.TtfData is not { Length: > 0 } ttf) continue;
@@ -112,7 +112,8 @@ public partial class Table : BaseParagraph
                     return (bytes, name);
             return curFace; // nothing covers it — the notdef stays where it is
         }
-        for (var i = 0; i < s.Length; i++)
+        var i = 0;
+        while (i < s.Length)
         {
             var frag = s[i].ToString();
             int cp = s[i];
@@ -131,6 +132,7 @@ public partial class Table : BaseParagraph
                 if (face.Item2 != primary.Item2) sawChain = true;
             }
             cur.Append(frag);
+            i++;
         }
         Flush();
         return sawChain ? runs : null;
@@ -151,11 +153,11 @@ public partial class Table : BaseParagraph
         if (string.IsNullOrEmpty(family)) return (ttf, ss.Font?.FontName);
         try
         {
-            var styled = Aspose.Pdf.Text.FontRepository.TryFindFont(family!, want, ignoreCase: true);
+            var styled = Aspose.Pdf.Text.FontRepository.TryFindFont(family, want, ignoreCase: true);
             if (styled?.SourceFontData?.TtfData is { Length: > 12 } st)
                 return (st, styled.FontName);
         }
-        catch { }
+        catch { /* a font that cannot be found or read leaves the fallback in place */ }
         return (ttf, ss.Font?.FontName);
     }
 
@@ -185,12 +187,12 @@ public partial class Table : BaseParagraph
         {
             var row = Rows.At(r);
             var occupied = new List<bool>();
-            void Reserve(int col) { while (occupied.Count <= col) occupied.Add(false); occupied[col] = true; }
+            void Reserve(int col) { while (occupied.Count <= col) { occupied.Add(false); } occupied[col] = true; }
             foreach (var (colStart, colSpan, _) in pending)
                 for (var k = 0; k < colSpan; k++) Reserve(colStart + k);
 
-            // -1 = vacant or held by a foreign rowspan (advance x by the column width);
-            // -2 = covered by this row's own ColSpan cell (x already advanced by the span).
+            // -1 = vacant or held by a foreign rowspan (advance x by the column width); -2
+            // = covered by this row's own ColSpan cell (x already advanced by the span).
             var mapping = new List<int>();
             void Put(int col, int val)
             {
@@ -260,12 +262,12 @@ public partial class Table : BaseParagraph
     {
         if (string.IsNullOrEmpty(html)) return null;
         List<(string Text, string Url)>? anchors = null;
-        foreach (Match m in Regex.Matches(html,
+        foreach (var groups in SafeRegex.Matches(html,
                      @"<a\b[^>]*\bhref\s*=\s*(?:'(?<u>[^']*)'|""(?<u>[^""]*)""|(?<u>[^\s>]+))[^>]*>(?<t>.*?)</a\s*>",
-                     RegexOptions.IgnoreCase | RegexOptions.Singleline))
+                     RegexOptions.IgnoreCase | RegexOptions.Singleline).Select(m => m.Groups))
         {
-            var atext = HtmlFragment.StripHtmlTags(m.Groups["t"].Value).Trim();
-            var url = m.Groups["u"].Value.Trim();
+            var atext = HtmlFragment.StripHtmlTags(groups["t"].Value).Trim();
+            var url = groups["u"].Value.Trim();
             if (atext.Length == 0 || url.Length == 0) continue;
             (anchors ??= new()).Add((atext, url));
         }

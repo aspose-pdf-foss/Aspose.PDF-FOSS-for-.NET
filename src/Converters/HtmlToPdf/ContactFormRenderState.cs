@@ -10,7 +10,6 @@ internal static partial class HtmlToPdfConverter
 /// invocation; never shared.</summary>
 private sealed class ContactFormRenderState
 {
-    public Dictionary<string, Dictionary<string, string>> css = null!;
     public System.Globalization.CultureInfo inv = null!;
     // Per-field-class widths/heights, straight from the sheet.
     public Dictionary<string, (double W, double H)> clsW = null!;
@@ -34,7 +33,6 @@ private sealed class ContactFormRenderState
     public double y;
     public bool pendingHeading;
     public string html = default!;
-    public HtmlLoadOptions? options = null;
     public double pageWidth = 0;
     public double pageHeight = 0;
     public double marginLeft = 0;

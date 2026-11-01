@@ -8,8 +8,8 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     // ── The body-face METRICS CARD ──────────────────────────────────────────────
-    // A one-card report: `body { font-family: Verdana-ish; font-size: Npx;
-    // width: 100% }`, a `.main` border-collapse table whose single column stacks
+    // A one-card report: `body { font-family: Verdana-ish; font-size: Npx; width:
+    // 100% }`, a `.main` border-collapse table whose single column stacks
     // a tinted HEADING band over a body cell, and a nested `.metrics` table
     // (width: inherit — the enclosing td's percent class) of bold-label /
     // value rows. The expected render draws the card with the real body face at
@@ -20,8 +20,8 @@ internal static partial class HtmlToPdfConverter
     //   page 601 × 842; card [96 .. 517] (right band 84); frame 1.5 pt black,
     //   heading band fill from the heading class; heading text 0.6em of the
     //   9px body = 4.05 pt at (97.5, band top + 5.8); labels x 98.93, values
-    //   x 201.38 (col1 = 75% of the metrics table's inherited 33% box);
-    //   first row baseline 98.4; single-line row pitch 9.75 (13px), wrapped
+    //   x 201.38 (col1 = 75% of the metrics table's inherited 33% box); first
+    //   row baseline 98.4; single-line row pitch 9.75 (13px), wrapped
     //   in-cell line 8.25 (11px = the face's hhea box); a <sup> grows its
     //   value line: main run +1.16 below the label baseline, the sup at
     //   0.833× size raised 2.36 above the value baseline.
@@ -55,7 +55,7 @@ internal static partial class HtmlToPdfConverter
         if (!mc.css.TryGetValue("body", out var bodyRule)
             || !bodyRule.TryGetValue("font-family", out var bodyFam)
             || !bodyRule.TryGetValue("font-size", out var bodyFsV)
-            || !Regex.IsMatch(bodyFsV, @"^\s*[\d.]+\s*px\s*$", RegexOptions.IgnoreCase)
+            || !SafeRegex.IsMatch(bodyFsV, @"^\s*[\d.]+\s*px\s*$", RegexOptions.IgnoreCase)
             || !(bodyRule.TryGetValue("width", out var bodyW)
                  && bodyW.Trim() == "100%"))
             return null;
@@ -80,11 +80,10 @@ internal static partial class HtmlToPdfConverter
         }
         if (!mc.hasCollapse || !mc.hasInherit || mc.headCls is null) return null;
 
-        const double PxPt = 0.75;
-        mc.bodyFs = double.Parse(Regex.Match(bodyFsV, @"[\d.]+").Value,
+        mc.bodyFs = double.Parse(SafeRegex.Match(bodyFsV, @"[\d.]+").Value,
             System.Globalization.CultureInfo.InvariantCulture) * PxPt;   // 9px → 6.75
         mc.headFs = mc.headCls.TryGetValue("font-size", out var hfv)
-            && Regex.Match(hfv, @"([\d.]+)\s*em") is { Success: true } hem
+            && SafeRegex.Match(hfv, @"([\d.]+)\s*em") is { Success: true } hem
             ? double.Parse(hem.Groups[1].Value,
                 System.Globalization.CultureInfo.InvariantCulture) * mc.bodyFs
             : 0.6 * mc.bodyFs;
@@ -92,14 +91,14 @@ internal static partial class HtmlToPdfConverter
                 ? ParseCssColor(hbg) : null)
             ?? Color.FromRgbBytes(0x4E, 0x58, 0x9E);
 
-        mc.headTdM = Regex.Match(mc.html,
+        mc.headTdM = SafeRegex.Match(mc.html,
             @"<td\b[^>]*class\s*=\s*[""'][^""']*heading[^""']*[""'][^>]*>([\s\S]*?)</td>",
             RegexOptions.IgnoreCase);
         if (!mc.headTdM.Success) return null;
         mc.headText = CollapseWs(DecodeEntities(
-            Regex.Replace(mc.headTdM.Groups[1].Value, "<[^>]+>", " "))).Trim();
+            SafeRegex.Replace(mc.headTdM.Groups[1].Value, "<[^>]+>", " "))).Trim();
 
-        mc.innerTblM = Regex.Match(mc.html,
+        mc.innerTblM = SafeRegex.Match(mc.html,
             @"<table\b[^>]*class\s*=\s*[""'][^""']*metrics[^""']*[""'][^>]*>([\s\S]*?)</table>",
             RegexOptions.IgnoreCase);
         if (!mc.innerTblM.Success) return null;
@@ -170,17 +169,17 @@ internal static partial class HtmlToPdfConverter
         return RemoteFaceCache.GetOrAdd(key, _ =>
         {
             var map = new Dictionary<(int, bool), string>();
-            foreach (Match m in Regex.Matches(css, @"@font-face\s*\{(?<b>[^{}]*)\}",
+            foreach (Match m in SafeRegex.Matches(css, @"@font-face\s*\{(?<b>[^{}]*)\}",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
             {
                 var body = m.Groups["b"].Value;
-                var wM = Regex.Match(body, @"font-weight\s*:\s*(\d+)", RegexOptions.IgnoreCase);
+                var wM = SafeRegex.Match(body, @"font-weight\s*:\s*(\d+)", RegexOptions.IgnoreCase);
                 var weight = wM.Success
                     ? int.Parse(wM.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
                     : 400;
-                var italic = Regex.IsMatch(body, @"font-style\s*:\s*(italic|oblique)",
+                var italic = SafeRegex.IsMatch(body, @"font-style\s*:\s*(italic|oblique)",
                     RegexOptions.IgnoreCase);
-                var uM = Regex.Match(body, @"url\(\s*[""']?(https?://[^""')]+)[""']?\s*\)",
+                var uM = SafeRegex.Match(body, @"url\(\s*[""']?(https?://[^""')]+)[""']?\s*\)",
                     RegexOptions.IgnoreCase);
                 if (!uM.Success || map.ContainsKey((weight, italic))) continue;
                 var bytes = FetchRemoteImage(uM.Groups[1].Value.Trim());
@@ -244,8 +243,8 @@ internal static partial class HtmlToPdfConverter
     private static string? BalancedInner(string html, int afterOpen, string tag)
     {
         var depth = 1;
-        var rx = new Regex(@"<(/?)" + tag + @"\b[^>]*?(/?)>", RegexOptions.IgnoreCase);
-        for (var m = rx.Match(html, afterOpen); m.Success; m = m.NextMatch())
+        var rx = new Regex(@"<(/?)" + tag + @"\b[^>]*?(/?)>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
+        for (var m = SafeRegex.Match(rx, html, afterOpen); m.Success; m = SafeRegex.NextMatch(m))
         {
             if (m.Groups[2].Value == "/") continue;
             depth += m.Groups[1].Value == "/" ? -1 : 1;
@@ -258,7 +257,7 @@ internal static partial class HtmlToPdfConverter
     /// <paramref name="emPt"/> — null when the property is absent.</summary>
     private static double? CssEmLen(string decl, string prop, double emPt)
     {
-        var m = Regex.Match(decl, @"(?<![-\w])" + Regex.Escape(prop) + @"\s*:\s*(-?[\d.]+)\s*(em|px|pt)?",
+        var m = SafeRegex.Match(decl, @"(?<![-\w])" + Regex.Escape(prop) + @"\s*:\s*(-?[\d.]+)\s*(em|px|pt)?",
             RegexOptions.IgnoreCase);
         if (!m.Success) return null;
         var v = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
@@ -273,8 +272,9 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Attribute value out of a single tag's markup — null when absent.</summary>
     private static string? AttrValue(string tagMarkup, string attr)
     {
-        var m = Regex.Match(tagMarkup,
+        var m = SafeRegex.Match(tagMarkup,
             attr + @"\s*=\s*(?:""([^""]*)""|'([^']*)')", RegexOptions.IgnoreCase);
-        return m.Success ? (m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value) : null;
+        if (m.Success) return m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value;
+        return null;
     }
 }

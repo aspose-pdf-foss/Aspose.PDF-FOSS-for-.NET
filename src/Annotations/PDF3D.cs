@@ -14,10 +14,12 @@ public enum PDF3DActivation
     activatedUserOrScriptAction,
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Embedded-stream content for a 3D artwork (U3D or PRC). Acts as
 /// a thin byte-buffer wrapper — the FOSS save path does not currently emit
 /// the /3DD stream object.</summary>
 public sealed class PDF3DContent
+#pragma warning restore S101
 {
     private byte[] _bytes = System.Array.Empty<byte>();
 
@@ -71,9 +73,11 @@ public sealed class PDF3DContent
     }
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>PDF /3DD stream wrapper — pairs a <see cref="PDF3DArtwork"/>
 /// with its document-owned content stream. Stored only.</summary>
 public sealed class PDF3DStream
+#pragma warning restore S101
 {
     public PDF3DStream(Document doc, PDF3DArtwork pdf3DArtwork)
     {
@@ -103,9 +107,11 @@ public enum LightingSchemeType
     Headlamp,
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Lighting scheme applied to a PDF 3D artwork (public-API shape).
 /// Stored only.</summary>
 public sealed class PDF3DLightingScheme
+#pragma warning restore S101
 {
     /// <summary>Creates a lighting scheme of the given type.</summary>
     public PDF3DLightingScheme(LightingSchemeType type) { Type = type; }
@@ -155,9 +161,11 @@ public enum RenderModeType
     ShadedIllustration,
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Render mode applied to a 3D artwork view (public-API shape).
 /// Stored only.</summary>
 public sealed class PDF3DRenderMode
+#pragma warning restore S101
 {
     private double _crease;
     private double _opacity = 1.0;
@@ -207,9 +215,11 @@ public sealed class PDF3DRenderMode
     public PDF3DRenderMode SetOpacity(double opacity) { _opacity = opacity; return this; }
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Orientation angles for the cutting plane of a 3D cross-section
 /// (public-API shape). Stored only.</summary>
 public sealed class PDF3DCuttingPlaneOrientation
+#pragma warning restore S101
 {
     public PDF3DCuttingPlaneOrientation() { }
 
@@ -228,9 +238,11 @@ public sealed class PDF3DCuttingPlaneOrientation
         => $"({AngleX?.ToString() ?? "_"}, {AngleY?.ToString() ?? "_"}, {AngleZ?.ToString() ?? "_"})";
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Single cross-section through a PDF 3D model (public-API shape).
 /// Stored only.</summary>
 public sealed class PDF3DCrossSection
+#pragma warning restore S101
 {
     public PDF3DCrossSection(Document doc) { _ = doc; }
 
@@ -242,9 +254,11 @@ public sealed class PDF3DCrossSection
     public bool Visibility { get; set; } = true;
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Ordered collection of <see cref="PDF3DCrossSection"/> entries
 /// applied to a PDF 3D view (public-API shape). Stored only.</summary>
 public sealed class PDF3DCrossSectionArray
+#pragma warning restore S101
 {
     private readonly List<PDF3DCrossSection> _items = new();
 
@@ -268,9 +282,11 @@ public sealed class PDF3DCrossSectionArray
     public void RemoveAt(int index) => _items.RemoveAt(index - 1);
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Camera + render-state snapshot of a 3D artwork (public-API
 /// shape). Stored only.</summary>
 public sealed class PDF3DView
+#pragma warning restore S101
 {
     /// <summary>Creates a view named <c>viewName</c> that copies the camera, background, lighting scheme and render mode of <c>view</c>.</summary>
     public PDF3DView(Document doc, PDF3DView view, string viewName)
@@ -315,9 +331,11 @@ public sealed class PDF3DView
     internal bool HasOwnBackground;
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>Indexed collection of <see cref="PDF3DView"/> snapshots
 /// (public-API shape). Stored only.</summary>
 public sealed class PDF3DViewArray
+#pragma warning restore S101
 {
     private readonly List<PDF3DView> _items = new();
 
@@ -345,9 +363,11 @@ public sealed class PDF3DViewArray
     internal IEnumerable<PDF3DView> Items => _items;
 }
 
+#pragma warning disable S101 // public API: the published type name
 /// <summary>A 3D artwork dictionary referenced by a PDF 3D annotation
 /// (public-API shape). Stored only.</summary>
 public sealed class PDF3DArtwork
+#pragma warning restore S101
 {
     /// <summary>Creates 3D artwork from the given 3D content.</summary>
     public PDF3DArtwork(Document doc, PDF3DContent content)

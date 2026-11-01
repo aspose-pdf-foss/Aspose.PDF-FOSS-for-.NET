@@ -37,9 +37,11 @@ public sealed partial class Document
                     if (text.Length > 0) width = Math.Max(width, x + MeasureStyled(text, r, sz));
                 }
                 var hasText = maxBase > 0;
-                var h = hasText ? maxBase
-                    : maxImage > 0 ? maxImage
-                    : li == 0 && groupFs > 0 ? groupFs : markSize > 0 ? markSize : 10;
+                double h = 10;
+                if (hasText) h = maxBase;
+                else if (maxImage > 0) h = maxImage;
+                else if (li == 0 && groupFs > 0) h = groupFs;
+                else if (markSize > 0) h = markSize;
                 var bl = new BandLine
                 {
                     Pitch = hasText ? h + groupLs : h, TextHeight = hasText ? h : 0, HasText = hasText,

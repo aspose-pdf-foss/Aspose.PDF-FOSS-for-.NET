@@ -12,7 +12,6 @@ private sealed class AnnotationFlattenState
 {
     // Get the page this annotation belongs to
     public Aspose.Pdf.Core.PdfDictionary? pageDict;
-    public string? subtype;
     public Aspose.Pdf.Core.PdfStream? appearanceStream;
 }
 }

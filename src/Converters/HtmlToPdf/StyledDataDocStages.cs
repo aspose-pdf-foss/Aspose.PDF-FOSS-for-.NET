@@ -10,8 +10,6 @@ internal static partial class HtmlToPdfConverter
     {
         Text.GlyphOutlineParser? gp = default;
         (double winAsc, double winDesc, double upm) fm = default;
-        gp = null!;
-        fm = default;
         if (!sy.glyphParsers.TryGetValue(p.FontKey, out var g))
         {
             try
@@ -63,37 +61,35 @@ internal static partial class HtmlToPdfConverter
         }
 
         sy.lines = new List<List<(char c, int run)>>();
+        var line = new List<(char c, int run)>();
+        var w = 0.0;
+        var i = 0;
+        while (i < sy.stream.Count)
         {
-            var line = new List<(char c, int run)>();
-            var w = 0.0;
-            var i = 0;
-            while (i < sy.stream.Count)
+            var j = i + (sy.stream[i].c == ' ' ? 1 : 0);
+            while (j < sy.stream.Count && sy.stream[j].c != ' ') j++;
+            var segW = 0.0;
+            for (var k = i; k < j; k++) segW += AdvW(sy, gp, fm, sy.stream[k].c) + sy.lsF;
+            if (line.Count > 0 && w + segW > sy.colWidth + 1e-9)
             {
-                var j = i + (sy.stream[i].c == ' ' ? 1 : 0);
-                while (j < sy.stream.Count && sy.stream[j].c != ' ') j++;
-                var segW = 0.0;
-                for (var k = i; k < j; k++) segW += AdvW(sy, gp, fm, sy.stream[k].c) + sy.lsF;
-                if (line.Count > 0 && w + segW > sy.colWidth + 1e-9)
+                sy.lines.Add(line);
+                line = new List<(char c, int run)>();
+                w = 0;
+                var from = sy.stream[i].c == ' ' ? i + 1 : i;
+                for (var k = from; k < j; k++)
                 {
-                    sy.lines.Add(line);
-                    line = new List<(char c, int run)>();
-                    w = 0;
-                    var from = sy.stream[i].c == ' ' ? i + 1 : i;
-                    for (var k = from; k < j; k++)
-                    {
-                        line.Add(sy.stream[k]);
-                        w += AdvW(sy, gp, fm, sy.stream[k].c) + sy.lsF;
-                    }
+                    line.Add(sy.stream[k]);
+                    w += AdvW(sy, gp, fm, sy.stream[k].c) + sy.lsF;
                 }
-                else
-                {
-                    for (var k = i; k < j; k++) line.Add(sy.stream[k]);
-                    w += segW;
-                }
-                i = j;
             }
-            if (line.Count > 0) sy.lines.Add(line);
+            else
+            {
+                for (var k = i; k < j; k++) line.Add(sy.stream[k]);
+                w += segW;
+            }
+            i = j;
         }
+        if (line.Count > 0) sy.lines.Add(line);
 
         sy.mt = p.Style.TryGetValue("margin-top", out var mtv) ? StyledLen(mtv, sy.size) : 0.0;
         sy.pendingMargins.Add(sy.mt);

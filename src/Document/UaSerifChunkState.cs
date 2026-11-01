@@ -28,7 +28,6 @@ private sealed class UaSerifChunkState
     public bool uaAtBoxEdge;
     public string chunk = default!;
     public double uaWrapPt = 0;
-    public HtmlFragment html = default!;
     public FlowLayout flow = default!;
     public double marginLeft = 0;
     public bool isHead;

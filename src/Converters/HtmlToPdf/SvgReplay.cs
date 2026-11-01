@@ -15,7 +15,7 @@ internal static partial class HtmlToPdfConverter
         sr.svgDir = svgDir;
         sr.options = options;
         sr.inv = System.Globalization.CultureInfo.InvariantCulture;
-        sr.vb = Regex.Match(sr.svg, @"viewBox=""(?<a>-?[\d.]+)\s+(?<b>-?[\d.]+)\s+(?<c>[\d.]+)\s+(?<d>[\d.]+)""");
+        sr.vb = SafeRegex.Match(sr.svg, @"viewBox=""(?<a>-?[\d.]+)\s+(?<b>-?[\d.]+)\s+(?<c>[\d.]+)\s+(?<d>[\d.]+)""");
         sr.total = sr.placement;
         if (sr.vb.Success)
         {
@@ -29,16 +29,20 @@ internal static partial class HtmlToPdfConverter
         sr.rootTotal = sr.total;
 
         sr.maskDefs = new Dictionary<string, (double X, double Y, double W, double H, byte[] Png)>(StringComparer.Ordinal);
-        sr.maskSpans = new List<(int Start, int End)>();
-        foreach (Match mm in Regex.Matches(sr.svg, @"<mask id=""(?<id>[^""]+)""(?<hattrs>[^>]*)>(?<body>[\s\S]*?)</mask\s*>"))
+        sr.defSpans = new List<(int Start, int End)>();
+        // A clip path's shape is the outline of a clip, not ink: replayed as a path it would
+        // fill the clipped area, a page-sized one painting the whole page black.
+        foreach (Match cm in SafeRegex.Matches(sr.svg, @"<clipPath\b[^>]*>[\s\S]*?</clipPath\s*>"))
+            sr.defSpans.Add((cm.Index, cm.Index + cm.Length));
+        foreach (Match mm in SafeRegex.Matches(sr.svg, @"<mask id=""(?<id>[^""]+)""(?<hattrs>[^>]*)>(?<body>[\s\S]*?)</mask\s*>"))
         {
-            sr.maskSpans.Add((mm.Index, mm.Index + mm.Length));
+            sr.defSpans.Add((mm.Index, mm.Index + mm.Length));
             var ha = mm.Groups["hattrs"].Value;
-            var mx = Regex.Match(ha, @"(?<![\w-])x=""(?<v>-?[\d.]+)""");
-            var my = Regex.Match(ha, @"(?<![\w-])y=""(?<v>-?[\d.]+)""");
-            var mw = Regex.Match(ha, @"width=""(?<v>[\d.]+)""");
-            var mh = Regex.Match(ha, @"height=""(?<v>[\d.]+)""");
-            var mi = Regex.Match(mm.Groups["body"].Value, @"xlink:href=""(?<v>data:[^""]+)""");
+            var mx = SafeRegex.Match(ha, @"(?<![\w-])x=""(?<v>-?[\d.]+)""");
+            var my = SafeRegex.Match(ha, @"(?<![\w-])y=""(?<v>-?[\d.]+)""");
+            var mw = SafeRegex.Match(ha, @"width=""(?<v>[\d.]+)""");
+            var mh = SafeRegex.Match(ha, @"height=""(?<v>[\d.]+)""");
+            var mi = SafeRegex.Match(mm.Groups["body"].Value, @"xlink:href=""(?<v>data:[^""]+)""");
             if (!(mx.Success && my.Success && mw.Success && mh.Success && mi.Success)) continue;
             var png = LoadConverterImage(DecodeEntities(mi.Groups["v"].Value), sr.options);
             if (png is null) continue;
@@ -52,7 +56,9 @@ internal static partial class HtmlToPdfConverter
         sr.gsNames = new Dictionary<string, string>(StringComparer.Ordinal);
         sr.sb = new StringBuilder();
 
-        foreach (Match tag in Regex.Matches(sr.svg, @"<(?<close>/)?(?<tag>g|path|image)\b(?<attrs>[^>]*)>"))
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match tag in SafeRegex.Matches(sr.svg, @"<(?<close>/)?(?<tag>g|path|image)\b(?<attrs>[^>]*)>"))
+#pragma warning restore S3267
         {
             if (!ReplaySvgTag(sr, tag)) break;
         }

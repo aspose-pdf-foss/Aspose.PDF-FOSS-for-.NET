@@ -36,20 +36,14 @@ internal static partial class HtmlToPdfConverter
         DrawDealerTable(dl);
 
         dl.rightBottom = dl.midTop;
-        {
-            DrawSidePanels(dl);
-        }
+        DrawSidePanels(dl);
 
         dl.discTop = Math.Max(dl.leftBottom, dl.rightBottom) + 11.25;
-        {
-            DrawDisclaimer(dl);
-        }
+        DrawDisclaimer(dl);
 
         // ── footer paragraph + the contact table (30/20/20/30 % columns,
         //    vertically-centred rows — the table opens the SECOND page) ──
-        {
-            DrawFooterAndContacts(dl);
-        }
+        DrawFooterAndContacts(dl);
 
         foreach (var (pg, ops) in dl.pageStreams)
             pg.AddContentStream(Encoding.ASCII.GetBytes(ops.ToString() + "\n"));

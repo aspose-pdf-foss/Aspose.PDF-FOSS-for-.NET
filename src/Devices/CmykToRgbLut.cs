@@ -24,10 +24,9 @@ namespace Aspose.Pdf.Devices;
 /// versus GDI+'s (102, 102, 51) — every channel within 30 levels,
 /// where the naïve formula's (82, 71, 31) was off by 31 on G.
 /// </summary>
-internal static class CmykToRgbLut
+internal static partial class CmykToRgbLut
 {
     private const int Grid = 9; // 9 samples per channel — matches the bake script
-    private const int Stride = Grid * Grid * Grid; // K-stride: K varies fastest in cmyk-grid layout
     private static byte[]? _table;
     private static readonly object _lock = new();
 
@@ -87,24 +86,24 @@ internal static class CmykToRgbLut
         // index = ((c × Grid + m) × Grid + y) × Grid + k → triple at idx*3.
         double r = 0, g = 0, b = 0;
         for (var dci = 0; dci <= 1; dci++)
-        for (var dmi = 0; dmi <= 1; dmi++)
-        for (var dyi = 0; dyi <= 1; dyi++)
-        for (var dki = 0; dki <= 1; dki++)
-        {
-            var ci = c0 + dci;
-            var mi = m0 + dmi;
-            var yi = y0 + dyi;
-            var ki = k0 + dki;
-            var idx = (((ci * Grid) + mi) * Grid + yi) * Grid + ki;
-            var p = idx * 3;
-            var w = (dci == 1 ? dc : 1 - dc)
-                  * (dmi == 1 ? dm : 1 - dm)
-                  * (dyi == 1 ? dy : 1 - dy)
-                  * (dki == 1 ? dk : 1 - dk);
-            r += lut[p]     * w;
-            g += lut[p + 1] * w;
-            b += lut[p + 2] * w;
-        }
+            for (var dmi = 0; dmi <= 1; dmi++)
+                for (var dyi = 0; dyi <= 1; dyi++)
+                    for (var dki = 0; dki <= 1; dki++)
+                    {
+                        var ci = c0 + dci;
+                        var mi = m0 + dmi;
+                        var yi = y0 + dyi;
+                        var ki = k0 + dki;
+                        var idx = (((ci * Grid) + mi) * Grid + yi) * Grid + ki;
+                        var p = idx * 3;
+                        var w = (dci == 1 ? dc : 1 - dc)
+                              * (dmi == 1 ? dm : 1 - dm)
+                              * (dyi == 1 ? dy : 1 - dy)
+                              * (dki == 1 ? dk : 1 - dk);
+                        r += lut[p]     * w;
+                        g += lut[p + 1] * w;
+                        b += lut[p + 2] * w;
+                    }
 
         return ((byte)Compat.Clamp(r + 0.5, 0, 255),
                 (byte)Compat.Clamp(g + 0.5, 0, 255),

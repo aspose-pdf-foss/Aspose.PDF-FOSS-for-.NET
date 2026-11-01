@@ -11,18 +11,21 @@ internal static partial class HtmlToPdfConverter
     {
         if (fb.mps.wtInlineGrid && fb.tableWpt > 0 && fb.rows.Count > 0 && fb.rows[0].Count > 0)
         {
-            double DeclBox(int dc) => fb.colPx[dc]
-                + (fb.colPxStyle[dc] ? 2 * fb.p + (fb.mps.wtBw > 0 ? fb.mps.wtBw : fb.bw) : 0);
+            double DeclBox(int dc)
+            {
+                var rule = fb.mps.wtBw > 0 ? fb.mps.wtBw : fb.bw;
+                return fb.colPx[dc] + (fb.colPxStyle[dc] ? 2 * fb.p + rule : 0);
+            }
             // Weigh only the cells that fit the column count — CloseRow
             // pads short rows with empty slots a spanning cell already
             // covers, and those carry no width share.
             double wSum = 0;
             var covered = 0;
-            foreach (var mc0 in fb.rows[0])
+            foreach (var colSpan in fb.rows[0].Select(mc0 => mc0.ColSpan))
             {
                 if (covered >= fb.nCols) break;
-                wSum += 1.0 / Math.Max(1, mc0.ColSpan);
-                covered += Math.Max(1, mc0.ColSpan);
+                wSum += 1.0 / Math.Max(1, colSpan);
+                covered += Math.Max(1, colSpan);
             }
             // When EVERY column declares a width, the declared boxes
             // SCALE proportionally to fill the declared table (the

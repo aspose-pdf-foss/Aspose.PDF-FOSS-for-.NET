@@ -16,7 +16,7 @@ internal static partial class HtmlToPdfConverter
     // Measured geometry. Everything is the declared geometry at
     // 0.75 pt/px hung off two origins:
     //  - the widget's left edge (the .gantt_grid box) at the page's own left
-    //    margin + 1.5, and the timeline right after the grid's 359 px;
+    //    margin + 1.5, and the timeline right after the grid's 359 px,
     //  - the header band top at 93.0, the data band 34 px under it — which puts
     //    bar 1 (left:70 top:2 w:1050 h:30) at 419.25/120.0/787.5/22.5, exactly
     //    where it is expected, and row 2 (top:37) at 146.25.
@@ -61,25 +61,25 @@ internal static partial class HtmlToPdfConverter
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         var cells = new List<(double, string, string, double)>();
-        foreach (Match c in Regex.Matches(html,
+        foreach (var groups in SafeRegex.Matches(html,
                      @"<div class=""gantt_(?:grid_head_)?cell[^""]*""[^>]*style=""(?<s>[^""]*)""[^>]*>(?<b>[\s\S]*?)(?=<div class=""gantt_(?:grid_head_)?cell|</div>\s*</div>|$)",
-                     RegexOptions.IgnoreCase))
+                     RegexOptions.IgnoreCase).Select(c => c.Groups))
         {
-            var st = c.Groups["s"].Value;
-            var wm = Regex.Match(st, @"width\s*:\s*([\d.]+)px");
+            var st = groups["s"].Value;
+            var wm = SafeRegex.Match(st, @"width\s*:\s*([\d.]+)px");
             if (!wm.Success) continue;
-            var align = Regex.Match(st, @"text-align\s*:\s*(\w+)") is { Success: true } am
+            var align = SafeRegex.Match(st, @"text-align\s*:\s*(\w+)") is { Success: true } am
                 ? am.Groups[1].Value.ToLowerInvariant() : "left";
-            var body = c.Groups["b"].Value;
+            var body = groups["b"].Value;
             // Tree chrome: an indent div is one level, and the icons before the
             // label each take their own slot.
-            var indent = Regex.Matches(body, @"gantt_tree_indent").Count * GtTreeIndentPx
-                       + Regex.Matches(body, @"gantt_tree_icon").Count * GtTreeIconPx;
-            var tm = Regex.Match(body, @"<div class=""gantt_tree_content""[^>]*>(?<t>[^<]*)</div\s*>",
+            var indent = SafeRegex.Matches(body, @"gantt_tree_indent").Count * GtTreeIndentPx
+                       + SafeRegex.Matches(body, @"gantt_tree_icon").Count * GtTreeIconPx;
+            var tm = SafeRegex.Match(body, @"<div class=""gantt_tree_content""[^>]*>(?<t>[^<]*)</div\s*>",
                 RegexOptions.IgnoreCase);
             var text = tm.Success
-                ? Regex.Replace(DecodeEntities(tm.Groups["t"].Value), @"\s+", " ").Trim()
-                : Regex.Replace(DecodeEntities(Regex.Replace(body, "<[^>]+>", " ")), @"\s+", " ").Trim();
+                ? SafeRegex.Replace(DecodeEntities(tm.Groups["t"].Value), @"\s+", " ").Trim()
+                : SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(body, "<[^>]+>", " ")), @"\s+", " ").Trim();
             cells.Add((double.Parse(wm.Groups[1].Value, inv), align, text, indent));
         }
         return cells;
@@ -88,14 +88,14 @@ internal static partial class HtmlToPdfConverter
     private static List<List<(double WidthPx, string Align, string Text, double IndentPx)>> ParseGanttRows(string html)
     {
         var rows = new List<List<(double, string, string, double)>>();
-        var data = Regex.Match(html,
+        var data = SafeRegex.Match(html,
             @"<div class=""gantt_grid_data""[^>]*>(?<b>[\s\S]*?)<div class=""gantt_task""",
             RegexOptions.IgnoreCase);
         if (!data.Success) return rows;
-        var openRx = new Regex(@"<div class=""gantt_row[^""]*""[^>]*>", RegexOptions.IgnoreCase);
+        var openRx = new Regex(@"<div class=""gantt_row[^""]*""[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var body = data.Groups["b"].Value;
         var starts = new List<int>();
-        for (var m = openRx.Match(body); m.Success; m = openRx.Match(body, m.Index + m.Length))
+        for (var m = SafeRegex.Match(openRx, body); m.Success; m = SafeRegex.Match(openRx, body, m.Index + m.Length))
             starts.Add(m.Index);
         for (var i = 0; i < starts.Count; i++)
         {

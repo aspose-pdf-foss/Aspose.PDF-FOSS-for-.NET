@@ -35,17 +35,19 @@ internal static partial class HtmlToPdfConverter
     // the latter used by rich-text editors (EditorJS) to resume numbering.
     private static readonly Regex CounterSetRx = new(
         @"counter-(?:set|reset)\s*:\s*[A-Za-z_][\w-]*\s+(-?\d+)",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
 
     private static int ParseListStart(Dictionary<string, string>? attrs)
     {
         if (attrs is null) return 0;
-        if (attrs.TryGetValue("start", out var s) && int.TryParse(s.Trim(), out var st))
+        if (attrs.TryGetValue("start", out var s) && int.TryParse(s.Trim(), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var st))
             return st - 1;
         if (attrs.TryGetValue("style", out var css) && !string.IsNullOrEmpty(css))
         {
-            var m = CounterSetRx.Match(css);
-            if (m.Success && int.TryParse(m.Groups[1].Value, out var cv)) return cv;
+            var m = SafeRegex.Match(CounterSetRx, css);
+            if (m.Success && int.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var cv)) return cv;
         }
         return 0;
     }
@@ -62,15 +64,15 @@ internal static partial class HtmlToPdfConverter
             case "upper-alpha":
             case "lower-alpha":
             {
-                var s = "";
+                var s = new StringBuilder();
                 var v = n;
                 while (v > 0)
                 {
                     v--;
-                    s = (char)('A' + v % 26) + s;
+                    s.Insert(0, (char)('A' + v % 26));
                     v /= 26;
                 }
-                return listStyleType[0] == 'l' ? s.ToLowerInvariant() : s;
+                return listStyleType[0] == 'l' ? s.ToString().ToLowerInvariant() : s.ToString();
             }
             case "upper-roman":
             case "lower-roman":
@@ -122,18 +124,18 @@ internal static partial class HtmlToPdfConverter
     private static readonly Regex StepListShellRegex = new(
         @"^\s*(?:<!doctype[^>]*>\s*)?(?:<html[^>]*>\s*)?(?:<head[^>]*>[\s\S]*?</head>\s*)?(?:<body[^>]*>\s*)?" +
         @"<ul\b[^>]*>(?<inner>[\s\S]*)</ul>\s*(?:</body>\s*)?(?:</html>\s*)?$",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex StepLiRegex = new(
-        @"<li\b(?<attrs>[^>]*)>(?<c>[\s\S]*?)</li>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"<li\b(?<attrs>[^>]*)>(?<c>[\s\S]*?)</li>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex StepTagRegex = new(
-        @"^<(?<close>/?)(?<tag>span|strong|b|h1|h2|h3|p)\b[^>]*>$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"^<(?<close>/?)(?<tag>span|strong|b|h1|h2|h3|p)\b[^>]*>$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
-    private static readonly Regex StepAnyTagRegex = new(@"<[^>]*>", RegexOptions.Compiled);
+    private static readonly Regex StepAnyTagRegex = new(@"<[^>]*>", RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex StepPadLeftRegex = new(
-        @"padding-left\s*:\s*(?<v>\d+(?:\.\d+)?)\s*(?<u>em|px|pt)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"padding-left\s*:\s*(?<v>\d+(?:\.\d+)?)\s*(?<u>em|px|pt)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Try to read <paramref name="html"/> as the step-list dialect. True only when
     /// the document is a single un-nested &lt;ul> of &lt;li> items, every tag inside the items
@@ -144,14 +146,14 @@ internal static partial class HtmlToPdfConverter
         List<StepListItem> items = new List<StepListItem>();
         if (string.IsNullOrEmpty(html) ||
             html.IndexOf("<ul", StringComparison.OrdinalIgnoreCase) < 0) return null;
-        var shell = StepListShellRegex.Match(html);
+        var shell = SafeRegex.Match(StepListShellRegex, html);
         if (!shell.Success) return null;
         var inner = shell.Groups["inner"].Value;
         if (inner.IndexOf("<ul", StringComparison.OrdinalIgnoreCase) >= 0 ||
             inner.IndexOf("<ol", StringComparison.OrdinalIgnoreCase) >= 0) return null;
         var anyHeading = false;
         var covered = 0;
-        foreach (Match li in StepLiRegex.Matches(inner))
+        foreach (Match li in SafeRegex.Matches(StepLiRegex, inner))
         {
             // Only whitespace may sit between consecutive <li> elements.
             if (inner.Substring(covered, li.Index - covered).Trim().Length != 0) return null;
@@ -171,7 +173,7 @@ internal static partial class HtmlToPdfConverter
         bool isHeading = default;
         item = new StepListItem();
         isHeading = false;
-        var pad = StepPadLeftRegex.Match(attrs);
+        var pad = SafeRegex.Match(StepPadLeftRegex, attrs);
         if (pad.Success)
         {
             var v = double.Parse(pad.Groups["v"].Value, System.Globalization.CultureInfo.InvariantCulture);
@@ -182,8 +184,7 @@ internal static partial class HtmlToPdfConverter
                 _ => v,
             };
         }
-        foreach (Match any in StepAnyTagRegex.Matches(content))
-            if (!StepTagRegex.IsMatch(any.Value)) return null;
+        if (SafeRegex.Matches(StepAnyTagRegex, content).Any(any => !SafeRegex.IsMatch(StepTagRegex, any.Value))) return null;
 
         var blocks = item.Blocks;
         var cur = new StepBlock();
@@ -207,11 +208,11 @@ internal static partial class HtmlToPdfConverter
         }
 
         var pos = 0;
-        foreach (Match t in StepAnyTagRegex.Matches(content))
+        foreach (Match t in SafeRegex.Matches(StepAnyTagRegex, content))
         {
             AddText(content.Substring(pos, t.Index - pos));
             pos = t.Index + t.Length;
-            var tm = StepTagRegex.Match(t.Value);
+            var tm = SafeRegex.Match(StepTagRegex, t.Value);
             var tag = tm.Groups["tag"].Value.ToLowerInvariant();
             var close = tm.Groups["close"].Value.Length > 0;
             switch (tag)
@@ -297,33 +298,33 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>One embedded @font-face: raw TTF bytes for a family (+bold/italic variant).</summary>
     private static readonly Regex FontFaceRx = new(
-        @"@font-face\s*\{(?<b>[^{}]*)\}", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"@font-face\s*\{(?<b>[^{}]*)\}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex FontFaceFamilyRx = new(
-        @"font-family\s*:\s*[""']?(?<f>[^;""'}]+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"font-family\s*:\s*[""']?(?<f>[^;""'}]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex FontFaceDataRx = new(
         @"url\(\s*[""']?data:(?:font/ttf|font/truetype|application/(?:x-)?font-ttf|application/octet-stream);base64,(?<d>[A-Za-z0-9+/=]+)",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Collect the document's @font-face data-URI faces keyed
     /// "family", "family|bold", "family|italic" (lower-case).</summary>
     internal static Dictionary<string, byte[]> ParseDataFontFaces(string html)
     {
         var fonts = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in FontFaceRx.Matches(html))
+        foreach (Match m in SafeRegex.Matches(FontFaceRx, html))
         {
             var body = m.Groups["b"].Value;
-            var fam = FontFaceFamilyRx.Match(body);
-            var data = FontFaceDataRx.Match(body);
+            var fam = SafeRegex.Match(FontFaceFamilyRx, body);
+            var data = SafeRegex.Match(FontFaceDataRx, body);
             if (!fam.Success || !data.Success) continue;
             byte[] ttf;
-            try { ttf = System.Convert.FromBase64String(data.Groups["d"].Value); }
+            try { ttf = Base64Payload(data.Groups["d"].Value); }
             catch { continue; }
             if (ttf.Length < 12) continue;
             var key = fam.Groups["f"].Value.Trim().TrimEnd('"', '\'').ToLowerInvariant();
-            if (Regex.IsMatch(body, @"font-weight\s*:\s*(bold|[7-9]00)", RegexOptions.IgnoreCase)) key += "|bold";
-            else if (Regex.IsMatch(body, @"font-style\s*:\s*italic", RegexOptions.IgnoreCase)) key += "|italic";
+            if (SafeRegex.IsMatch(body, @"font-weight\s*:\s*(bold|[7-9]00)", RegexOptions.IgnoreCase)) key += "|bold";
+            else if (SafeRegex.IsMatch(body, @"font-style\s*:\s*italic", RegexOptions.IgnoreCase)) key += "|italic";
             fonts[key] = ttf;
         }
         return fonts;
@@ -341,7 +342,9 @@ internal static partial class HtmlToPdfConverter
         public StyledNode? Parent;
         public List<string>? Runs;            // p leaves only
         public Dictionary<string, string> Style = new(StringComparer.OrdinalIgnoreCase);
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double FontSizePt = 12.0;
+#pragma warning restore S3218
         public byte[]? Ttf;
         public string FontKey = "";
     }
@@ -359,17 +362,17 @@ internal static partial class HtmlToPdfConverter
     }
 
     private static readonly Regex StyledParaRx = new(
-        @"<p\b(?<attrs>[^>]*)>(?<c>[\s\S]*?)</p>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"<p\b(?<attrs>[^>]*)>(?<c>[\s\S]*?)</p>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex StyledDivRx = new(
-        @"<(?<close>/?)div\b(?<attrs>[^>]*)>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"<(?<close>/?)div\b(?<attrs>[^>]*)>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex StyledSpanRx = new(
-        @"<(?<close>/?)span\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"<(?<close>/?)span\b[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static readonly Regex StyledCompoundRx = new(
         @"\G(?<tag>[a-zA-Z][\w-]*|\*)?(?<rest>(?:\.[\w-]+|\[[\w-]+\s*=\s*""[^""]*""\]|::?[\w-]+)*)",
-        RegexOptions.Compiled);
+        RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>Parse every &lt;style&gt; rule keeping full selectors, with media
     /// filtering: @media print blocks are inlined and
@@ -378,9 +381,9 @@ internal static partial class HtmlToPdfConverter
     {
         var rules = new List<StyledRule>();
         var order = 0;
-        foreach (Match block in Regex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
+        foreach (Match block in SafeRegex.Matches(html, @"<style[^>]*>([\s\S]*?)</style>", RegexOptions.IgnoreCase))
         {
-            var cssText = Regex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", "");
+            var cssText = SafeRegex.Replace(block.Groups[1].Value, @"/\*[\s\S]*?\*/", "");
             var sbCss = new StringBuilder(cssText.Length);
             var i = 0;
             while (i < cssText.Length)
@@ -403,13 +406,13 @@ internal static partial class HtmlToPdfConverter
                     sbCss.Append(cssText, braceOpen + 1, Math.Max(0, j - braceOpen - 2));
                 i = j;
             }
-            foreach (Match rule in Regex.Matches(sbCss.ToString(), @"([^{}]+)\{([^{}]*)\}"))
+            foreach (var groups in SafeRegex.Matches(sbCss.ToString(), @"([^{}]+)\{([^{}]*)\}").Select(rule => rule.Groups))
             {
                 var decls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (Match d in StyleDeclRx.Matches(rule.Groups[2].Value))
-                    decls[d.Groups[1].Value.Trim().ToLowerInvariant()] = d.Groups[2].Value.Trim();
+                foreach (var dGroups in SafeRegex.Matches(StyleDeclRx, groups[2].Value).Select(d => d.Groups))
+                    decls[dGroups[1].Value.Trim().ToLowerInvariant()] = dGroups[2].Value.Trim();
                 if (decls.Count == 0) continue;
-                foreach (var selRaw in rule.Groups[1].Value.Split(','))
+                foreach (var selRaw in groups[1].Value.Split(','))
                 {
                     var r = ParseStyledSelector(selRaw.Trim());
                     if (r is null) continue;
@@ -432,39 +435,37 @@ internal static partial class HtmlToPdfConverter
         // Tokenize by whitespace / '>' OUTSIDE brackets — attribute values may
         // contain both (e.g. [section-template-key="TSR - Report_Intro"]).
         var parts = new List<string>();
+        var cur = new StringBuilder();
+        var depth = 0;
+        foreach (var ch in sel)
         {
-            var tok = new StringBuilder();
-            var depth = 0;
-            foreach (var ch in sel)
+            if (ch == '[') depth++;
+            else if (ch == ']') depth = Math.Max(0, depth - 1);
+            if (depth == 0 && (char.IsWhiteSpace(ch) || ch == '>'))
             {
-                if (ch == '[') depth++;
-                else if (ch == ']') depth = Math.Max(0, depth - 1);
-                if (depth == 0 && (char.IsWhiteSpace(ch) || ch == '>'))
-                {
-                    if (tok.Length > 0) { parts.Add(tok.ToString()); tok.Clear(); }
-                    if (ch == '>') parts.Add(">");
-                }
-                else tok.Append(ch);
+                if (cur.Length > 0) { parts.Add(cur.ToString()); cur.Clear(); }
+                if (ch == '>') parts.Add(">");
             }
-            if (tok.Length > 0) parts.Add(tok.ToString());
+            else cur.Append(ch);
         }
+        if (cur.Length > 0) parts.Add(cur.ToString());
         var comb = '\0';
         foreach (var tok in parts)
         {
             if (tok == ">") { comb = '>'; continue; }
-            var m = StyledCompoundRx.Match(tok);
+            var m = SafeRegex.Match(StyledCompoundRx, tok);
             if (!m.Success || m.Length != tok.Length) return null;
             var classes = new List<string>();
             var attrs = new List<(string a, string v)>();
             var pseudo = "";
-            foreach (Match p in Regex.Matches(m.Groups["rest"].Value,
-                @"\.(?<c>[\w-]+)|\[(?<a>[\w-]+)\s*=\s*""(?<v>[^""]*)""\]|::?(?<p>[\w-]+)"))
+            foreach (var groups in SafeRegex.Matches(m.Groups["rest"].Value,
+                @"\.(?<c>[\w-]+)|\[(?<a>[\w-]+)\s*=\s*""(?<v>[^""]*)""\]|::?(?<p>[\w-]+)").Select(p => p.Groups))
             {
-                if (p.Groups["c"].Success) classes.Add(p.Groups["c"].Value);
-                else if (p.Groups["a"].Success) attrs.Add((p.Groups["a"].Value, p.Groups["v"].Value));
+                if (groups["c"].Success) classes.Add(groups["c"].Value);
+                else if (groups["a"].Success) attrs.Add((groups["a"].Value, groups["v"].Value));
                 else
                 {
-                    pseudo = p.Groups["p"].Value.ToLowerInvariant();
+                    pseudo = groups["p"].Value.ToLowerInvariant();
                     if (pseudo is not ("first-child" or "last-child")) return null;
                 }
             }
@@ -482,8 +483,7 @@ internal static partial class HtmlToPdfConverter
         (char comb, string tag, List<string> classes, List<(string a, string v)> attrs, string pseudo) p)
     {
         if (p.tag.Length > 0 && !el.Tag.Equals(p.tag, StringComparison.OrdinalIgnoreCase)) return false;
-        foreach (var c in p.classes)
-            if (!el.Classes.Contains(c)) return false;
+        if (p.classes.Any(c => !el.Classes.Contains(c))) return false;
         foreach (var (a, v) in p.attrs)
             if (!el.Attrs.TryGetValue(a, out var av) || av != v) return false;
         if (p.pseudo == "first-child" && (el.Parent is null || el.Parent.Children[0] != el)) return false;
@@ -542,7 +542,7 @@ internal static partial class HtmlToPdfConverter
         if (string.IsNullOrEmpty(v)) return 0;
         v = v.Trim();
         if (v.Equals("auto", StringComparison.OrdinalIgnoreCase)) return 0;
-        var m = Regex.Match(v, @"^(-?[\d.]+)\s*(pt|px|em)?$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(v, @"^(-?[\d.]+)\s*(pt|px|em)?$", RegexOptions.IgnoreCase);
         if (!m.Success) return 0;
         var n = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         return m.Groups[2].Value.ToLowerInvariant() switch
@@ -557,27 +557,26 @@ internal static partial class HtmlToPdfConverter
     /// nested divs over classed &lt;p&gt; leaves (spans inside them), and EVERY leaf's
     /// cascade resolving to one of the document's @font-face data faces. Builds the
     /// element tree (with cascaded styles) rooted at body.</summary>
-    internal static StyledNode? TryParseStyledDataFontDoc(string html)
+    internal static StyledNode? TryParseStyledDataFontDoc(string html, Dictionary<string, byte[]> dataFonts)
     {
         StyledNode bodyNode = new StyledNode { Tag = "body" };
-        var dataFonts = ParseDataFontFaces(html);
         if (dataFonts.Count == 0) return null;
 
-        var bodyM = Regex.Match(html, @"<body[^>]*>(?<b>[\s\S]*)</body>", RegexOptions.IgnoreCase);
+        var bodyM = SafeRegex.Match(html, @"<body[^>]*>(?<b>[\s\S]*)</body>", RegexOptions.IgnoreCase);
         if (!bodyM.Success) return null;
         var body = bodyM.Groups["b"].Value;
 
         // Shape check: removing the p elements wholesale and then the div tags must
         // leave only whitespace — anything else is beyond this dialect.
-        var residue = StyledParaRx.Replace(body, "");
-        residue = StyledDivRx.Replace(residue, "");
+        var residue = SafeRegex.Replace(StyledParaRx, body, "");
+        residue = SafeRegex.Replace(StyledDivRx, residue, "");
         if (residue.Trim().Length != 0) return null;
 
         // Build the tree from the interleaved div/p token stream.
         var tokens = new List<(int idx, int len, string kind, Match m)>();
-        foreach (Match d in StyledDivRx.Matches(body))
+        foreach (Match d in SafeRegex.Matches(StyledDivRx, body))
             tokens.Add((d.Index, d.Length, d.Groups["close"].Value.Length > 0 ? "/div" : "div", d));
-        foreach (Match p in StyledParaRx.Matches(body))
+        foreach (Match p in SafeRegex.Matches(StyledParaRx, body))
             tokens.Add((p.Index, p.Length, "p", p));
         tokens.Sort((a, b) => a.idx.CompareTo(b.idx));
 
@@ -627,7 +626,7 @@ internal static partial class HtmlToPdfConverter
                 if (n.FontSizePt <= 0) n.FontSizePt = 12.0;
                 var fam = n.Style.TryGetValue("font-family", out var famRaw) ? FirstFontFamily(famRaw) : null;
                 var bold = n.Style.TryGetValue("font-weight", out var fw)
-                    && Regex.IsMatch(fw, @"bold|[7-9]00", RegexOptions.IgnoreCase);
+                    && SafeRegex.IsMatch(fw, @"bold|[7-9]00", RegexOptions.IgnoreCase);
                 var key = (fam ?? "").ToLowerInvariant();
                 if (bold && dataFonts.ContainsKey(key + "|bold")) key += "|bold";
                 if (dataFonts.TryGetValue(key, out var ttf)) { n.Ttf = ttf; n.FontKey = key; }
@@ -641,26 +640,25 @@ internal static partial class HtmlToPdfConverter
 
     private static void FillStyledAttrs(StyledNode node, string attrText)
     {
-        foreach (Match a in Regex.Matches(attrText, @"([\w-]+)\s*=\s*([""'])(.*?)\2"))
-            node.Attrs[a.Groups[1].Value] = a.Groups[3].Value;
+        foreach (var groups in SafeRegex.Matches(attrText, @"([\w-]+)\s*=\s*([""'])(.*?)\2").Select(a => a.Groups))
+            node.Attrs[groups[1].Value] = groups[3].Value;
         if (node.Attrs.TryGetValue("class", out var cls))
             node.Classes.AddRange(cls.Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
     private static bool ParseStyledRuns(string inner, StyledNode node)
     {
-        foreach (Match any in StepAnyTagRegex.Matches(inner))
-            if (!StyledSpanRx.IsMatch(any.Value)) return false;
+        if (SafeRegex.Matches(StepAnyTagRegex, inner).Any(any => !SafeRegex.IsMatch(StyledSpanRx, any.Value))) return false;
         var runs = new List<string>();
         var pos = 0;
         void AddRun(string raw)
         {
             // &nbsp; must stay distinct from a collapsible space through decoding.
             var t = DecodeEntities(raw.Replace("&nbsp;", " ").Replace("&#160;", " "));
-            t = Regex.Replace(t, @"[ \t\r\n\f]+", " ");
+            t = SafeRegex.Replace(t, @"[ \t\r\n\f]+", " ");
             if (t.Length > 0) runs.Add(t);
         }
-        foreach (Match t in StyledSpanRx.Matches(inner))
+        foreach (Match t in SafeRegex.Matches(StyledSpanRx, inner))
         {
             AddRun(inner.Substring(pos, t.Index - pos));
             pos = t.Index + t.Length;     // span tags cut run boundaries, nothing more

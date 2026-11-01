@@ -25,9 +25,9 @@ public sealed partial class ParagraphAbsorber
                                 (int)Math.Round(0.8 * (sh.avgFontSize + 2), MidpointRounding.ToEven));
             var cols = new HashSet<int>();
             int colMin = int.MaxValue, colMax = int.MinValue;
-            foreach (var f in frags)
+            foreach (var rectangle in frags.Select(f => f.Rectangle))
             {
-                var r = f.Rectangle;
+                var r = rectangle;
                 if (r is null) continue;
                 for (var c = (int)Math.Floor(r.LLX); c < r.URX; c++)
                 {
@@ -73,8 +73,8 @@ public sealed partial class ParagraphAbsorber
             var key = byRows ? (f.PositionOrNull?.YIndent ?? f.Rectangle?.LLY ?? 0)
                              : (f.Rectangle?.LLX ?? 0);
             var g = 0;
-            if (byRows) { foreach (var c in cuts) if (key < c) g++; }
-            else { foreach (var c in cuts) if (key >= c) g++; }
+            if (byRows) { foreach (var c in cuts.Where(c => key < c)) g++; }
+            else { foreach (var c in cuts.Where(c => key >= c)) g++; }
             if (!groups.TryGetValue(g, out var list)) groups[g] = list = [];
             list.Add(f);
         }
@@ -83,7 +83,7 @@ public sealed partial class ParagraphAbsorber
     }
 
     /// <summary></summary>
-    private void CollectRowCuts(SectionSplitState sh, List<TextFragment> frags, List<double> cuts)
+    private static void CollectRowCuts(SectionSplitState sh, List<TextFragment> frags, List<double> cuts)
     {
         var rows = new HashSet<int>();
         int rowMin = int.MaxValue, rowMax = int.MinValue;

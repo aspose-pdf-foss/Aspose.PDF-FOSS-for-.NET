@@ -111,7 +111,7 @@ internal static class PsRects
         if (top.IsNumber) return new List<double[]> { ReadFourNumbers(i) };
         if (top.Type == PsType.Array) return FromArray(i.PopArray());
         if (top.Type == PsType.String) return FromString(i.PopString());
-        throw new PsErrorSignal("typecheck");
+        throw new PsErrorException("typecheck");
     }
 
     private static double[] ReadFourNumbers(PsInterpreter i)
@@ -131,7 +131,7 @@ internal static class PsRects
             var r = new double[NumbersPerRect];
             for (var j = 0; j < NumbersPerRect; j++)
             {
-                if (!array[k + j].IsNumber) throw new PsErrorSignal("typecheck");
+                if (!array[k + j].IsNumber) throw new PsErrorException("typecheck");
                 r[j] = array[k + j].Number;
             }
 

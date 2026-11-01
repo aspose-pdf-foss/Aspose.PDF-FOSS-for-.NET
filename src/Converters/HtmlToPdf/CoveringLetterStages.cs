@@ -56,11 +56,11 @@ internal static partial class HtmlToPdfConverter
         cl.h2Line = 16.5 * 1.2;                 // 22px type on its 1.2em line
         cl.h2Drop = MetricBaselineDrop(16.5, cl.h2Line, cl.cm);
         cl.y = LtMargin + OsUaBody;
-        Stream(cl, cl.page, "q 0.106 0.208 0.369 rg\n"); // the sheet's #1b355e heading blue
+        Stream(cl.page, "q 0.106 0.208 0.369 rg\n"); // the sheet's #1b355e heading blue
         for (var i = 0; i < cl.h2Lines.Count; i++)
             EmitRun(cl, cl.page, new OsRun(cl.h2Lines[i], "Candara Bold", 16.5),
                 cl.contentL, cl.y + i * cl.h2Line + cl.h2Drop);
-        Stream(cl, cl.page, "0 0 0 rg\nQ\n");
+        Stream(cl.page, "0 0 0 rg\nQ\n");
         cl.y += cl.h2Lines.Count * cl.h2Line + LtTableMT;
     }
 
@@ -87,7 +87,7 @@ internal static partial class HtmlToPdfConverter
         cl.body = cl.justM.Groups[1].Value;
         for (var i = 0; i < cl.body.Length;)
         {
-            var m = Regex.Match(cl.body[i..], @"<(p|ul|br)\b", RegexOptions.IgnoreCase);
+            var m = SafeRegex.Match(cl.body[i..], @"<(p|ul|br)\b", RegexOptions.IgnoreCase);
             if (!m.Success) break;
             var at = i + m.Index;
             var tag = m.Groups[1].Value.ToLowerInvariant();
@@ -109,14 +109,14 @@ internal static partial class HtmlToPdfConverter
             var inner = cl.body[(openEnd + 1)..close];
             i = close + tag.Length + 3;
 
-            var mtM = Regex.Match(attrs, @"margin-top:\s*([\d.]+)px");
+            var mtM = SafeRegex.Match(attrs, @"margin-top:\s*([\d.]+)px");
             var marginTop = mtM.Success
                 ? double.Parse(mtM.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * 0.75
                 : LtPTop;
             if (tag == "ul")
             {
                 var firstLi = true;
-                foreach (Match li in Regex.Matches(inner, @"<li\b[^>]*>([\s\S]*?)</li>", RegexOptions.IgnoreCase))
+                foreach (Match li in SafeRegex.Matches(inner, @"<li\b[^>]*>([\s\S]*?)</li>", RegexOptions.IgnoreCase))
                 {
                     AddLines(cl, LtParseRuns(li.Groups[1].Value, out _), cl.liX, cl.liRight,
                         justify: true, liMode: true,
@@ -152,25 +152,25 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Covering letter: the heading and address table read off the html.</summary>
     private static bool ParseCoveringLetterHeader(CoveringLetterState cl)
     {
-        cl.h2M = Regex.Match(cl.html, @"<h2\b[^>]*>([\s\S]*?)</h2>", RegexOptions.IgnoreCase);
-        cl.justM = Regex.Match(cl.html,
+        cl.h2M = SafeRegex.Match(cl.html, @"<h2\b[^>]*>([\s\S]*?)</h2>", RegexOptions.IgnoreCase);
+        cl.justM = SafeRegex.Match(cl.html,
             @"<div\b[^>]*class\s*=\s*[""']justify[""'][^>]*>([\s\S]*?)</div>", RegexOptions.IgnoreCase);
-        cl.addrM = Regex.Match(cl.html, @"<table[^>]*margin-top:\s*100px[\s\S]*?(<table[^>]*>[\s\S]*?</table>)",
+        cl.addrM = SafeRegex.Match(cl.html, @"<table[^>]*margin-top:\s*100px[\s\S]*?(<table[^>]*>[\s\S]*?</table>)",
             RegexOptions.IgnoreCase);
         if (!cl.h2M.Success || !cl.justM.Success || !cl.addrM.Success) return false;
 
-        cl.h2Lines = BrLines(cl, cl.h2M.Groups[1].Value);
-        cl.addrTds = Regex.Matches(cl.addrM.Groups[1].Value,
+        cl.h2Lines = BrLines(cl.h2M.Groups[1].Value);
+        cl.addrTds = SafeRegex.Matches(cl.addrM.Groups[1].Value,
             @"<td\b[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase);
         if (cl.addrTds.Count < 3) return false;
         cl.addrName = LtFlat(cl.addrTds[0].Groups[1].Value);
         // the rowspan cell keeps its interior blank lines; only the final
         // trailing <br> makes no line
-        cl.addrRight = Regex.Split(cl.addrTds[1].Groups[1].Value, @"<br\s*/?>", RegexOptions.IgnoreCase)
+        cl.addrRight = SafeRegex.Split(cl.addrTds[1].Groups[1].Value, @"<br\s*/?>", RegexOptions.IgnoreCase)
             .Select(LtFlat).ToList();
         while (cl.addrRight.Count > 0 && cl.addrRight[^1].Length == 0) cl.addrRight.RemoveAt(cl.addrRight.Count - 1);
         cl.addrRight.Add("");                       // the pair of closing <br>s leaves one blank line
-        cl.addrLeft = BrLines(cl, cl.addrTds[2].Groups[1].Value);
+        cl.addrLeft = BrLines(cl.addrTds[2].Groups[1].Value);
         return true;
     }
 }

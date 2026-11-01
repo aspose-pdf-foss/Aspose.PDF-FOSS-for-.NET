@@ -20,12 +20,12 @@ private sealed class AlphaZeroRewriteState
 {
     public Aspose.Pdf.Core.PdfDictionary? extGStates;
     public string text = null!;
-    public System.Text.StringBuilder output = null!;
+    // The paint operators to replace, as ranges of the text with what goes in their place.
+    public List<(int start, int end, string replacement)> edits = null!;
     public Stack<(bool fill0, bool stroke0)> stack = null!;
     public bool fill0;
     public bool stroke0;
     public string? lastName;
-    public bool changed;
     public int pos;
     // an inline image ends the rewrite with the original bytes kept
     public bool bailOut;

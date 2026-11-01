@@ -27,8 +27,16 @@ internal static class TaggedTocWiring
                 continue;
             }
             var link = new LS.LinkElement();
-            link._dict.Set("Alt", new PdfString(Encoding.UTF8.GetBytes(tag.Text)));
-            tag.Item.AppendChild(link, validate: false);
+            link._dict.Set("Alt", Aspose.Pdf.Forms.Field.EncodePdfTextString(tag.Text));
+            // A list item holds only a label and a body (ISO 32000-1 14.8.4.3.3), so the link of
+            // a nested entry goes into the item's body; a TOC item takes the link itself.
+            var holder = tag.Item;
+            if (tag.Item.Role == "LI")
+            {
+                holder = new LS.ListLBodyElement();
+                tag.Item.AppendChild(holder, validate: false);
+            }
+            holder.AppendChild(link, validate: false);
             link.TagMarkedContent(doc, tag.Page, tag.Mcid);
             if (tag.Annotation is { } annotation)
                 link.TagObject(doc, annotation, tag.Page);

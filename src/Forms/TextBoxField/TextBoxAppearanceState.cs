@@ -37,6 +37,13 @@ private sealed class TextBoxAppearanceState
     public bool needsComposite;
     public Aspose.Pdf.Core.PdfDictionary? drFontDict;
     public Dictionary<int, int>? compositeCmap;
+    // A composite /DR face this session embedded: the value is drawn through the
+    // embedder (its program and the /DR font dictionary it lives in), so the
+    // face's /W and /ToUnicode cover the glyphs the appearance shows.
+    public byte[]? compositeProgram;
+    // The /DR composite face is a subset lacking a glyph of the value.
+    public bool subsetLacksGlyphs;
+    public PdfDictionary? compositeFonts;
     // No composite /DR face but the value still needs glyphs beyond WinAnsi
     // (Hebrew, Cyrillic, CJK …): embed the /DA font's system face — falling
     // back to Arial — as a Type0/Identity-H font in the appearance resources

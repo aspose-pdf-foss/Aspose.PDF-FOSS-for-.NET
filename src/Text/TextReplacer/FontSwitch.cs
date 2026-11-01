@@ -64,16 +64,14 @@ public sealed partial class TextReplacer
     {
         var bf = fontDict?.GetName("BaseFont");
         if (string.IsNullOrEmpty(bf)) return null;
-        var plus = bf!.IndexOf('+');
+        var plus = bf.IndexOf('+');
         if (plus == 6) bf = bf.Substring(plus + 1);
         return bf;
     }
 
     private static bool ContainsCjk(string text)
     {
-        foreach (var ch in text)
-            if (ch >= '　' && ch <= '鿿') return true;
-        return false;
+        return text.Any(ch => ch >= '　' && ch <= '鿿');
     }
 
     // Arabic Presentation Forms-A and -B: the blocks whose members NFKD-decompose to the
@@ -159,12 +157,12 @@ public sealed partial class TextReplacer
         if (isCid && toUnicode is null)
             return true;
 
-        // A simple (non-CID) font with NO ToUnicode is single-byte WinAnsi/Latin1:
-        // it physically cannot encode a character outside Latin-1 (> 0xFF), so a
-        // Cyrillic/Hebrew/CJK replacement must switch fonts (→ CID fallback in
+        // A simple (non-CID) font with NO ToUnicode is single-byte: a character its
+        // encoding has no code for (Cyrillic/Hebrew/CJK - but not the en dash or the
+        // curly quotes of a WinAnsi font) must switch fonts (→ CID fallback in
         // WriteFontSwitchedReplacement). Without this, the reverse-map check below
-        // is skipped and EncodeString silently Latin1-encodes the char to '?'.
-        if (!isCid && toUnicode is null && text.Any(ch => ch > 0xFF))
+        // is skipped and EncodeString silently encodes the char to '?'.
+        if (!isCid && toUnicode is null && text.Any(ch => SimpleFontCode(ch, fontDict) is null))
             return true;
 
         if (toUnicode is not null)
@@ -215,11 +213,22 @@ public sealed partial class TextReplacer
                             remappedCodes.Add(code++);
                     }
 
-                    // Check if any replacement character's Latin1 byte is remapped
+                    // A replacement character whose code the Differences array re-points at
+                    // another glyph would draw that glyph: switch. A code it names with the
+                    // character's own glyph still draws the character (a Type3 font lists
+                    // every glyph it has that way). A Type3 font without the glyph has
+                    // nothing to draw it with.
+                    var names = DifferencesGlyphNames(diffsArr);
+                    var charProcs = fontDict.GetName("Subtype") == "Type3"
+                        ? reader.ResolveDict(fontDict.Get("CharProcs")) : null;
                     foreach (var ch in text)
                     {
-                        var b = (int)(ch <= 0xFF ? ch : 0x3F);
-                        if (remappedCodes.Contains(b))
+                        var b = SimpleFontCode(ch, fontDict) ?? '?';
+                        var own = PdfEncodings.WinAnsiName(b);
+                        var drawn = names.TryGetValue(b, out var named) ? named : own;
+                        if (remappedCodes.Contains(b) && named != own)
+                            return true;
+                        if (charProcs is not null && ch != ' ' && (drawn is null || !charProcs.ContainsKey(drawn)))
                             return true;
                     }
                 }
@@ -227,6 +236,19 @@ public sealed partial class TextReplacer
         }
 
         return false;
+    }
+
+    /// <summary>The glyph name a /Differences array gives each code it re-points.</summary>
+    private static Dictionary<int, string> DifferencesGlyphNames(PdfArray differences)
+    {
+        var names = new Dictionary<int, string>();
+        var code = 0;
+        foreach (var item in differences)
+        {
+            if (item is PdfInteger number) code = (int)number.Value;
+            else if (item is PdfName name) names[code++] = name.Value;
+        }
+        return names;
     }
 
     /// <summary>
@@ -266,7 +288,7 @@ public sealed partial class TextReplacer
         var src = SourceFontFamily(fontDict);
         if (!string.IsNullOrEmpty(src))
         {
-            try { var t = FontRepository.GetTtfData(src!); if (t is { Length: > 12 }) return src!; }
+            try { var t = FontRepository.GetTtfData(src); if (t is { Length: > 12 }) return src; }
             catch { /* not installed → fall through to Times */ }
         }
         return "TimesNewRoman";
@@ -311,7 +333,7 @@ public sealed partial class TextReplacer
         // codes are judged by the Differences check in NeedsFontSwitch, every other code still
         // maps through the base encoding and is judged by its width below.
         var enc = fontDict.Get("Encoding");
-        var encDict = enc as PdfName is null ? reader.ResolveDict(enc) : null;
+        var encDict = enc is not PdfName ? reader.ResolveDict(enc) : null;
         string? encName = enc as PdfName is { } pn ? pn.Value : encDict?.GetName("BaseEncoding");
         var remapped = new HashSet<int>();
         var diffNames = new HashSet<string>(StringComparer.Ordinal);
@@ -351,8 +373,10 @@ public sealed partial class TextReplacer
             // Map char → single-byte code. ASCII (0x20-0x7E) is identity under WinAnsi/
             // Standard/MacRoman; Latin-1 (0xA0-0xFF) ≈ WinAnsi. Anything else can't be a
             // single-byte code here, so treat as absent-from-this-font.
-            if (ch >= 0x100) { missing.Add(ch); continue; }
-            int code = ch;
+            // The character's single-byte code: its WinAnsi code under a WinAnsi
+            // encoding, its Latin-1 value under the others; none means absent.
+            int? mapped = encName == "WinAnsiEncoding" ? SimpleFontCode(ch, fontDict) : (ch < 0x100 ? ch : null);
+            if (mapped is not { } code) { missing.Add(ch); continue; }
             var stdName = encName switch
             {
                 "MacRomanEncoding" => PdfEncodings.MacRomanName(code),
@@ -379,7 +403,7 @@ public sealed partial class TextReplacer
             // carrying neither was rejected above.
             if (widths is null || code < firstChar || code > lastChar) { missing.Add(ch); continue; }
             var w = reader.Resolve(widths[code - firstChar]);
-            double width = w is PdfInteger wi ? wi.Value : w is PdfReal wr ? wr.Value : 0;
+            double width = w switch { PdfInteger wi => wi.Value, PdfReal wr => wr.Value, _ => 0 };
             if (width == 0) missing.Add(ch);
         }
         return missing.ToArray();
@@ -406,10 +430,11 @@ public sealed partial class TextReplacer
                 if ((fl.Value & ForceBoldFlagBit) != 0) bold = true;
             }
             var ia = reader.Resolve(descriptor.Get("ItalicAngle"));
-            var angle = ia is PdfInteger ii ? ii.Value : ia is PdfReal ir ? ir.Value : 0;
+            var angle = ia switch { PdfInteger ii => ii.Value, PdfReal ir => ir.Value, _ => 0 };
             if (angle != 0) italic = true;
         }
-        return bold ? (italic ? "BoldItalic" : "Bold") : (italic ? "Italic" : "");
+        if (bold) return italic ? "BoldItalic" : "Bold";
+        return italic ? "Italic" : "";
     }
 
     /// <summary>/FontWeight at or above which a face counts as bold (PDF 32000 Table 122

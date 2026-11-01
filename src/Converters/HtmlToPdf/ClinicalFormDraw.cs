@@ -7,9 +7,6 @@ namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
-// Clinical form helpers: text flattening, measurement, page breaks, runs, lines, fills, box and radio inks, cell widths and the item layout.
-    private static string Flat(ClinicalFormState cf, string frag) => Regex.Replace(
-        DecodeEntities(Regex.Replace(frag, @"<[^>]+>", " ")), @"\s+", " ").Trim();
 
     private static double M(ClinicalFormState cf, string s, int style, double fs)
     {

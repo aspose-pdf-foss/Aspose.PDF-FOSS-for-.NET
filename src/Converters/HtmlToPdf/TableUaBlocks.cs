@@ -31,7 +31,9 @@ internal static partial class HtmlToPdfConverter
 
     private static double UaBlockMarginPt(TableParseState ps, string tag, string? style, bool top)
     {
-        var fs = ps.curFontPt > 0 ? ps.curFontPt : ps.uaBaseFontPt > 0 ? ps.uaBaseFontPt : DefaultBodyFontPt;
+        double fs = DefaultBodyFontPt;
+        if (ps.curFontPt > 0) fs = ps.curFontPt;
+        else if (ps.uaBaseFontPt > 0) fs = ps.uaBaseFontPt;
         var side = top ? "margin-top" : "margin-bottom";
         if (style is not null && CssBoxSidePt(style, "margin", side, top ? 0 : 2, fs) is { } own) return own;
         foreach (var sheet in new IReadOnlyDictionary<string, Dictionary<string, string>>?[] { ps.uaSheet, ps.uaDocSheet })
@@ -45,9 +47,9 @@ internal static partial class HtmlToPdfConverter
     /// for that side (1-4 values in the CSS order top, right, bottom, left). Null when neither is declared.</summary>
     private static double? CssBoxSidePt(string style, string prop, string longhand, int sideIdx, double fs)
     {
-        var lh = Regex.Match(style, @"(?<![-\w])" + longhand + @"\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+        var lh = SafeRegex.Match(style, @"(?<![-\w])" + longhand + @"\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
         if (lh.Success) return CssLengthOrZeroPt(lh.Groups[1].Value.Trim(), fs);
-        var sh = Regex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+        var sh = SafeRegex.Match(style, @"(?<![-\w])" + prop + @"\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
         if (!sh.Success) return null;
         var parts = sh.Groups[1].Value.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0) return null;
@@ -66,7 +68,7 @@ internal static partial class HtmlToPdfConverter
     private static double? CssLengthOrZeroPt(string v, double fs)
     {
         if (IsZeroLength(v) || v.Equals("auto", StringComparison.OrdinalIgnoreCase)) return 0;
-        var m = Regex.Match(v, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*em$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(v, @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*em$", RegexOptions.IgnoreCase);
         if (m.Success) return double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) * fs;
         return TryParseLength(v);
     }
@@ -76,19 +78,19 @@ internal static partial class HtmlToPdfConverter
     private static (double W, Color? C)? UaRuleBelow(string style)
     {
         if (TryParseBorderShorthand(style, "border-bottom") is (var shW, var shC) && shW > 0) return (shW, shC);
-        var st = Regex.Match(style, @"(?<![-\w])border-bottom-style\s*:\s*(\w+)", RegexOptions.IgnoreCase);
+        var st = SafeRegex.Match(style, @"(?<![-\w])border-bottom-style\s*:\s*(\w+)", RegexOptions.IgnoreCase);
         if (!st.Success || st.Groups[1].Value.Equals("none", StringComparison.OrdinalIgnoreCase)
             || st.Groups[1].Value.Equals("hidden", StringComparison.OrdinalIgnoreCase)) return null;
-        var wm = Regex.Match(style, @"(?<![-\w])border-bottom-width\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+        var wm = SafeRegex.Match(style, @"(?<![-\w])border-bottom-width\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
         var w = wm.Success ? TryParseLength(wm.Groups[1].Value.Trim()) ?? 0 : UaMediumBorderPt;
         if (w <= 0) return null;
-        var cm = Regex.Match(style, @"(?<![-\w])border-bottom-color\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+        var cm = SafeRegex.Match(style, @"(?<![-\w])border-bottom-color\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
         return (w, cm.Success ? ParseCssColor(cm.Groups[1].Value.Trim()) : null);
     }
 
     /// <summary>The top rule a style declares (the `border-top` shorthand or its longhands).</summary>
     private static (double W, Color? C)? UaRuleAbove(string style) =>
-        UaRuleBelow(Regex.Replace(style, @"border-bottom(?=[\s:-])", "border-none", RegexOptions.IgnoreCase)
+        UaRuleBelow(SafeRegex.Replace(style, @"border-bottom(?=[\s:-])", "border-none", RegexOptions.IgnoreCase)
             .Replace("border-top", "border-bottom", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>A band line was inserted at the cell's head: every per-line map keyed by index moves up by one.</summary>
@@ -142,9 +144,9 @@ internal static partial class HtmlToPdfConverter
                 }
         if (tok.Attributes is not null && tok.Attributes.TryGetValue("style", out var st) && st is not null)
         {
-            var fsm = Regex.Match(st, @"font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+            var fsm = SafeRegex.Match(st, @"font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
             if (fsm.Success && TryParseLength(fsm.Groups[1].Value.Trim()) is { } sfs && sfs > 0) ps.curFontPt = sfs;
-            var ffm = Regex.Match(st, @"font-family\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
+            var ffm = SafeRegex.Match(st, @"font-family\s*:\s*([^;""']+)", RegexOptions.IgnoreCase);
             if (ffm.Success && FirstFontFamily(ffm.Groups[1].Value) is { Length: > 0 } sfam) ps.curFamily = sfam;
         }
         ps.styleStack.Add((tag, prevPt, prevFam, false, ps.curColor, false, false));
@@ -177,8 +179,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var kv in co.docCss)
         {
             var hit = false;
-            foreach (var sel in kv.Key.Split(','))
-                if (wanted.Contains(sel.Trim())) { hit = true; break; }
+            if (kv.Key.Split(',').Any(sel => wanted.Contains(sel.Trim()))) { hit = true; }
             if (!hit) continue;
             if (CssBoxSidePt(kv.Value, "padding", "padding-top", 0, fs) is { } t) top = t;
             if (CssBoxSidePt(kv.Value, "padding", "padding-right", 1, fs) is { } r) right = r;
@@ -212,7 +213,7 @@ internal static partial class HtmlToPdfConverter
     {
         var chain = ancestors is null ? new List<CssElem>() : new List<CssElem>(ancestors);
         chain.Add(new CssElem { Tag = "table", Classes = ps.uaTableClasses is { Length: > 0 } ? ps.uaTableClasses : null });
-        chain.Add(new CssElem { Tag = "td", Classes = ps.uaCellClasses });
+        chain.Add(new CssElem { Tag = "td", Classes = ps.uaCellClasses, RowOrdinal = ps.rowOrdinal });
         return chain;
     }
 
@@ -223,9 +224,7 @@ internal static partial class HtmlToPdfConverter
         var dot = seg.IndexOf('.');
         if (dot < 0 || seg.IndexOf('#') >= 0 || seg.IndexOf(':') >= 0) return false;
         if (dot > 0 && !seg[..dot].Equals(tag, StringComparison.OrdinalIgnoreCase)) return false;
-        foreach (var c in seg[(dot + 1)..].Split('.', StringSplitOptions.RemoveEmptyEntries))
-            if (Array.FindIndex(classes, x => x.Equals(c, StringComparison.OrdinalIgnoreCase)) < 0) return false;
-        return true;
+        return !seg[(dot + 1)..].Split('.', StringSplitOptions.RemoveEmptyEntries).Any(c => Array.FindIndex(classes, x => x.Equals(c, StringComparison.OrdinalIgnoreCase)) < 0);
     }
 
     /// <summary>The sheet's descendant rules addressing a UA-boxed cell through its ancestors (`.orange-blue .footer
@@ -271,7 +270,7 @@ internal static partial class HtmlToPdfConverter
             })
                 if (decls.TryGetValue(prop, out var bv) && ChainBorder(bv) is { } bi)
                 {
-                    sides |= side; if (bi.Width > w) w = bi.Width; color ??= bi.Color;
+                    sides |= side; if (bi.Width > w) { w = bi.Width; } color ??= bi.Color;
                 }
             if (sides != 0) co.ps.cell.Border = new BorderInfo(sides, w <= 0 ? PxToPt : w, color ?? Color.Black);
         }
@@ -284,7 +283,9 @@ internal static partial class HtmlToPdfConverter
         string? decl = null;
         if (cfg.tblStyle.TryGetValue("border-spacing", out var own)) decl = own;
         else
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
             foreach (var sheet in new IReadOnlyDictionary<string, Dictionary<string, string>>?[] { cfg.css, cfg.docCss })
+#pragma warning restore S3267
                 if (decl is null && sheet is not null)
                     foreach (var key in new[] { "table", "*" })
                         if (decl is null && sheet.TryGetValue(key, out var rule) && rule.TryGetValue("border-spacing", out var v)) decl = v;
@@ -313,7 +314,9 @@ internal static partial class HtmlToPdfConverter
     private static bool UaBorderCollapse(TableStyleConfig cfg)
     {
         if (cfg.tblStyle.TryGetValue("border-collapse", out var own)) return own.Trim().Equals("collapse", StringComparison.OrdinalIgnoreCase);
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
         foreach (var sheet in new IReadOnlyDictionary<string, Dictionary<string, string>>?[] { cfg.css, cfg.docCss })
+#pragma warning restore S3267
             if (sheet is not null)
                 foreach (var key in new[] { "table", "*" })
                     if (sheet.TryGetValue(key, out var rule) && rule.TryGetValue("border-collapse", out var v))
@@ -337,8 +340,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var kv in co.docCss)
         {
             var hit = false;
-            foreach (var sel in kv.Key.Split(','))
-                if (wanted.Contains(sel.Trim())) { hit = true; break; }
+            if (kv.Key.Split(',').Any(sel => wanted.Contains(sel.Trim()))) { hit = true; }
             if (hit && kv.Value.TryGetValue("width", out var wv) && !wv.Contains('%') && TryParseLength(wv.Trim()) is { } wPt && wPt > 0) found = wPt;
         }
         return found;
@@ -358,8 +360,7 @@ internal static partial class HtmlToPdfConverter
             foreach (var kv in sheet)
             {
                 var hit = false;
-                foreach (var sel in kv.Key.Split(','))
-                    if (wanted.Contains(sel.Trim())) { hit = true; break; }
+                if (kv.Key.Split(',').Any(sel => wanted.Contains(sel.Trim()))) { hit = true; }
                 if (hit && kv.Value.TryGetValue(prop, out var v)) found = v;
             }
         }
@@ -368,11 +369,11 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>The background a row declares: its style, its bgcolor, or a sheet rule on its class (`.HEADER {
     /// background: #ddd }`, `tr.HEADER`).</summary>
-    private static Color? UaRowBackground(TableStyleConfig cfg, TableParseState ps, Token tok)
+    private static Color? UaRowBackground(TableStyleConfig cfg, Token tok)
     {
         if (tok.Attributes is null) return null;
         if (tok.Attributes.TryGetValue("style", out var st) && st is not null
-            && Regex.Match(st, "background(-color)? *: *([^;]+)", RegexOptions.IgnoreCase) is { Success: true } sm
+            && SafeRegex.Match(st, "background(-color)? *: *([^;]+)", RegexOptions.IgnoreCase) is { Success: true } sm
             && ParseCssColor(sm.Groups[2].Value.Trim()) is { } sc) return sc;
         if (tok.Attributes.TryGetValue("bgcolor", out var bga) && ParseCssColor(bga) is { } ac) return ac;
         if (!tok.Attributes.TryGetValue("class", out var cls) || cls is null) return null;
@@ -389,7 +390,7 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>`text-transform: uppercase` declared on a style string.</summary>
     private static bool UaUppercaseDeclared(string? style) =>
-        style is not null && Regex.IsMatch(style, @"text-transform\s*:\s*uppercase", RegexOptions.IgnoreCase);
+        style is not null && SafeRegex.IsMatch(style, @"text-transform\s*:\s*uppercase", RegexOptions.IgnoreCase);
 
     /// <summary>A block opening inside a paragraph (a list in a p) closes the paragraph first, the way the
     /// HTML parser does: its lines push, its bottom margin is left, and every run open inside it closes.</summary>
@@ -423,7 +424,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (!ps.uaCellBoxes || ps.cell is null) return;
         ps.lineRunMarks ??= new();
-        if (ps.lineRunMarks.Count == 0) ps.lineRunMarks.Add((0, ps.boldDepth > 0 && !bold ? true : ps.lineRunMarks.Count > 0));
+        if (ps.lineRunMarks.Count == 0) ps.lineRunMarks.Add((0, (ps.boldDepth > 0 && !bold) || ps.lineRunMarks.Count > 0));
         ps.lineRunMarks.Add((ps.line.Length, bold));
     }
 }

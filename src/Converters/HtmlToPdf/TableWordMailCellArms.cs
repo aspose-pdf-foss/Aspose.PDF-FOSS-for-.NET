@@ -68,7 +68,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (width(word) <= boxW) { pieces.Add((word, false)); continue; }
             var first = true;
-            foreach (var part in Regex.Split(word, @"(?=\\)"))
+            foreach (var part in SafeRegex.Split(word, @"(?=\\)"))
             {
                 if (part.Length == 0) continue;
                 if (width(part) <= boxW) { pieces.Add((part, !first)); first = false; continue; }
@@ -85,7 +85,10 @@ internal static partial class HtmlToPdfConverter
         var cur = "";
         foreach (var (piece, glued) in pieces)
         {
-            var joined = cur.Length == 0 ? piece : glued ? cur + piece : cur + " " + piece;
+            string joined;
+            if (cur.Length == 0) joined = piece;
+            else if (glued) joined = cur + piece;
+            else joined = cur + " " + piece;
             if (cur.Length > 0 && width(joined) > boxW)
             {
                 lines.Add(cur);
@@ -125,7 +128,7 @@ internal static partial class HtmlToPdfConverter
     private static void ReadWordMailCellPadding(CellOpenState co, string st)
     {
         if (co.ps.cellCssPadPt > 0
-            || Regex.Match(st, @"(?<![-\w])padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is not { Success: true } pm) return;
+            || SafeRegex.Match(st, @"(?<![-\w])padding\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is not { Success: true } pm) return;
         var (pT, pR, pB, pL) = ChainPadPt(pm.Groups[1].Value.Trim(), co.ps.cellClassPt > 0 ? co.ps.cellClassPt : co.cellFontSize);
         if (pL + pR > 0) { co.ps.cellCssPadPt = pL + pR; co.ps.cellPadLeftPt = pL; }
         co.ps.cellChainPadTopPt = pT; co.ps.cellChainPadBotPt = pB;
@@ -142,7 +145,7 @@ internal static partial class HtmlToPdfConverter
             ("border-bottom", BorderSide.Bottom), ("border-right", BorderSide.Right),
         })
         {
-            if (Regex.IsMatch(st, @"(?<![-\w])" + prop + @"\s*:\s*none", RegexOptions.IgnoreCase)) { sides &= ~side; continue; }
+            if (SafeRegex.IsMatch(st, @"(?<![-\w])" + prop + @"\s*:\s*none", RegexOptions.IgnoreCase)) { sides &= ~side; continue; }
             if (TryParseBorderShorthand(st, prop) is not (var sw, var sc)) continue;
             sides |= side;
             if (sw > w) w = sw;

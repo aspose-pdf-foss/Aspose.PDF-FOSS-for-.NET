@@ -245,7 +245,7 @@ internal static partial class RulePainter
         var dashed = SetStrokeStyle(builder, side, colour, width, straightRun);
         var (p1, p2) = (from.StrokeInnerPoint(horizontal), to.StrokeInnerPoint(horizontal));
         builder.MoveTo(from.X, from.Y);
-        if (Passed(from, to, p1, p2, horizontal))
+        if (Passed(from, p1, p2, horizontal))
         {
             var cross = MitresCross(from, to);
             builder.LineTo(cross.X, cross.Y);
@@ -285,7 +285,7 @@ internal static partial class RulePainter
     }
 
     /// <summary>True when a side's two inner points have passed each other.</summary>
-    private static bool Passed(Corner from, Corner to, (double X, double Y) p1, (double X, double Y) p2, bool horizontal)
+    private static bool Passed(Corner from, (double X, double Y) p1, (double X, double Y) p2, bool horizontal)
     {
         // Measured along the side from its starting corner toward its end.
         var (along1, along2) = horizontal

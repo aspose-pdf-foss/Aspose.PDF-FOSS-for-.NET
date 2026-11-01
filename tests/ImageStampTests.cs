@@ -83,6 +83,22 @@ public class ImageStampTests
     }
 
     [Fact]
+    public void AStampOverContentLeavingATranslationInForceCancelsIt()
+    {
+        // The content's last cm stays in force for what is appended after it, a (2) inside
+        // its string and a scale inside its own q ... Q do not: the stamp undoes (100, 50) alone.
+        var content = System.Text.Encoding.ASCII.GetBytes(
+            "q 2 0 0 2 0 0 cm Q BT /F1 9 Tf (1 0 0 1 9 9 cm) Tj ET 1 0 0 1 100 50 cm 0 0 1 rg 0 0 10 10 re f");
+        using var doc = Document.Open(PdfBuilder.BuildWithFlateStream(content));
+        var stamp = ImageStamp.FromRgb(new byte[4 * 4 * 3], 4, 4);
+        stamp.X = 200;
+        stamp.Y = 300;
+        stamp.ApplyTo(doc.Pages[1]);
+        var written = System.Text.Encoding.ASCII.GetString(doc.Pages[1].GetDecodedContentBytes());
+        Assert.Contains("q 1 0 0 1 -100 -50 cm ", written);
+    }
+
+    [Fact]
     public void Image_SurvivesSaveRoundtrip()
     {
         var pdf = PdfBuilder.BuildMinimal();

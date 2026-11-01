@@ -33,6 +33,10 @@ public sealed partial class PdfToHtmlConverter
     // over the page raster it describes.
     private const string TransparentTextColor = "rgba(0, 0, 0, 0)";
 
+    /// <summary>A colour painted with a constant alpha, spelt as the transparent text colour is.</summary>
+    private static string CssRgba(int r, int g, int b, double alpha) =>
+        $"rgba({r}, {g}, {b}, {alpha.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)})";
+
     // One substitutor per source font (keyed by font object number), shared across
     // all pages this converter instance renders: the minted stand-in characters
     // (U+A880 upward) must stay stable document-wide, like the shared font they
@@ -59,6 +63,24 @@ public sealed partial class PdfToHtmlConverter
         ? "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">"
         : "<!DOCTYPE html>";
 
+    // An XHTML document is XML: its root declares the XHTML namespace, its element names are
+    // lowercase, and it states its character set through an http-equiv meta (the charset
+    // attribute is HTML5's). The HTML5 envelope keeps its shape, upper-case STYLE included.
+    private bool Xhtml => DocumentType == HtmlDocumentType.Xhtml;
+
+    /// <summary>The opening html tag matching <see cref="DocumentType"/>.</summary>
+    private string HtmlOpenTag() => Xhtml ? "<html xmlns=\"http://www.w3.org/1999/xhtml\">" : "<html>";
+
+    /// <summary>The character-set meta matching <see cref="DocumentType"/>.</summary>
+    private string CharsetMeta() => Xhtml
+        ? "<meta http-equiv=\"content-type\" content=\"text/html;charset=utf-8\" />"
+        : "<meta charset=\"utf-8\" />";
+
+    /// <summary>The embedded stylesheet's tags matching <see cref="DocumentType"/>.</summary>
+    private string StyleOpenTag() => Xhtml ? "<style>" : "<STYLE>";
+
+    private string StyleCloseTag() => Xhtml ? "</style>" : "</STYLE>";
+
     /// <summary>
     /// Hand every distinct font of the document to the caller's
     /// <see cref="HtmlSaveOptions.CustomResourceSavingStrategy"/>. Each font that has a
@@ -80,7 +102,7 @@ public sealed partial class PdfToHtmlConverter
             var page = doc.Pages[i];
             var reader = page.Reader;
             if (reader is null) continue;
-            var resources = reader.ResolveDict(page.Dict.Get("Resources"));
+            var resources = PageResources(page.Dict, reader);
             var fontDict = resources is not null ? reader.ResolveDict(resources.Get("Font")) : null;
             if (fontDict is null) continue;
             foreach (var key in fontDict.Keys)
@@ -126,7 +148,7 @@ public sealed partial class PdfToHtmlConverter
     /// <summary>Escape <c>&amp;</c> for an href/src attribute without double-escaping
     /// ampersands the caller's resource strategy already escaped itself.</summary>
     private static string EscapeHrefAmpersands(string url) =>
-        url.Contains('&') ? System.Text.RegularExpressions.Regex.Replace(url, "&(?!amp;)", "&amp;") : url;
+        url.Contains('&') ? SafeRegex.Replace(url, "&(?!amp;)", "&amp;") : url;
 
     /// <summary>Decoded FontFile2 (TrueType) program of a simple or Type0/CID font, or null -
     /// also when the entry holds a bare CFF program under the wrong key (a producer's slip a
@@ -191,7 +213,7 @@ public sealed partial class PdfToHtmlConverter
             {
                 if (Text.FontRepository.GetTtfData(candidate) is { Length: > 0 } ttf) return ttf;
             }
-            catch { }
+            catch { /* a font that cannot be found or read leaves the fallback in place */ }
         }
         return null;
     }
@@ -200,13 +222,13 @@ public sealed partial class PdfToHtmlConverter
     {
         yield return name;
         // Strip PostScript name suffixes ("CourierNewPSMT" → "CourierNew").
-        var stripped = System.Text.RegularExpressions.Regex.Replace(name, @"(PSMT|PS|MT)$", "");
+        var stripped = SafeRegex.Replace(name, @"(PSMT|PS|MT)$", "");
         if (stripped != name) yield return stripped;
         // Hyphenated style → spaced ("ArialNarrow-Bold" → "ArialNarrow Bold").
         var spacedStyle = stripped.Replace("-", " ");
         if (spacedStyle != stripped) yield return spacedStyle;
         // Split camel-case words ("ArialNarrow Bold" → "Arial Narrow Bold").
-        var camel = System.Text.RegularExpressions.Regex.Replace(spacedStyle, @"(\p{Ll})(\p{Lu})", "$1 $2");
+        var camel = SafeRegex.Replace(spacedStyle, @"(\p{Ll})(\p{Lu})", "$1 $2");
         if (camel != spacedStyle) yield return camel;
     }
 
@@ -230,7 +252,7 @@ public sealed partial class PdfToHtmlConverter
         // real text, not converter CSS.
         var sb = new StringBuilder();
         sb.AppendLine(DocTypeDeclaration());
-        sb.AppendLine("<html><head><meta charset=\"utf-8\" />");
+        sb.AppendLine(HtmlOpenTag() + "<head>" + CharsetMeta());
         sb.AppendLine(TitleElement());
         sb.AppendLine("</head><body>");
 
@@ -242,6 +264,15 @@ public sealed partial class PdfToHtmlConverter
 
         sb.AppendLine("</body></html>");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Convert all pages to HTML and write to a stream.
+    /// </summary>
+    public void SaveAsHtml(Document doc, Stream output)
+    {
+        var html = SaveAsHtml(doc);
+        output.Write(Encoding.UTF8.GetBytes(HtmlTextFormat.Crlfify(html)));
     }
 
     /// <summary>
@@ -281,19 +312,10 @@ public sealed partial class PdfToHtmlConverter
         if (bodyOnly) return div;
         var sb = new StringBuilder();
         sb.AppendLine(DocTypeDeclaration());
-        sb.AppendLine("<html><head><meta charset=\"utf-8\" /></head><body>");
+        sb.AppendLine(HtmlOpenTag() + "<head>" + CharsetMeta() + "</head><body>");
         sb.Append(div);
         sb.AppendLine("</body></html>");
         return sb.ToString();
-    }
-
-    /// <summary>
-    /// Convert all pages to HTML and write to a stream.
-    /// </summary>
-    public void SaveAsHtml(Document doc, Stream output)
-    {
-        var html = SaveAsHtml(doc);
-        output.Write(Encoding.UTF8.GetBytes(HtmlTextFormat.Crlfify(html)));
     }
 
 }

@@ -67,11 +67,15 @@ internal static partial class XfaRenderer
         catch { return null; }
     }
 
-    /// <summary>Copy each form-packet element's resolved <c>presence</c> onto its
+    /// <summary>Copy each form-packet element's resolved value and caption onto its
     /// template counterpart. Counterparts pair by (tag, name) in sibling order —
     /// the expanded template's instance list and the packet's recorded instances
-    /// run parallel. An element the packet gives no presence keeps the template's.</summary>
-    private static void OverlayFormPresence(XmlElement tmpl, XmlElement form)
+    /// run parallel. The packet's <c>presence</c> is taken only with <paramref name="presence"/>,
+    /// for a conversion asked to render the form as signed - in the state a viewer saved it.
+    /// The default conversion shows what the template's own presence attribute and the
+    /// template's scripts say, whatever state a viewer saved (measured on two forms: a block
+    /// the packet hides is drawn, a template-hidden block the packet shows is not).</summary>
+    private static void OverlayFormValues(XmlElement tmpl, XmlElement form, bool presence)
     {
         static bool IsBox(XmlElement e) =>
             e.LocalName is "subform" or "field" or "draw" or "exclGroup"
@@ -92,16 +96,15 @@ internal static partial class XfaRenderer
             seen[key] = idx + 1;
             if (!formKids.TryGetValue(key, out var list) || idx >= list.Count) continue;
             var f = list[idx];
-            var pres = f.GetAttribute("presence");
-            if (pres.Length > 0) t.SetAttribute("presence", pres);
-            // The packet also records the resolved <value> (script-computed titles,
+            if (presence && f.GetAttribute("presence") is { Length: > 0 } saved) t.SetAttribute("presence", saved);
+            // The packet records the resolved <value> (script-computed titles,
             // language-resolved labels): it replaces the template default. Empty
             // packet values (cleared placeholders) don't erase template text.
             var fVal = f.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "value");
             if (fVal is not null && !string.IsNullOrWhiteSpace(fVal.InnerText))
             {
                 var tVal = t.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "value");
-                var imported = (XmlElement)t.OwnerDocument!.ImportNode(fVal, true);
+                var imported = (XmlElement)t.OwnerDocument.ImportNode(fVal, true);
                 if (tVal is not null) t.ReplaceChild(imported, tVal);
                 else t.AppendChild(imported);
             }
@@ -113,18 +116,33 @@ internal static partial class XfaRenderer
             if (fCapVal is not null && !string.IsNullOrWhiteSpace(fCapVal.InnerText))
             {
                 var tCap = t.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "caption");
-                var imported = (XmlElement)t.OwnerDocument!.ImportNode(fCapVal, true);
+                var imported = (XmlElement)t.OwnerDocument.ImportNode(fCapVal, true);
                 if (tCap is null)
                 {
-                    tCap = t.OwnerDocument!.CreateElement("caption", t.NamespaceURI);
+                    tCap = t.OwnerDocument.CreateElement("caption", t.NamespaceURI);
                     t.AppendChild(tCap);
                 }
                 var tCapVal = tCap.ChildNodes.OfType<XmlElement>().FirstOrDefault(c => c.LocalName == "value");
                 if (tCapVal is not null) tCap.ReplaceChild(imported, tCapVal);
                 else tCap.AppendChild(imported);
             }
-            OverlayFormPresence(t, f);
+            OverlayBorderFill(t, f);
+            OverlayFormValues(t, f, presence);
         }
+    }
+
+    /// <summary>Gives a template box the colour of the fill the packet records in its border: a script colours a
+    /// box at run time (the dark cells of a code drawn as a grid), and the packet keeps that colour.</summary>
+    private static void OverlayBorderFill(XmlElement tmpl, XmlElement form)
+    {
+        var fColor = FirstChild(form, "border") is { } fBorder && FirstChild(fBorder, "fill") is { } fFill ? FirstChild(fFill, "color") : null;
+        if (fColor is null) return;
+        var doc = tmpl.OwnerDocument;
+        var border = FirstChild(tmpl, "border") ?? (XmlElement)tmpl.AppendChild(doc.CreateElement("border", tmpl.NamespaceURI))!;
+        var fill = FirstChild(border, "fill") ?? (XmlElement)border.AppendChild(doc.CreateElement("fill", tmpl.NamespaceURI))!;
+        var imported = (XmlElement)doc.ImportNode(fColor, true);
+        if (FirstChild(fill, "color") is { } old) fill.ReplaceChild(imported, old);
+        else fill.AppendChild(imported);
     }
 
     private static XmlElement? LoadDataRoot(Document doc)
@@ -161,7 +179,7 @@ internal static partial class XfaRenderer
                     result[System.Text.Encoding.UTF8.GetString(s.Value)] = reader.DecodeStream(st);
             }
         }
-        catch { }
+        catch { /* a stream that does not decode is skipped, as if absent */ }
         return result;
     }
 
@@ -188,13 +206,18 @@ internal static partial class XfaRenderer
         ox.owner = new XmlDocument();
         ox.clone = (XmlElement)ox.owner.ImportNode(ox.root, true);
         ox.owner.AppendChild(ox.clone);
-        if (ox.dataRoot is null && ox.formRoot is null) return ox.clone;
-        // Instance expansion is the FORM packet's job — it records the runtime
-        // instance set a viewer saved. Without one the renderer draws exactly
-        // ONE instance per template subform and leaves repeated data groups
-        // unbound (five <detail> data rows under occur min=2
-        // render as a single empty row; singular values all bind).
-        if (ox.formRoot is null) return ox.clone;
+        if (ox.dataRoot is null && ox.formRoot is null)
+        {
+            // Nothing to bind or repeat by; the members of subform sets still take the
+            // sets' places, as the walk below makes them.
+            HoistSubformSetsUnder(ox.clone);
+            return ox.clone;
+        }
+        // The FORM packet records the runtime instance set a viewer saved. Without one
+        // a template subform keeps ONE instance, bound strictly, unless it is repeatable
+        // and its data holds several groups: then it is instantiated per group, as a
+        // first merge of the data would.
+        ox.strict = ox.formRoot is null;
 
         ox.used = new HashSet<XmlElement>();
         ox.packetRecords = ox.formRoot is not null
@@ -204,12 +227,24 @@ internal static partial class XfaRenderer
         return ox.clone;
     }
 
+    /// <summary>The one data leaf a field's own reference from the record reaches, empty or not; null when the
+    /// field has no such reference or it reaches no node or several. That leaf is the field's value: a node of the
+    /// field's name in a data group around it does not stand in for the path the field names.</summary>
+    private static XmlElement? RecordReferencedLeaf(Ctx ctx, XmlElement e)
+    {
+        var reference = DataRefOf(e);
+        if (ctx.DataRoot is null || !reference.StartsWith(RecordPrefix, StringComparison.Ordinal)) return null;
+        var nodes = ReferencedNodes(ctx.DataRoot, reference.Substring(RecordPrefix.Length));
+        return nodes.Count == 1 && !nodes[0].ChildNodes.OfType<XmlElement>().Any() ? nodes[0] : null;
+    }
+
     /// <summary>Resolve a bound value for <paramref name="name"/>: the nearest expanded
     /// ancestor's data group child of that name, else null. When the data group carries
     /// SEVERAL same-name value nodes (repeated fields, e.g. a TOC's page-number column),
     /// the k-th same-name template field binds to the k-th data node in document order.</summary>
     private static string? BoundValue(Ctx ctx, XmlElement e, string name)
     {
+        if (RecordReferencedLeaf(ctx, e) is { } leaf) return leaf.InnerText;
         for (XmlElement? a = e; a is not null; a = a.ParentNode as XmlElement)
         {
             var idx = a.GetAttribute("data-idx");
@@ -219,7 +254,12 @@ internal static partial class XfaRenderer
             if (idx == "-1") return string.Empty;
             if (!int.TryParse(idx, out var i) || i < 0 || i >= ctx.Groups.Count) continue;
             var matches = ctx.Groups[i].ChildNodes.OfType<XmlElement>().Where(c => c.LocalName == name).ToList();
-            if (matches.Count == 0) continue;
+            if (matches.Count == 0)
+            {
+                // No node of the field's name: its own reference may name the node.
+                if (ReferencedValue(e, a, ctx.Groups[i]) is { } referenced) return referenced;
+                continue;
+            }
             if (matches.Count == 1) return matches[0].InnerText;
             int ord = 0;
             foreach (var f in a.SelectNodes(".//*")!.OfType<XmlElement>())
@@ -230,6 +270,10 @@ internal static partial class XfaRenderer
             }
             return matches[Math.Min(ord, matches.Count - 1)].InnerText;
         }
+        // No instance holds the field (a master page's header, a field of the root): its
+        // reference starts at the record. Without a saved form state the strict resolver
+        // alone decides, as before.
+        if (!ctx.StrictBinding && ctx.DataRoot is not null) return ReferencedValue(e, null, ctx.DataRoot);
         return null;
     }
 }

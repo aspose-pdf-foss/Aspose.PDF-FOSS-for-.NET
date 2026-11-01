@@ -15,36 +15,36 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>UA serif table cells: one cell parsed, measured and drawn.</summary>
-    private void DrawUaCell(UaSerifTableState ua, UaRowState ur, int ci)
+    private static void DrawUaCell(UaSerifTableState ua, UaRowState ur, int ci)
     {
         var cell = ur.cells[ci];
         var colW = ua.colWs[Math.Min(ci, ua.colWs.Count - 1)];
         var cellR = ur.cellL + colW;
         if (cell.Bg is { } bgc)
             ua.tb.SetFillColor(bgc.R / 255.0, bgc.G / 255.0, bgc.B / 255.0)
-              .Rectangle(ur.cellL, ua.page.Height - (ua.topD + ur.rowH), colW, ur.rowH)
+              .Rectangle(ur.cellL, ua.page.LayoutFrameHeight - (ua.topD + ur.rowH), colW, ur.rowH)
               .Fill();
         if (cell.Solid[0])
         {
             var ec = cell.EdgeColor ?? Color.Black;
             ua.tb.SetStrokeColor(ec.R / 255.0, ec.G / 255.0, ec.B / 255.0)
               .SetLineWidth(UaTableEdgePt)
-              .MoveTo(ur.cellL, ua.page.Height - (ua.topD + UaTableEdgePt / 2))
-              .LineTo(cellR, ua.page.Height - (ua.topD + UaTableEdgePt / 2))
+              .MoveTo(ur.cellL, ua.page.LayoutFrameHeight - (ua.topD + UaTableEdgePt / 2))
+              .LineTo(cellR, ua.page.LayoutFrameHeight - (ua.topD + UaTableEdgePt / 2))
               .Stroke();
         }
         if (cell.Solid[2])
             ua.tb.SetStrokeColor(0, 0, 0).SetLineWidth(UaTableEdgePt)
-              .MoveTo(ur.cellL, ua.page.Height - (ua.topD + ur.rowH - UaTableEdgePt / 2))
-              .LineTo(cellR, ua.page.Height - (ua.topD + ur.rowH - UaTableEdgePt / 2))
+              .MoveTo(ur.cellL, ua.page.LayoutFrameHeight - (ua.topD + ur.rowH - UaTableEdgePt / 2))
+              .LineTo(cellR, ua.page.LayoutFrameHeight - (ua.topD + ur.rowH - UaTableEdgePt / 2))
               .Stroke();
         if (cell.Solid[3])
             ua.tb.SetStrokeColor(0, 0, 0).SetLineWidth(UaTableEdgePt)
-              .MoveTo(ur.cellL + UaTableEdgePt / 2, ua.page.Height - ua.topD)
-              .LineTo(ur.cellL + UaTableEdgePt / 2, ua.page.Height - (ua.topD + ur.rowH))
+              .MoveTo(ur.cellL + UaTableEdgePt / 2, ua.page.LayoutFrameHeight - ua.topD)
+              .LineTo(ur.cellL + UaTableEdgePt / 2, ua.page.LayoutFrameHeight - (ua.topD + ur.rowH))
               .Stroke();
 
-        DrawUaCellLines(ua, ur, ci, colW, cellR);
+        DrawUaCellLines(ua, ur, ci);
         ur.cellL = cellR;
     }
 
@@ -66,14 +66,14 @@ public sealed partial class Document
         double WordW(string w)
         {
             if (measureFace is { } mf)
-                return StyledWidth(ua, w, mf.Item3, fb?.Item3, cell.Fs);
+                return StyledWidth(w, mf.Item3, fb?.Item3, cell.Fs);
             double mw = 0;
-            foreach (System.Text.RegularExpressions.Match sm in
-                System.Text.RegularExpressions.Regex.Matches(w,
-                    $@"[^{UaFallbackChar}]+|{UaFallbackChar}+"))
-                mw += sm.Value[0] == UaFallbackChar && fb is not null
-                    ? StyledWidth(ua, sm.Value, fb.Value.Item3, null, cell.Fs)
-                    : TimesWidth(ua, sm.Value);
+            foreach (var value in
+                SafeRegex.Matches(w,
+                    $@"[^{UaFallbackChar}]+|{UaFallbackChar}+").Select(sm => sm.Value))
+                mw += value[0] == UaFallbackChar && fb is not null
+                    ? StyledWidth(value, fb.Value.Item3, null, cell.Fs)
+                    : TimesWidth(value);
             return mw;
         }
         var cur = "";
@@ -92,9 +92,9 @@ public sealed partial class Document
             if (styled)
             {
                 var f = Face(ua, cell.Family!)!.Value;
-                box = CssBox(ua, f.Item4, cell.Fs);
+                box = CssBox(f.Item4, cell.Fs);
                 if (ln.IndexOf(UaFallbackChar) >= 0 && fb is not null)
-                    box = Math.Max(box, CssBox(ua, fb.Value.Item4, cell.Fs));
+                    box = Math.Max(box, CssBox(fb.Value.Item4, cell.Fs));
             }
             else box = UaSerifPitchPt;
             cell.Boxes.Add(box);
@@ -106,30 +106,30 @@ public sealed partial class Document
     }
 
     /// <summary></summary>
-    private void ParseUaCell(UaSerifTableState ua, UaRowState ur, System.Text.RegularExpressions.Match dm)
+    private static void ParseUaCell(UaRowState ur, System.Text.RegularExpressions.Match dm)
     {
         var attrs = dm.Groups["a"].Value;
-        var text = System.Text.RegularExpressions.Regex.Replace(
+        var text = SafeRegex.Replace(
             HtmlFragment.StripHtmlTags(dm.Groups["in"].Value),
             @"\s+", " ").Trim();
         var fs = UaSerifPt;
-        var fsm = System.Text.RegularExpressions.Regex.Match(attrs,
+        var fsm = SafeRegex.Match(attrs,
             @"font-size\s*:\s*([\d.]+)pt", UaRx);
         if (fsm.Success)
             fs = double.Parse(fsm.Groups[1].Value,
                 System.Globalization.CultureInfo.InvariantCulture);
         string? family = null;
-        var ffm = System.Text.RegularExpressions.Regex.Match(attrs,
+        var ffm = SafeRegex.Match(attrs,
             @"font-family\s*:\s*([^;""']+)", UaRx);
         if (ffm.Success) family = ffm.Groups[1].Value.Trim();
         Color? bg = null;
-        var bgm = System.Text.RegularExpressions.Regex.Match(attrs,
+        var bgm = SafeRegex.Match(attrs,
             @"background[^;]*?(#[0-9a-f]{6})", UaRx);
         if (bgm.Success)
             bg = Converters.HtmlToPdfConverter.ParseCssColor(bgm.Groups[1].Value);
         // border-style lists top right bottom left
         var solid = new bool[4];
-        var bsm = System.Text.RegularExpressions.Regex.Match(attrs,
+        var bsm = SafeRegex.Match(attrs,
             @"border-style\s*:\s*([^;]+)", UaRx);
         if (bsm.Success)
         {
@@ -142,7 +142,7 @@ public sealed partial class Document
             if (toks.Length == 2) { solid[2] = solid[0]; solid[3] = solid[1]; }
         }
         Color? edgeColor = null;
-        var bcm = System.Text.RegularExpressions.Regex.Match(attrs,
+        var bcm = SafeRegex.Match(attrs,
             @"border-color\s*:\s*(#[0-9a-f]{6})", UaRx);
         if (bcm.Success)
             edgeColor = Converters.HtmlToPdfConverter.ParseCssColor(bcm.Groups[1].Value);
@@ -151,7 +151,7 @@ public sealed partial class Document
     }
 
     /// <summary></summary>
-    private void DrawUaCellLines(UaSerifTableState ua, UaRowState ur, int ci, double colW, double cellR)
+    private static void DrawUaCellLines(UaSerifTableState ua, UaRowState ur, int ci)
     {
         var cell = ur.cells[ci];
         if (cell.Lines.Count > 0)
@@ -167,8 +167,8 @@ public sealed partial class Document
             if (styled)
             {
                 var f = Face(ua, cell.Family!)!.Value;
-                pitch = CssBox(ua, f.Item4, cell.Fs);
-                seat1 = SeatIn(ua, f.Item4, cell.Fs, cell.Boxes[0]);
+                pitch = CssBox(f.Item4, cell.Fs);
+                seat1 = SeatIn(f.Item4, cell.Fs, cell.Boxes[0]);
             }
             else
             {
@@ -179,18 +179,18 @@ public sealed partial class Document
             for (var li = 0; li < cell.Lines.Count; li++)
             {
                 var baseD = contentTop + seat1 + li * pitch;
-                var py = ua.page.Height - baseD;
+                var py = ua.page.LayoutFrameHeight - baseD;
                 var ln = cell.Lines[li];
                 if (styled)
                 {
                     var f = Face(ua, cell.Family!)!.Value;
                     var x = textX;
                     // split at fallback-glyph boundaries
-                    foreach (System.Text.RegularExpressions.Match sm in
-                        System.Text.RegularExpressions.Regex.Matches(ln,
-                            $@"[^{UaFallbackChar}]+|{UaFallbackChar}+"))
+                    foreach (var value in
+                        SafeRegex.Matches(ln,
+                            $@"[^{UaFallbackChar}]+|{UaFallbackChar}+").Select(sm => sm.Value))
                     {
-                        var seg = sm.Value;
+                        var seg = value;
                         var isFb = seg[0] == UaFallbackChar && fb is not null;
                         var (ttf, name, gp, _) = isFb ? fb!.Value : f;
                         var (res, hex) = Text.Type0FontEmbedder.Embed(
@@ -202,7 +202,7 @@ public sealed partial class Document
                             ua.tb.ShowTextHexKerned(hex, adj);
                         else ua.tb.ShowTextHex(hex);
                         ua.tb.EndText();
-                        x += StyledWidth(ua, seg, gp,
+                        x += StyledWidth(seg, gp,
                             isFb ? null : fb?.Item3, cell.Fs);
                     }
                 }
@@ -212,11 +212,11 @@ public sealed partial class Document
                     // fallback glyph alone goes through its
                     // embedded face
                     var x = textX;
-                    foreach (System.Text.RegularExpressions.Match sm in
-                        System.Text.RegularExpressions.Regex.Matches(ln,
-                            $@"[^{UaFallbackChar}]+|{UaFallbackChar}+"))
+                    foreach (var smValue in
+                        SafeRegex.Matches(ln,
+                            $@"[^{UaFallbackChar}]+|{UaFallbackChar}+").Select(sm => sm.Value))
                     {
-                        var seg = sm.Value;
+                        var seg = smValue;
                         if (seg[0] == UaFallbackChar && fb is not null)
                         {
                             var (ttf, name, gp, _) = fb.Value;
@@ -226,14 +226,14 @@ public sealed partial class Document
                             ua.tb.BeginText().SetFont(res, cell.Fs)
                               .MoveTextPosition(x, py)
                               .ShowTextHex(hex).EndText();
-                            x += StyledWidth(ua, seg, gp, null, cell.Fs);
+                            x += StyledWidth(seg, gp, null, cell.Fs);
                         }
                         else
                         {
                             ua.tb.BeginText().SetFont(ua.uaTimes2, cell.Fs)
                               .MoveTextPosition(x, py)
                               .ShowText(seg).EndText();
-                            x += TimesWidth(ua, seg);
+                            x += TimesWidth(seg);
                         }
                     }
                 }

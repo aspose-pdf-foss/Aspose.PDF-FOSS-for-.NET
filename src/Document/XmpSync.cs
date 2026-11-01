@@ -19,23 +19,103 @@ public sealed partial class Document
         if (!HasMetadata) return;
         var meta = GetOrCreateXmpMetadata();
 
-        // ISO 16684-1 / PDF 32000-2 § 14.3.3 mapping between /Info entries and
-        // their XMP property equivalents. Sync only when the XMP side carries
-        // a non-empty value and the /Info side is missing-or-empty.
-        SyncIfMissing(meta, "dc:title", "Title");
-        SyncIfMissing(meta, "dc:description", "Subject");
-        SyncIfMissing(meta, "dc:creator", "Author");
-        SyncIfMissing(meta, "pdf:Keywords", "Keywords");
-        SyncIfMissing(meta, "xmp:CreatorTool", "Creator");
-        SyncIfMissing(meta, "pdf:Producer", "Producer");
+        // ISO 16684-1 / PDF 32000-2 § 14.3.3: an /Info entry and its XMP property are one
+        // value written twice. What the caller set, emptied or removed in /Info since the
+        // last save is the newer of the two and goes into the packet; for every other entry
+        // the packet fills an /Info side that is missing or empty.
+        foreach (var (xmpKey, infoKey) in InfoXmpPairs)
+        {
+            if (AssignedInfoKeys.Contains(infoKey)) CarryInfoIntoXmp(meta, xmpKey, infoKey);
+            else SyncIfMissing(meta, xmpKey, infoKey);
+        }
+        // The keywords are in the packet twice where it has a subject list: the list follows them.
+        if (AssignedInfoKeys.Contains("Keywords") && !string.IsNullOrEmpty(meta.Get("dc:subject")))
+            CarryInfoIntoXmp(meta, "dc:subject", "Keywords");
+        // A date the caller set is the date in a packet that states one.
+        if (AssignedInfoKeys.Contains("CreationDate") && Info.CreationDate != DateTime.MinValue
+            && !string.IsNullOrEmpty(meta.Get("xmp:CreateDate")))
+            meta.Set("xmp:CreateDate", FormatXmpDate(Info.CreationDate, Info.CreationTimeZone));
+        if (AssignedInfoKeys.Contains("ModDate") && Info.ModDate != DateTime.MinValue
+            && !string.IsNullOrEmpty(meta.Get("xmp:ModifyDate")))
+            meta.SetStamped("xmp:ModifyDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone));
+        AssignedInfoKeys.Clear();
+    }
+
+    /// <summary>
+    /// The save's own stamps - the modification date, the producer, the default creator - are the newest /Info values,
+    /// and the packet states the same values (PDF 32000-2 § 14.3.3; ISO 19005-1 6.7.3 requires it of a PDF/A file). A
+    /// packet that claims PDF/A gets each of them, stated before or not; any packet keeps its own pdf:Producer naming
+    /// the library, and a packet the save rewrites anyway follows the date it states. A clean packet that claims
+    /// nothing is left as the file has it, so repeated saves do not rewrite it.
+    /// </summary>
+    private void CarrySaveStampsIntoXmp(bool producerExplicit)
+    {
+        if (_rawXmpOverride is not null || (_metadata is null && !HasMetadata)) return;
+        var meta = GetOrCreateXmpMetadata();
+        var claimsPdfA = !string.IsNullOrEmpty(meta.PdfAidPart);
+        // A PDF/A packet must be valid XMP: a property the conversion or this save states under its current prefix
+        // replaces the one an early writer stated under the legacy xap prefix of the same namespace.
+        if (claimsPdfA) meta.KeepOnePropertyPerName = true;
+        // A 2.0 save moved the documentary entries into the packet under their own names; its pdf: and creator-tool
+        // properties are the file's and stay as they are.
+        var infoIsDocumentary = !SavesAsPdf20;
+        if (!producerExplicit && !meta.ProducerExplicitlySet && infoIsDocumentary) CarryStamp(meta, "pdf:Producer", Info.Producer, claimsPdfA);
+        if (!claimsPdfA && !meta.IsDirty) return;
+        if ((!meta.ModifyDateExplicitlySet || Info.ModDateExplicitlySet) && Info.ModDate != DateTime.MinValue)
+            CarryStamp(meta, "xmp:ModifyDate", FormatXmpDate(Info.ModDate, Info.ModTimeZone), claimsPdfA);
+        if (claimsPdfA && infoIsDocumentary) CarryStamp(meta, "xmp:CreatorTool", Info.Creator, add: true);
+    }
+
+    /// <summary>Write a stamped value into the packet where it differs; <paramref name="add"/> also where the packet
+    /// does not state the property yet.</summary>
+    private static void CarryStamp(XmpMetadata meta, string key, string? value, bool add)
+    {
+        if (string.IsNullOrEmpty(value)) return;
+        var current = meta.Get(key);
+        if (current == value || (!add && string.IsNullOrEmpty(current))) return;
+        meta.SetStamped(key, value!);
+    }
+
+    /// <summary>The xmp:ModifyDate the caller assigned since the packet was read, in UTC, or null.</summary>
+    private DateTime? XmpModifyDateSetByCaller()
+    {
+        if (_metadata is not { ModifyDateExplicitlySet: true } meta) return null;
+        return DateTimeOffset.TryParse(meta.Get("xmp:ModifyDate"), System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal, out var date) ? date.UtcDateTime : null;
+    }
+
+    /// <summary>The /Info keys the caller set, emptied or removed since the last save.</summary>
+    internal HashSet<string> AssignedInfoKeys { get; } = new(StringComparer.Ordinal);
+
+    private static readonly (string Xmp, string Info)[] InfoXmpPairs =
+    [
+        ("dc:title", "Title"),
+        ("dc:description", "Subject"),
+        ("dc:creator", "Author"),
+        ("pdf:Keywords", "Keywords"),
+        ("xmp:CreatorTool", "Creator"),
+        ("pdf:Producer", "Producer"),
+    ];
+
+    private void CarryInfoIntoXmp(XmpMetadata meta, string xmpKey, string infoKey)
+    {
+        var value = Info.GetRawString(infoKey);
+        if (string.IsNullOrEmpty(value))
+        {
+            if (!string.IsNullOrEmpty(meta.Get(xmpKey))) meta.Remove(xmpKey);
+        }
+        else if (meta.Get(xmpKey) != value)
+        {
+            meta.Set(xmpKey, value!);
+        }
     }
 
     private void SyncIfMissing(XmpMetadata meta, string xmpKey, string infoKey)
     {
-        if (!string.IsNullOrEmpty(Info[infoKey])) return;
+        if (!string.IsNullOrEmpty(Info.GetRawString(infoKey))) return;
         var v = meta.Get(xmpKey);
         if (string.IsNullOrEmpty(v)) return;
-        Info[infoKey] = v;
+        Info.SetRawString(infoKey, v);
     }
 
     /// <summary>Format an /Info date (DateTime + timezone offset) as an ISO 8601
@@ -161,7 +241,7 @@ public sealed partial class Document
             var meta = GetOrCreateMetadata();
             if (string.IsNullOrEmpty(meta.Get("dc:title"))) meta.Set("dc:title", title);
             if (string.IsNullOrEmpty(meta.Get("pdf:Producer"))) meta.SetStamped("pdf:Producer", BuildVersionInfo.ProducerString);
-            if (string.IsNullOrEmpty(meta.Get("pdfuaid:part"))) meta.Set("pdfuaid:part", "1");
+            if (!_taggedForPdfAOnly && string.IsNullOrEmpty(meta.Get("pdfuaid:part"))) meta.Set("pdfuaid:part", "1");
         }
 
         if (_reader.Trailer.Get("ID") is null)

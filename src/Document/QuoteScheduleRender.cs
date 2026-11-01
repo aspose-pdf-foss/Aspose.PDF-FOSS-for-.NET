@@ -11,7 +11,7 @@ public sealed partial class Document
 {
     /// <summary>Render the class-width form letter if <paramref name="html"/> is one.
     /// False leaves the fragment to the ordinary block flow.</summary>
-    private bool TryRenderQuoteScheduleFragment(string html, FlowLayout flow, Page page,
+    private static bool TryRenderQuoteScheduleFragment(string html, FlowLayout flow, Page page,
         double marginLeft, double marginBottom, HtmlLoadOptions? options)
     {
         var qs = new QuoteScheduleState();
@@ -25,7 +25,7 @@ public sealed partial class Document
         if (qs.css.Count == 0) return false;
         qs.colClasses = 0;
         foreach (var kv in qs.css)
-            if (kv.Value.width > 0 && Regex.IsMatch(qs.html,
+            if (kv.Value.width > 0 && SafeRegex.IsMatch(qs.html,
                     @"<td\b[^>]*class\s*=\s*""[^""]*\b" + Regex.Escape(kv.Key) + @"\b",
                     RegexOptions.IgnoreCase))
                 qs.colClasses++;

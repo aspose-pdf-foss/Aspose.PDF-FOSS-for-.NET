@@ -9,6 +9,8 @@ public sealed class PdfFileInfo : IDisposable
     private bool _hasOpenPassword;
     private bool _hasEditPassword;
     private bool _headerLooksLikePdf;
+    // The file parsed as far as its encryption dictionary and was refused only for want of the open password.
+    private bool _openRefusedForPassword;
 
     /// <summary>True when the source bytes start with <c>%PDF-</c> at byte 0.
     /// PDF 32000-2 § 7.5.2 requires the magic at the very start of a strictly
@@ -97,12 +99,6 @@ public sealed class PdfFileInfo : IDisposable
         _hasEditPassword = DetectEditPassword();
     }
 
-    /// <summary>The bound Document. Callers use this to perform
-    /// document-level operations alongside the info-setting facade
-    /// (e.g. <c>info.Document.Convert(...)</c>) before saving via
-    /// <see cref="SaveNewInfo(string)"/>.</summary>
-    public Document? Document => _doc;
-
     /// <summary>
     /// Create a PdfFileInfo instance from PDF bytes.
     /// </summary>
@@ -118,6 +114,7 @@ public sealed class PdfFileInfo : IDisposable
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
             _doc = null;
+            _openRefusedForPassword = ex is InvalidPasswordException;
             _hasOpenPassword = true;
             _hasEditPassword = false;
         }
@@ -140,6 +137,7 @@ public sealed class PdfFileInfo : IDisposable
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
             _doc = null;
+            _openRefusedForPassword = ex is InvalidPasswordException;
             _hasEditPassword = false;
         }
     }
@@ -179,6 +177,7 @@ public sealed class PdfFileInfo : IDisposable
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
             _doc = null;
+            _openRefusedForPassword = ex is InvalidPasswordException;
             _hasOpenPassword = true;
             _hasEditPassword = false;
         }
@@ -201,6 +200,7 @@ public sealed class PdfFileInfo : IDisposable
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
             _doc = null;
+            _openRefusedForPassword = ex is InvalidPasswordException;
             _hasEditPassword = false;
         }
     }
@@ -223,6 +223,12 @@ public sealed class PdfFileInfo : IDisposable
         _inputFilePath = inputFile;
     }
 
+    /// <summary>The bound Document. Callers use this to perform
+    /// document-level operations alongside the info-setting facade
+    /// (e.g. <c>info.Document.Convert(...)</c>) before saving via
+    /// <see cref="SaveNewInfo(string)"/>.</summary>
+    public Document? Document => _doc;
+
     /// <summary>The handler owns both password questions, so the open/edit flags come
     /// from asking it directly rather than from the Standard handler's empty-password
     /// probe, which cannot read an alternative /Filter's /O and /U at all.</summary>
@@ -240,6 +246,7 @@ public sealed class PdfFileInfo : IDisposable
         catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
         {
             _doc = null;
+            _openRefusedForPassword = ex is InvalidPasswordException;
             _hasOpenPassword = true;
             _hasEditPassword = false;
         }
@@ -262,6 +269,7 @@ public sealed class PdfFileInfo : IDisposable
             {
                 _doc?.Dispose();
                 _doc = null;
+                _openRefusedForPassword = false;
                 _hasOpenPassword = false;
                 _hasEditPassword = false;
                 return;
@@ -276,6 +284,7 @@ public sealed class PdfFileInfo : IDisposable
             catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
             {
                 _doc = null;
+                _openRefusedForPassword = ex is InvalidPasswordException;
                 _hasOpenPassword = true;
                 _hasEditPassword = false;
             }
@@ -296,7 +305,9 @@ public sealed class PdfFileInfo : IDisposable
         get
         {
             if (PasswordType == PasswordType.Inaccessible)
+#pragma warning disable S2372 // public API: the published property; it refuses an inaccessible document
                 throw new InvalidPasswordException(
+#pragma warning restore S2372
                     "Cannot determine HasEditPassword without a valid open password.");
             return _hasEditPassword;
         }
@@ -382,8 +393,8 @@ public sealed class PdfFileInfo : IDisposable
             if (_doc is null || value is null) return;
             // Clear existing custom entries, then apply the supplied map.
             var existing = new List<string>();
-            foreach (var key in _doc.Info.Keys)
-                if (!DocumentInfo.IsPredefinedKey(key)) existing.Add(key);
+            foreach (var key in _doc.Info.Keys.Where(key => !DocumentInfo.IsPredefinedKey(key)))
+                existing.Add(key);
             foreach (var key in existing) _doc.Info.SetCustom(key, string.Empty);
             foreach (var kv in value) _doc.Info.SetCustom(kv.Key, kv.Value);
         }
@@ -395,6 +406,29 @@ public sealed class PdfFileInfo : IDisposable
     public byte[] SaveNewInfo()
     {
         return _doc?.ToArray() ?? [];
+    }
+
+    /// <summary>Save the modified Info dictionary to a stream. Returns true on success.</summary>
+    public bool SaveNewInfo(Stream outputStream)
+    {
+        if (_doc is null || outputStream is null) return false;
+        var bytes = _doc.ToArray();
+        outputStream.Write(bytes, 0, bytes.Length);
+        return true;
+    }
+
+    /// <summary>Save the modified Info dictionary to a file. Returns true on success.</summary>
+    public bool SaveNewInfo(string outputFile)
+    {
+        if (_doc is null) return false;
+        // Sync /Info values into the XMP packet so a re-read against
+        // Document.Metadata sees the same Title / Author / … the caller wrote
+        // through this facade. Without this, PDF/A-style readers that look at
+        // XMP first surface stale "Untitled"-style placeholders even though
+        // /Info has the updated value.
+        SyncInfoToXmp();
+        File.WriteAllBytes(outputFile, _doc.ToArray());
+        return true;
     }
 
     /// <summary>
@@ -447,8 +481,9 @@ public sealed class PdfFileInfo : IDisposable
         if (info.Subject is not null) meta.Set("dc:description", info.Subject);
         if (info.Keywords is not null) meta.Set("pdf:Keywords", info.Keywords);
         if (info.Producer is not null) meta.Set("pdf:Producer", info.Producer);
-        if (info.CreationDate != DateTime.MinValue) meta.Set("xmp:CreateDate", info.CreationDate.ToString("yyyy-MM-ddTHH:mm:sszzz"));
-        if (info.ModDate != DateTime.MinValue) meta.Set("xmp:ModifyDate", info.ModDate.ToString("yyyy-MM-ddTHH:mm:sszzz"));
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        if (info.CreationDate != DateTime.MinValue) meta.Set("xmp:CreateDate", info.CreationDate.ToString("yyyy-MM-ddTHH:mm:sszzz", inv));
+        if (info.ModDate != DateTime.MinValue) meta.SetStamped("xmp:ModifyDate", info.ModDate.ToString("yyyy-MM-ddTHH:mm:sszzz", inv));
 
         // Custom (non-predefined) /Info entries are mirrored into the Adobe PDFX
         // schema (pdfx:Key) so document-property indexers that read XMP first — and
@@ -657,6 +692,27 @@ public sealed class PdfFileInfo : IDisposable
     }
 
     /// <summary>
+    /// Bind this facade to a PDF file at the given path.
+    /// </summary>
+    public void BindPdf(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        try
+        {
+            _doc = Document.Open(bytes);
+            _hasOpenPassword = _doc.IsEncrypted && (!_doc.IsDecrypted || _doc.IsOwnerAuthentication);
+            _hasEditPassword = DetectEditPassword();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
+        {
+            _doc = null;
+            _openRefusedForPassword = ex is InvalidPasswordException;
+            _hasOpenPassword = true;
+            _hasEditPassword = false;
+        }
+    }
+
+    /// <summary>
     /// Clears the standard /Info dictionary entries (Title, Author, Subject,
     /// Keywords, Creator, Producer, Trapped, CreationDate, ModDate) on the
     /// bound document. No-op when no document is bound.
@@ -678,32 +734,11 @@ public sealed class PdfFileInfo : IDisposable
     }
 
     /// <summary>
-    /// Bind this facade to a PDF file at the given path.
-    /// </summary>
-    public void BindPdf(string path)
-    {
-        var bytes = File.ReadAllBytes(path);
-        try
-        {
-            _doc = Document.Open(bytes);
-            _hasOpenPassword = _doc.IsEncrypted && (!_doc.IsDecrypted || _doc.IsOwnerAuthentication);
-            _hasEditPassword = DetectEditPassword();
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
-        {
-            _doc = null;
-            _hasOpenPassword = true;
-            _hasEditPassword = false;
-        }
-    }
-
-    /// <summary>
     /// Whether the bound document is a valid PDF file (instance property).
     /// Property form mirrors the PdfFileInfo.IsPdfFile public surface.
     /// </summary>
-    public bool IsPdfFile => _doc != null
-        && (!UseStrictValidation || _headerLooksLikePdf)
-        && IsStructurallyValidPdf(_doc);
+    public bool IsPdfFile => (!UseStrictValidation || _headerLooksLikePdf)
+        && (_doc is null ? _openRefusedForPassword : IsStructurallyValidPdf(_doc));
 
     /// <summary>
     /// A successful parse alone is not enough: the lenient reader recovers a
@@ -746,29 +781,6 @@ public sealed class PdfFileInfo : IDisposable
         _doc = null;
     }
 
-    /// <summary>Save the modified Info dictionary to a stream. Returns true on success.</summary>
-    public bool SaveNewInfo(Stream outputStream)
-    {
-        if (_doc is null || outputStream is null) return false;
-        var bytes = _doc.ToArray();
-        outputStream.Write(bytes, 0, bytes.Length);
-        return true;
-    }
-
-    /// <summary>Save the modified Info dictionary to a file. Returns true on success.</summary>
-    public bool SaveNewInfo(string outputFile)
-    {
-        if (_doc is null) return false;
-        // Sync /Info values into the XMP packet so a re-read against
-        // Document.Metadata sees the same Title / Author / … the caller wrote
-        // through this facade. Without this, PDF/A-style readers that look at
-        // XMP first surface stale "Untitled"-style placeholders even though
-        // /Info has the updated value.
-        SyncInfoToXmp();
-        File.WriteAllBytes(outputFile, _doc.ToArray());
-        return true;
-    }
-
     /// <summary>Source-PDF stream. Setting opens and binds the document; getter returns null.</summary>
     public Stream? InputStream
     {
@@ -779,6 +791,7 @@ public sealed class PdfFileInfo : IDisposable
             {
                 _doc?.Dispose();
                 _doc = null;
+                _openRefusedForPassword = false;
                 return;
             }
             using var ms = new MemoryStream();
@@ -793,6 +806,7 @@ public sealed class PdfFileInfo : IDisposable
             catch (Exception ex) when (ex is InvalidOperationException or InvalidPasswordException)
             {
                 _doc = null;
+                _openRefusedForPassword = ex is InvalidPasswordException;
                 _hasOpenPassword = true;
                 _hasEditPassword = false;
             }

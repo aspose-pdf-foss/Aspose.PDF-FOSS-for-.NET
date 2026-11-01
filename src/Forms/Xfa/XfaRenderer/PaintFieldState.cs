@@ -43,9 +43,11 @@ private sealed class PaintFieldState
     public double bw;
     public double bh;
     // datasets-bound value if present (bound-but-empty stays empty), else the
-    // SOM-resolved value, else the template default. All picture-formatted;
-    // a match="none" bind blocks the data paths entirely.
+    // SOM-resolved value, else the template default. All picture-formatted; a
+    // match="none" bind blocks the data paths entirely.
     public string? val;
+    // True when the datasets bound the field: an empty value is then the field's own, not a missing one.
+    public bool bound;
     // A FIELD-level border paints its fill (Designer's shaded answer cells) and,
     // with a visible edge, strokes the field's whole box (table cells outline
     // this way — the row rules of a Designer grid).
@@ -58,5 +60,15 @@ private sealed class PaintFieldState
     public double w = 0;
     public double h = 0;
     public string path = default!;
+    // A check box or option: the outline of its glyph (top-down coordinates), its on value and whether it is on.
+    public double glyphX;
+    public double glyphY;
+    public double glyphSize;
+    public bool glyphRound;
+    public string glyphMark = string.Empty;
+    public bool glyphOn;
+    public string? glyphOnValue;
+    // The items that draw the value: the widget's appearance shows them once the field has one.
+    public List<Item>? valueItems;
 }
 }

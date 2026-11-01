@@ -6,19 +6,19 @@ namespace Aspose.Pdf;
 public sealed partial class Document
 {
     /// <summary>
-    /// PDF/A-1 transparency simulation. PDF/A-1 forbids
-    /// transparency, and plain neutralisation (alpha → 1, blend → Normal)
-    /// changes what the reader sees: a 50%-alpha fill turns opaque and hides
-    /// the backdrop, a Multiply highlight turns into an opaque bar that hides
-    /// the text under it. This pass preserves the appearance instead: it
-    /// rasterises each transparency-using region from the original page and
-    /// paints the composite as an opaque image on top, rewrites the
-    /// transparent paint operators to no-ops, and flattens Highlight
+    /// PDF/A-1 transparency simulation. PDF/A-1 forbids transparency, and plain
+    /// neutralisation (alpha → 1, blend → Normal) changes what the reader sees: a
+    /// 10%-alpha white panel turns opaque and hides the picture under it, a
+    /// Multiply highlight turns into an opaque bar that hides the text under it.
+    /// This pass preserves the appearance instead: it rasterises each such region
+    /// from the original page and paints the composite as an opaque image on top,
+    /// rewrites the transparent paint operators to no-ops, and flattens Highlight
     /// annotations (whose appearance streams blend with Multiply) into the
-    /// content before deleting them. Concretely:
+    /// content before deleting them. Transparent text is kept as vector text under
+    /// its composite, so it still extracts. Concretely:
     ///   1. scan the page content for paints under 0 &lt; alpha &lt; 1 or a
-    ///      non-Normal blend mode, collecting their device-space regions and a
-    ///      rewrite that turns those paints into <c>n</c>;
+    ///      non-Normal blend mode or a soft mask, collecting their device-space
+    ///      regions and a rewrite that turns those paints into <c>n</c>;
     ///   2. flatten each Highlight annotation's /AP form into the content at
     ///      its /Rect and delete the annotation, adding the rect as a region;
     ///   3. render the page (original paints + flattened highlights) at
@@ -33,7 +33,8 @@ public sealed partial class Document
         var ts = new TransparencyRegionState();
         ts.page = page;
         ts.recolorConstantAlpha = recolorConstantAlpha;
-        ts.resources = _reader.ResolveDict(ts.page.Dict.Get("Resources"));
+        // The states are as often the page tree's as the page's own.
+        ts.resources = SoftwarePageRenderer.ResolveInheritedPageResources(ts.page.Dict, _reader);
         ts.content = ts.page.GetContentStreamBytes();
         if (ts.content is not { Length: > 0 }) return;
 
@@ -66,8 +67,8 @@ public sealed partial class Document
         _reader.SuppressCacheClear = true;
         try
         {
-            // 150 dpi: the composites are consumed at raster-compare resolution;
-            // half the nominal 300 dpi keeps the mid-conversion render cheap.
+            // 150 dpi: the composites are consumed at raster-compare resolution; half
+            // the nominal 300 dpi keeps the mid-conversion render cheap.
             using var ms = new MemoryStream();
             new PngDevice(new Resolution(150)).Process(ts.page, ms);
             (ts.pixels, ts.pngW, ts.pngH, ts.hasAlpha) = Facades.PdfFileMend.DecodePng(ms.ToArray());
@@ -93,8 +94,10 @@ public sealed partial class Document
         CompositeTransparencyRegions(ts);
 
         ts.baseBytes = ts.rewritten ?? ts.content;
-        ts.tail = "\n" + ts.flattenOps + ts.drawOps;
-        ts.page.SetContentStream(Combine(ts.baseBytes, Compat.Latin1.GetBytes(ts.tail)));
+        // The content is closed in q/Q before the composites: a transform it leaves open (a page
+        // drawn under one flipping cm) would otherwise carry into them and mirror and displace them.
+        ts.tail = "\nQ\n" + ts.flattenOps + ts.drawOps;
+        ts.page.SetContentStream(Combine(Compat.Latin1.GetBytes("q\n"), Combine(ts.baseBytes, Compat.Latin1.GetBytes(ts.tail))));
 
         if (ts.annotIndices.Count > 0)
         {

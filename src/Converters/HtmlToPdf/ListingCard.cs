@@ -31,7 +31,7 @@ internal static partial class HtmlToPdfConverter
         lc.html = html;
         lc.pageWidth = pageWidth;
         lc.pageHeight = pageHeight;
-        if (!Regex.IsMatch(lc.html, @"class\s*=\s*[""']container-header[""']", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(lc.html, @"class\s*=\s*[""']container-header[""']", RegexOptions.IgnoreCase))
             return null;
         if (!ReadListingCardStyle(lc)) return null;
 

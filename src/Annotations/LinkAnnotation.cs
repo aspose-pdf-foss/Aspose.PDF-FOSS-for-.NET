@@ -82,7 +82,7 @@ public partial class LinkAnnotation : Annotation
         {
             if (value is ExplicitDestination ed)
             {
-                Dict.Set("Dest", ed.ToPdfArray());
+                Dict.Set("Dest", ed.ToLocalPdfArray());
                 Dict.Remove("A"); // Remove action when setting explicit destination
             }
             else if (value is NamedDestination nd)
@@ -97,6 +97,43 @@ public partial class LinkAnnotation : Annotation
         }
     }
 
+    /// <summary>True once an action was given to the link: it decides what the link does, over a hyperlink.</summary>
+    private bool _actionGiven;
+
+    /// <summary>The hyperlink the link opens. A link acts through its action, so the hyperlink is
+    /// written as one - a web address as a URI action, a file as a launch action, a page of this
+    /// document as a go-to action - unless an action was given to the link, which keeps priority.
+    /// A link read from a file reports the hyperlink its action stands for.</summary>
+    public new Hyperlink? Hyperlink
+    {
+        get => base.Hyperlink ?? HyperlinkOfAction();
+        set
+        {
+            base.Hyperlink = value;
+            if (_actionGiven) return;
+            PdfAction? action = value switch
+            {
+                WebHyperlink { Url: { Length: > 0 } url } => new GoToURIAction(url),
+                FileHyperlink { FileName: { Length: > 0 } file } fileLink => new LaunchAction(file) { NewWindow = fileLink.NewWindow },
+                LocalHyperlink { TargetPageNumber: > 0 } local => new GoToAction(new XYZExplicitDestination(local.TargetPageNumber, 0, 0, 0)),
+                _ => null,
+            };
+            if (action is null) return;
+            Dict.Remove("Dest");
+            Dict.Set("A", action.Dict);
+        }
+    }
+
+    /// <summary>The hyperlink the link's action stands for: a URI action's web address, a launch action's file,
+    /// a go-to action's page; null for any other action or none.</summary>
+    private Hyperlink? HyperlinkOfAction() => Action switch
+    {
+        GoToURIAction { URI: { Length: > 0 } uri } => new WebHyperlink(uri),
+        LaunchAction { File: { Length: > 0 } file } => new FileHyperlink(file),
+        GoToAction { Destination: ExplicitDestination { PageNumber: > 0 } destination } => new LocalHyperlink { TargetPageNumber = destination.PageNumber },
+        _ => null,
+    };
+
     /// <summary>Gets the web address the link opens when its action is a URI action; null for any other action or when there is none.</summary>
     public string? Uri
     {
@@ -106,7 +143,7 @@ public partial class LinkAnnotation : Annotation
             if (action is null) return null;
             if (action.GetName("S") != "URI") return null;
             var uri = InternalReader.Resolve(action.Get("URI"));
-            return uri is PdfString s ? s.ToText() : null;
+            return uri is PdfString s ? PdfAction.UriText(s) : null;
         }
     }
 
@@ -157,6 +194,7 @@ public partial class LinkAnnotation : Annotation
         }
         set
         {
+            _actionGiven = value is not null;
             if (value is null) Dict.Remove("A");
             else Dict.Set("A", value.Dict);
         }

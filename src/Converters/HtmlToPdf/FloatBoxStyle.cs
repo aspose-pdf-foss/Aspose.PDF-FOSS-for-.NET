@@ -11,9 +11,11 @@ internal static partial class HtmlToPdfConverter
     private sealed class FbStyle
     {
         public bool Sans;                                     // Arial; else Times New Roman
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double Px = FbDefaultFontPx;
         public bool Bold;
         public string Rgb = "0 0 0";
+#pragma warning restore S3218
         public string Align = "left";
         public bool Nowrap;
         public double LineHeightPx;                           // a line height declared as a LENGTH (px, pt, rem); 0 = none
@@ -23,15 +25,33 @@ internal static partial class HtmlToPdfConverter
         public bool Uppercase;                                // text-transform: uppercase
         public double RaisePt;                                // a relatively positioned run's lift above the baseline
         public FbStyle Clone() => (FbStyle)MemberwiseClone();
-        public string MeasureFace => Sans ? (Bold ? FbSansBoldMeasureFace : FbSansMeasureFace) : (Bold ? FbSerifBoldMeasureFace : FbSerifMeasureFace);
-        public string Res => Sans ? (Bold ? FbSansBoldRes : FbSansRes) : (Bold ? FbSerifBoldRes : FbSerifRes);
+        public string MeasureFace
+        {
+            get
+            {
+                if (Sans) return Bold ? FbSansBoldMeasureFace : FbSansMeasureFace;
+                return Bold ? FbSerifBoldMeasureFace : FbSerifMeasureFace;
+            }
+        }
+        public string Res
+        {
+            get
+            {
+                if (Sans) return Bold ? FbSansBoldRes : FbSansRes;
+                return Bold ? FbSerifBoldRes : FbSerifRes;
+            }
+        }
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double Pt => Px * FbPxPt;
+#pragma warning restore S3218
     }
 
     /// <summary>Four edges in pt (top, right, bottom, left).</summary>
     private sealed class FbEdges
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double T, R, B, L;
+#pragma warning restore S3218
         public double H => L + R;
         public double V => T + B;
     }
@@ -43,14 +63,18 @@ internal static partial class HtmlToPdfConverter
         public string Float = "none";
         public string Clear = "none";
         public bool WidthAuto = true;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double WidthPt;
+#pragma warning restore S3218
         public bool HeightAuto = true;
         public double HeightPt;
         public bool MarginLeftAuto, MarginRightAuto;
-        public bool VAlignTop;                                // vertical-align: top (an inline-block's top on the line top)
         public bool PadDeclared;                              // a padding declaration exists (else a cell takes cellpadding)
         public bool MarginDeclared;                           // a margin declaration exists (else a control takes the UA margins)
         public bool Bfc;                                      // overflow other than visible: the box contains its floats
+        public double MaxWidthPt;                             // a declared max-width (content box); 0 = none
+        public bool Positioned;                               // position other than static: the containing block of its absolute descendants
+        public bool OutOfFlow;                                // absolutely positioned: placed by its offsets, moving nothing
         public FbEdges Margin = new(), Pad = new(), Border = new();
         public string BorderRgb = "0 0 0";
         public string? BgRgb;
@@ -67,13 +91,13 @@ internal static partial class HtmlToPdfConverter
     private static string? FbDecl(FbState fb, HtmlNode el, string prop)
     {
         // (the styled-sheet claim resolves every property through its own cascade)
-        var v = fb.sheet is { } sheet
-            ? (FbSheetDecls(sheet, el).TryGetValue(prop, out var sv) ? sv : null)
-            : DomDecl(el, prop, fb.css) ?? FbAttrRuleDecl(fb, el, prop);
+        string? v;
+        if (fb.sheet is { } sheet) v = FbSheetDecls(sheet, el).TryGetValue(prop, out var sv) ? sv : null;
+        else v = DomDecl(el, prop, fb.css) ?? FbAttrRuleDecl(fb, el, prop);
         return v is not null && v.Trim().Equals("inherit", StringComparison.OrdinalIgnoreCase) ? null : v;
     }
 
-    private static readonly Regex FbAttrRuleRx = new(@"^(?:(?<anc>[^\s\[]+)\s+)?(?<tag>[a-zA-Z]+)\[type\s*=\s*[""']?(?<type>[a-zA-Z]+)[""']?\]$", RegexOptions.Compiled);
+    private static readonly Regex FbAttrRuleRx = new(@"^(?:(?<anc>[^\s\[]+)\s+)?(?<tag>[a-zA-Z]+)\[type\s*=\s*[""']?(?<type>[a-zA-Z]+)[""']?\]$", RegexOptions.Compiled, RegexLimits.Timeout);
 
     private static string? FbAttrRuleDecl(FbState fb, HtmlNode el, string prop)
     {
@@ -127,8 +151,8 @@ internal static partial class HtmlToPdfConverter
         if (!string.IsNullOrEmpty(weight))
         {
             var wl = weight.Trim().ToLowerInvariant();
-            if (wl is "bold" or "bolder" || (int.TryParse(wl, out var wn) && wn >= 600)) st.Bold = true;
-            else if (wl is "normal" or "lighter" || (int.TryParse(wl, out var wn2) && wn2 < 600)) st.Bold = false;
+            if (wl is "bold" or "bolder" || (int.TryParse(wl, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var wn) && wn >= 600)) st.Bold = true;
+            else if (wl is "normal" or "lighter" || (int.TryParse(wl, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var wn2) && wn2 < 600)) st.Bold = false;
         }
         var color = FbDecl(fb, el, "color");
         if (!string.IsNullOrEmpty(color) && FbRgb(color) is { } rgb) st.Rgb = rgb;
@@ -143,7 +167,7 @@ internal static partial class HtmlToPdfConverter
             var lhl = lh.Trim().ToLowerInvariant();
             // (probed: a number, an em or a % line height is a FACTOR of each descendant's own size -
             //  the em and % forms inherit as the factor, not as the resolved length; px / rem inherit as lengths)
-            var factor = Regex.Match(lhl, @"^(\d*\.?\d+)\s*(em|%)?$");
+            var factor = SafeRegex.Match(lhl, @"^(\d*\.?\d+)\s*(em|%)?$");
             if (lhl == "normal") { st.LineHeightPx = 0; st.LineHeightFactor = 0; }
             else if (factor.Success)
             {
@@ -177,7 +201,7 @@ internal static partial class HtmlToPdfConverter
             case "x-large": return 24;
             case "xx-large": return 32;
         }
-        var m = Regex.Match(v, @"^(-?\d*\.?\d+)\s*(px|pt|em|rem|ex|%)?$");
+        var m = SafeRegex.Match(v, @"^(-?\d*\.?\d+)\s*(px|pt|em|rem|ex|%)?$");
         if (!m.Success) return 0;
         var n = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
         return m.Groups[2].Value switch
@@ -216,12 +240,12 @@ internal static partial class HtmlToPdfConverter
         p.MarginDeclared = FbReadBoxEdges(fb, el, "margin", p.Margin, cbW, emPx, out p.MarginLeftAuto, out p.MarginRightAuto);
         p.PadDeclared = FbReadBoxEdges(fb, el, "padding", p.Pad, cbW, emPx, out _, out _);
         FbReadBorders(fb, el, p);
-        p.VAlignTop = (FbDecl(fb, el, "vertical-align") ?? "").Trim().Equals("top", StringComparison.OrdinalIgnoreCase);
         var overflow = (FbDecl(fb, el, "overflow") ?? "visible").Trim().ToLowerInvariant();
         p.Bfc = overflow is "auto" or "hidden" or "scroll";
         var bg = FbDecl(fb, el, "background-color") ?? FbDecl(fb, el, "background");
         // (a functional colour keeps its spaces: `rgb(237, 28, 36)`; a shorthand's first token is the colour)
         if (!string.IsNullOrEmpty(bg) && FbRgb(bg.Contains('(') ? bg : bg.Split(' ')[0]) is { } bgRgb) p.BgRgb = bgRgb;
+        if (fb.columns) FbColumnBoxProps(fb, el, p, cbW, emPx);
         return p;
     }
 
@@ -230,10 +254,10 @@ internal static partial class HtmlToPdfConverter
     {
         var v = value.Trim().ToLowerInvariant();
         if (v == "auto" || v.Length == 0) return null;
-        var pm = Regex.Match(v, @"^(-?\d+(?:\.\d+)?)\s*%$");
+        var pm = SafeRegex.Match(v, @"^(-?\d+(?:\.\d+)?)\s*%$");
         if (pm.Success) return pctBase <= 0 ? null : double.Parse(pm.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) / 100.0 * pctBase;
         var px = FbLengthPx(v, emPx);
-        if (px == 0 && v != "0" && !v.StartsWith("0")) return null;
+        if (px == 0 && v != "0" && !v.StartsWith('0')) return null;
         if (px < 0 && !allowNegative) return null;
         return px * FbPxPt;
     }
@@ -249,7 +273,7 @@ internal static partial class HtmlToPdfConverter
         {
             declared = true;
             var parts = sh.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            string t = parts[0], r = parts.Length > 1 ? parts[1] : parts[0], b = parts.Length > 2 ? parts[2] : parts[0], l = parts.Length > 3 ? parts[3] : parts.Length > 1 ? parts[1] : parts[0];
+            string t = parts[0], r = parts.Length > 1 ? parts[1] : parts[0], b = parts.Length > 2 ? parts[2] : parts[0], l = parts.Length switch { > 3 => parts[3], > 1 => parts[1], _ => parts[0] };
             e.T = FbEdgePt(t, cbW, emPx); e.R = FbEdgePt(r, cbW, emPx); e.B = FbEdgePt(b, cbW, emPx); e.L = FbEdgePt(l, cbW, emPx);
             leftAuto = l.Equals("auto", StringComparison.OrdinalIgnoreCase);
             rightAuto = r.Equals("auto", StringComparison.OrdinalIgnoreCase);
@@ -283,7 +307,7 @@ internal static partial class HtmlToPdfConverter
                 var t = tok.ToLowerInvariant();
                 if (t is "solid" or "dashed" or "dotted" or "double" or "none" or "hidden")
                     foreach (var i in onto) { styles[i] = t; if (t != "none" && t != "hidden" && widths[i] <= 0) widths[i] = FbMediumBorderPx * FbPxPt; }
-                else if (t is "thin" or "medium" or "thick" || Regex.IsMatch(t, @"^\d"))
+                else if (t is "thin" or "medium" or "thick" || SafeRegex.IsMatch(t, @"^\d"))
                     foreach (var i in onto) widths[i] = FbBorderWidthPt(t);
                 else if (FbRgb(tok) is { } c) rgb = c;
             }
@@ -299,7 +323,7 @@ internal static partial class HtmlToPdfConverter
         if (!string.IsNullOrEmpty(bw))
         {
             var parts = bw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            string t = parts[0], r = parts.Length > 1 ? parts[1] : parts[0], b = parts.Length > 2 ? parts[2] : parts[0], l = parts.Length > 3 ? parts[3] : parts.Length > 1 ? parts[1] : parts[0];
+            string t = parts[0], r = parts.Length > 1 ? parts[1] : parts[0], b = parts.Length > 2 ? parts[2] : parts[0], l = parts.Length switch { > 3 => parts[3], > 1 => parts[1], _ => parts[0] };
             widths[0] = FbBorderWidthPt(t); widths[1] = FbBorderWidthPt(r); widths[2] = FbBorderWidthPt(b); widths[3] = FbBorderWidthPt(l);
         }
         var bc = FbDecl(fb, el, "border-color");

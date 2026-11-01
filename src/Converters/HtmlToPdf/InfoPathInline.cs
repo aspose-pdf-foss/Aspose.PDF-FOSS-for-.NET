@@ -13,7 +13,9 @@ internal static partial class HtmlToPdfConverter
         public double Fs = IpFs;
         public bool Bold;
         public bool Gothic;                                  // MS UI Gothic (the placeholders)
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public string Rgb = "0 0 0";
+#pragma warning restore S3218
         public IpStyle Clone() => (IpStyle)MemberwiseClone();
     }
 
@@ -25,11 +27,13 @@ internal static partial class HtmlToPdfConverter
         public string Text = "";
         public string Face = IpFace;
         public double Fs = IpFs;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public string Rgb = "0 0 0";
         public double Above, Below, Advance;
         public double W, H;                                  // a box's declared/derived content size
         public bool Checked, Cjk, Nowrap, Swallowed;
         public IpLine? Inner;                                // a textbox's inner line
+#pragma warning restore S3218
         public IpNode? Node;
         public double X;                                     // pen offset in the line, set by the line
     }
@@ -38,7 +42,6 @@ internal static partial class HtmlToPdfConverter
     {
         public List<IpItem> Items = new();
         public double Above, Below, Width;
-        public bool HasText;
         public double Height => Above + Below;
     }
 
@@ -60,7 +63,6 @@ internal static partial class HtmlToPdfConverter
             x += it.Advance;
             line.Above = Math.Max(line.Above, it.Above);
             line.Below = Math.Max(line.Below, it.Below);
-            if (it.Kind == IpKind.Text) line.HasText = true;
         }
         line.Width = x;
         return line;
@@ -72,7 +74,10 @@ internal static partial class HtmlToPdfConverter
         // a space joining two runs belongs to one of them only
         if (text == " " && line.Items.Count > 0 && line.Items[^1].Kind == IpKind.Text && line.Items[^1].Text.EndsWith(' ')) return;
         var cjk = IpIsCjk(text);
-        var face = cjk ? IpCjkFace : st.Gothic ? IpGothicFace : st.Bold ? IpBoldFace : IpFace;
+        string face = IpFace;
+        if (cjk) face = IpCjkFace;
+        else if (st.Gothic) face = IpGothicFace;
+        else if (st.Bold) face = IpBoldFace;
         var gothic = st.Gothic || cjk;
         line.Items.Add(new IpItem
         {

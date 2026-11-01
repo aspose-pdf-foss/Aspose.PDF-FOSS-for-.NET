@@ -21,7 +21,9 @@ internal static partial class HtmlToPdfConverter
 {
     private sealed class SvgTextEl
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double X, Y, DxEm, DyEm;    // svg px / em offsets
+#pragma warning restore S3218
         public bool AnchorEnd;
         public bool Rotate45;              // rotate(-45) about the (x,y) pivot
         public string Text = "";
@@ -38,9 +40,9 @@ internal static partial class HtmlToPdfConverter
         bh.pageHeight = pageHeight;
         bh.marginLeft = 90.0;
         bh.marginTop = 72.0;
-        if (!Regex.IsMatch(bh.html, @"id\s*=\s*['""]vertical-bar-chart['""]",
+        if (!SafeRegex.IsMatch(bh.html, @"id\s*=\s*['""]vertical-bar-chart['""]",
                 RegexOptions.IgnoreCase)
-            || !Regex.IsMatch(bh.html, @"<svg\b", RegexOptions.IgnoreCase))
+            || !SafeRegex.IsMatch(bh.html, @"<svg\b", RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor("Times New Roman") is null) return null;
 
@@ -56,10 +58,10 @@ internal static partial class HtmlToPdfConverter
 
         bh.sb = new StringBuilder();
         bh.yTd = bh.marginTop + UaBodyMarginPt;
-        bh.chartOpen = Regex.Match(bh.html, @"<div\b[^>]*id\s*=\s*['""]vertical-bar-chart['""]",
+        bh.chartOpen = SafeRegex.Match(bh.html, @"<div\b[^>]*id\s*=\s*['""]vertical-bar-chart['""]",
             RegexOptions.IgnoreCase);
-        bh.lead = Regex.Replace(bh.html[..bh.chartOpen.Index], @"<[^>]+>", " ");
-        bh.lead = Regex.Replace(DecodeEntities(bh.lead), @"\s+", " ").Trim();
+        bh.lead = SafeRegex.Replace(bh.html[..bh.chartOpen.Index], @"<[^>]+>", " ");
+        bh.lead = SafeRegex.Replace(DecodeEntities(bh.lead), @"\s+", " ").Trim();
         if (bh.lead.Length > 0)
         {
             BcText(bh, bh.lead, bh.contentL, bh.yTd + UaSerifBaselineDropPt, 12, Color.FromArgb(0, 0, 0));
@@ -70,14 +72,14 @@ internal static partial class HtmlToPdfConverter
         BcBand(bh, "title", 18);
         BcBand(bh, "subTitle", 12);
 
-        bh.container = Regex.Match(bh.html,
+        bh.container = SafeRegex.Match(bh.html,
             @"<div\b[^>]*class\s*=\s*['""]lastN-container['""](?<tag>[^>]*)>", RegexOptions.IgnoreCase);
         bh.contPct = bh.container.Success
             ? BcPx(bh, BcStyleProp("<x " + bh.container.Groups["tag"].Value + ">", "width"), 75) / 100.0 : 0.75;
         bh.contW = bh.contentW * bh.contPct;
         bh.contX = bh.contentL + (bh.contentW - bh.contW) / 2;
         bh.rowTopTd = bh.yTd;
-        bh.rowM = Regex.Match(bh.html,
+        bh.rowM = SafeRegex.Match(bh.html,
             @"<div\b[^>]*class\s*=\s*['""]xAxis-and-chart['""](?<tag>[^>]*)>",
             RegexOptions.IgnoreCase);
         bh.rowHPt = bh.rowM.Success
@@ -88,19 +90,20 @@ internal static partial class HtmlToPdfConverter
         if (bh.rowM.Success)
         {
             // child divs of the flex row, in order
-            foreach (Match dm in Regex.Matches(bh.html[bh.rowM.Index..],
+            foreach (Match dm in SafeRegex.Matches(bh.html[bh.rowM.Index..],
                 @"<div\b(?<tag>[^>]*)>", RegexOptions.IgnoreCase))
             {
                 if (dm.Index == 0) continue;
                 var dTag = dm.Groups["tag"].Value;
                 var dW = BcPx(bh, BcStyleProp("<x " + dTag + ">", "width"), -1);
-                var dPct = BcStyleProp("<x " + dTag + ">", "width")?.Trim().EndsWith("%") == true;
+                var dPct = BcStyleProp("<x " + dTag + ">", "width")?.Trim().EndsWith('%') == true;
                 var abs = bh.rowM.Index + dm.Index;
                 // the svg (if any) opening before the next div child
-                var svgM = Regex.Match(bh.html[abs..], @"<svg\b(?<tag>[^>]*)>(?<body>[\s\S]*?)</svg>",
+                var svgM = SafeRegex.Match(bh.html[abs..], @"<svg\b(?<tag>[^>]*)>(?<body>[\s\S]*?)</svg>",
                     RegexOptions.IgnoreCase);
-                var divWPt = dPct ? (bh.contX + bh.contW - bh.penX)
-                    : dW > 0 ? dW * 0.75 : 0;
+                double divWPt = 0;
+                if (dPct) divWPt = bh.contX + bh.contW - bh.penX;
+                else if (dW > 0) divWPt = dW * 0.75;
                 if (svgM.Success && svgM.Index < 2000)
                     DrawSvg(bh.sb, bh.html[(abs + svgM.Index)..(abs + svgM.Index + svgM.Length)],
                         bh.penX, bh.rowTopTd, bh.pageHeight, bh.chartGray, bh.invc);
@@ -111,11 +114,11 @@ internal static partial class HtmlToPdfConverter
         }
         bh.yTd = bh.rowTopTd + bh.rowHPt;
 
-        bh.capM = Regex.Match(bh.html,
+        bh.capM = SafeRegex.Match(bh.html,
             @"<div\b[^>]*class\s*=\s*['""]xAxisLabel['""][^>]*\bwidth:\s*100px[^>]*>(?<body>[^<]*)</div>",
             RegexOptions.IgnoreCase);
         if (!bh.capM.Success)
-            bh.capM = Regex.Match(bh.html,
+            bh.capM = SafeRegex.Match(bh.html,
                 @"<div\b[^>]*class\s*=\s*['""]xAxisLabel['""][^>]*>(?<body>[^<]*)</div>",
                 RegexOptions.IgnoreCase);
         if (bh.capM.Success && bh.capM.Groups["body"].Value.Trim().Length > 0)
@@ -151,7 +154,7 @@ internal static partial class HtmlToPdfConverter
         ec.html = html;
         ec.pageWidth = pageWidth;
         ec.pageHeight = pageHeight;
-        if (!Regex.IsMatch(ec.html, @"class\s*=\s*[""']ember-view chart[""']", RegexOptions.IgnoreCase)
+        if (!SafeRegex.IsMatch(ec.html, @"class\s*=\s*[""']ember-view chart[""']", RegexOptions.IgnoreCase)
             || !ec.html.Contains("_jsPlumb_connector", StringComparison.OrdinalIgnoreCase))
             return null;
         if (WinMetricsFor("Times New Roman") is not { } fm) return null;
@@ -178,30 +181,30 @@ internal static partial class HtmlToPdfConverter
         }
 
         // ── the connectors: per svg, the polyline strokes and the arrow fills ──
-        foreach (Match sm in Regex.Matches(ec.html,
+        foreach (var groups in SafeRegex.Matches(ec.html,
             @"<svg(?<attrs>[^>]*_jsPlumb_connector[^>]*)>(?<body>[\s\S]*?)</svg>",
-            RegexOptions.IgnoreCase))
+            RegexOptions.IgnoreCase).Select(sm => sm.Groups))
         {
-            var attrs = sm.Groups["attrs"].Value;
+            var attrs = groups["attrs"].Value;
             var ox = ec.originX + EmberPx(ec, attrs, "left") * 0.75;
             var oy = ec.originY + EmberPx(ec, attrs, "top") * 0.75;
-            foreach (Match pmM in Regex.Matches(sm.Groups["body"].Value,
+            foreach (Match pmM in SafeRegex.Matches(groups["body"].Value,
                 @"<path\b(?<pa>[^>]*)>", RegexOptions.IgnoreCase))
             {
                 var pa = pmM.Groups["pa"].Value;
-                var dM = Regex.Match(pa, @"\bd\s*=\s*[""']([^""']*)", RegexOptions.IgnoreCase);
+                var dM = SafeRegex.Match(pa, @"\bd\s*=\s*[""']([^""']*)", RegexOptions.IgnoreCase);
                 if (!dM.Success) continue;
                 double tx = 0, ty = 0;
-                var trM = Regex.Match(pa, @"translate\(\s*(-?[\d.eE+-]+)\s*[, ]\s*(-?[\d.eE+-]+)",
+                var trM = SafeRegex.Match(pa, @"translate\(\s*(-?[\d.eE+-]+)\s*[, ]\s*(-?[\d.eE+-]+)",
                     RegexOptions.IgnoreCase);
                 if (trM.Success)
                 {
                     tx = double.Parse(trM.Groups[1].Value, ec.invc);
                     ty = double.Parse(trM.Groups[2].Value, ec.invc);
                 }
-                var strokeM = Regex.Match(pa, @"stroke\s*=\s*[""']\s*(#[0-9a-fA-F]{3,6}|none)",
+                var strokeM = SafeRegex.Match(pa, @"stroke\s*=\s*[""']\s*(#[0-9a-fA-F]{3,6}|none)",
                     RegexOptions.IgnoreCase);
-                var fillM = Regex.Match(pa, @"fill\s*=\s*[""']\s*(#[0-9a-fA-F]{3,6}|none)",
+                var fillM = SafeRegex.Match(pa, @"fill\s*=\s*[""']\s*(#[0-9a-fA-F]{3,6}|none)",
                     RegexOptions.IgnoreCase);
                 var stroke = strokeM.Success && strokeM.Groups[1].Value != "none"
                     ? ParseCssColor(strokeM.Groups[1].Value) : null;
@@ -210,13 +213,13 @@ internal static partial class HtmlToPdfConverter
                 if (stroke is null && fill is null) continue;
                 // path: M/L pairs only (the jsPlumb flowchart segments + arrows)
                 var ops = new StringBuilder();
-                foreach (Match cmd in Regex.Matches(dM.Groups[1].Value,
-                    @"([ML])\s*(-?[\d.eE+]+)[,\s]+(-?[\d.eE+]+)", RegexOptions.IgnoreCase))
+                foreach (var cmdGroups in SafeRegex.Matches(dM.Groups[1].Value,
+                    @"([ML])\s*(-?[\d.eE+]+)[,\s]+(-?[\d.eE+]+)", RegexOptions.IgnoreCase).Select(cmd => cmd.Groups))
                 {
-                    var px2 = ox + (tx + double.Parse(cmd.Groups[2].Value, ec.invc)) * 0.75;
-                    var py2 = oy + (ty + double.Parse(cmd.Groups[3].Value, ec.invc)) * 0.75;
+                    var px2 = ox + (tx + double.Parse(cmdGroups[2].Value, ec.invc)) * 0.75;
+                    var py2 = oy + (ty + double.Parse(cmdGroups[3].Value, ec.invc)) * 0.75;
                     ops.Append(Compat.Format(ec.invc,
-                        $"{px2:0.##} {ec.pageHeight - py2:0.##} {(cmd.Groups[1].Value.ToUpperInvariant() == "M" ? "m" : "l")} "));
+                        $"{px2:0.##} {ec.pageHeight - py2:0.##} {(cmdGroups[1].Value.ToUpperInvariant() == "M" ? "m" : "l")} "));
                 }
                 if (ops.Length == 0) continue;
                 if (fill is { } fc)
@@ -247,7 +250,7 @@ internal static partial class HtmlToPdfConverter
         bv.pageHeight = pageHeight;
         bv.chartGray = chartGray;
         bv.invc = invc;
-        bv.open = Regex.Match(bv.svg, @"<svg\b[^>]*>", RegexOptions.IgnoreCase);
+        bv.open = SafeRegex.Match(bv.svg, @"<svg\b[^>]*>", RegexOptions.IgnoreCase);
         bv.vw = AttrF(bv, bv.open.Value, "width", 0) * 0.75;
         bv.vh = AttrF(bv, bv.open.Value, "height", 0) * 0.75;
         if (bv.vw <= 0 || bv.vh <= 0) return;
@@ -256,7 +259,9 @@ internal static partial class HtmlToPdfConverter
 
         bv.stack = new Stack<(double tx, double ty, string fill)>();
         bv.stack.Push((0, 0, "#888888"));
-        foreach (Match t in Regex.Matches(bv.svg,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match t in SafeRegex.Matches(bv.svg,
+#pragma warning restore S3267
             @"<(?<close>/)?(?<tag>g|line|rect|text|path)\b(?<attrs>[^>]*?)(?<self>/)?>(?(close)|(?<body>(?=[^<]*</text>)[^<]*)?)",
             RegexOptions.IgnoreCase))
         {

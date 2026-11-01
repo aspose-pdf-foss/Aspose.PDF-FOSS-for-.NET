@@ -11,7 +11,12 @@ internal static partial class HtmlToPdfConverter
         for (var i = 0; i < rk.bodyRows.Count; i++)
         {
             var (label, value, isAmount, isTotal, isFees) = rk.bodyRows[i];
-            if (i > 0) rk.by += isTotal ? RcTotalPitch : rk.afterFees ? RcPostFeesPitch : RcBodyPitch;
+            if (i > 0)
+            {
+                if (isTotal) rk.by += RcTotalPitch;
+                else if (rk.afterFees) rk.by += RcPostFeesPitch;
+                else rk.by += RcBodyPitch;
+            }
             rk.afterFees = false;
             var lfs = isTotal ? RcTotalFs : RcBodyFs;
             Emit(rk, isTotal ? "F2" : "F1", lfs, RcBodyLabelX, rk.by, label);
@@ -23,12 +28,12 @@ internal static partial class HtmlToPdfConverter
                 var name = amt.Length > 0 ? value[..value.LastIndexOf(amt, StringComparison.Ordinal)].Trim() : value;
                 Emit(rk, "F2", RcBodyFs, RcFeesValueX, rk.by + RcFeesDrop, name);
                 if (amt.Length > 0)
-                    Emit(rk, "F2", RcBodyFs, RcFeesAmtRight - W(rk, amt, RcBodyFs, true), rk.by + RcFeesDrop, amt);
+                    Emit(rk, "F2", RcBodyFs, RcFeesAmtRight - ReceiptW(amt, RcBodyFs, true), rk.by + RcFeesDrop, amt);
                 rk.afterFees = true;
             }
             else if (isAmount && value.Length > 0)
                 Emit(rk, "F2", lfs,
-                    (isTotal ? RcTotalAmtRight : RcAmountRight) - W(rk, value, lfs, true), rk.by, value);
+                    (isTotal ? RcTotalAmtRight : RcAmountRight) - ReceiptW(value, lfs, true), rk.by, value);
             else if (value.Length > 0)
                 Emit(rk, "F2", RcBodyFs, RcBodyValueX, rk.by, value);
         }
@@ -54,22 +59,22 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Collects the body rows from the table markup: label and value cells flattened, the total row flagged.</summary>
     private static void CollectReceiptRows(ReceiptCardState rk)
     {
-        foreach (Match tr in Regex.Matches(rk.bodyM.Groups[1].Value,
+        foreach (Match tr in SafeRegex.Matches(rk.bodyM.Groups[1].Value,
             @"<tr>((?:(?!</tr>)[\s\S])*)</tr>", RegexOptions.IgnoreCase))
         {
             var row = tr.Groups[1].Value;
-            var tds = Regex.Matches(row, @"<td\b([^>]*)>((?:(?!</td>|<td\b)[\s\S])*)</td>",
+            var tds = SafeRegex.Matches(row, @"<td\b([^>]*)>((?:(?!</td>|<td\b)[\s\S])*)</td>",
                 RegexOptions.IgnoreCase);
             if (tds.Count < 2) continue;
-            var label = Flat(rk, tds[0].Groups[2].Value);
+            var label = FlatKeepingNbsp(tds[0].Groups[2].Value);
             if (label.Length == 0) continue;
             var attrs0 = tds[0].Groups[1].Value;
             var isTotal = attrs0.Contains("totalLabel", StringComparison.OrdinalIgnoreCase);
             var isFees = row.Contains("<table", StringComparison.OrdinalIgnoreCase);
             var isAmount = tds[1].Groups[1].Value.Contains("detailValueAmt", StringComparison.OrdinalIgnoreCase)
                 || isTotal;
-            var value = Flat(rk, isFees
-                ? Regex.Replace(tds[1].Groups[2].Value, @"</?t[a-z]+\b[^>]*>", " ")
+            var value = FlatKeepingNbsp(isFees
+                ? SafeRegex.Replace(tds[1].Groups[2].Value, @"</?t[a-z]+\b[^>]*>", " ")
                 : tds[1].Groups[2].Value);
             rk.bodyRows.Add((label, value, isAmount, isTotal, isFees));
         }
@@ -78,17 +83,17 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Collects the sections from the markup: each heading with its flattened lines.</summary>
     private static void CollectReceiptSections(ReceiptCardState rk)
     {
-        foreach (Match sm in Regex.Matches(rk.html,
+        foreach (Match sm in SafeRegex.Matches(rk.html,
             @"class=[""']summarySection[""'][\s\S]*?<table>([\s\S]*?)</table>", RegexOptions.IgnoreCase))
         {
             var rows = new List<(string, string)>();
-            foreach (Match tr in Regex.Matches(sm.Groups[1].Value, @"<tr>([\s\S]*?)</tr>",
+            foreach (Match tr in SafeRegex.Matches(sm.Groups[1].Value, @"<tr>([\s\S]*?)</tr>",
                 RegexOptions.IgnoreCase))
             {
-                var tds = Regex.Matches(tr.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>",
+                var tds = SafeRegex.Matches(tr.Groups[1].Value, @"<td[^>]*>([\s\S]*?)</td>",
                     RegexOptions.IgnoreCase);
                 if (tds.Count >= 2)
-                    rows.Add((Flat(rk, tds[0].Groups[1].Value), Flat(rk, tds[1].Groups[1].Value)));
+                    rows.Add((FlatKeepingNbsp(tds[0].Groups[1].Value), FlatKeepingNbsp(tds[1].Groups[1].Value)));
             }
             rk.sections.Add(rows);
         }
@@ -98,10 +103,10 @@ internal static partial class HtmlToPdfConverter
     private static void ParseReceiptAddress(ReceiptCardState rk)
     {
         if (rk.addrM.Success)
-            foreach (Match li in Regex.Matches(rk.addrM.Groups[1].Value, @"<li[^>]*>([\s\S]*?)</li>",
+            foreach (Match li in SafeRegex.Matches(rk.addrM.Groups[1].Value, @"<li[^>]*>([\s\S]*?)</li>",
                 RegexOptions.IgnoreCase))
             {
-                var t = Flat(rk, li.Groups[1].Value);
+                var t = FlatKeepingNbsp(li.Groups[1].Value);
                 if (t.Length > 0) rk.addrItems.Add(t);
             }
     }

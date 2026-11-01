@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using Aspose.Pdf.Annotations;
 using Aspose.Pdf.Core;
 using Aspose.Pdf.IO;
@@ -44,7 +44,7 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             ? Compat.Latin1.GetString(dsStr.Value)
             : null;
         if (string.IsNullOrEmpty(ds)) return null;
-        var m = System.Text.RegularExpressions.Regex.Match(ds,
+        var m = SafeRegex.Match(ds,
             @"line-height\s*:\s*([\d.]+)\s*pt",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return m.Success && double.TryParse(m.Groups[1].Value,
@@ -94,7 +94,16 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
     /// <summary>Text-specific horizontal alignment override applied to
     /// the field's widget appearance. Stored only — mirrors
     /// Annotation.TextHorizontalAlignment.</summary>
-    public new Aspose.Pdf.HorizontalAlignment TextHorizontalAlignment { get; set; } = Aspose.Pdf.HorizontalAlignment.Left;
+    public new Aspose.Pdf.HorizontalAlignment TextHorizontalAlignment
+    {
+        get => _textHorizontalAlignment;
+        set { _textHorizontalAlignment = value; TextHorizontalAlignmentSet = true; }
+    }
+
+    private Aspose.Pdf.HorizontalAlignment _textHorizontalAlignment = Aspose.Pdf.HorizontalAlignment.Left;
+
+    /// <summary>True once a caller set <see cref="TextHorizontalAlignment"/>: its Left default asks for nothing.</summary>
+    internal bool TextHorizontalAlignmentSet { get; private set; }
 
     /// <summary>
     /// 1-based index of the page that owns this field's widget. Resolved by
@@ -136,7 +145,7 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             if (value is null)
                 _dict.Remove("T");
             else
-                _dict.Set("T", new PdfString(Compat.Latin1.GetBytes(value)));
+                _dict.Set("T", EncodePdfTextString(value));
         }
     }
 
@@ -325,10 +334,7 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
     bool ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.Contains(Aspose.Pdf.Annotations.WidgetAnnotation item)
     {
         if (item is null) return false;
-        foreach (var w in this)
-            if (ReferenceEquals(w, item) || ReferenceEquals(w.Dict, item.Dict))
-                return true;
-        return false;
+        return this.Any(w => ReferenceEquals(w, item) || ReferenceEquals(w.Dict, item.Dict));
     }
 
     void ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.CopyTo(
@@ -341,11 +347,13 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
     bool ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>.Remove(Aspose.Pdf.Annotations.WidgetAnnotation item)
         => throw new NotSupportedException("Remove widgets through Form.RemoveFieldAppearance.");
 
+#pragma warning disable S2365 // public API: a fresh copy per read is the published contract
     /// <summary>Field-typed child kids of this field as a snapshot
     /// array — convenience accessor mirroring
     /// <see cref="Form.Fields"/> on the form. Each entry is a freshly
     /// materialised <see cref="Field"/> over the matching /Kids entry.</summary>
     public Field[] Fields => FieldKids().ToArray();
+#pragma warning restore S2365
 
     // A Field is now itself a WidgetAnnotation, so the former implicit
     // Field -> WidgetAnnotation conversion is unnecessary (and illegal to a
@@ -398,11 +406,9 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
     {
         get
         {
-            foreach (var child in FieldKids())
-            {
-                if (string.Equals(child.PartialName, name, StringComparison.Ordinal))
-                    return new Aspose.Pdf.Annotations.WidgetAnnotation(child.Dict, child.Reader);
-            }
+            var child = FieldKids().FirstOrDefault(child => string.Equals(child.PartialName, name, StringComparison.Ordinal));
+            if (child is not null)
+                return new Aspose.Pdf.Annotations.WidgetAnnotation(child.Dict, child.Reader);
             throw new ArgumentException($"Kid field not found: {name}");
         }
     }
@@ -464,18 +470,20 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             if (_dict.ContainsKey("StructParent"))
                 return (int)_dict.GetInt("StructParent");
 
-            // Walk the parent page's Annots array to find position
-            var pageDict = FindPageDict();
+            // Walk the page's Annots array for the field's widget: its own dict, or a widget kid of its
+            // own (1-based to match the public API contract).
+            var widgets = new List<PdfDictionary> { _dict };
+            widgets.AddRange(AllKids());
+            var pageDict = FindPageDict() ?? widgets.Skip(1).Select(kid => _reader.ResolveDict(kid.Get("P"))).FirstOrDefault(p => p is not null);
             if (pageDict is not null)
             {
                 var annotsObj = _reader.Resolve(pageDict.Get("Annots"));
                 if (annotsObj is PdfArray annots)
                 {
-                    // Try by reference identity (1-based to match the public API contract).
                     for (int i = 0; i < annots.Count; i++)
                     {
                         var resolved = _reader.ResolveDict(annots[i]);
-                        if (ReferenceEquals(resolved, _dict))
+                        if (widgets.Any(widget => ReferenceEquals(resolved, widget)))
                             return i + 1;
                     }
 
@@ -536,6 +544,9 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
 
     private Aspose.Pdf.Annotations.DefaultAppearance? _defaultAppearance;
 
+    /// <summary>The appearance object handed to or out of this field, without parsing the /DA for one.</summary>
+    internal Aspose.Pdf.Annotations.DefaultAppearance? DefaultAppearanceIfSet => _defaultAppearance;
+
     /// <summary>
     /// Default appearance (font, size, colour) of the field — the field-level
     /// counterpart of <see cref="Aspose.Pdf.Annotations.WidgetAnnotation"/>.
@@ -544,7 +555,28 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
     /// </summary>
     public new Aspose.Pdf.Annotations.DefaultAppearance DefaultAppearance
     {
-        get => _defaultAppearance ??= ParseDefaultAppearance();
+        get
+        {
+            if (_defaultAppearance is not null) return _defaultAppearance;
+            var parsed = ParseDefaultAppearance();
+            var handedSize = parsed.FontSize;
+            // The appearance read from a field of the file stays that field's: a size, face
+            // or colour set on it is written like a whole appearance assigned. A field made in
+            // code writes the change to its /DA, and redraws an appearance it already has; only
+            // a size set on it pins the size.
+            void Write()
+            {
+                parsed.Changed = null; // the write itself may settle the face name
+                try
+                {
+                    if (IsNumberedObject) DefaultAppearance = parsed;
+                    else WriteChangedAppearance(parsed, sizeSet: !parsed.FontSize.Equals(handedSize));
+                }
+                finally { parsed.Changed = Write; }
+            }
+            parsed.Changed = Write;
+            return _defaultAppearance = parsed;
+        }
         set
         {
             _defaultAppearance = value;
@@ -561,12 +593,27 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             // immediately (the font may be set after Form.Add); this re-points /DA
             // at the embedded resource. A no-op otherwise.
             Form.EmbedDefaultAppearanceFont(this);
+            DropWidgetAppearanceStrings();
             // Drop any appearance generated with the previous /DA (e.g. built with
             // the default /Helv during Form.Add) and rebuild it with the new
             // font/size/colour.
             Dict.Remove("AP");
             GenerateAppearance();
         }
+    }
+
+    /// <summary>A change to the handed-out appearance of a field made in code: the /DA follows it, a font
+    /// the form can embed is embedded once the field is on a form, and an appearance already drawn is drawn
+    /// again with the new font, size and colour.</summary>
+    private void WriteChangedAppearance(Aspose.Pdf.Annotations.DefaultAppearance appearance, bool sizeSet)
+    {
+        if (sizeSet && appearance.FontSize > 0) DaFontSizePinned = true;
+        Dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(appearance.ToAppearanceString())));
+        Form.EmbedDefaultAppearanceFont(this);
+        DropWidgetAppearanceStrings();
+        if (Dict.Get("AP") is null) return;
+        Dict.Remove("AP");
+        GenerateAppearance();
     }
 
     /// <summary>The field rectangle.</summary>
@@ -618,40 +665,41 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             var parts = da.Split(' ');
             for (int i = 0; i < parts.Length; i++)
             {
-                if ((parts[i] == "rg" || parts[i] == "RG") && i >= 3)
-                {
-                    if (double.TryParse(parts[i - 3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var r) &&
-                        double.TryParse(parts[i - 2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var g) &&
-                        double.TryParse(parts[i - 1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var b))
-                        return Color.FromRgb(r, g, b);
-                }
+                if ((parts[i] == "rg" || parts[i] == "RG") && i >= 3 && double.TryParse(parts[i - 3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var r) &&
+                    double.TryParse(parts[i - 2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var g) &&
+                    double.TryParse(parts[i - 1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var b))
+                    return Color.FromRgb(r, g, b);
             }
             return Color.Black;
         }
-        set
+        set => _dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(WithTextColor(GetString("DA") ?? "", value))));
+    }
+
+    /// <summary>An appearance string with its colour operators replaced by an RGB fill of this colour, the font
+    /// and size kept.</summary>
+    internal static string WithTextColor(string da, Color value)
+    {
+        var r = (value.R / 255.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        var g = (value.G / 255.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        var b = (value.B / 255.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        // Remove existing color operators from DA
+        var parts = da.Split(' ').ToList();
+        int i = parts.Count - 1;
+        while (i >= 0)
         {
-            // Update /DA string with new color, preserving font info
-            var da = GetString("DA") ?? "";
-            var r = (value.R / 255.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-            var g = (value.G / 255.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-            var b = (value.B / 255.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-            // Remove existing color operators from DA
-            var parts = da.Split(' ').ToList();
-            for (int i = parts.Count - 1; i >= 0; i--)
+            if ((parts[i] == "rg" || parts[i] == "RG" || parts[i] == "g" || parts[i] == "G") && i >= 1)
             {
-                if ((parts[i] == "rg" || parts[i] == "RG" || parts[i] == "g" || parts[i] == "G") && i >= 1)
-                {
-                    int numArgs = parts[i] == "rg" || parts[i] == "RG" ? 3 : 1;
-                    int start = Math.Max(0, i - numArgs);
-                    parts.RemoveRange(start, i - start + 1);
-                    i = start;
-                }
+                int numArgs = parts[i] == "rg" || parts[i] == "RG" ? 3 : 1;
+                int start = Math.Max(0, i - numArgs);
+                parts.RemoveRange(start, i - start + 1);
+                i = start;
             }
-            var newDa = string.Join(" ", parts).Trim();
-            if (newDa.Length > 0) newDa += " ";
-            newDa += $"{r} {g} {b} rg";
-            _dict.Set("DA", new PdfString(Compat.Latin1.GetBytes(newDa)));
+            i--;
         }
+        var newDa = string.Join(" ", parts).Trim();
+        if (newDa.Length > 0) newDa += " ";
+        newDa += $"{r} {g} {b} rg";
+        return newDa;
     }
 
     internal new PdfDictionary Dict => _dict;
@@ -705,20 +753,21 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
             {
                 var ad = _reader.ResolveDict(annots[i]);
                 if (ad is null) continue;
-                foreach (var cand in candidates)
-                    if (ReferenceEquals(ad, cand)) return (annots, i + 1);
+                if (candidates.Any(cand => ReferenceEquals(ad, cand))) return (annots, i + 1);
             }
         }
         return (null, -1);
     }
 
     /// <summary>Global flag: when true, a field's value is auto-resized to fit its
-    /// widget rectangle. Static to match the public surface (a process-wide default).
-    /// Stored only.</summary>
+    /// widget rectangle. Static to match the public surface (a process-wide default);
+    /// one flag for every field type, read on the single-line and the multiline path alike.</summary>
     public static bool FitIntoRectangle { get; set; }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether the collection is thread-safe. Always false.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Synchronization root; returns this instance.</summary>
     public object SyncRoot => this;
@@ -740,12 +789,14 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
         set
         {
             if (value is null) Dict.Remove("TM");
-            else Dict.Set("TM", new PdfString(System.Text.Encoding.UTF8.GetBytes(value)));
+            else Dict.Set("TM", EncodePdfTextString(value));
         }
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Execute the supplied JavaScript action against this field. Stored intent only — the JS interpreter is not invoked.</summary>
     public void ExecuteFieldJavaScript(Aspose.Pdf.Annotations.JavascriptAction javaScriptAction)
+#pragma warning restore S2325
     {
         _ = javaScriptAction;
     }
@@ -759,13 +810,23 @@ public partial class Field : Aspose.Pdf.Annotations.WidgetAnnotation, ICollectio
         OwnerDocument?.Form.FlattenField(this);
     }
 
+#pragma warning disable S2325, S3400 // public API: the published instance member
     /// <summary>Recalculate the field's value from its calculation script. Currently no-op; returns false.</summary>
     public bool Recalculate() => false;
+#pragma warning restore S2325, S3400
 
     /// <summary>The block size the generator reserves for a field placed through
     /// Paragraphs: the layout Width/Height a field type stores (text box, button)
     /// else the widget rectangle's size.</summary>
     internal virtual (double w, double h) GeneratorBlockSize()
         => (base.Width, base.Height);
+
+    /// <summary>A field an HTML page sizes as a percentage of its table cell: the share of the cell's
+    /// content box its layout width takes (0: the field keeps its own width).</summary>
+    internal double CellWidthFraction { get; set; }
+
+    /// <summary>Resize the field's layout box to a new width, keeping its height.</summary>
+    internal virtual void SetGeneratorBlockWidth(double width)
+        => Rect = new Rectangle(0, 0, width, base.Height);
 
 }

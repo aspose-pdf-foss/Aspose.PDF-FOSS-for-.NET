@@ -5,10 +5,10 @@ namespace Aspose.Pdf.Converters;
 
 internal static partial class HtmlToPdfConverter
 {
-    /// <summary>Replays one SVG element tag: groups push and pop the graphics state, paths accumulate, shapes emit their fill and stroke under the current effect state, masks and defs are skipped.</summary>
+    /// <summary>Replays one SVG element tag: groups push and pop the graphics state, paths accumulate, shapes emit their fill and stroke under the current effect state, the mask and clip path definitions are skipped.</summary>
     private static bool ReplaySvgTag(SvgReplayState sr, Match tag)
     {
-        if (InsideMaskDef(sr, tag.Index)) return true;
+        if (InsideDef(sr, tag.Index)) return true;
         var attrs = tag.Groups["attrs"].Value;
         if (tag.Groups["close"].Success)
         {

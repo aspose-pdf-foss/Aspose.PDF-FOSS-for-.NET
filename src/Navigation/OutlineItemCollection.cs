@@ -128,13 +128,17 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     /// <summary>Whether the bookmark is expanded.</summary>
     public new bool Open { get => base.Open; set => base.Open = value; }
 
+#pragma warning disable S2325 // public API: the published instance member
     // ── Public-API additions ─────────────────────────────────────
 
     /// <summary>Whether the collection is read-only. Always false.</summary>
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether the collection is thread-safe. Always false.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Synchronization root for <see cref="IsSynchronized"/>; returns this collection.</summary>
     public object SyncRoot => this;
@@ -216,9 +220,7 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
     public bool Contains(OutlineItemCollection item)
     {
         if (item is null) return false;
-        foreach (var kid in Children)
-            if (ReferenceEquals(kid, item)) return true;
-        return false;
+        return Children.Any(kid => ReferenceEquals(kid, item));
     }
 
     /// <summary>Copy children into <paramref name="array"/> starting at <paramref name="index"/>.</summary>
@@ -243,18 +245,24 @@ public class OutlineItemCollection : OutlineItem, System.Collections.Generic.IEn
         Clear();
     }
 
-    /// <summary>Remove the first child whose title matches <paramref name="name"/>.</summary>
-    public void Delete(string name)
+    /// <summary>Remove the first item below this one whose title matches <paramref name="name"/>, however deep.</summary>
+    public void Delete(string name) => DeleteNamed(name);
+
+    /// <summary>Whether an item titled <paramref name="name"/> was found and removed below this one.</summary>
+    internal bool DeleteNamed(string name)
     {
         var kids = Children;
         for (var i = 0; i < kids.Count; i++)
         {
-            if (kids[i].Title == name && kids[i] is OutlineItemCollection oic)
+            if (kids[i] is not OutlineItemCollection kid) continue;
+            if (kid.Title == name)
             {
-                Remove(oic);
-                return;
+                Remove(kid);
+                return true;
             }
+            if (kid.DeleteNamed(name)) return true;
         }
+        return false;
     }
 
     /// <summary>Insert an outline item at the supplied 1-based index.</summary>

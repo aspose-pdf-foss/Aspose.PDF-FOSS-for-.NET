@@ -18,7 +18,7 @@ public sealed partial class HeaderFooter
             heights.Add(RenderReportRegion(null, null, inner, 0, frac * rr.w, 0,
                 rr.inFieldset, null, null));
         var groupH = 0.0;
-        foreach (var h in heights) if (h > groupH) groupH = h;
+        foreach (var h in heights.Where(h => h > groupH)) groupH = h;
         var cx = rr.x;
         for (var ci = 0; ci < rr.pendingCols.Count; ci++)
         {

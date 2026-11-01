@@ -70,7 +70,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
         }
 
         /// <summary>A JPEG-encoded image decodes through the baseline reader; null hands the stream back to the generic path.</summary>
-        private static Bitmap? TryDecodeJpegImage(PdfDictionary dict, PdfReader reader, byte[] decoded, SoftwarePageRenderer.ImageColorSpaceInfo csInfo, bool opSim, bool replicateChroma)
+        private static Bitmap? TryDecodeJpegImage(PdfDictionary dict, PdfReader reader, byte[] decoded, SoftwarePageRenderer.ImageColorSpaceInfo csInfo, bool opSim, bool replicateChroma, int jpegScale = 1)
         {
             if (decoded.Length > 2 && decoded[0] == 0xFF && decoded[1] == 0xD8)
             {
@@ -82,7 +82,7 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                 try
                 {
                     var (pixels, jw, jh, comps) = Aspose.Pdf.IO.Filters.JpegDecoder.Decode(decoded,
-                        SoftwarePageRenderer.CmykDecodeInverts(dict), replicateChroma);
+                        SoftwarePageRenderer.CmykDecodeInverts(dict), replicateChroma, jpegScale);
                     byte[]? bgraJ;
                     if (comps == 1 && csInfo.TintTransform is not null && csInfo.TintComponents <= 1)
                         bgraJ = SeparationToBgra(pixels, jw, jh,
@@ -91,7 +91,10 @@ public sealed partial class GdiPlusPageRenderer : IPageRenderer
                         // Multi-colorant /DeviceN JPEG: raw ink tuples through the tint transform.
                         bgraJ = DeviceNToBgra(pixels, jw, jh, csInfo);
                     else
+                    {
+                        pixels = SoftwarePageRenderer.DecodedJpegSamples(pixels, jw * jh, comps, csInfo.BaseName, dict.Get("Decode"), reader);
                         bgraJ = comps == 1 ? GrayToBgra(pixels, jw, jh) : RgbToBgra(pixels, jw, jh);
+                    }
                     if (bgraJ is null) return null;
                     var (mb, mw, mh) = ApplyMasks(dict, reader, bgraJ, jw, jh);
                     return FromBgra(mb, mw, mh);

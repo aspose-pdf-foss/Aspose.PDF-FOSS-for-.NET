@@ -45,7 +45,7 @@ public sealed partial class GraphicsAbsorber : IDisposable
         foreach (var op in page.Contents) ops.Add(op);
 
         _editState = new GraphicsEditState(page, ops);
-        Walk(ops, resources, page.Reader, Elements, depth: 0, _editState);
+        Walk(ops, resources, page.Reader, Elements, depth: 0);
         // Bind each top-level element to the edit session so a later Position
         // change / removal rewrites the page content in place.
         foreach (var element in Elements)
@@ -86,7 +86,7 @@ public sealed partial class GraphicsAbsorber : IDisposable
 
     private const int MaxFormDepth = 12;
 
-    private static void Walk(IReadOnlyList<Aspose.Pdf.Operator> ops, Core.PdfDictionary? resources, IO.PdfReader reader, GraphicElementCollection elements, int depth, GraphicsEditState? editState, Aspose.Pdf.Matrix? baseCtm = null, ClipRegion? baseClip = null)
+    private static void Walk(IReadOnlyList<Aspose.Pdf.Operator> ops, Core.PdfDictionary? resources, IO.PdfReader reader, GraphicElementCollection elements, int depth, Aspose.Pdf.Matrix? baseCtm = null, ClipRegion? baseClip = null)
     {
         var gw = new GraphicsWalkState();
         gw.ops = ops;
@@ -94,7 +94,6 @@ public sealed partial class GraphicsAbsorber : IDisposable
         gw.reader = reader;
         gw.elements = elements;
         gw.depth = depth;
-        gw.editState = editState;
         gw.baseCtm = baseCtm;
         gw.gs = new WalkState();
         if (gw.baseCtm is not null) gw.gs.Ctm = new Aspose.Pdf.Matrix(gw.baseCtm);
@@ -128,7 +127,7 @@ public sealed partial class GraphicsAbsorber : IDisposable
     /// children are walked under the composed CTM (form /Matrix × placement CTM);
     /// the placement rectangle is the form /BBox mapped the same way.</summary>
     private static void VisitForm(Do d, int opIndex, Core.PdfDictionary? resources, IO.PdfReader reader,
-        WalkState gs, GraphicElementCollection elements, int depth, GraphicsEditState? editState)
+        WalkState gs, GraphicElementCollection elements, int depth)
     {
         if (resources is null) return;
         var xobjDict = reader.ResolveDict(resources.Get("XObject"));
@@ -151,7 +150,7 @@ public sealed partial class GraphicsAbsorber : IDisposable
         foreach (var raw in ContentStreamOperatorParser.ParseOperators(bytes))
             formOps.Add(TypedOperatorParser.Parse(raw));
         var childBase = formMatrix is null ? gs.Ctm : formMatrix.Multiply(gs.Ctm);
-        Walk(formOps, formResources, reader, children, depth + 1, editState: null, childBase, gs.Clip);
+        Walk(formOps, formResources, reader, children, depth + 1, childBase, gs.Clip);
 
         // Placement rectangle: /BBox under /Matrix × CTM.
         var rect = new Rectangle(0, 0, 0, 0);

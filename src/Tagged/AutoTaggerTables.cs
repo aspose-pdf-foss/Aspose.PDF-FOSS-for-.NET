@@ -19,7 +19,7 @@ internal static partial class AutoTagger
     // A numeric cell: a figure, money, a percentage, or a dash for none - with the letter of a note after it, if any
     // ("124.0 e", estimated).
     private static readonly System.Text.RegularExpressions.Regex NumericCell = new(
-        @"^[\s$€£(\-–—]*(\d[\d,.\s]*%?|[-–—.]+)[)\s]*(\s[a-z])?\s*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+        @"^[\s$€£(\-–—]*(\d[\d,.\s]*%?|[-–—.]+)[)\s]*(\s[a-z])?\s*$", System.Text.RegularExpressions.RegexOptions.Compiled, RegexLimits.Timeout);
 
     /// <summary>How many leading rows of a table are header rows - the rows set in bold over a
     /// body that is not, or the rows of text over a body of figures - and whether its first
@@ -44,7 +44,7 @@ internal static partial class AutoTagger
         double NumericShare(IEnumerable<(int R, int C)> cells)
         {
             var filled = cells.Where(c => text[c.R, c.C] is not null).ToList();
-            return filled.Count == 0 ? -1 : (double)filled.Count(c => NumericCell.IsMatch(text[c.R, c.C]!.ToString())) / filled.Count;
+            return filled.Count == 0 ? -1 : (double)filled.Count(c => SafeRegex.IsMatch(NumericCell, text[c.R, c.C]!.ToString())) / filled.Count;
         }
 
         var all = (from r in Enumerable.Range(0, t.rows) from c in Enumerable.Range(0, t.cols) select (r, c)).ToList();
@@ -119,10 +119,12 @@ internal static partial class AutoTagger
     private const double CrossingBandFactor = 4.0;
     private const int CrossingBandLines = 3;
 
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
     /// <summary>What a row of the grid holds: how many of its cells hold text, whether a line's
     /// text runs across one of the grid's interior column edges, how many lines stand in it and
     /// the size most of its text is set in.</summary>
     private readonly record struct GridRow(int Cells, bool Crosses, int Lines, double Size);
+#pragma warning restore S3218
 
     private static GridRow[] RowCells((Aspose.Pdf.Rectangle region, int rows, int cols, List<double> colX, List<double> rowY) t, List<Line> lines)
     {
@@ -223,7 +225,9 @@ internal static partial class AutoTagger
                 if (r - start >= MinTableRows) yield return RowsOf(t, start, r);
                 start = r;
             }
+#pragma warning disable S127 // a spanned row group just read - the scan steps past its rows
             r = end - 1;
+#pragma warning restore S127
         }
         yield return start == 0 ? t : RowsOf(t, start, t.rows);
     }
@@ -274,7 +278,9 @@ internal static partial class AutoTagger
             cells[j] = map;
             tables.RemoveAt(i);
             cells.RemoveAt(i);
+#pragma warning disable S127 // the current table was merged away - the scan revisits its index
             i--;
+#pragma warning restore S127
         }
     }
 
@@ -412,7 +418,11 @@ internal static partial class AutoTagger
     {
         var (rows, cols) = (t.rows, t.cols);
         var parent = Enumerable.Range(0, rows * cols).ToArray();
-        int Find(int i) => parent[i] == i ? i : parent[i] = Find(parent[i]);
+        int Find(int i)
+        {
+            if (parent[i] != i) parent[i] = Find(parent[i]);
+            return parent[i];
+        }
         void Join(int a, int b) => parent[Find(a)] = Find(b);
         // rowY runs bottom to top: row r (from the top) lies between rowY[rows - 1 - r] and rowY[rows - r].
         double Top(int r) => t.rowY[rows - r];
@@ -498,7 +508,7 @@ internal static partial class AutoTagger
             // Cells of figures, several lines of them on shared baselines: each such line is a row of figures, whatever
             // the label column does - a label wrapped over the line above its figures joins them (as a wrapped label
             // over a text table's row does), one going on under them stays with them.
-            var figureCells = multi.Where(kv => kv.Value.All(x => NumericCell.IsMatch(x.Text))).ToList();
+            var figureCells = multi.Where(kv => kv.Value.All(x => SafeRegex.IsMatch(NumericCell, x.Text))).ToList();
             // (two cells of figures standing on shared baselines prove the band holds rows; every line holding a figure in
             // any cell is then a row - a table whose later columns start lower, stair-wise, has rows its first columns alone fill)
             var shared = figureCells.Count >= 2
@@ -596,7 +606,7 @@ internal static partial class AutoTagger
         if (inside.Count == 0) return false;
         var size = inside.Max(f => f.Size);
         return inside.Any(f => f.Base + 0.3 * f.Size >= bottom && f.Base + 0.3 * f.Size < top && f.Size > HeadingMarkSizeShare * size
-                               && NumericCell.IsMatch(f.Text) && f.Text.Any(char.IsDigit) && !PeriodCell.IsMatch(f.Text.Trim()));
+                               && SafeRegex.IsMatch(NumericCell, f.Text) && f.Text.Any(char.IsDigit) && !SafeRegex.IsMatch(PeriodCell, f.Text.Trim()));
     }
 
     /// <summary>Whether a value is one character that is no letter or figure: a bullet, whatever its glyph.</summary>
@@ -644,7 +654,7 @@ internal static partial class AutoTagger
             var rowsWith = Enumerable.Range(0, t.rows).Where(r => values[r, c] is { Count: > 0 }).ToList();
             // Each line's clear gaps between its values, at least a text size wide.
             var gaps = new List<(int Row, int Line, double L, double R)>();
-            var linesWith = rowsWith.SelectMany(r => values[r, c]!.GroupBy(v => v.Line).Select(g => (Row: r, Values: g.ToList()))).ToList();
+            var linesWith = rowsWith.SelectMany(r => values[r, c].GroupBy(v => v.Line).Select(g => (Row: r, Values: g.ToList()))).ToList();
             foreach (var (r, ofLine) in linesWith)
             {
                 var sorted = ofLine.OrderBy(v => v.X).ToList();
@@ -653,7 +663,9 @@ internal static partial class AutoTagger
                 var labelled = LoneSymbol(sorted[0].Text);
                 foreach (var v in sorted.Skip(1))
                 {
+#pragma warning disable S1244 // reach starts as a copy of sorted[0].R - exact equality means it has not moved
                     if (v.X - reach >= DataColumnGapEms * v.Size && !(labelled && reach == sorted[0].R)) gaps.Add((r, v.Line, reach, v.X));
+#pragma warning restore S1244
                     reach = Math.Max(reach, v.R);
                 }
             }
@@ -674,7 +686,7 @@ internal static partial class AutoTagger
                 }
                 foreach (var m in members) used.Add(m);
                 // The column starts as far before its text as the column it is cut from does before its own.
-                var inset = Math.Max(0, rowsWith.SelectMany(r => values[r, c]!).Min(v => v.X) - t.colX[c]);
+                var inset = Math.Max(0, rowsWith.SelectMany(r => values[r, c]).Min(v => v.X) - t.colX[c]);
                 var at = inset < rr - l ? rr - inset : (l + rr) / 2;
                 var split = members.Select(m => gaps[m].Row).Distinct().ToList();
                 // (a value of any cell of the line standing across the gap's middle crosses it: a figure in the column

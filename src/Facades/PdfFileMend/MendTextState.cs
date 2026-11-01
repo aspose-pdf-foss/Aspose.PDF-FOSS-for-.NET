@@ -66,6 +66,5 @@ private sealed class MendTextState
     public float llx = 0;
     public float lly = 0;
     public float urx = 0;
-    public float ury = 0;
 }
 }

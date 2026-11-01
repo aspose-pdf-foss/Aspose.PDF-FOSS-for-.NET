@@ -31,8 +31,8 @@ private sealed class CascadeState
     public double effFs;
     // Prefer the SYSTEM face of the same family for measuring and re-emission. The
     // source font is typically an embedded SUBSET whose width table is keyed by its
-    // custom byte codes, so measuring Unicode text against it mis-indexes the widths;
-    // the system face carries the true advances (the reflow is measured
+    // custom byte codes, so measuring Unicode text against it mis-indexes the widths; the
+    // system face carries the true advances (the reflow is measured
     // with these), and embedding it makes the absorber read the same metrics back, so
     // the re-emitted words land at consistent positions.
     public string faceName = null!;

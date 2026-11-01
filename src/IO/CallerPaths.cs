@@ -22,7 +22,7 @@ internal static class CallerPaths
     public static string? NormalizeDirectory(string? path)
     {
         if (string.IsNullOrEmpty(path) || Compat.IsWindows()) return path;
-        return path!.Replace('\\', System.IO.Path.DirectorySeparatorChar);
+        return path.Replace('\\', System.IO.Path.DirectorySeparatorChar);
     }
 
     /// <summary>

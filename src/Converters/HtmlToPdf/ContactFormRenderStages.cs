@@ -83,31 +83,31 @@ internal static partial class HtmlToPdfConverter
     /// <summary></summary>
     private static bool ScanContactFormToken(ContactFormRenderState cf)
     {
-        var m = cf.tokRx.Match(cf.body2, cf.scanPos);
+        var m = SafeRegex.Match(cf.tokRx, cf.body2, cf.scanPos);
         if (!m.Success) return false;
         if (m.Groups["h2"].Success)
         {
-            var t = Regex.Replace(m.Groups["h2"].Value, "<[^>]+>", "");
-            cf.blocks.Add(("h2", Regex.Replace(DecodeEntities(t), @"\s+", " ").Trim(), new List<CfField>()));
+            var t = SafeRegex.Replace(m.Groups["h2"].Value, "<[^>]+>", "");
+            cf.blocks.Add(("h2", SafeRegex.Replace(DecodeEntities(t), @"\s+", " ").Trim(), new List<CfField>()));
             cf.scanPos = m.Index + m.Length;
             return true;
         }
         // The row runs to its matching </div>.
         var depth = 1;
         var end = -1;
-        for (var s = cf.divRx.Match(cf.body2, m.Index + m.Length); s.Success;
-             s = cf.divRx.Match(cf.body2, s.Index + s.Length))
+        for (var s = SafeRegex.Match(cf.divRx, cf.body2, m.Index + m.Length); s.Success;
+             s = SafeRegex.Match(cf.divRx, cf.body2, s.Index + s.Length))
         {
             depth += s.Groups["c"].Length > 0 ? -1 : 1;
             if (depth == 0) { end = s.Index; break; }
         }
         if (end < 0) return false;
         var rowHtml = cf.body2[(m.Index + m.Length)..end];
-        var rowH2 = Regex.Match(rowHtml, @"<h2\b[^>]*>(?<t>[\s\S]*?)</h2\s*>", RegexOptions.IgnoreCase);
+        var rowH2 = SafeRegex.Match(rowHtml, @"<h2\b[^>]*>(?<t>[\s\S]*?)</h2\s*>", RegexOptions.IgnoreCase);
         if (rowH2.Success)
         {
-            var rt = Regex.Replace(rowH2.Groups["t"].Value, "<[^>]+>", "");
-            cf.blocks.Add(("h2row", Regex.Replace(DecodeEntities(rt), @"\s+", " ").Trim(), new List<CfField>()));
+            var rt = SafeRegex.Replace(rowH2.Groups["t"].Value, "<[^>]+>", "");
+            cf.blocks.Add(("h2row", SafeRegex.Replace(DecodeEntities(rt), @"\s+", " ").Trim(), new List<CfField>()));
         }
         var fields = ParseContactFields(rowHtml, cf.clsW);
         if (fields.Count > 0) cf.blocks.Add(("row", "", fields));

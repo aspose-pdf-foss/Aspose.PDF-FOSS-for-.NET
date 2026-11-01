@@ -21,7 +21,9 @@ public abstract class PdfFunction
     /// <summary>Output range — one [min, max] pair per output. Null when /Range is absent.</summary>
     public double[][]? Range { get; }
 
+#pragma warning disable S2368 // public API: the published signature
     protected PdfFunction(double[][] domain, double[][]? range)
+#pragma warning restore S2368
     {
         Domain = domain;
         Range = range;
@@ -31,28 +33,44 @@ public abstract class PdfFunction
     public double[] Evaluate(double[] inputs)
     {
         var clamped = new double[inputs.Length];
-        for (int i = 0; i < inputs.Length; i++)
-        {
-            var (lo, hi) = i < Domain.Length ? (Domain[i][0], Domain[i][1]) : (double.NegativeInfinity, double.PositiveInfinity);
-            clamped[i] = Math.Max(lo, Math.Min(hi, inputs[i]));
-        }
+        for (int i = 0; i < inputs.Length; i++) clamped[i] = ClampInput(i, inputs[i]);
         var raw = EvaluateCore(clamped);
         if (Range is null) return raw;
-        for (int i = 0; i < raw.Length; i++)
-        {
-            if (i >= Range.Length) break;
-            raw[i] = Math.Max(Range[i][0], Math.Min(Range[i][1], raw[i]));
-        }
+        for (int i = 0; i < raw.Length && i < Range.Length; i++) raw[i] = ClampOutput(i, raw[i]);
         return raw;
     }
+
+    /// <summary>The function of one input, written into a buffer the caller keeps: a shading
+    /// rasteriser evaluates once per pixel, and the arrays <see cref="Evaluate"/> returns would be
+    /// as many. Returns the function's output count; the buffer holds the outputs, clamped as
+    /// <see cref="Evaluate"/> clamps them, when it is at least that long. The base evaluates
+    /// through <see cref="Evaluate"/>; the gradient function types evaluate in place.</summary>
+    internal virtual int EvaluateInto(double input, double[] outputs)
+    {
+        var result = Evaluate([input]);
+        if (result.Length <= outputs.Length) Array.Copy(result, outputs, result.Length);
+        return result.Length;
+    }
+
+    /// <summary>The input clamped to its domain; an input beyond the declared domain is free.</summary>
+    protected double ClampInput(int i, double x)
+    {
+        var (lo, hi) = i < Domain.Length ? (Domain[i][0], Domain[i][1]) : (double.NegativeInfinity, double.PositiveInfinity);
+        return Math.Max(lo, Math.Min(hi, x));
+    }
+
+    /// <summary>The output clamped to its range, when a range is declared for it.</summary>
+    protected double ClampOutput(int i, double y)
+        => Range is not null && i < Range.Length ? Math.Max(Range[i][0], Math.Min(Range[i][1], y)) : y;
 
     protected abstract double[] EvaluateCore(double[] inputs);
 
     // ── Factory ──────────────────────────────────────────────────────────────
 
-    /// <summary>Parse a PDF function from a dictionary/stream reference. Without a
-    /// reader the object must stand alone: its entries are direct and a stream's
-    /// bytes are decoded by its own filters.</summary>
+    /// <summary>Parse a PDF function from a dictionary/stream reference, or from an
+    /// array of 1-output functions (a shading's /Function, §8.7.4.5), read as
+    /// one function of their outputs. Without a reader the object must stand alone:
+    /// its entries are direct and a stream's bytes are decoded by its own filters.</summary>
     internal static PdfFunction? Parse(PdfObject? obj, PdfReader? reader)
     {
         if (obj is null) return null;
@@ -61,6 +79,8 @@ public abstract class PdfFunction
             PdfDictionary dict;
             byte[]? streamData = null;
             var resolved = Resolve(obj, reader);
+            if (resolved is PdfArray array)
+                return ArrayFunction.Create(array, reader);
             if (resolved is PdfStream stream)
             {
                 dict = stream.Dict;
@@ -106,7 +126,11 @@ public abstract class PdfFunction
     /// <summary>An entry followed through an indirect reference where there is a
     /// reader to follow it with; a standalone object's entries are its own.</summary>
     private static PdfObject? Resolve(PdfObject? obj, PdfReader? reader)
-        => reader is not null ? reader.Resolve(obj) : obj is PdfNull ? null : obj;
+    {
+        if (reader is not null) return reader.Resolve(obj);
+        if (obj is PdfNull) return null;
+        return obj;
+    }
 
     internal static double[][] ParsePairs(PdfArray? arr)
     {
@@ -136,11 +160,24 @@ public sealed class ExponentialFunction : PdfFunction
     protected override double[] EvaluateCore(double[] inputs)
     {
         var x = inputs.Length > 0 ? inputs[0] : 0;
-        var pow = Math.Pow(x, N);
         var result = new double[C0.Length];
-        for (int i = 0; i < result.Length; i++)
-            result[i] = C0[i] + pow * (C1[i] - C0[i]);
+        Interpolate(x, result);
         return result;
+    }
+
+    internal override int EvaluateInto(double input, double[] outputs)
+    {
+        if (outputs.Length < C0.Length) return C0.Length;
+        Interpolate(ClampInput(0, input), outputs);
+        for (int i = 0; i < C0.Length; i++) outputs[i] = ClampOutput(i, outputs[i]);
+        return C0.Length;
+    }
+
+    private void Interpolate(double x, double[] result)
+    {
+        var pow = Math.Pow(x, N);
+        for (int i = 0; i < C0.Length; i++)
+            result[i] = C0[i] + pow * (C1[i] - C0[i]);
     }
 
     internal static ExponentialFunction? Create(PdfDictionary dict, PdfReader? reader)
@@ -175,7 +212,22 @@ public sealed class StitchingFunction : PdfFunction
     protected override double[] EvaluateCore(double[] inputs)
     {
         var x = inputs.Length > 0 ? inputs[0] : 0;
-        // Find which sub-function to use
+        var k = SubFunctionAt(x, out var t);
+        return Functions[k].Evaluate([t]);
+    }
+
+    internal override int EvaluateInto(double input, double[] outputs)
+    {
+        var k = SubFunctionAt(ClampInput(0, input), out var t);
+        var count = Functions[k].EvaluateInto(t, outputs);
+        if (count > outputs.Length) return count;
+        for (int i = 0; i < count; i++) outputs[i] = ClampOutput(i, outputs[i]);
+        return count;
+    }
+
+    /// <summary>The sub-function the input falls to, and the input mapped into its encode range.</summary>
+    private int SubFunctionAt(double x, out double t)
+    {
         int k = 0;
         for (int i = 0; i < Bounds.Length; i++)
         {
@@ -184,13 +236,12 @@ public sealed class StitchingFunction : PdfFunction
         }
         if (k >= Functions.Length) k = Functions.Length - 1;
 
-        // Map x into the sub-function's encode range
         var dLo = k == 0 ? Domain[0][0] : Bounds[k - 1];
         var dHi = k < Bounds.Length ? Bounds[k] : Domain[0][1];
         var eLo = k < Encode.Length ? Encode[k][0] : 0;
         var eHi = k < Encode.Length ? Encode[k][1] : 1;
-        var t = dHi - dLo != 0 ? eLo + (x - dLo) * (eHi - eLo) / (dHi - dLo) : eLo;
-        return Functions[k].Evaluate([t]);
+        t = dHi - dLo != 0 ? eLo + (x - dLo) * (eHi - eLo) / (dHi - dLo) : eLo;
+        return k;
     }
 
     internal static StitchingFunction? Create(PdfDictionary dict, PdfReader? reader)
@@ -210,6 +261,77 @@ public sealed class StitchingFunction : PdfFunction
         var encodeArr = ArrayEntry(dict, "Encode", reader);
         var encode = encodeArr is not null ? ParsePairs(encodeArr) : [];
         return new StitchingFunction(domain, range, fns.ToArray(), bounds, encode);
+    }
+}
+
+// ── Array of 1-output functions ──────────────────────────────────────────────
+
+/// <summary>An array of n 1-output functions standing for one n-output function
+/// (a shading's /Function, §8.7.4.5): every member takes the same inputs
+/// and gives one output, in array order. A member giving more than one output
+/// contributes its first only; one giving none contributes 0. The domain is the
+/// first member's; the range is the members' first ranges when all declare one,
+/// else none - each member still clamps its own output to its own range.</summary>
+internal sealed class ArrayFunction : PdfFunction
+{
+    private readonly PdfFunction[] _members;
+
+    /// <summary>A member's outputs, per thread. Taken while a call evaluates its
+    /// members and put back after, so a member that holds an array function deeper
+    /// down (a stitching function's sub-function written as an array) gets its own.</summary>
+    [ThreadStatic] private static double[]? _scratch;
+
+    private ArrayFunction(PdfFunction[] members, double[][]? range)
+        : base(members[0].Domain, range)
+    {
+        _members = members;
+    }
+
+    protected override double[] EvaluateCore(double[] inputs)
+    {
+        var result = new double[_members.Length];
+        for (int i = 0; i < _members.Length; i++)
+            result[i] = _members[i].Evaluate(inputs) is { Length: > 0 } output ? output[0] : 0;
+        return result;
+    }
+
+    internal override int EvaluateInto(double input, double[] outputs)
+    {
+        if (outputs.Length < _members.Length) return _members.Length;
+        input = ClampInput(0, input);
+        var scratch = _scratch ?? new double[1];
+        _scratch = null;
+        for (int i = 0; i < _members.Length; i++)
+        {
+            var count = _members[i].EvaluateInto(input, scratch);
+            if (count > scratch.Length)
+            {
+                scratch = new double[count];
+                count = _members[i].EvaluateInto(input, scratch);
+            }
+            outputs[i] = ClampOutput(i, count > 0 ? scratch[0] : 0);
+        }
+        _scratch = scratch;
+        return _members.Length;
+    }
+
+    /// <summary>The array's members as one function; null when the array is empty or
+    /// a member is not a function, or is itself an array.</summary>
+    internal static ArrayFunction? Create(PdfArray array, PdfReader? reader)
+    {
+        if (array.Count == 0) return null;
+        var members = new PdfFunction[array.Count];
+        var ranges = new double[array.Count][];
+        var ranged = true;
+        for (int i = 0; i < array.Count; i++)
+        {
+            var member = Parse(array[i], reader);
+            if (member is null or ArrayFunction) return null;
+            members[i] = member;
+            if (member.Range is { Length: > 0 } range) ranges[i] = range[0];
+            else ranged = false;
+        }
+        return new ArrayFunction(members, ranged ? ranges : null);
     }
 }
 

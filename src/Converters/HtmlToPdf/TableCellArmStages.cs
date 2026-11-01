@@ -23,13 +23,13 @@ internal static partial class HtmlToPdfConverter
             // must stay whole. The PINNED-BODY report dialect lifts the
             // guard: its lines measure at their own size through the chain
             // path, so the column absorbs the growth (the 22px title cell).
-            if (Regex.Match(tdOwnSt, @"(?<![-\w])font-size\s*:\s*([^;""']+)",
+            if (SafeRegex.Match(tdOwnSt, @"(?<![-\w])font-size\s*:\s*([^;""']+)",
                     RegexOptions.IgnoreCase) is { Success: true } tdFsm
                 && TryParseLength(tdFsm.Groups[1].Value.Trim()) is { } tdFsp && tdFsp > 0
                 && (co.pinnedBodyGrid
                     || tdFsp < (co.ps.cellClassPt > 0 ? co.ps.cellClassPt : co.cellFontSize)))
                 co.ps.cellClassPt = tdFsp;
-            if (Regex.Match(tdOwnSt, @"(?<![-\w])color\s*:\s*([^;""']+)",
+            if (SafeRegex.Match(tdOwnSt, @"(?<![-\w])color\s*:\s*([^;""']+)",
                     RegexOptions.IgnoreCase) is { Success: true } tdColm
                 && ParseCssColor(tdColm.Groups[1].Value.Trim()) is { } tdCol)
                 co.ps.cellChainColor = tdCol;
@@ -37,19 +37,22 @@ internal static partial class HtmlToPdfConverter
             // number) resolves against the cell's DECLARED font size even
             // when the applied size kept a larger base (the guard above) —
             // `line-height:1.1em; font-size:10px` is an 8.25 pt pitch.
-            if (Regex.Match(tdOwnSt, @"(?<![-\w])line-height\s*:\s*([\d.]+)\s*(em|px|pt)?",
+            if (SafeRegex.Match(tdOwnSt, @"(?<![-\w])line-height\s*:\s*([\d.]+)\s*(em|px|pt)?",
                     RegexOptions.IgnoreCase) is { Success: true } tdLhm
                 && double.TryParse(tdLhm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var tdLh)
                 && tdLh > 0)
             {
-                var tdDeclPt = Regex.Match(tdOwnSt,
+                double tdDeclPt;
+                if (SafeRegex.Match(tdOwnSt,
                         @"(?<![-\w])font-size\s*:\s*([^;""']+)", RegexOptions.IgnoreCase)
                     is { Success: true } fsm2
                     && TryParseLength(fsm2.Groups[1].Value.Trim()) is { } declPt
-                    && declPt > 0 ? declPt
-                    : co.ps.cellClassPt > 0 ? co.ps.cellClassPt : co.cellFontSize;
+                    && declPt > 0)
+                    tdDeclPt = declPt;
+                else if (co.ps.cellClassPt > 0) tdDeclPt = co.ps.cellClassPt;
+                else tdDeclPt = co.cellFontSize;
                 co.ps.cellOwnLineHPt = tdLhm.Groups[2].Value.ToLowerInvariant() switch
                 {
                     "px" => tdLh * PxToPt,
@@ -68,6 +71,7 @@ internal static partial class HtmlToPdfConverter
         // say, so only the still-unset slots fill.
         if (!(co.chainBase is not null)) return;
         co.ps.chainTdElem = ChainTokElem(co.tag, co.tok.Attributes);
+        co.ps.chainTdElem.RowOrdinal = co.ps.rowOrdinal;
         co.ps.chainOpenElems?.Clear();
         co.tdChain = new List<CssElem>(co.chainBase) { co.ps.chainTdElem };
         if (!(MatchChainDecls(co.chainRules, co.tdChain) is { } cd)) return;
@@ -77,7 +81,7 @@ internal static partial class HtmlToPdfConverter
         // Font first: the ex/em pads below resolve on the cell size.
         if (co.ps.cellClassPt <= 0 && cd.TryGetValue("font-size", out var cfs))
         {
-            var pcm = Regex.Match(cfs.Trim(), @"^([\d.]+)\s*%$");
+            var pcm = SafeRegex.Match(cfs.Trim(), @"^([\d.]+)\s*%$");
             if (pcm.Success && double.TryParse(pcm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var fsPct)
@@ -87,7 +91,7 @@ internal static partial class HtmlToPdfConverter
                 co.ps.cellClassPt = fsAbs;
         }
         if (!co.ps.cellBold && cd.TryGetValue("font-weight", out var cfw)
-            && Regex.IsMatch(cfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(cfw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
             co.ps.cellBold = true;
         if (co.ps.cell!.BackgroundColor is null
             && (cd.TryGetValue("background-color", out var cbg)
@@ -155,23 +159,23 @@ internal static partial class HtmlToPdfConverter
     {
         if (co.tok.Attributes is not null)
         {
-            if (co.tok.Attributes.TryGetValue("colspan", out var cs) && int.TryParse(cs, out var csn) && csn > 0)
+            if (co.tok.Attributes.TryGetValue("colspan", out var cs) && int.TryParse(cs, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var csn) && csn > 0)
                 co.ps.colSpan = csn;
-            if (co.tok.Attributes.TryGetValue("rowspan", out var rs) && int.TryParse(rs, out var rsn) && rsn > 1)
+            if (co.tok.Attributes.TryGetValue("rowspan", out var rs) && int.TryParse(rs, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var rsn) && rsn > 1)
                 co.ps.cellRowSpan = rsn;
             if (co.tok.Attributes.TryGetValue("style", out var st))
             {
                 // A cell opting out of the table's borders keeps its box
                 // blank (`<td style="border-style:none">` in a bordered
                 // table — the layout-table idiom).
-                if (Regex.IsMatch(st, @"border(-style)?\s*:\s*none", RegexOptions.IgnoreCase))
+                if (SafeRegex.IsMatch(st, @"border(-style)?\s*:\s*none", RegexOptions.IgnoreCase))
                     co.ps.cell!.Border = new BorderInfo(BorderSide.None);
                 if (co.uaCellBoxes && UaUppercaseDeclared(st)) co.ps.cellUpper = true;
                 if (co.uaCellBoxes && UaRuleBelow(st) is (var tdRuleW, var tdRuleC))
                 { co.ps.cellRuleBelowPt = tdRuleW; co.ps.cellRuleColor = tdRuleC; }
                 if (co.uaCellBoxes && UaRuleAbove(st) is (var tdTopW, var tdTopC) && tdTopW > co.ps.uaPrevRowRuleBelowPt + 0.01)
                 { co.ps.cellRuleAbovePt = tdTopW; co.ps.cellRuleAboveColor = tdTopC; }
-                var am = Regex.Match(st, @"text-align\s*:\s*(left|right|center)", RegexOptions.IgnoreCase);
+                var am = SafeRegex.Match(st, @"text-align\s*:\s*(left|right|center)", RegexOptions.IgnoreCase);
                 if (am.Success)
                 {
                     co.ps.alignSet = true;
@@ -200,23 +204,23 @@ internal static partial class HtmlToPdfConverter
                             // The pt-styled fragment spells each side as
                             // LONGHANDS (border-bottom-width/-style/-color).
                             if (!co.ptCellWidths
-                                || Regex.Match(st,
+                                || SafeRegex.Match(st,
                                     @"(?<![-\w])" + bprop + @"-style\s*:\s*(\w+)",
                                     RegexOptions.IgnoreCase) is not { Success: true } blS
                                 || blS.Groups[1].Value.Equals("none",
                                     StringComparison.OrdinalIgnoreCase))
                                 continue;
-                            bpt = Regex.Match(st,
+                            if (SafeRegex.Match(st,
                                     @"(?<![-\w])" + bprop + @"-width\s*:\s*([\d.]+)\s*(px|pt)",
                                     RegexOptions.IgnoreCase) is { Success: true } blW
                                 && double.TryParse(blW.Groups[1].Value,
                                     System.Globalization.NumberStyles.Float,
                                     System.Globalization.CultureInfo.InvariantCulture,
-                                    out var blWv)
-                                ? (blW.Groups[2].Value.Equals("px",
-                                    StringComparison.OrdinalIgnoreCase) ? blWv * 0.75 : blWv)
-                                : 0.75;
-                            bcol = Regex.Match(st,
+                                    out var blWv))
+                                bpt = blW.Groups[2].Value.Equals("px",
+                                    StringComparison.OrdinalIgnoreCase) ? blWv * 0.75 : blWv;
+                            else bpt = 0.75;
+                            bcol = SafeRegex.Match(st,
                                     @"(?<![-\w])" + bprop + @"-color\s*:\s*([^;]+)",
                                     RegexOptions.IgnoreCase) is { Success: true } blC
                                 ? ParseCssColor(blC.Groups[1].Value.Trim())
@@ -267,7 +271,7 @@ internal static partial class HtmlToPdfConverter
         if (co.ps.cellWidthPct <= 0 && co.tok.Attributes is not null
             && co.tok.Attributes.TryGetValue("style", out var wPctStyle))
         {
-            var pm = Regex.Match(wPctStyle, @"width\s*:\s*(\d+(?:\.\d+)?)\s*%");
+            var pm = SafeRegex.Match(wPctStyle, @"width\s*:\s*(\d+(?:\.\d+)?)\s*%");
             if (pm.Success && double.TryParse(pm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var wPctS)
@@ -287,12 +291,12 @@ internal static partial class HtmlToPdfConverter
         if (co.liftNestedTables
             && co.tok.Attributes is not null && co.tok.Attributes.TryGetValue("style", out var tdVSt) && tdVSt is not null)
         {
-            foreach (Match pm in Regex.Matches(tdVSt,
-                @"padding-(top|bottom)\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(tdVSt,
+                @"padding-(top|bottom)\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase).Select(pm => pm.Groups))
             {
-                var vPadPt = double.Parse(pm.Groups[2].Value,
+                var vPadPt = double.Parse(groups[2].Value,
                     System.Globalization.CultureInfo.InvariantCulture) * PxToPt;
-                if (pm.Groups[1].Value.Equals("top", StringComparison.OrdinalIgnoreCase))
+                if (groups[1].Value.Equals("top", StringComparison.OrdinalIgnoreCase))
                     co.ps.cellChainPadTopPt = Math.Max(co.ps.cellChainPadTopPt, vPadPt);
                 else
                 {
@@ -305,7 +309,7 @@ internal static partial class HtmlToPdfConverter
             }
             // …and the SHORTHAND's vertical value (`padding: 8px 0px`) is
             // the same declaration in one token.
-            if (Regex.Match(tdVSt, @"(?<![-\w])padding\s*:\s*(\d+(?:\.\d+)?)\s*px",
+            if (SafeRegex.Match(tdVSt, @"(?<![-\w])padding\s*:\s*(\d+(?:\.\d+)?)\s*px",
                     RegexOptions.IgnoreCase) is { Success: true } pshm
                 && double.TryParse(pshm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -318,13 +322,13 @@ internal static partial class HtmlToPdfConverter
         }
         if ((co.uaCellBoxes || co.liftNestedTables)
             && co.tok.Attributes is not null && co.tok.Attributes.TryGetValue("style", out var tdSt2) && tdSt2 is not null)
-            foreach (Match pm in Regex.Matches(tdSt2,
-                @"padding-(left|right)\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase))
+            foreach (var pmGroups in SafeRegex.Matches(tdSt2,
+                @"padding-(left|right)\s*:\s*(\d+(?:\.\d+)?)\s*px", RegexOptions.IgnoreCase).Select(pm => pm.Groups))
             {
-                var padPt = double.Parse(pm.Groups[2].Value,
+                var padPt = double.Parse(pmGroups[2].Value,
                     System.Globalization.CultureInfo.InvariantCulture) * PxToPtW;
                 co.ps.cellCssPadPt += padPt;
-                if (pm.Groups[1].Value.Equals("left", StringComparison.OrdinalIgnoreCase))
+                if (pmGroups[1].Value.Equals("left", StringComparison.OrdinalIgnoreCase))
                 { co.ps.cellPadLeftPt += padPt; co.ps.cellPadLeftInline = true; }
                 else co.ps.cellPadRightInline = true;
             }
@@ -334,7 +338,7 @@ internal static partial class HtmlToPdfConverter
         // A UA-boxed cell's own padding shorthand is its box on every side - the cell's style attribute is the
         // most specific rule (measured on the mailing: the `style="padding: 15px"` column indents its text 11.25).
         if (co.uaCellBoxes && co.tok.Attributes is not null && co.tok.Attributes.TryGetValue("style", out var uaPadSt) && uaPadSt is not null
-            && Regex.Match(uaPadSt, @"(?<![-\w])padding\s*:\s*([^;""]+)", RegexOptions.IgnoreCase) is { Success: true } uaPad)
+            && SafeRegex.Match(uaPadSt, @"(?<![-\w])padding\s*:\s*([^;""]+)", RegexOptions.IgnoreCase) is { Success: true } uaPad)
         {
             var (uaT, uaR, uaB, uaL) = ChainPadPt(uaPad.Groups[1].Value, co.cellFontSize);
             co.ps.cellChainPadTopPt = Math.Max(co.ps.cellChainPadTopPt, uaT);
@@ -344,7 +348,7 @@ internal static partial class HtmlToPdfConverter
         if (co.uaCellBoxes) ApplyUaSheetCellPadding(co);
         if ((co.uaCellBoxes || co.liftNestedTables) && co.ps.cellCssPadPt <= 0
             && co.tok.Attributes is not null && co.tok.Attributes.TryGetValue("style", out var tdSt3) && tdSt3 is not null
-            && Regex.Match(tdSt3, @"(?<![-\w])padding\s*:\s*([^;""]+)", RegexOptions.IgnoreCase) is { Success: true } shPad)
+            && SafeRegex.Match(tdSt3, @"(?<![-\w])padding\s*:\s*([^;""]+)", RegexOptions.IgnoreCase) is { Success: true } shPad)
         {
             var (_, shR, _, shL) = ChainPadPt(shPad.Groups[1].Value, co.cellFontSize);
             if (shL + shR > 0) co.ps.cellShortPadPt = shL + shR;
@@ -354,13 +358,13 @@ internal static partial class HtmlToPdfConverter
         // pads (content-box), and the left pad indents the text.
         if ((co.ptCellWidths || (co.redlineCells && !co.widenProbe))
             && co.tok.Attributes is not null && co.tok.Attributes.TryGetValue("style", out var tdStPt) && tdStPt is not null)
-            foreach (Match pm in Regex.Matches(tdStPt,
-                @"padding-(left|right)\s*:\s*(\d+(?:\.\d+)?)\s*pt", RegexOptions.IgnoreCase))
+            foreach (var padGroups in SafeRegex.Matches(tdStPt,
+                @"padding-(left|right)\s*:\s*(\d+(?:\.\d+)?)\s*pt", RegexOptions.IgnoreCase).Select(pm => pm.Groups))
             {
-                var padPt = double.Parse(pm.Groups[2].Value,
+                var padPt = double.Parse(padGroups[2].Value,
                     System.Globalization.CultureInfo.InvariantCulture);
                 co.ps.cellCssPadPt += padPt;
-                if (pm.Groups[1].Value.Equals("left", StringComparison.OrdinalIgnoreCase))
+                if (padGroups[1].Value.Equals("left", StringComparison.OrdinalIgnoreCase))
                     co.ps.cellPadLeftPt += padPt;
             }
         if (co.tok.Attributes is not null
@@ -383,7 +387,7 @@ internal static partial class HtmlToPdfConverter
         if (co.ptCellWidths && co.ps.cellWidthPt <= 0
             && co.tok.Attributes is not null
             && co.tok.Attributes.TryGetValue("style", out var ptwSt) && ptwSt is not null
-            && Regex.Match(ptwSt, @"(?<![-\w])width\s*:\s*([\d.]+)\s*pt",
+            && SafeRegex.Match(ptwSt, @"(?<![-\w])width\s*:\s*([\d.]+)\s*pt",
                 RegexOptions.IgnoreCase) is { Success: true } ptwM
             && double.TryParse(ptwM.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,
@@ -446,13 +450,13 @@ internal static partial class HtmlToPdfConverter
                 // pt/px regex below reads ".875rem" as bare 0.875 POINTS
                 // and the whole grid draws at ant size. Bare numbers keep
                 // their legacy points reading.
-                if (Regex.IsMatch(szv, @"r?em", RegexOptions.IgnoreCase)
+                if (SafeRegex.IsMatch(szv, @"r?em", RegexOptions.IgnoreCase)
                     && TryParseLength(szv.Trim()) is { } szRelPt && szRelPt > 0)
                 {
                     co.ps.cellClassPt = szRelPt;
                     break;
                 }
-                var szm = Regex.Match(szv, @"([\d.]+)\s*(pt|px)?", RegexOptions.IgnoreCase);
+                var szm = SafeRegex.Match(szv, @"([\d.]+)\s*(pt|px)?", RegexOptions.IgnoreCase);
                 if (!szm.Success || !double.TryParse(szm.Groups[1].Value,
                         System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out var szn) || szn <= 0)
@@ -464,14 +468,14 @@ internal static partial class HtmlToPdfConverter
         if (co.tok.Attributes is not null)
         {
             if (co.tok.Attributes.TryGetValue("style", out var bStyle)
-                && Regex.IsMatch(bStyle, @"font-weight\s*:\s*(bold|[6-9]00)", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(bStyle, @"font-weight\s*:\s*(bold|[6-9]00)", RegexOptions.IgnoreCase))
                 co.ps.cellBold = true;
             if (!co.ps.cellBold && co.tok.Attributes.TryGetValue("class", out var bCls))
                 foreach (var cn in bCls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                     if ((co.css.TryGetValue("." + cn, out var bRule)
                             || (co.docCss?.TryGetValue("." + cn, out bRule) ?? false))
                         && bRule.TryGetValue("font-weight", out var fw)
-                        && Regex.IsMatch(fw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
+                        && SafeRegex.IsMatch(fw, @"bold|[6-9]00", RegexOptions.IgnoreCase))
                     { co.ps.cellBold = true; break; }
         }
         co.ps.rowHasCell = true; if (co.tag == "td") co.ps.rowHasTd = true;
@@ -492,7 +496,7 @@ internal static partial class HtmlToPdfConverter
         //  Verdana 6 pitch 9.75 = the 7.5 line + 1 px pads + 1 px spacing, the attribute unread)
         if (!(co.uaCellBoxes)
             && co.tok.Attributes is not null && co.tok.Attributes.TryGetValue("height", out var tdH)
-            && double.TryParse(Regex.Match(tdH, @"[\d.]+").Value, System.Globalization.NumberStyles.Float,
+            && double.TryParse(SafeRegex.Match(tdH, @"[\d.]+").Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var tdHpx) && tdHpx > 0)
         {
             co.ps.rowMinHeightPt = Math.Max(co.ps.rowMinHeightPt, tdHpx * PxToPt);
@@ -506,7 +510,7 @@ internal static partial class HtmlToPdfConverter
         if ((co.uaCellBoxes || co.liftNestedTables)
             && co.tok.Attributes is not null && co.tok.Attributes.TryGetValue("style", out var tdHSt)
             && tdHSt is not null
-            && Regex.Match(tdHSt, @"(?<!\w-)height\s*:\s*([\d.]+\s*(?:px|pt|cm|mm|in))",
+            && SafeRegex.Match(tdHSt, @"(?<!\w-)height\s*:\s*([\d.]+\s*(?:px|pt|cm|mm|in))",
                 RegexOptions.IgnoreCase) is { Success: true } tdHm
             && TryParseLength(tdHm.Groups[1].Value.Replace(" ", "")) is { } tdHPt && tdHPt > 0)
         {
@@ -523,7 +527,7 @@ internal static partial class HtmlToPdfConverter
         if ((co.ptCellWidths || co.redlineCells || uaValign) && (co.ps.cell!.VerticalAlignment == VerticalAlignment.None || uaValign)
             && co.tok.Attributes is not null
             && co.tok.Attributes.TryGetValue("style", out var vaSt) && vaSt is not null
-            && Regex.Match(vaSt, @"vertical-align\s*:\s*(\w+)",
+            && SafeRegex.Match(vaSt, @"vertical-align\s*:\s*(\w+)",
                 RegexOptions.IgnoreCase) is { Success: true } vaM)
             co.ps.cell.VerticalAlignment = vaM.Groups[1].Value.ToLowerInvariant() switch
             {
@@ -590,7 +594,7 @@ internal static partial class HtmlToPdfConverter
         if (co.tok.Attributes is not null
             && co.tok.Attributes.TryGetValue("style", out var tdFontSt) && tdFontSt is not null)
         {
-            var tdFs = Regex.Match(tdFontSt, @"(?<![-\w])font-size\s*:\s*([^;""']+)",
+            var tdFs = SafeRegex.Match(tdFontSt, @"(?<![-\w])font-size\s*:\s*([^;""']+)",
                 RegexOptions.IgnoreCase);
             // …honoured only when SMALLER than the grid's base — the same
             // deliberate limit the pitch model keeps elsewhere: an ENLARGED
@@ -610,10 +614,10 @@ internal static partial class HtmlToPdfConverter
             }
             // …and a td styling font-style italic sets its whole cell
             // italic (the Description band's own td style).
-            if (co.formGridDialect && Regex.IsMatch(tdFontSt,
+            if (co.formGridDialect && SafeRegex.IsMatch(tdFontSt,
                     @"font-style\s*:\s*italic", RegexOptions.IgnoreCase))
                 co.ps.italicDepth = 1;
-            var tdFf = Regex.Match(tdFontSt, @"(?<![-\w])font-family\s*:\s*([^;""']+)",
+            var tdFf = SafeRegex.Match(tdFontSt, @"(?<![-\w])font-family\s*:\s*([^;""']+)",
                 RegexOptions.IgnoreCase);
             if (tdFf.Success && FirstFontFamily(tdFf.Groups[1].Value) is { Length: > 0 } tdFam)
                 co.ps.curFamily = tdFam;
@@ -623,7 +627,7 @@ internal static partial class HtmlToPdfConverter
         if (co.tok.Attributes is not null)
         {
             if (co.tok.Attributes.TryGetValue("style", out var tdBgSt) && tdBgSt is not null
-                && Regex.Match(tdBgSt, @"background(?:-color)?\s*:\s*([^;]+)",
+                && SafeRegex.Match(tdBgSt, @"background(?:-color)?\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase) is { Success: true } tdBgm
                 && ParseCssColor(tdBgm.Groups[1].Value) is { } tdBg)
                 co.ps.cell.BackgroundColor = tdBg;
@@ -635,13 +639,19 @@ internal static partial class HtmlToPdfConverter
         // white-space:nowrap keeps a cell on one line whether it arrives
         // inline, through one of the cell's classes, or INHERITED from the table itself
         if (co.tblStyle.TryGetValue("white-space", out var tblWs)
-            && Regex.IsMatch(tblWs, @"^\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(tblWs, @"^\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
             co.ps.cell.HtmlNoWrap = true;
         if (co.tok.Attributes is not null)
         {
             if (co.tok.Attributes.TryGetValue("style", out var nwStyle)
-                && Regex.IsMatch(nwStyle, @"white-space\s*:\s*nowrap", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(nwStyle, @"white-space\s*:\s*nowrap", RegexOptions.IgnoreCase))
                 co.ps.cell.HtmlNoWrap = true;
+            // A cell asking for in-word breaks (`word-wrap: break-word`, `overflow-wrap: break-word |
+            // anywhere`, `word-break: break-all | break-word`) wraps a token wider than its column
+            // inside it (probed: a 100 px fixed-layout cell breaks a 264 pt word into four lines).
+            if (nwStyle is not null
+                && SafeRegex.IsMatch(nwStyle, @"(?:word-wrap|overflow-wrap)\s*:\s*(?:break-word|anywhere)|word-break\s*:\s*break-(?:all|word)", RegexOptions.IgnoreCase))
+                co.ps.cell.HtmlBreakWord = true;
             if (!co.ps.cell.HtmlNoWrap && co.tok.Attributes.TryGetValue("class", out var nwCls))
                 foreach (var cn in nwCls.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                     if ((co.css.TryGetValue("." + cn, out var cRule)
@@ -655,7 +665,7 @@ internal static partial class HtmlToPdfConverter
         if (!co.ps.cell.HtmlNoWrap
             && (ElementRule(co.css, co.tag) ?? ElementRule(co.docCss, co.tag)) is { } tagRule
             && tagRule.TryGetValue("white-space", out var tagWs)
-            && Regex.IsMatch(tagWs, @"^\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(tagWs, @"^\s*(nowrap|pre(?![-\w]))", RegexOptions.IgnoreCase))
             co.ps.cell.HtmlNoWrap = true;
     }
 
@@ -669,7 +679,7 @@ internal static partial class HtmlToPdfConverter
         // bytes ever arrive — a spacer GIF that fails to load still holds
         // its gutter open, the way a browser reserves a broken image's box.
         // (…unless the picture stands in a positioned wrapper: out of flow, it lends the cell nothing)
-        if (ci.liftNestedTables && ci.ciw > 0 && !InPositionedInline(ci.ps))
+        if (ci.liftNestedTables && ci.ciw > 0 && ci.maxFrac <= 0 && !InPositionedInline(ci.ps))
             ci.ps.cellImgWidthPt = Math.Max(ci.ps.cellImgWidthPt, ci.ciw * PxToPtW);
         // (the placeholder's column is its framed box: the 32 pt square and its 1 pt frame each side -
         //  measured: beside the 5.5in / 1.5in columns squeezed by their slack, the masthead centres at 280)
@@ -681,9 +691,9 @@ internal static partial class HtmlToPdfConverter
         // place; the paragraph-image path below breaks the line
         // around it. A checkmark glyph carries the ink. Cells that
         // hold ONLY the image (the data-row tick boxes) keep the
-        // real bitmap.
+        // real bitmap. (SMALL by the box it loaded at, as LoadCellImage gives it - never one a max-width cap completed or scaled.)
         if (ci.overDeclaredDraw && ci.cellImgBytes is not null
-            && ci.ciw is > 0 and <= 20 && ci.cih is > 0 and <= 20
+            && (ci.boxBeforeCap ?? (ci.ciw, ci.cih)) is (> 0 and <= 20, > 0 and <= 20)
             && ci.ps.line.ToString().Replace("&nbsp;", " ").Trim((char)0xA0, ' ').Length > 0)
         {
             ci.ps.line.Append('☑');
@@ -724,7 +734,7 @@ internal static partial class HtmlToPdfConverter
         if (ci.dwFormCells && ci.cellImgBytes is null
             && !ci.tok.Attributes!.ContainsKey("width")
             && (!ci.tok.Attributes.TryGetValue("style", out var dwImgSt) || dwImgSt is null
-                || !Regex.IsMatch(dwImgSt, @"(?<![-\w])width\s*:", RegexOptions.IgnoreCase)))
+                || !SafeRegex.IsMatch(dwImgSt, @"(?<![-\w])width\s*:", RegexOptions.IgnoreCase)))
         {
             ci.ps.line.Append(Table.InlineCheckboxGapChar);
             ci.ps.cellImgWidthPt += Table.DwHiddenInlinePt;
@@ -742,7 +752,7 @@ internal static partial class HtmlToPdfConverter
             if (!ci.ps.lineStyleSet) { ci.ps.lineFontPt = ci.ps.curFontPt; ci.ps.lineFamily = ci.ps.curFamily; ci.ps.lineStyleSet = true; }
             ci.ps.line.Append(DecodeEntities(uaAlt));
             if (ci.tok.Attributes.TryGetValue("style", out var uaImgSt)
-                && Regex.IsMatch(uaImgSt, @"margin-right\s*:\s*[1-9]", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(uaImgSt, @"margin-right\s*:\s*[1-9]", RegexOptions.IgnoreCase))
                 ci.ps.line.Append('\u00A0');
             ci.ps.lineHadText = true;
             if (ci.ps.boldDepth == 0) ci.ps.lineAllBold = false;
@@ -808,17 +818,25 @@ internal static partial class HtmlToPdfConverter
     private static void AddCellImage(CellImgState ci, byte[] cellImgBytes)
     {
             PushLine(ci.ps, ci.redlineCells, ci.dwFormCells, ci.widenProbe);
-            var cellImg = new Image { ImageStream = new System.IO.MemoryStream(cellImgBytes) };
+            var cellImg = new Image { ImageStream = new System.IO.MemoryStream(cellImgBytes), BoxMaxWidthFraction = ci.maxFrac };
             // A cell that declares an alignment aligns its IMAGE too, not
             // only its text — an `align="right"` logo cell hangs its logo
             // on the right edge of the cell the same way a right-aligned
             // run seats there.
             if (ci.ps.alignSet) cellImg.HorizontalAlignment = ci.ps.cellAlign;
-            if (ci.liftNestedTables && ci.ciw > 0 && !InPositionedInline(ci.ps))
+            if (ci.liftNestedTables && ci.ciw > 0 && ci.maxFrac <= 0 && !InPositionedInline(ci.ps))
                 ci.ps.cellImgWidthPt = Math.Max(ci.ps.cellImgWidthPt, ci.ciw * PxToPtW);
             if (IsSvgBytes(cellImgBytes)) cellImg.FileType = ImageFileType.Svg;
             if (ci.ciw > 0) cellImg.FixWidth = ci.ciw * PxToPt;
             if (ci.cih > 0) cellImg.FixHeight = ci.cih * PxToPt;
+            // A percent width resolves against the cell's text box once the columns are solved, no wider than a
+            // max-width length; the picture's own width, so held, is the most its column need grow for it.
+            if (ci.ciwFrac > 0)
+            {
+                (cellImg.BoxWidthFraction, cellImg.MaxDrawWidth) = (ci.ciwFrac, ci.maxWidthPt);
+                if (TryReadImagePixelSize(cellImgBytes) is (var ownW, _) && ownW > 0)
+                    ci.ps.cellImgMaxPt = Math.Max(ci.ps.cellImgMaxPt, ci.maxWidthPt > 0 ? Math.Min(ownW * PxToPtW, ci.maxWidthPt) : ownW * PxToPtW);
+            }
             // A picture in a positioned wrapper is out of flow: it draws at its seat and the rows below run
             // on underneath it (the Word mail's chart floats over the six rows of the small grid beside it,
             // and its 11.25 pt row keeps its declared height). A floating box in flow position is that seat.
@@ -851,33 +869,42 @@ internal static partial class HtmlToPdfConverter
             ci.cellImgBytes = LoadConverterImage(cellSrc, ci.options);
         ci.ciw = 0;
         ci.cih = 0;
+        ci.ciwFrac = 0;
         if (ci.tok.Attributes!.TryGetValue("width", out var ciwS))
-            double.TryParse(Regex.Match(ciwS, @"[\d.]+").Value,
+            double.TryParse(SafeRegex.Match(ciwS, @"[\d.]+").Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out ci.ciw);
         if (ci.tok.Attributes.TryGetValue("height", out var cihS))
-            double.TryParse(Regex.Match(cihS, @"[\d.]+").Value,
+            double.TryParse(SafeRegex.Match(cihS, @"[\d.]+").Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out ci.cih);
         // A CSS-sized cell image (style="width:240px; height:45px") is as
         // explicit as the attribute form.
         if ((ci.ciw <= 0 || ci.cih <= 0) && ci.tok.Attributes.TryGetValue("style", out var ciStyle))
         {
-            var cwm = Regex.Match(ciStyle, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+            var cwm = SafeRegex.Match(ciStyle, @"(?<![-\w])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
             if (ci.ciw <= 0 && cwm.Success)
                 double.TryParse(cwm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out ci.ciw);
-            var chm = Regex.Match(ciStyle, @"(?<![-\w])height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
+            var chm = SafeRegex.Match(ciStyle, @"(?<![-\w])height\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase);
             if (ci.cih <= 0 && chm.Success)
                 double.TryParse(chm.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out ci.cih);
+            // A PERCENT width is a share of the cell's text box, known only once the columns are
+            // solved: the picture asks the column for nothing and is sized at layout (the file's own
+            // size would widen the column, and the sheet, to a bitmap drawn at a fraction of it).
+            var cpm = ci.ciw <= 0 && ci.cih <= 0
+                ? SafeRegex.Match(ciStyle, @"(?<![-\w])width\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase) : Match.Empty;
+            if (cpm.Success && double.TryParse(cpm.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var ciwPct) && ciwPct > 0)
+                ci.ciwFrac = ciwPct / WholeWidthPercent;
         }
         // An image that declares NO box of its own takes the file's own
         // pixel size: a browser lays an unsized image out at its
         // intrinsic dimensions. Without this the cell reserves nothing,
         // so the column collapses and the sheet is sized as though the
         // picture were not there.
-        if ((ci.ciw <= 0 && ci.cih <= 0 || ci.ps.resetSheetGrid) && (ci.ciw <= 0 || ci.cih <= 0) && ci.cellImgBytes is { Length: > 0 }
+        if (ci.ciwFrac <= 0 && (ci.ciw <= 0 && ci.cih <= 0 || ci.ps.resetSheetGrid) && (ci.ciw <= 0 || ci.cih <= 0) && ci.cellImgBytes is { Length: > 0 }
             && TryReadImagePixelSize(ci.cellImgBytes) is (var intrinsicW, var intrinsicH) && intrinsicW > 0 && intrinsicH > 0)
         {
             // …and one declared side scales the other by the picture's own aspect (a
@@ -995,7 +1022,7 @@ internal static partial class HtmlToPdfConverter
         // 1px solid #000; border-left: 0px }`) box only the sides
         // that declare a visible stroke.
         if (co.ps.cell.Border is null
-            && (co.bgRule!.ContainsKey("border-top") || co.bgRule!.ContainsKey("border-bottom")
+            && (co.bgRule!.ContainsKey("border-top") || co.bgRule.ContainsKey("border-bottom")
                 || co.bgRule.ContainsKey("border-left") || co.bgRule.ContainsKey("border-right")))
         {
             BorderSide clsSides = 0; double clsW = 0; Color? clsCol = null;
@@ -1011,10 +1038,10 @@ internal static partial class HtmlToPdfConverter
                     if (sbi.Width > clsW) clsW = sbi.Width;
                     clsCol ??= sbi.Color;
                 }
-            co.ps.cell.Border = clsSides != 0
-                ? new BorderInfo(clsSides, clsW <= 0 ? 0.75 : clsW,
-                    clsCol ?? Color.Black)
-                : new BorderInfo(BorderSide.None);
+            if (clsSides != 0)
+                co.ps.cell.Border = new BorderInfo(clsSides, clsW <= 0 ? 0.75 : clsW,
+                    clsCol ?? Color.Black);
+            else co.ps.cell.Border = new BorderInfo(BorderSide.None);
         }
         return true;
     }

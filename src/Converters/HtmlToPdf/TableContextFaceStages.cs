@@ -12,7 +12,7 @@ internal static partial class HtmlToPdfConverter
         // says it through `.h5 { font-weight: bold }` on the table alone, and every cell of
         // that row draws bold in the reference.
         ps.tableBold = cfg.tblStyle.TryGetValue("font-weight", out var itfw)
-            && Regex.IsMatch(itfw, @"bold|[6-9]00", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(itfw, @"bold|[6-9]00", RegexOptions.IgnoreCase);
         cfg.inlineFaceRatio = 0.0;
         if (cfg.tblStyle.TryGetValue("font-family", out var iff))
         {
@@ -23,7 +23,7 @@ internal static partial class HtmlToPdfConverter
             // the body face in its synthetic style and keeps the calibrated
             // legacy metrics.
             if (cfg.tblTag.Success
-                && Regex.IsMatch(cfg.tblTag.Value, @"font-family", RegexOptions.IgnoreCase)
+                && SafeRegex.IsMatch(cfg.tblTag.Value, @"font-family", RegexOptions.IgnoreCase)
                 && cfg.tblTag.Value.IndexOf("data-fhw", StringComparison.OrdinalIgnoreCase) < 0
                 && !cfg.tblClasses.Contains("fh-row")
                 && ps.cellFamily is { Length: > 0 } && WinMetricsFor(ps.cellFamily) is { } ifm)
@@ -73,6 +73,8 @@ internal static partial class HtmlToPdfConverter
         // Verdana; a `.datagrid { font: 12px/150% Arial }` wrapper draws its cells in Arial 9).
         if (_ancestorGridSheet && cfg.cssAncestors is { Count: > 0 } && cfg.chainRules is { Count: > 0 })
             ApplyAncestorTypography(cfg, ps, cfg.cellSizeDeclared, html);
+        // …and where none of the above faces them, the cells inherit the installed face the body rule names, as the prose does.
+        InheritBodyFace(cfg, ps, cssRunFace, uaCellBoxes, html);
 
         // The CSS run dialect costs this table its uniform per-row line grid, so it only
         // applies where that grid is actually wrong: a table holding a RUN whose class
@@ -87,7 +89,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var wbSrc in new[] { cfg.css, cfg.docCss })
             if (wbSrc is not null && wbSrc.TryGetValue("*", out var wbR)
                 && wbR.TryGetValue("word-break", out var wbV)
-                && Regex.IsMatch(wbV, "break-word|break-all", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(wbV, "break-word|break-all", RegexOptions.IgnoreCase))
                 cfg.breakAnywhereDoc = true;
         // Word mail: every cell holds its declared width - a token wider than its cell
         // (a signature picture's alt path) breaks inside it instead of widening the column.
@@ -99,7 +101,7 @@ internal static partial class HtmlToPdfConverter
         // quotation: the page is 96 + 487.5 + 90 = 673.5 with the rule, 2339.51 without it).
         if (!cfg.breakAnywhereDoc
             && (TableClassRuleValue(cfg, "word-break") ?? TableClassCellRuleValue(cfg, "word-break")) is { } clsWb
-            && Regex.IsMatch(clsWb, "break-word|break-all", RegexOptions.IgnoreCase))
+            && SafeRegex.IsMatch(clsWb, "break-word|break-all", RegexOptions.IgnoreCase))
             cfg.breakAnywhereDoc = true;
         return cssRunFace;
     }
@@ -112,11 +114,11 @@ internal static partial class HtmlToPdfConverter
         // (probed: a `body { font-size: 15px }` sheet's unclassed cells draw at 12 pt). Documents
         // with no body size keep the calibrated 11 (the diff report and the attachment grid page
         // 27 and 20 pt wider at 12).
-        cfg.cellFontSize = cfg.defaultCellFontPt > 0 ? cfg.defaultCellFontPt
-            // (a UA-boxed grid the document sizes nowhere draws at the browser's 16px base)
-            : uaCellBoxes ? UaDefaultFontPt
-            : _quirksRowStrut && cfg.docCss is not null && TryGetCssLength(cfg.docCss, "body", "font-size") is > 0 ? UaDefaultFontPt
-            : LegacyCellFontPt;
+        if (cfg.defaultCellFontPt > 0) cfg.cellFontSize = cfg.defaultCellFontPt;
+        // (a UA-boxed grid the document sizes nowhere draws at the browser's 16px base)
+        else if (uaCellBoxes) cfg.cellFontSize = UaDefaultFontPt;
+        else if (_quirksRowStrut && cfg.docCss is not null && TryGetCssLength(cfg.docCss, "body", "font-size") is > 0) cfg.cellFontSize = UaDefaultFontPt;
+        else cfg.cellFontSize = LegacyCellFontPt;
         cfg.cellFontShorthand = false;
         cfg.cellSizeDeclared = true;
         // (a keyword the table's OWN style attribute states - `font-size: small` - is a size too, the

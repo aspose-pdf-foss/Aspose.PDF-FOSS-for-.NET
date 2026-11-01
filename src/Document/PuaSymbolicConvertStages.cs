@@ -29,8 +29,8 @@ public sealed partial class Document
         catch { return true; }
 
         pu.tfPattern = new System.Text.RegularExpressions.Regex(
-            @"/" + System.Text.RegularExpressions.Regex.Escape(key) + @"\s+([\d.]+)\s+Tf");
-        if (!pu.tfPattern.IsMatch(pu.content)) return true;
+            @"/" + System.Text.RegularExpressions.Regex.Escape(key) + @"\s+([\d.]+)\s+Tf", System.Text.RegularExpressions.RegexOptions.None, RegexLimits.Timeout);
+        if (!SafeRegex.IsMatch(pu.tfPattern, pu.content)) return true;
 
         pu.firstChar = (int)((_reader.Resolve(pu.fontDict.Get("FirstChar")) as PdfInteger)?.Value ?? 0);
         pu.widths = _reader.Resolve(pu.fontDict.Get("Widths")) as PdfArray;
@@ -40,7 +40,9 @@ public sealed partial class Document
         pu.newKey = $"C{pu.converted}_0";
         pu.rewritten = new StringBuilder();
         pu.pos = 0;
-        foreach (System.Text.RegularExpressions.Match m in pu.tfPattern.Matches(pu.content))
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (System.Text.RegularExpressions.Match m in SafeRegex.Matches(pu.tfPattern, pu.content))
+#pragma warning restore S3267
         {
             if (!RewritePuaShowRun(pu, m)) break;
         }
@@ -109,7 +111,7 @@ public sealed partial class Document
         if (nextEt >= 0) segEnd = Math.Min(segEnd, nextEt);
 
         var segment = pu.content[pu.pos..segEnd];
-        segment = System.Text.RegularExpressions.Regex.Replace(segment,
+        segment = SafeRegex.Replace(segment,
             @"\(((?:[^()\\]|\\.)*)\)\s*(Tj|'\s*)",
             sm =>
             {
@@ -140,9 +142,12 @@ public sealed partial class Document
         pu.pos = segEnd;
         return true;
     }
-    private static int CodeToGid(PuaSymbolicConvertState pu, int code) =>
-        pu.cmap.TryGetValue(0xF000 | code, out var g) ? g
-        : pu.cmap.TryGetValue(code, out var g2) ? g2 : 0;
+    private static int CodeToGid(PuaSymbolicConvertState pu, int code)
+    {
+        if (pu.cmap.TryGetValue(0xF000 | code, out var g)) return g;
+        if (pu.cmap.TryGetValue(code, out var g2)) return g2;
+        return 0;
+    }
 
     private static bool CodeIsPua(PuaSymbolicConvertState pu, int code) => pu.cmap.ContainsKey(0xF000 | code);
 }

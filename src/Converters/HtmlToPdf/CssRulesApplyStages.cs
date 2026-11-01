@@ -8,8 +8,15 @@ internal static partial class HtmlToPdfConverter
 // The stages of the CSS rule application: one selector's declarations.
     private static void ApplyCssSelector(CssRulesApplyState cq, string selector)
     {
-        if (!cq.css!.TryGetValue(selector, out var decls)) return;
+        if (cq.css!.TryGetValue(selector, out var decls)) ApplyRuleDeclarations(cq, decls);
+    }
+
+    /// <summary>One rule's declarations, in the order the rule states them, then its painted box.</summary>
+    private static void ApplyRuleDeclarations(CssRulesApplyState cq, Dictionary<string, string> decls)
+    {
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var kv in decls)
+#pragma warning restore S3267
         {
             if (!ApplyCssDeclaration(cq, kv)) break;
         }
@@ -75,7 +82,7 @@ internal static partial class HtmlToPdfConverter
     {
         if (!decls.TryGetValue("background-image", out var bg) && !decls.TryGetValue("background", out bg))
             return null;
-        var m = Regex.Match(DecodeEntities(bg), @"url\(\s*[""']?([^""')]+?)[""']?\s*\)", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(DecodeEntities(bg), @"url\(\s*[""']?([^""')]+?)[""']?\s*\)", RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value.Trim() : null;
     }
 
@@ -84,7 +91,7 @@ internal static partial class HtmlToPdfConverter
     /// every document that declares one.</summary>
     private static void ApplyPaintOnlyWidthFraction(string val, BlockStyle s)
     {
-        if (Regex.Match(val.Trim(), @"^([0-9.]+)\s*%$") is { Success: true } m
+        if (SafeRegex.Match(val.Trim(), @"^([0-9.]+)\s*%$") is { Success: true } m
             && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var pct)
             && pct > 0 && pct <= 100)
@@ -94,7 +101,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>A `vh` length as its fraction of the viewport height; null for any other unit.</summary>
     private static double? TryParseViewportFraction(string s)
     {
-        var m = Regex.Match(s.Trim(), @"^(\d+(?:\.\d+)?)\s*vh$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(s.Trim(), @"^(\d+(?:\.\d+)?)\s*vh$", RegexOptions.IgnoreCase);
         return m.Success ? double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) / 100.0 : null;
     }
 
@@ -111,13 +118,13 @@ internal static partial class HtmlToPdfConverter
             else if (kv.Key == "padding-bottom") cq.s.BgSpanPadBottomPt = bgPadOne;
             else cq.s.BgSpanPadLeftPt = bgPadOne;
         }
-        // page-break-before:always — a genuine pagination directive, honoured here.
-        if (kv.Key == "page-break-before"
-            && kv.Value.Contains("always", StringComparison.OrdinalIgnoreCase))
-            cq.s.PageBreakBefore = true;
-        else if (kv.Key == "page-break-after"
-            && kv.Value.Contains("always", StringComparison.OrdinalIgnoreCase))
-            cq.s.PageBreakAfter = true;
+        // page-break-before:always — a genuine pagination directive, honoured here. The rules apply in
+        // specificity order, so a later `avoid` or `auto` withdraws the break a less specific rule set
+        // (a sheet breaking before every h1 but not before the one it names by id).
+        if (kv.Key == "page-break-before")
+            cq.s.PageBreakBefore = kv.Value.Contains("always", StringComparison.OrdinalIgnoreCase);
+        else if (kv.Key == "page-break-after")
+            cq.s.PageBreakAfter = kv.Value.Contains("always", StringComparison.OrdinalIgnoreCase);
         // Print-authored cover documents (a body{margin:0} page with an
         // explicit page-break-after separator): the cover classes' OWN type
         // scale and physical-unit margins ARE the layout — the calibrated
@@ -136,7 +143,7 @@ internal static partial class HtmlToPdfConverter
             {
                 double pt = 0;
                 if (TryParseLength(v) is { } len) { pt = len; return pt; }
-                if (Regex.IsMatch(v.Trim(), @"^0(px|pt|em|rem|in|cm|mm)?$",
+                if (SafeRegex.IsMatch(v.Trim(), @"^0(px|pt|em|rem|in|cm|mm)?$",
                         RegexOptions.IgnoreCase)) { pt = 0; return pt; }
                 return null;
             }
@@ -152,6 +159,14 @@ internal static partial class HtmlToPdfConverter
                 cq.s.MarginBottom = cmB;
             }
         }
+        // A sheet whose body pads its own box states its vertical rhythm: a rule's margin shorthand
+        // is recorded and the render keeps it (see ApplyBlockTopDrop).
+        else if (cq.cssBoxBody && kv.Key == "margin")
+            ApplyMarginDecl(kv.Value, cq.s);
+        // …and a list's padding-left is its indent, in place of the flow's calibrated 20 pt.
+        else if (cq.cssBoxBody && kv.Key == "padding-left" && cq.s.Tag is "ul" or "ol"
+                 && TryParseLength(kv.Value) is { } listPadPt)
+            cq.s.LeftIndent += listPadPt - CalibratedListIndentPt;
         else if (cq.coverStyles && kv.Key == "line-height"
                  && double.TryParse(kv.Value.Trim(), System.Globalization.NumberStyles.Float,
                      System.Globalization.CultureInfo.InvariantCulture, out var clhF)
@@ -184,7 +199,9 @@ internal static partial class HtmlToPdfConverter
         // the layout properties ARE the spec: stylesheet font sizes, MARGIN-LEFT
         // class indents, and centering all apply.
         else if (cq.metricLayout && kv.Key is "font-size" or "margin-left" or "padding-left"
-                     or "padding-bottom")
+                     or "padding-bottom"
+                     // …and a class margin-right and text-indent, which the flow renders (the hanging tree view)
+                     or "margin-right" or "text-indent")
             ApplyDeclaration(kv.Key, kv.Value, cq.s);
         else if (cq.metricLayout && kv.Key == "text-align")
             cq.s.AlignCenter = kv.Value.Trim().Equals("center", StringComparison.OrdinalIgnoreCase);

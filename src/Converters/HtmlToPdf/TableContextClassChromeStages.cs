@@ -18,8 +18,8 @@ internal static partial class HtmlToPdfConverter
             if (d.TryGetValue("border", out var bd))
             {
                 var t = bd.Trim();
-                cfg.hasBorder = !t.StartsWith("0") && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0;
-                var wm = Regex.Match(bd, @"(\d+(?:\.\d+)?)\s*px");
+                cfg.hasBorder = !t.StartsWith('0') && t.IndexOf("none", StringComparison.OrdinalIgnoreCase) < 0;
+                var wm = SafeRegex.Match(bd, @"(\d+(?:\.\d+)?)\s*px");
                 if (wm.Success && double.TryParse(wm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var bw))
                     cfg.borderWidth = bw * PxToPt;
                 var bc = ParseCssColor(bd); if (bc is not null) cfg.borderColor = bc;
@@ -70,14 +70,16 @@ internal static partial class HtmlToPdfConverter
                     foreach (var src2 in new[] { cfg.css, cfg.docCss })
                         if (src2 is not null && src2.TryGetValue("td", out var dtd2)
                             && dtd2.TryGetValue("border-width", out var bwv))
-                            foreach (Match mm in Regex.Matches(bwv, @"([\d.]+)\s*(px)?"))
+                            foreach (Match mm in SafeRegex.Matches(bwv, @"([\d.]+)\s*(px)?"))
                                 if (double.TryParse(mm.Groups[1].Value,
                                         System.Globalization.NumberStyles.Float,
                                         System.Globalization.CultureInfo.InvariantCulture, out var bwp)
                                     && bwp > 0 && bwp < 10)
                                     maxPx = Math.Max(maxPx, bwp);
                     cfg.borderWidth = maxPx * PxToPt;
+#pragma warning disable S3267 // the if's null test narrows the item for the body - a Where predicate does not carry that null state into the loop
                     foreach (var src2 in new[] { cfg.css, cfg.docCss })
+#pragma warning restore S3267
                         if (src2 is not null)
                             foreach (var sel2 in new[] { "td", "table" })
                                 if (src2.TryGetValue(sel2, out var d2)
@@ -103,7 +105,7 @@ internal static partial class HtmlToPdfConverter
         if (cssRunFace is not null)
         {
             var mixed = false;
-            foreach (Match rt in Regex.Matches(html, @"<(?:span|font|p)\b[^>]*\bclass\s*=\s*[""']([^""']*)[""']",
+            foreach (Match rt in SafeRegex.Matches(html, @"<(?:span|font|p)\b[^>]*\bclass\s*=\s*[""']([^""']*)[""']",
                          RegexOptions.IgnoreCase))
             {
                 foreach (var rc in rt.Groups[1].Value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))

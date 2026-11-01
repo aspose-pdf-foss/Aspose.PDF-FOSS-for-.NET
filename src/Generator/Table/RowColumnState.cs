@@ -111,7 +111,7 @@ private sealed class RowColumnState
     public List<(ReservedBlock block, ReservedPart part, Rectangle rect)>? blockSink;
     public List<(Aspose.Pdf.Forms.RadioButtonOptionField opt, Rectangle rect)>? optionSink;
     public List<byte[]>? graphSink;
-    public List<(Aspose.Pdf.Forms.CheckboxField cbf, Rectangle rect)>? checkboxSink;
+    public List<(Aspose.Pdf.Annotations.Annotation annot, Rectangle rect)>? checkboxSink;
     public Page? page;
     public List<(Note note, double x, double baseline, double size)>? footnoteSink;
     public int firstLine;
@@ -122,6 +122,12 @@ private sealed class RowColumnState
     public bool anyBoxes;
     public bool anyLinks;
     public bool xmlMixedSizes;
+    /// <summary>A line carries an underline its text state declared: it draws line by line,
+    /// where the rule under the run is stroked.</summary>
+    public bool anyDeclaredUnderline;
+    /// <summary>The character spacing that spreads a fully justified line to the cell's inner
+    /// width; zero for every other line.</summary>
+    public double justifyCharSpacing;
     // The cell mixes alignments (e.g. a centred title above a left HtmlFragment)
     // or carries an embedded-font (Arabic/Type0) line, an inline-box
     // decoration, so each line is positioned

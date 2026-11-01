@@ -55,14 +55,14 @@ public sealed partial class Document
         if (!hl.uaFlowProse) return false;
         var sheet = TableSheetForChunk(hl.htmlContent, chunk);
         if (sheet is null) return false;
-        var open = Regex.Match(chunk, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
+        var open = SafeRegex.Match(chunk, @"<table\b([^>]*)>", RegexOptions.IgnoreCase);
         var tableClasses = InlineAttr(open.Groups[0].Value, "class");
         // The sheet must style THIS table (an element or class rule); a plain table keeps the calibrated engines.
         sheet.TryGetValue("table", out var tableDecls);
         if (tableDecls is null && !HasClassRule(sheet, "table", tableClasses)) return false;
         // A nested table, a spanning cell, a picture or a control: no rule here yet.
-        if (Regex.Matches(chunk, @"<\s*table\b", RegexOptions.IgnoreCase).Count > 1
-            || Regex.IsMatch(chunk, @"\b(colspan|rowspan)\s*=|<\s*(img|input)\b", RegexOptions.IgnoreCase))
+        if (SafeRegex.Matches(chunk, @"<\s*table\b", RegexOptions.IgnoreCase).Count > 1
+            || SafeRegex.IsMatch(chunk, @"\b(colspan|rowspan)\s*=|<\s*(img|input)\b", RegexOptions.IgnoreCase))
             return false;
         var decls = MergeCssDecls(tableDecls, "");
         MergeClassRules(decls, sheet, "table", tableClasses);
@@ -113,17 +113,15 @@ public sealed partial class Document
     private static Dictionary<string, string> MergeCssDecls(Dictionary<string, string>? rule, string style)
     {
         var d = rule is null ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) : new Dictionary<string, string>(rule, StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in Regex.Matches(style, @"([-\w]+)\s*:\s*([^;]+)"))
-            d[m.Groups[1].Value.Trim().ToLowerInvariant()] = m.Groups[2].Value.Trim();
+        foreach (var groups in SafeRegex.Matches(style, @"([-\w]+)\s*:\s*([^;]+)").Select(m => m.Groups))
+            d[groups[1].Value.Trim().ToLowerInvariant()] = groups[2].Value.Trim();
         return d;
     }
 
     /// <summary>Whether the sheet holds a rule for any of the element's classes (".cls" or "tag.cls").</summary>
     private static bool HasClassRule(IReadOnlyDictionary<string, Dictionary<string, string>> sheet, string tag, string? classAttr)
     {
-        foreach (var cls in (classAttr ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
-            if (sheet.ContainsKey(tag + "." + cls) || sheet.ContainsKey("." + cls)) return true;
-        return false;
+        return (classAttr ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Any(cls => sheet.ContainsKey(tag + "." + cls) || sheet.ContainsKey("." + cls));
     }
 
     /// <summary>Apply the sheet's class rules of the element ("tag.cls" over ".cls") onto its declarations.</summary>
@@ -142,24 +140,24 @@ public sealed partial class Document
     private static bool ParseUaCssTableCells(HtmlFragmentLayoutState hl, HtmlInlineFlowState st, IReadOnlyDictionary<string, Dictionary<string, string>> sheet, string chunk, UaCssTable t, double defaultPad)
     {
         sheet.TryGetValue("td", out var tdRule);
-        foreach (Match rm in Regex.Matches(chunk, @"<tr\b[^>]*>(.*?)</tr\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
+        foreach (Match rm in SafeRegex.Matches(chunk, @"<tr\b[^>]*>(.*?)</tr\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
         {
             var row = new List<UaCssCell>();
-            foreach (Match cm in Regex.Matches(rm.Groups[1].Value, @"<t([dh])\b([^>]*)>(.*?)</t\1\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
+            foreach (var groups in SafeRegex.Matches(rm.Groups[1].Value, @"<t([dh])\b([^>]*)>(.*?)</t\1\s*>", RegexOptions.IgnoreCase | RegexOptions.Singleline).Select(cm => cm.Groups))
             {
-                var tag = cm.Groups[2].Value;
+                var tag = groups[2].Value;
                 var decls = MergeCssDecls(tdRule, "");
                 MergeClassRules(decls, sheet, "td", InlineAttr("<td " + tag + ">", "class"));
                 decls = MergeCssDecls(decls, InlineAttr("<td " + tag + ">", "style") ?? "");
                 if (decls.Keys.Any(k => k.StartsWith("border", StringComparison.OrdinalIgnoreCase))) return false;
                 var cell = new UaCssCell();
-                var isHeader = cm.Groups[1].Value.Equals("h", StringComparison.OrdinalIgnoreCase);
-                var bold = isHeader || Regex.IsMatch(decls.TryGetValue("font-weight", out var fw) ? fw : "", @"bold|[6-9]00", RegexOptions.IgnoreCase);
-                foreach (var b in ParseHtmlFlowBlocks(cm.Groups[3].Value, hl, st.basePt, out _, out _))
-                    foreach (var it in b.Items) { if (bold) it.Bold = true; cell.Items.Add(it); }
-                cell.NoWrap = Regex.IsMatch(tag, @"\bnowrap\b", RegexOptions.IgnoreCase)
+                var isHeader = groups[1].Value.Equals("h", StringComparison.OrdinalIgnoreCase);
+                var bold = isHeader || SafeRegex.IsMatch(decls.TryGetValue("font-weight", out var fw) ? fw : "", @"bold|[6-9]00", RegexOptions.IgnoreCase);
+                foreach (var b in ParseHtmlFlowBlocks(groups[3].Value, hl, st.basePt, out _, out _))
+                    foreach (var it in b.Items) { if (bold) { it.Bold = true; } cell.Items.Add(it); }
+                cell.NoWrap = SafeRegex.IsMatch(tag, @"\bnowrap\b", RegexOptions.IgnoreCase)
                     || (decls.TryGetValue("white-space", out var ws) && ws.Contains("nowrap", StringComparison.OrdinalIgnoreCase));
-                cell.FullWidth = decls.TryGetValue("width", out var cw) && Regex.IsMatch(cw, @"^\s*100\s*%");
+                cell.FullWidth = decls.TryGetValue("width", out var cw) && SafeRegex.IsMatch(cw, @"^\s*100\s*%");
                 if (cw is not null && !cell.FullWidth && CssMarginPt(cw.Trim(), st.basePt) is var dw && !double.IsNaN(dw) && dw > 0) cell.DeclaredW = dw;
                 (cell.PadTop, cell.PadBottom, cell.PadLeft, cell.PadRight) = CssPaddingSides(decls, st.basePt, defaultPad);
                 if (decls.TryGetValue("text-align", out var ta) || isHeader)
@@ -185,7 +183,7 @@ public sealed partial class Document
             var v = sh.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Select(x => CssMarginPt(x, fontPt)).Select(x => double.IsNaN(x) ? 0 : x).ToArray();
             if (v.Length >= 1)
             {
-                top = v[0]; right = v[v.Length > 1 ? 1 : 0]; bottom = v[v.Length > 2 ? 2 : 0]; left = v[v.Length > 3 ? 3 : v.Length > 1 ? 1 : 0];
+                top = v[0]; right = v[v.Length > 1 ? 1 : 0]; bottom = v[v.Length > 2 ? 2 : 0]; left = v[v.Length switch { > 3 => 3, > 1 => 1, _ => 0 }];
             }
         }
         foreach (var (name, side) in new[] { ("top", 0), ("bottom", 1), ("left", 2), ("right", 3) })
@@ -207,7 +205,7 @@ public sealed partial class Document
         if (decls.TryGetValue("width", out var cssW)) wAttr = cssW;
         if (wAttr is { Length: > 0 })
         {
-            var pm = Regex.Match(wAttr, @"^\s*([\d.]+)\s*(%|px|pt)?");
+            var pm = SafeRegex.Match(wAttr, @"^\s*([\d.]+)\s*(%|px|pt)?");
             if (pm.Success && double.TryParse(pm.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var wv))
                 t.WidthPt = pm.Groups[2].Value switch { "%" => contentWidth * wv / 100.0, "pt" => wv, _ => wv * CssPxToPt };
         }
@@ -232,8 +230,8 @@ public sealed partial class Document
     /// <summary>A border shorthand's width (0 for none/hidden) and colour.</summary>
     private static (double WidthPt, Color? Color) CssBorderSide(string value)
     {
-        if (Regex.IsMatch(value, @"\b(none|hidden)\b", RegexOptions.IgnoreCase)) return (0, null);
-        var wm = Regex.Match(value, @"([\d.]+)\s*(px|pt)");
+        if (SafeRegex.IsMatch(value, @"\b(none|hidden)\b", RegexOptions.IgnoreCase)) return (0, null);
+        var wm = SafeRegex.Match(value, @"([\d.]+)\s*(px|pt)");
         var w = wm.Success ? CssMarginPt(wm.Value.Replace(" ", ""), UaInlineBasePt) : CssPxToPt * UaTableMediumBorderPx;
         return (double.IsNaN(w) ? 0 : w, Converters.HtmlToPdfConverter.ParseCssColor(value));
     }
@@ -298,8 +296,8 @@ public sealed partial class Document
         foreach (var it in items)
         {
             if (it.Kind != HtmlInlineKind.Text) continue;
-            foreach (Match tm in HtmlFlowTokenRegex.Matches(it.Text))
-                if (tm.Value.Trim().Length > 0) widest = System.Math.Max(widest, InlineTextWidth(st, it, tm.Value.Trim()));
+            foreach (var value in SafeRegex.Matches(HtmlFlowTokenRegex, it.Text).Select(tm => tm.Value))
+                if (value.Trim().Length > 0) widest = System.Math.Max(widest, InlineTextWidth(st, it, value.Trim()));
         }
         return widest;
     }
@@ -313,7 +311,8 @@ public sealed partial class Document
             {
                 var c = t.Rows[r][i];
                 // An empty cell opens no line box: its padding is all the height it asks for.
-                c.Lines = c.Items.Count == 0 ? new List<HtmlInlineLine>() : BuildInlineLines(st, c.Items, c.NoWrap ? double.MaxValue / 4 : t.ColW[i] - c.PadLeft - c.PadRight);
+                if (c.Items.Count == 0) c.Lines = new List<HtmlInlineLine>();
+                else c.Lines = BuildInlineLines(st, c.Items, c.NoWrap ? double.MaxValue / 4 : t.ColW[i] - c.PadLeft - c.PadRight);
                 c.ContentH = 0;
                 foreach (var line in c.Lines) { MeasureInlineLine(st, line); c.ContentH += line.Above + line.Below; }
                 t.RowH[r] = System.Math.Max(t.RowH[r], c.ContentH + c.PadTop + c.PadBottom);
@@ -323,7 +322,7 @@ public sealed partial class Document
     /// <summary>Draw the table at the cursor (on the next page when it does not fit): margin,
     /// background over the border box, border bands, then each cell's lines seated on their
     /// line boxes, vertically aligned in the row; advance by the box and its margins.</summary>
-    private void EmitUaCssTable(HtmlInlineFlowState st, UaCssTable t)
+    private static void EmitUaCssTable(HtmlInlineFlowState st, UaCssTable t)
     {
         var flow = st.flow;
         var gridH = t.Spacing * (t.Rows.Count + 1) + t.RowH.Sum();
@@ -373,7 +372,7 @@ public sealed partial class Document
 
     /// <summary>One cell: its background over its box, its lines seated from its padded top,
     /// centred (or top / bottom aligned) in the row and aligned in its content width.</summary>
-    private void EmitUaCssCell(HtmlInlineFlowState st, UaCssCell c, double x, double top, double w, double rowH)
+    private static void EmitUaCssCell(HtmlInlineFlowState st, UaCssCell c, double x, double top, double w, double rowH)
     {
         if (c.Back is { } back) st.csb.SaveState().SetFillColor(back).Rectangle(x, top - rowH, w, rowH).Fill().RestoreState();
         var cellH = c.ContentH + c.PadTop + c.PadBottom;

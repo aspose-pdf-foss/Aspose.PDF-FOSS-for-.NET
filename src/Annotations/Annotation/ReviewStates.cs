@@ -85,7 +85,7 @@ public partial class Annotation
         if (!string.IsNullOrEmpty(author)) reply.Title = author;
         reply.Dict.Set("State", new PdfString(Compat.Latin1.GetBytes(state)));
         reply.Dict.Set("StateModel", new PdfString(Compat.Latin1.GetBytes(model)));
-        reply.Dict.Set("IRT", _dict);
+        reply.Dict.Set("IRT", reply.ReferenceTo(this));
         page.Annotations.Add(reply);
     }
 
@@ -121,11 +121,8 @@ public partial class Annotation
         {
             var annots = _reader.Resolve(pages[i].Dict.Get("Annots")) as Core.PdfArray;
             if (annots is null) continue;
-            foreach (var item in annots)
-            {
-                if (ReferenceEquals(_reader.ResolveDict(item), dict))
-                    return i;
-            }
+            if (annots.Any(item => ReferenceEquals(_reader.ResolveDict(item), dict)))
+                return i;
         }
         return -1;
     }

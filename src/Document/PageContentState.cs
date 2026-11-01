@@ -23,6 +23,9 @@ private sealed class PageContentState
     // would otherwise jump over; pages this same pass created are already in flow order
     // and re-ordering them puts a continuation ahead of the page it continues.
     public int preLayoutPageCount;
+    // The pages shown turned by their /Rotate this pass lays out, each with what it held before: the
+    // generated content is laid out in the page as shown and turned into media space once the pass is done.
+    public List<(Page page, Page.ShownFrameMark mark)> turnedPages = new();
     // Collect overflow pages to add after iteration
     public List<(byte[] content, double width, double height)> overflowPages = null!;
     // Table images destined for an overflow page, keyed by that page's slot index in

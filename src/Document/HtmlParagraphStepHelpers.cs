@@ -56,9 +56,8 @@ public sealed partial class Document
             {
                 var mfs = ml.FontPt > 0 ? ml.FontPt : psFs;
                 var mPitch = ml.LinePt > 0 ? ml.LinePt : psPitch * mfs / psFs;
-                n += ml.EmptyPara
-                    ? mPitch + (ml.BlockMargined ? 0 : 2 * mfs)
-                    : Math.Max(1, PsLayoutLine(sr, ml).Count) * mPitch;
+                if (ml.EmptyPara) n += mPitch + (ml.BlockMargined ? 0 : 2 * mfs);
+                else n += Math.Max(1, PsLayoutLine(sr, ml).Count) * mPitch;
             }
         }
         // the cluster's exact height, so keep-together prices
@@ -78,8 +77,8 @@ public sealed partial class Document
         cb.SaveState();
         if (sr.prow.Clog)
             cb.SetLineWidth(0.75)
-              .MoveTo(page.Width - marginRight - 0.5, sr.clogTop)
-              .LineTo(page.Width - marginRight - 0.5, flow.CurrentY)
+              .MoveTo(page.LayoutFrameWidth - marginRight - 0.5, sr.clogTop)
+              .LineTo(page.LayoutFrameWidth - marginRight - 0.5, flow.CurrentY)
               .Stroke();
         if (sr.prow.Warn)
         {
@@ -284,10 +283,13 @@ public sealed partial class Document
             {
                 var runW = 0.0;
                 foreach (var (sx2, sg2, tx2) in dl)
-                    runW = Math.Max(runW, sx2 + (sg2.BlankPt > 0
-                        ? sg2.BlankPt
-                        : sg2.Radio || sg2.Checkbox ? 11.2
-                        : tx2 is null ? 0 : PsMeasure(tx2, sg2.Bold, rfs)));
+                {
+                    double segW = 0;
+                    if (sg2.BlankPt > 0) segW = sg2.BlankPt;
+                    else if (sg2.Radio || sg2.Checkbox) segW = 11.2;
+                    else if (tx2 is not null) segW = PsMeasure(tx2, sg2.Bold, rfs);
+                    runW = Math.Max(runW, sx2 + segW);
+                }
                 rInset += pline.Align == 1
                     ? Math.Max(0, (sr.psLimit - sr.psLineInset * 2 - runW) / 2)
                     : Math.Max(0, sr.psLimit - sr.psLineInset * 2 - runW);

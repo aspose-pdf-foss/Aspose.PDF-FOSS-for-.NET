@@ -66,12 +66,11 @@ private sealed class BorderedGridState
     public double fillW;
     public Converters.HtmlToPdfConverter.MetricCell mc = null!;
     public double cellFs;
-    public (double asc, double sum) cFm;
     public double cellLineH;
     public string mFace = null!;
     public string fontRes = null!;
-    // Middle vertical alignment (the HTML cell default);
-    // a valign='top' cell seats its first line at the row top.
+    // Middle vertical alignment (the HTML cell default); a
+    // valign='top' cell seats its first line at the row top.
     public double lineTopTd;
     // A link cell with no sheet anchor rule draws the UA link
     // ink: #0000FF text with an underline one tenth of an em

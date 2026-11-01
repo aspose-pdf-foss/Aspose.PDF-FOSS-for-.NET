@@ -7,8 +7,8 @@ internal static partial class HtmlToPdfConverter
 {
     private static void FitBorderedColumns(MetricParseState mps, List<List<MetricCell>> rows, double[] colW,
         bool[] colFixed, double[] colPct, double[] colPx, bool[] colPxStyle, int nCols, double availW, double bw,
-        double p, double pageWidth, double pageHeight, double marginTop, double marginBottom,
-        double tableWpt, double tablePct, double baseFontSize, bool paragraphCells, string tableHtml,
+        double p,
+        double tableWpt, double tablePct,
         double s, string face, string boldFace, double symInsetPt, bool tableFills, bool stdSerif = false, MetricTableState? host = null)
     {
         var fb = new FitBorderedState();
@@ -25,15 +25,8 @@ internal static partial class HtmlToPdfConverter
         fb.availW = availW;
         fb.bw = bw;
         fb.p = p;
-        fb.pageWidth = pageWidth;
-        fb.pageHeight = pageHeight;
-        fb.marginTop = marginTop;
-        fb.marginBottom = marginBottom;
         fb.tableWpt = tableWpt;
         fb.tablePct = tablePct;
-        fb.baseFontSize = baseFontSize;
-        fb.paragraphCells = paragraphCells;
-        fb.tableHtml = tableHtml;
         fb.s = s;
         fb.face = face;
         fb.boldFace = boldFace;
@@ -56,10 +49,9 @@ internal static partial class HtmlToPdfConverter
     }
 
     private static void RenderBorderedGrid(MetricParseState mps, List<List<MetricCell>> rows, double[] colW, int nCols,
-        double availW, double s, double bw, double lineH, string face, string boldFace, double hheaSum, (double asc, double sum) fm,
+        double availW, double s, double bw, double lineH, string face, string boldFace, (double asc, double sum) fm,
         double p, double pageWidth, double pageHeight, double marginTop, double marginBottom,
-        double tableWpt, double tablePct, double baseFontSize, bool paragraphCells, string tableHtml,
-        double symInsetPt, bool tableFills, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc,
+        double tableWpt, double tablePct, double baseFontSize, string tableHtml, bool tableFills, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc,
         Core.PdfDictionary docFontDict, HtmlLoadOptions? loadOptions, System.Globalization.CultureInfo invc,
         bool stdSerif, bool wrapperStacks, Color? rmtAnchorColor,
         double marginLeft, double contentWidth, double tableX, FlowPosition cursor)
@@ -87,16 +79,21 @@ internal static partial class HtmlToPdfConverter
         foreach (var w in colW) bg.outerW += w + 2 * p + 2 * bw;
         // (a collapsed grid's neighbours share one rule: the frame ends on the last one)
         if (mps.attrCollapse) bg.outerW -= nCols * bw;
-        bg.outerR = bg.tableX + (mps.borderHugs ? bg.outerW
-            : tableFills && !mps.layoutFixed ? availW : Math.Max(availW, bg.outerW));
-        bg.rowIdx = -1;
-        foreach (var r in rows)
+        bg.outerR = bg.tableX + ((mps.borderHugs, tableFills, mps.layoutFixed) switch
         {
-            if (!RenderGridRow(bg, mps, colW, nCols, s, bw, lineH, face, boldFace, hheaSum, fm, p, pageWidth, pageHeight, marginTop, marginBottom, tableWpt, baseFontSize, symInsetPt, css, doc, docFontDict, loadOptions, invc, stdSerif, wrapperStacks, rmtAnchorColor, r)) break;
+            (true, _, _) => bg.outerW,
+            (_, true, false) => availW,
+            _ => Math.Max(availW, bg.outerW),
+        });
+        bg.rowIdx = -1;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (var r in rows)
+#pragma warning restore S3267
+        {
+            if (!RenderGridRow(bg, mps, colW, nCols, s, bw, lineH, face, boldFace, fm, p, pageWidth, pageHeight, marginTop, marginBottom, tableWpt, baseFontSize, css, doc, docFontDict, loadOptions, invc, stdSerif, wrapperStacks, rmtAnchorColor, r)) break;
         }
-        bg.tableBottomTd = bg.rowDeclH is not null
-            ? bg.rowTopTd + (bg.rowBotW![^1] > 0 ? bg.rowBotW[^1] : bw) / 2
-            : bg.rowTopTd + bw + FrameExtra(mps, bw);
+        if (bg.rowDeclH is not null) bg.tableBottomTd = bg.rowTopTd + (bg.rowBotW![^1] > 0 ? bg.rowBotW[^1] : bw) / 2;
+        else bg.tableBottomTd = bg.rowTopTd + bw + FrameExtra(mps, bw);
         if (bg.rowDeclH is null)
             EmitGridFrame(bg, pageHeight, mps, invc, bw, bg.tableX, bg.tableTopTd, bg.outerR, bg.tableBottomTd);
         EmitGridStrokes(bg, mps, invc, bw);

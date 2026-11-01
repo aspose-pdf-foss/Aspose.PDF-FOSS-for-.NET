@@ -12,7 +12,6 @@ public sealed partial class TextReplacer
 /// invocation; never shared.</summary>
 private sealed class ReflowReplaceState
 {
-    public int countBefore;
     /// <summary>Whether the walk met an operator the replacer can act on - a text-showing
     /// operator, or a Do into a form that may hold one.</summary>
     public bool sawText;
@@ -28,8 +27,8 @@ private sealed class ReflowReplaceState
     public int lastWritePos;
     // CTM (current transformation matrix) and TM (text matrix) tracking. Both
     // are 6-element matrices [a b c d tx ty]. CTM accumulates from `cm`
-    // operators, push/pop on `q`/`Q`. TM is only meaningful inside BT/ET;
-    // reset on BT, mutated by Td/TD/T*/Tm. Td translates in TEXT SPACE so
+    // operators, push/pop on `q`/`Q`. TM is only meaningful inside BT/ET; reset
+    // on BT, mutated by Td/TD/T*/Tm. Td translates in TEXT SPACE so
     // the dy from Td maps to ty += dy * tm.d (for axis-aligned Tm; full
     // matrix math handles rotation/skew correctly via tm composition).
     // Together CTM and TM let TargetY scope a per-fragment replace to the
@@ -60,5 +59,7 @@ private sealed class ReflowReplaceState
     public double twSpacing;
     public Stack<(double tc, double tw)> spacingStack = null!;
     public byte[] output = null!;
+    /// <summary>Follower shifts the rewrites owe the line, applied after the walk.</summary>
+    public List<PendingShift> pendingShifts = new();
 }
 }

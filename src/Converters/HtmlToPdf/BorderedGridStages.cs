@@ -33,9 +33,11 @@ internal static partial class HtmlToPdfConverter
     {
         // (a UA grid under a face other than the serif draws in that face, as the unbordered rows do)
         if (mc.Face is null && !(stdSerif && !face.Equals("Times New Roman", StringComparison.OrdinalIgnoreCase)))
-            return mc.Bold ? (stdSerif ? "F6" : "F2")
-                : mc.Italic ? (stdSerif ? "F7" : "F3")
-                : (stdSerif ? "F5" : "F1");
+        {
+            if (mc.Bold) return stdSerif ? "F6" : "F2";
+            if (mc.Italic) return stdSerif ? "F7" : "F3";
+            return stdSerif ? "F5" : "F1";
+        }
         var fn = CellFaceName(face, boldFace, mc);
         if (!bg.extraRes.TryGetValue(fn, out var rn))
         {
@@ -46,9 +48,7 @@ internal static partial class HtmlToPdfConverter
             var fd = (bg.borderPage.Dict.Get("Resources") as Core.PdfDictionary)?
                 .Get("Font") as Core.PdfDictionary;
             var idx = 8 + bg.extraRes.Count;
-            while (fd?.Get("F" + idx) is { } takenObj
-                   && (takenObj is not Core.PdfDictionary taken
-                       || taken.GetName("BaseFont") != fn.Replace(" ", "")))
+            while (fd?.Get("F" + idx) is { } takenObj && !HoldsFace(bg.borderPage, takenObj, fn.Replace(" ", "")))
                 idx++;
             rn = "F" + idx;
             bg.extraRes[fn] = rn;
@@ -58,7 +58,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>Render one grid row: its content height and declared height, then each cell's box, background, borders and text at the walked column.</summary>
-    private static bool RenderGridRow(BorderedGridState bg, MetricParseState mps, double[] colW, int nCols, double s, double bw, double lineH, string face, string boldFace, double hheaSum, (double asc, double sum) fm, double p, double pageWidth, double pageHeight, double marginTop, double marginBottom, double tableWpt, double baseFontSize, double symInsetPt, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc, Core.PdfDictionary docFontDict, HtmlLoadOptions? loadOptions, System.Globalization.CultureInfo invc, bool stdSerif, bool wrapperStacks, Color? rmtAnchorColor, List<MetricCell> r)
+    private static bool RenderGridRow(BorderedGridState bg, MetricParseState mps, double[] colW, int nCols, double s, double bw, double lineH, string face, string boldFace, (double asc, double sum) fm, double p, double pageWidth, double pageHeight, double marginTop, double marginBottom, double tableWpt, double baseFontSize, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc, Core.PdfDictionary docFontDict, HtmlLoadOptions? loadOptions, System.Globalization.CultureInfo invc, bool stdSerif, bool wrapperStacks, Color? rmtAnchorColor, List<MetricCell> r)
     {
         bg.rowIdx++;
         bg.rowContentB = mps.borderHugs ? 0 : lineH;
@@ -96,7 +96,7 @@ internal static partial class HtmlToPdfConverter
         bg.rowEdgeStrokes = new StringBuilder();
         for (var c = 0; c < nCols; c++)
         {
-            if (!RenderGridCell(bg, mps, colW, nCols, s, bw, face, boldFace, hheaSum, fm, p, pageWidth, pageHeight, marginTop, marginBottom, tableWpt, baseFontSize, symInsetPt, css, doc, docFontDict, loadOptions, invc, stdSerif, wrapperStacks, rmtAnchorColor, r, c)) break;
+            if (!RenderGridCell(bg, mps, colW, nCols, s, bw, face, boldFace, fm, p, pageWidth, pageHeight, marginTop, marginBottom, tableWpt, baseFontSize, css, doc, docFontDict, loadOptions, invc, stdSerif, wrapperStacks, rmtAnchorColor, r, c)) break;
         }
         if (bg.rowEdgeStrokes.Length > 0)
             bg.borderPage.AddContentStream(Encoding.ASCII.GetBytes(bg.rowEdgeStrokes.ToString()));
@@ -107,10 +107,13 @@ internal static partial class HtmlToPdfConverter
             // above, the box, half the row's OWN bottom border.
             // A collapsed grid's row boundary carries its one shared border too
             // (probed: 10.5 pt rows pitch 14.25 = the 13.5 box + the 1px rule).
-            + (bg.rowDeclH is not null
-                ? bg.rowTopHalf + bg.rowBotW![bg.rowIdx] / 2
-                : mps.wtInlineGrid ? (mps.wtBw > 0 ? mps.wtBw : bw)
-                : mps.attrCollapse ? bw : 0);
+            + ((bg.rowDeclH, mps.wtInlineGrid, mps.attrCollapse) switch
+            {
+                (not null, _, _) => bg.rowTopHalf + bg.rowBotW![bg.rowIdx] / 2,
+                (_, true, _) => mps.wtBw > 0 ? mps.wtBw : bw,
+                (_, _, true) => bw,
+                _ => 0,
+            });
         return true;
     }
 
@@ -146,42 +149,42 @@ internal static partial class HtmlToPdfConverter
             bg.rowDeclH = new double[rows.Count];
             bg.rowBotW = new double[rows.Count];
             bg.rowStrokeCol = new Color?[rows.Count];
-            var trBlocks = Regex.Matches(tableHtml,
+            var trBlocks = SafeRegex.Matches(tableHtml,
                 @"<tr\b[\s\S]*?(?=<tr\b|</table)", RegexOptions.IgnoreCase);
             for (var tri = 0; tri < rows.Count; tri++)
             {
                 bg.rowBotW[tri] = mps.wtBw > 0 ? mps.wtBw : bw;
                 if (tri >= trBlocks.Count) continue;
                 var trBlock = trBlocks[tri].Value;
-                var hm = Regex.Match(trBlock, @"height\s*:\s*([\d.]+)\s*pt",
+                var hm = SafeRegex.Match(trBlock, @"height\s*:\s*([\d.]+)\s*pt",
                     RegexOptions.IgnoreCase);
                 if (hm.Success)
                     bg.rowDeclH[tri] = double.Parse(hm.Groups[1].Value,
                         System.Globalization.CultureInfo.InvariantCulture);
-                var tdSt = Regex.Match(trBlock,
+                var tdSt = SafeRegex.Match(trBlock,
                     @"<td\b[^>]*style\s*=\s*[""']([^""']*)", RegexOptions.IgnoreCase);
                 if (!tdSt.Success) continue;
                 var st = tdSt.Groups[1].Value;
-                var bwm = Regex.Match(st, @"border-width\s*:\s*([^;]+)",
+                var bwm = SafeRegex.Match(st, @"border-width\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase);
                 if (bwm.Success)
                 {
                     var toks = bwm.Groups[1].Value.Trim()
                         .Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    var bm = Regex.Match(
+                    var bm = SafeRegex.Match(
                         toks[Math.Min(toks.Length >= 3 ? 2 : 0, toks.Length - 1)],
                         @"([\d.]+)\s*pt");
                     if (bm.Success)
                         bg.rowBotW[tri] = double.Parse(bm.Groups[1].Value,
                             System.Globalization.CultureInfo.InvariantCulture);
                 }
-                var bcm = Regex.Match(st, @"border-color\s*:\s*([^;]+)",
+                var bcm = SafeRegex.Match(st, @"border-color\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase);
                 if (bcm.Success
                     && !bcm.Groups[1].Value.Contains("-moz-",
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    var firstCol = Regex.Match(bcm.Groups[1].Value.Trim(),
+                    var firstCol = SafeRegex.Match(bcm.Groups[1].Value.Trim(),
                         @"rgb\([^)]*\)|#\w+|[a-zA-Z]+").Value;
                     if (firstCol.Length > 0 && ParseCssColor(firstCol) is { } rcCol)
                         bg.rowStrokeCol[tri] = rcCol;
@@ -230,10 +233,10 @@ internal static partial class HtmlToPdfConverter
                     foreach (var r in rows)
                         if (c < r.Count && r[c].Text.Length > 0 && r[c].ColSpan <= 1)
                             foreach (var seg1 in r[c].Text.Split(''))
-                            foreach (var word in seg1.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-                                minP[c] = Math.Max(minP[c], MeasureFaceText(
-                                    r[c].Bold ? boldFace : face, word,
-                                    r[c].FontSize ?? mps.fontSize));
+                                foreach (var word in seg1.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                                    minP[c] = Math.Max(minP[c], MeasureFaceText(
+                                        r[c].Bold ? boldFace : face, word,
+                                        r[c].FontSize ?? mps.fontSize));
                 double slackSum = 0;
                 for (var c = 0; c < nCols; c++) slackSum += Math.Max(0, colW[c] - minP[c]);
                 var deficit = hugW0 - targetBox;
@@ -257,7 +260,7 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>Render one cell of a grid row: its span, box, background band, borders and the text lines seated inside it.</summary>
-    private static bool RenderGridCell(BorderedGridState bg, MetricParseState mps, double[] colW, int nCols, double s, double bw, string face, string boldFace, double hheaSum, (double asc, double sum) fm, double p, double pageWidth, double pageHeight, double marginTop, double marginBottom, double tableWpt, double baseFontSize, double symInsetPt, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc, Core.PdfDictionary docFontDict, HtmlLoadOptions? loadOptions, System.Globalization.CultureInfo invc, bool stdSerif, bool wrapperStacks, Color? rmtAnchorColor, List<MetricCell> r, int c)
+    private static bool RenderGridCell(BorderedGridState bg, MetricParseState mps, double[] colW, int nCols, double s, double bw, string face, string boldFace, (double asc, double sum) fm, double p, double pageWidth, double pageHeight, double marginTop, double marginBottom, double tableWpt, double baseFontSize, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc, Core.PdfDictionary docFontDict, HtmlLoadOptions? loadOptions, System.Globalization.CultureInfo invc, bool stdSerif, bool wrapperStacks, Color? rmtAnchorColor, List<MetricCell> r, int c)
     {
         bg.boxW = colW[c] + 2 * p + 2 * bw;
         if (bg.spanSkip > 0)
@@ -337,7 +340,7 @@ internal static partial class HtmlToPdfConverter
         if (c < r.Count && (r[c].Lines.Length > 0 || r[c].SubTables is { Count: > 0 }
             || r[c].DivSegs is { Count: > 0 }))
         {
-            RenderGridCellContent(bg, mps, bw, face, boldFace, hheaSum, fm, p, pageWidth, pageHeight, marginTop, marginBottom, baseFontSize, symInsetPt, css, doc, docFontDict, loadOptions, invc, stdSerif, wrapperStacks, rmtAnchorColor, r, c);
+            RenderGridCellContent(bg, mps, bw, face, boldFace, fm, p, pageWidth, pageHeight, marginTop, marginBottom, baseFontSize, css, doc, docFontDict, loadOptions, invc, stdSerif, wrapperStacks, rmtAnchorColor, r, c);
         }
         // (a collapsed grid's neighbours share one rule: the next box starts a border
         // width inside this one, so their vertical strokes coincide)
@@ -346,18 +349,17 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>The cell's text lines and nested sub-tables seated inside its box, with the paragraph or list geometry the cell declares.</summary>
-    private static void RenderGridCellContent(BorderedGridState bg, MetricParseState mps, double bw, string face, string boldFace, double hheaSum, (double asc, double sum) fm, double p, double pageWidth, double pageHeight, double marginTop, double marginBottom, double baseFontSize, double symInsetPt, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc, Core.PdfDictionary docFontDict, HtmlLoadOptions? loadOptions, System.Globalization.CultureInfo invc, bool stdSerif, bool wrapperStacks, Color? rmtAnchorColor, List<MetricCell> r, int c)
+    private static void RenderGridCellContent(BorderedGridState bg, MetricParseState mps, double bw, string face, string boldFace, (double asc, double sum) fm, double p, double pageWidth, double pageHeight, double marginTop, double marginBottom, double baseFontSize, IReadOnlyDictionary<string, Dictionary<string, string>> css, Document doc, Core.PdfDictionary docFontDict, HtmlLoadOptions? loadOptions, System.Globalization.CultureInfo invc, bool stdSerif, bool wrapperStacks, Color? rmtAnchorColor, List<MetricCell> r, int c)
     {
         bg.mc = r[c];
         bg.cellFs = bg.mc.FontSize ?? mps.fontSize;
-        bg.cFm = CellFm(fm, bg.mc);
-        bg.cellLineH = CellLineOf(mps, stdSerif, wrapperStacks, hheaSum, face, fm, bg.mc, bg.cellFs);
+        bg.cellLineH = CellLineOf(mps, stdSerif, wrapperStacks, face, fm, bg.mc, bg.cellFs);
         bg.mFace = CellFaceName(face, boldFace, bg.mc);
         bg.fontRes = ResOf(bg, face, boldFace, stdSerif, bg.mc);
         bg.lineTopTd = bg.rowTopTd
             // shared borders: content opens half the boundary
             // below the row's border center
-            + (mps.attrCollapse ? (mps.wtInlineGrid ? bw / 2 : 0) : bw)
+            + ((mps.attrCollapse, mps.wtInlineGrid) switch { (false, _) => bw, (_, true) => bw / 2, _ => 0 })
             + (mps.wtInlineGrid && mps.wtPadV >= 0 ? mps.wtPadV : p)
             // a cell's own top padding (a padding-top style, a paragraph's block margin)
             // seats its lines below it - the same band its content height already holds
@@ -380,9 +382,11 @@ internal static partial class HtmlToPdfConverter
             bg.borderPage.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(invc,
                 $"{fc.R / 255.0:0.###} {fc.G / 255.0:0.###} {fc.B / 255.0:0.###} rg")));
         bg.cellAsc = (CellFm(fm, bg.mc).asc) * bg.cellFs;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var ln in bg.mc.Lines)
+#pragma warning restore S3267
         {
-            if (!RenderGridCellLine(bg, mps, bw, fm, p, pageHeight, invc, stdSerif, ln)) break;
+            if (!RenderGridCellLine(bg, mps, bw, fm, p, pageHeight, invc, ln)) break;
         }
         // A cell whose content is stacked <div>/<p> boxes draws them band by
         // band, each in its own typography — the row already measured their
@@ -475,9 +479,9 @@ internal static partial class HtmlToPdfConverter
     }
 
     /// <summary>One text line of a grid cell: seated at the cell's baseline, aligned as the cell declares, with its link colour and underline.</summary>
-    private static bool RenderGridCellLine(BorderedGridState bg, MetricParseState mps, double bw, (double asc, double sum) fm, double p, double pageHeight, System.Globalization.CultureInfo invc, bool stdSerif, string ln)
+    private static bool RenderGridCellLine(BorderedGridState bg, MetricParseState mps, double bw, (double asc, double sum) fm, double p, double pageHeight, System.Globalization.CultureInfo invc, string ln)
     {
-        var drop = CellDropOf(mps, stdSerif, fm, bg.mc, bg.cellFs, bg.cellLineH);
+        var drop = CellDropOf(fm, bg.mc, bg.cellFs, bg.cellLineH);
         var lw = MeasureFaceText(bg.mFace, ln, bg.cellFs);
         // (the cell's own side padding insets the line beyond the table's)
         var lx = bg.mc.Align switch
@@ -505,8 +509,8 @@ internal static partial class HtmlToPdfConverter
                 }
             }
             else
-            EmitCellLineRuns(bg.borderPage, bg.fontRes, bg.cellFs, lx,
-                pageHeight - bg.lineTopTd - drop, ln, bg.mFace);
+                EmitCellLineRuns(bg.borderPage, bg.fontRes, bg.cellFs, lx,
+                    pageHeight - bg.lineTopTd - drop, ln, bg.mFace);
             if (bg.mc.LinkUrl is { } lurl)
             {
                 var lBase = bg.lineTopTd + drop;

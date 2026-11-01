@@ -15,7 +15,7 @@ namespace Aspose.Pdf;
 public sealed partial class Document : IDisposable
 {
     /// <summary></summary>
-    private void PlacePageAnnotations(Page page)
+    private static void PlacePageAnnotations(Page page)
     {
         foreach (var annot in page.Annotations)
         {
@@ -30,7 +30,7 @@ public sealed partial class Document : IDisposable
     }
 
     /// <summary></summary>
-    private void ApplyExplicitPageBackground(Page page)
+    private static void ApplyExplicitPageBackground(Page page)
     {
         if (page.ExplicitBackground is { } pageBg && !page.BackgroundApplied)
         {

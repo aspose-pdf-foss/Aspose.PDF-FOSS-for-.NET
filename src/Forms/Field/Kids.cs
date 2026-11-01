@@ -24,6 +24,33 @@ public partial class Field
         }
     }
 
+    /// <summary>A font, size or colour set on the field is its widgets' too: a widget kid with a /DA of its own
+    /// would keep drawing the old one, so that override goes and the kid inherits the field's /DA.</summary>
+    internal void DropWidgetAppearanceStrings()
+    {
+        foreach (var kid in AllKids())
+        {
+            if (kid.ContainsKey("T") || !kid.ContainsKey("DA")) continue;
+            kid.Remove("DA");
+            MarkKidDirty(kid);
+        }
+    }
+
+    /// <summary>A kid rewritten in memory (a refreshed appearance) is written by an incremental
+    /// save too, which only writes what was marked; the kid is found by its entry in /Kids.</summary>
+    internal void MarkKidDirty(PdfDictionary kid)
+    {
+        if (OwnerDocument is null || _reader.Resolve(_dict.Get("Kids")) is not PdfArray kids) return;
+        foreach (var entry in kids)
+        {
+            if (entry is PdfIndirectRef kidRef && ReferenceEquals(_reader.Resolve(entry), kid))
+            {
+                OwnerDocument.MarkDirty(kidRef.ObjectNumber, kid);
+                return;
+            }
+        }
+    }
+
     /// <summary>
     /// Iterates widget annotations for this field's kids in the /Kids array.
     /// </summary>
@@ -121,10 +148,19 @@ public partial class Field
         return null;
     }
 
+    /// <summary>How many levels of kids the widget rectangle lookups descend below a field.</summary>
+    private const int MaxWidgetRectDepth = 2;
+
+    /// <summary>A field whose widgets are kids of its own is placed where its first widget is: the geometry a
+    /// caller reads (GetRectangle, Width, Height) is that widget's, as a merged field's is its own.</summary>
+    private protected override Rectangle? PlacedRect =>
+        base.PlacedRect ?? AllKids().Select(kid => _reader.ResolveArray(kid.Get("Rect")))
+            .Where(r => r is { Count: >= 4 }).Select(r => Rectangle.FromPdfArray(r!, _reader)).FirstOrDefault();
+
     /// <summary>Bounding box (union) of all descendant widget /Rects (depth-limited), or null.</summary>
     private Rectangle? UnionKidRect(PdfDictionary dict, int depth)
     {
-        if (depth > 2) return null;
+        if (depth > MaxWidgetRectDepth) return null;
         var kids = _reader.Resolve(dict.Get("Kids")) as PdfArray;
         if (kids is null) return null;
         Rectangle? acc = null;
@@ -143,6 +179,23 @@ public partial class Field
                     System.Math.Max(acc.URX, r.URX), System.Math.Max(acc.URY, r.URY));
         }
         return acc;
+    }
+
+    /// <summary>The rectangle of the field's first widget: its own /Rect, else that of the first
+    /// widget among its kids. A field shown in several places has no single box of its own, and
+    /// the span of all its widgets is the box of none of them.</summary>
+    internal Rectangle? FirstWidgetRect() => FirstWidgetRect(_dict, 0);
+
+    private Rectangle? FirstWidgetRect(PdfDictionary dict, int depth)
+    {
+        if (_reader.Resolve(dict.Get("Rect")) is PdfArray { Count: >= 4 } own)
+            return Rectangle.FromPdfArray(own, _reader);
+        if (depth > MaxWidgetRectDepth || _reader.Resolve(dict.Get("Kids")) is not PdfArray kids) return null;
+        foreach (var k in kids)
+        {
+            if (_reader.ResolveDict(k) is { } kid && FirstWidgetRect(kid, depth + 1) is { } rect) return rect;
+        }
+        return null;
     }
 
     /// <summary>Whether this field is a container/group of child fields.</summary>

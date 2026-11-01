@@ -11,7 +11,7 @@ namespace Aspose.Pdf;
 public partial class Table
 {
 // Column-width helpers: whether an HTML column is fixed.
-    private bool HtmlColFixed(ColumnWidthState pw, int i)
+    private bool HtmlColFixed(int i)
         => HtmlColFixedCols is { } fx && i < fx.Length && fx[i];
 
     /// <summary>Widen the width array to the widest row, fit the columns to the window when asked, and clamp them to the available width.</summary>
@@ -91,7 +91,7 @@ public partial class Table
     /// <summary>The width the declared percent columns still want after the surplus, taken from the
     /// auto columns in proportion to their slack above min-content and handed to the declared ones in
     /// proportion to their want.</summary>
-    private static void YieldAutoColumnsToDeclared(ColumnWidthState pw, double[] hMins, double[] hMaxs)
+    private static void YieldAutoColumnsToDeclared(ColumnWidthState pw, double[] hMins)
     {
         double want = 0, slack = 0;
         for (var i = 0; i < pw.widths.Length; i++)
@@ -212,10 +212,7 @@ public partial class Table
             // HtmlFragment cell, which measures MIN-content (the widest unbreakable
             // word) because the HTML shrink-to-fit measure reports that: "Crossing
             // Type" sizes its column to "Crossing" and wraps.
-            if (ColumnAdjustment == ColumnAdjustment.AutoFitToContent)
-            {
-                if (FitColumnsToContent(availableWidth) is { } fitColumnsToContentResult) return fitColumnsToContentResult;
-            }
+            if (ColumnAdjustment == ColumnAdjustment.AutoFitToContent && FitColumnsToContent(availableWidth) is { } fitColumnsToContentResult) return fitColumnsToContentResult;
             // Default: one column per max cells in any row. DefaultColumnWidth names
             // that width when the caller set it (a caller paces a 28-column factor sheet
             // at "1cm" and lets TableBroken.VerticalInSamePage slice it); 100 pt is the
@@ -229,7 +226,7 @@ public partial class Table
             var defWidth = 100.0;
             if (!string.IsNullOrWhiteSpace(DefaultColumnWidth))
             {
-                var dtok = DefaultColumnWidth!.Trim();
+                var dtok = DefaultColumnWidth.Trim();
                 if (dtok.EndsWith("%", StringComparison.Ordinal)
                     && TryParseWidthToken(dtok.Substring(0, dtok.Length - 1)) is { } dpct
                     && availableWidth > 0)
@@ -242,6 +239,29 @@ public partial class Table
             return result;
         }
         return null;
+    }
+
+    /// <summary>The widest table among a cell's paragraphs, by the width it reports (its declared
+    /// columns, or its own measure when it fits its content): a cell holding a nested table is at
+    /// least as wide as that table, not as wide as an empty line. Zero when it holds none.</summary>
+    private static double WidestNestedTable(Cell cell)
+    {
+        double widest = 0;
+        foreach (var paragraph in cell.Paragraphs)
+            if (paragraph is Table nested) widest = Math.Max(widest, nested.PitchedWidth());
+        return widest;
+    }
+
+    /// <summary>The width this table draws at: the width it reports plus, on a separate-bordered
+    /// grid, the cell rule pitch every one of its columns grows by when it is built.</summary>
+    private double PitchedWidth()
+    {
+        var width = GetWidth();
+        if (width <= 0 || IsBordersCollapsed || RulesInsideColumnWidth) return width;
+        var (pitchL, pitchR) = CellBorderPitch();
+        var columns = 0;
+        for (var i = 0; i < Rows.Count; i++) columns = Math.Max(columns, Rows.At(i).Cells.Count);
+        return width + (pitchL + pitchR) * columns;
     }
 
     /// <summary>Auto-fit to content: each column as wide as its widest cell, scaled into the available width when the sum overflows.</summary>
@@ -286,14 +306,17 @@ public partial class Table
                 // guard on top of text + declared padding (probed: the factor
                 // sheet's columns land at text+pad+0.01 to the third decimal,
                 // and GetWidth reports 44.47 for a 44.46 pt cell).
-                // A picture in the cell does not wrap: it floors both boxes.
-                var picture = WidestPicture(cell);
-                var need = minContent
-                    ? Math.Max(MaxWordWidth(cell, row), picture) + (pad is null && AllBoldSerifHtml(cell)
+                // A picture in the cell does not wrap: it floors both boxes. So does a nested
+                // table, at the width it reports.
+                var picture = Math.Max(WidestPicture(cell, forNarrowest: minContent), WidestNestedTable(cell));
+                double need;
+                if (minContent)
+                    need = Math.Max(MaxWordWidth(cell, row), picture) + (pad is null && AllBoldSerifHtml(cell)
                         ? 0
-                        : (pad?.Left ?? 2) + (pad?.Right ?? 2))
-                    : Math.Max(MaxLineWidth(cell, row, exact: true), picture) + (pad?.Left ?? 0) + (pad?.Right ?? 0)
-                      + AutoFitMeasureGuardPt;
+                        : (pad?.Left ?? 2) + (pad?.Right ?? 2));
+                else
+                    need = Math.Max(MaxLineWidth(cell, row, exact: true), picture) + (pad?.Left ?? 0) + (pad?.Right ?? 0)
+                        + AutoFitMeasureGuardPt;
                 if (need > w[ci]) w[ci] = need;
             }
         }

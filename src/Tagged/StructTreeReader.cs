@@ -134,7 +134,7 @@ public sealed class StructTreeElement
                 {
                     PdfName n => n.Value,
                     PdfString s => s.ToText(),
-                    PdfInteger i => i.Value.ToString(),
+                    PdfInteger i => i.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     PdfReal r => r.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     PdfBoolean b => b == PdfBoolean.True ? "true" : "false",
                     _ => val?.ToString()

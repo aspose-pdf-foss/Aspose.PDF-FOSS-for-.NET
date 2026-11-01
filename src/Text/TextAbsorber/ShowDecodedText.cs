@@ -10,7 +10,7 @@ public sealed partial class TextAbsorber
     /// <summary>Show text: the decoded string measured, clipped and appended to the extraction.</summary>
     private void ShowDecodedText(ExtractState xs, PdfString tjStr)
     {
-        var fullDecoded = ApplyRtlIfPureRtl(NormalizeDecoded(DecodeString(tjStr.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine), foldNbsp: xs.searchRect is null));
+        var fullDecoded = ApplyRtlIfPureRtl(NormalizeDecoded(DecodeString(tjStr.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader), foldNbsp: xs.searchRect is null));
         if (xs.currentFontNonAgl)
             RecordAglError(xs.currentFontName, fullDecoded,
                 xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr, xs.tmY + xs.localCmTy);
@@ -32,7 +32,7 @@ public sealed partial class TextAbsorber
                 pen = AppendClippedRunRot(xs, clip, tjStr.Value, pen);
             else
             {
-                (pen, var keptStart) = AppendClippedRun(clip, tjStr.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.useFontEngine, xs.currentMetrics, xs.fontSize, xs.horizScale, xs.clipRect!, xs.tmOriginX, xs.tmA, xs.localCmTx, xs.cmLa, pen, xs.charSpacing, xs.wordSpacing, xs.blankClip, dropLeadingSpaces: xs.searchRect is not null && !xs.blankClip
+                (pen, var keptStart) = AppendClippedRun(clip, tjStr.Value, xs.currentToUnicode, xs.currentFontDict, xs.reader, xs.currentMetrics, xs.fontSize, xs.horizScale, xs.clipRect!, xs.tmOriginX, xs.tmA, xs.localCmTx, xs.cmLa, pen, xs.charSpacing, xs.wordSpacing, xs.blankClip, dropLeadingSpaces: xs.searchRect is not null && !xs.blankClip
                         && (_text.Length == 0 || _text[^1] == '\n'));
                 if (!double.IsNaN(keptStart)) txClip = keptStart;
             }
@@ -51,14 +51,12 @@ public sealed partial class TextAbsorber
             _ocrRuns.Add((fullDecoded,
                 xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx, xs.tmY, xs.fontSize, width));
         xs.lastRunEndDevX = xs.tmRotated ? xs.tmOriginX + (xs.tx - xs.tmOriginX) * xs.tmA + xs.localCmTx + width * xs.tmA : double.NaN;
-        xs.lastRunEndPageX = xs.tmRotated ? double.NaN : xs.tmE + (xs.tx + width - xs.tlmX) * xs.tmAr;
-        xs.lastRunStartPageX = xs.tmRotated ? double.NaN : xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr;
-        xs.lastRunEndX = xs.tx + width * (xs.tmRotated ? xs.tmA : 1.0); // rotated: advance projects through the axis norm
-        xs.lastRunEstWidth = width;
+        TrackRunExtent(xs, xs.tmE + (xs.tx - xs.tlmX) * xs.tmAr, xs.tmE + (xs.tx + width - xs.tlmX) * xs.tmAr,
+            xs.tx + width * (xs.tmRotated ? xs.tmA : 1.0)); // rotated: advance projects through the axis norm
         xs.lastHadMetrics = measuredWidth.HasValue;
         xs.tx += width;
         // Track rendered Y so subsequent '/"/'Tm' can distinguish
         // same-row column repositioning from real line advances.
-        xs.lastRenderedY = xs.tmY; xs.lastRenderedFs = xs.fontSize * (xs.tmRotated ? xs.tmN : 1.0); xs.lastRenderedCmTy = xs.localCmTy;
+        xs.lastRenderedY = xs.tmY; xs.lastRenderedCmTy = xs.localCmTy;
     }
 }

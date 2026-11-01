@@ -226,8 +226,9 @@ public class TextAbsorberEncodingTests
 
         // The combined resource (Adobe's 2.0 list plus its own 1.2 supplement)
         // resolves to 4,200 single-codepoint names, plus the 16 PDF/ZapfDingbats
-        // names the list itself does not carry.
-        Assert.Equal(4200 + 16, glyph.Count);
+        // names and the 89 AFII names of Arabic contextual forms the list itself
+        // does not carry.
+        Assert.Equal(4200 + 16 + 89, glyph.Count);
 
         // Names the list does not carry.
         Assert.Equal("\uFFFD", glyph[".notdef"]);
@@ -278,14 +279,39 @@ public class TextAbsorberEncodingTests
         // a caller reporting or reading from Adobe's own list uses
         // AdobeGlyphNameToUnicode/AdobeUnicodeToGlyphName rather than
         // GlyphNameToUnicode/UnicodeToGlyphName, which also carry the 16
-        // PDF-synthetic names this engine keeps beside it.
+        // PDF-synthetic names this engine keeps beside it and, read only, the
+        // 89 AFII names of the Arabic contextual forms.
         Assert.Equal(4200, TextAbsorber.AdobeGlyphNameToUnicode.Count);
         Assert.Equal(3680, TextAbsorber.AdobeUnicodeToGlyphName.Count);
-        Assert.Equal(4200 + 16, TextAbsorber.GlyphNameToUnicode.Count);
+        Assert.Equal(4200 + 16 + 89, TextAbsorber.GlyphNameToUnicode.Count);
 
         Assert.False(TextAbsorber.AdobeGlyphNameToUnicode.ContainsKey(".notdef"));
         Assert.False(TextAbsorber.AdobeUnicodeToGlyphName.ContainsKey(0xFFFD));
         Assert.Equal("µ", TextAbsorber.AdobeGlyphNameToUnicode["mu"]);
+    }
+
+    [Theory]
+    [InlineData("afii62753", "\uFE82")] // alef with madda above, final: the first contextual form
+    [InlineData("afii62760", "\uFE8E")] // alef, final
+    [InlineData("afii62761", "\uFE91")] // beh, initial
+    [InlineData("afii62762", "\uFE92")] // beh, medial
+    [InlineData("afii62763", "\uFE90")] // beh, final
+    [InlineData("afii62764", "\uFE94")] // teh marbuta, final
+    [InlineData("afii62830", "\uFEF0")] // alef maksura, final: its initial and medial shapes are outside the block
+    [InlineData("afii62833", "\uFEF2")] // yeh, final
+    [InlineData("afii62834", "\uFEF5")] // lam-alef with madda above, isolated
+    [InlineData("afii62841", "\uFEFC")] // lam-alef, final: the last
+    public void AnAfiiNameOfAnArabicContextualFormResolvesToItsPresentationForm(string name, string form)
+    {
+        Assert.Equal(form, TextAbsorber.ResolveGlyphName(name));
+    }
+
+    [Fact]
+    public void TheAfiiNamesOfTheArabicContextualFormsAreReadButNeverWritten()
+    {
+        Assert.False(TextAbsorber.GlyphNameToUnicode.ContainsKey("afii62752"));
+        Assert.False(TextAbsorber.GlyphNameToUnicode.ContainsKey("afii62842"));
+        Assert.False(TextAbsorber.UnicodeToGlyphName.TryGetValue(0xFE8E, out var name) && name.StartsWith("afii62", StringComparison.Ordinal));
     }
 
     [Fact]

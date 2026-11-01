@@ -23,7 +23,7 @@ internal static partial class HtmlToPdfConverter
             var baseY = sp.sbY + MetricBaselineDrop(9.75, pitch, pfm);
             foreach (var (r, t) in ln)
             {
-                SpEmitRun(sp.page, sp.docFontDict, r, t, lx, sp.pageHeight - baseY, sp.invc);
+                SpEmitRun(sp.page, r, t, lx, sp.pageHeight - baseY, sp.invc);
                 lx += MeasureFaceText(r.Face + (r.Bold ? " Bold" : ""), t, r.Fs);
             }
             sp.sbY += pitch;
@@ -100,7 +100,7 @@ internal static partial class HtmlToPdfConverter
             var baseY = sp.mainY + MetricBaselineDrop(maxFs, pitch, pfm);
             foreach (var (r, t) in ln)
             {
-                SpEmitRun(sp.pages[sp.pageIdx], sp.docFontDict, r, t, lx, sp.pageHeight - baseY, sp.invc);
+                SpEmitRun(sp.pages[sp.pageIdx], r, t, lx, sp.pageHeight - baseY, sp.invc);
                 lx += MeasureFaceText(r.Face + (r.Bold ? " Bold" : ""), t, r.Fs);
             }
             sp.mainY += pitch;
@@ -111,7 +111,7 @@ internal static partial class HtmlToPdfConverter
     /// <summary>Split panel: the logo image and the panel heading emitted.</summary>
     private static void EmitPanelLogoAndHeading(SplitPanelState sp)
     {
-        sp.imgM = Regex.Match(sp.html[..sp.orphan.Index],
+        sp.imgM = SafeRegex.Match(sp.html[..sp.orphan.Index],
             @"<img\b[^>]*src\s*=\s*[""']?([^""'\s>]+)[^>]*width\s*=\s*[""']?(\d+)[^>]*height\s*=\s*[""']?(\d+)",
             RegexOptions.IgnoreCase);
         if (sp.imgM.Success && LoadConverterImage(sp.imgM.Groups[1].Value, sp.options) is { } logoBytes)
@@ -121,10 +121,10 @@ internal static partial class HtmlToPdfConverter
             var ix = sp.leftCellX0 + 0.7;
             var iyTd = SpHeaderBandTopPt + 0.7;
             try { sp.page.AddImage(logoBytes, new Rectangle(ix, sp.pageHeight - iyTd - ih, ix + iw, sp.pageHeight - iyTd)); }
-            catch { }
+            catch { /* an image the page cannot take is left out - the layout carries on */ }
         }
 
-        sp.thM = Regex.Match(sp.html[..sp.orphan.Index], @"<th\b[^>]*>([\s\S]*)",
+        sp.thM = SafeRegex.Match(sp.html[..sp.orphan.Index], @"<th\b[^>]*>([\s\S]*)",
             RegexOptions.IgnoreCase);
         if (sp.thM.Success)
         {
@@ -143,7 +143,7 @@ internal static partial class HtmlToPdfConverter
                     var lx = sp.rightCellX0 + (sp.rightCellX1 - sp.rightCellX0 - lw) / 2;
                     foreach (var (r, t) in ln)
                     {
-                        SpEmitRun(sp.page, sp.docFontDict, r, t, lx, sp.pageHeight - cy, sp.invc);
+                        SpEmitRun(sp.page, r, t, lx, sp.pageHeight - cy, sp.invc);
                         lx += MeasureFaceText(r.Face + (r.Bold ? " Bold" : ""), t, r.Fs);
                     }
                     cy += first ? SpTitleGapPt : SpTitlePitchPt;

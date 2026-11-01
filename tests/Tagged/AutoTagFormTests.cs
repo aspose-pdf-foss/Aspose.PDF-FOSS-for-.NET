@@ -176,7 +176,7 @@ public class AutoTagFormTests
     {
         // A box to tick, a form of 9 pt drawn before "Yes." and before "No.", the answers a line apart from the prose.
         const string box = "0.5 w 0.5 0.5 8 8 re S\n";
-        static string Answer(double y, string text) => $"q 1 0 0 1 72 {y - 1} cm /Fx1 Do Q\nBT /F1 9 Tf 86 {y} Td ({text}) Tj ET\n";
+        static string Answer(double y, string text) => FormattableString.Invariant($"q 1 0 0 1 72 {y - 1} cm /Fx1 Do Q\nBT /F1 9 Tf 86 {y} Td ({text}) Tj ET\n");
         var page = Body() + Answer(600, "Yes. Skip the next line of the form.") + Answer(576, "No. Go on to the next line.");
         using var doc = Tag(Build(box, "0 0 9 9", page));
 

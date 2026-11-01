@@ -190,12 +190,14 @@ public sealed class CoonsPatchShading : ShadingBase
         var br = new MeshBitReader(data);
         var patches = new List<MeshPatch>();
         MeshPatch? prev = null;
-        var ncc = function is null ? (decode.Length - 4) / 2 : 1;
+        _ = function is null ? (decode.Length - 4) / 2 : 1;
 
         while (br.HasBits(bpf))
         {
             var flag = (int)br.ReadBits(bpf);
-            var newPoints = flag == 0 ? (tensor ? 16 : 12) : (tensor ? 12 : 8);
+            int newPoints;
+            if (flag == 0) newPoints = tensor ? 16 : 12;
+            else newPoints = tensor ? 12 : 8;
             var newColors = flag == 0 ? 4 : 2;
 
             var pts = new (double x, double y)[newPoints];
@@ -224,8 +226,8 @@ public sealed class CoonsPatchShading : ShadingBase
                 // Edge sharing per §8.7.4.5.7 Figure 31: 4 boundary points and
                 // 2 corner colours come from the previous patch's flag-indexed
                 // edge.
-                CopyShared(prev, patch, flag, tensor);
-                FillNewBoundary(patch, pts, flag, tensor);
+                CopyShared(prev, patch, flag);
+                FillNewBoundary(patch, pts, tensor);
                 // Map new corner colours: positions depend on flag.
                 AssignSharedColors(prev, patch, flag);
                 patch.CornerColors[2] = cols[0]; // see AssignSharedColors mapping
@@ -287,8 +289,6 @@ public sealed class CoonsPatchShading : ShadingBase
         // and back-solve for the 4 interior tensor points by inverting Bernstein at those four (u,v).
         double[] us = { 1.0 / 3.0, 2.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0 };
         double[] vs = { 1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0 };
-        int[] iu = { 1, 2, 1, 2 };
-        int[] iv = { 1, 1, 2, 2 };
         double SCoons(double u, double v, double[,] g)
         {
             // Boundary cubic Béziers.
@@ -391,7 +391,7 @@ public sealed class CoonsPatchShading : ShadingBase
         return x;
     }
 
-    private static void CopyShared(MeshPatch prev, MeshPatch cur, int flag, bool tensor)
+    private static void CopyShared(MeshPatch prev, MeshPatch cur, int flag)
     {
         // The 4 boundary points along the shared edge are reused; corner-color
         // mapping handled separately. Map per spec Figure 30/31:
@@ -414,7 +414,7 @@ public sealed class CoonsPatchShading : ShadingBase
         }
     }
 
-    private static void FillNewBoundary(MeshPatch p, (double x, double y)[] pts, int flag, bool tensor)
+    private static void FillNewBoundary(MeshPatch p, (double x, double y)[] pts, bool tensor)
     {
         // After 4 shared points, the remaining 8 (Coons) or 12 (tensor) bytes
         // describe the rest of the patch. For Coons:

@@ -29,14 +29,14 @@ public sealed partial class SoftwarePageRenderer
         pf.cellBBox = pf.pdict!.Get("BBox") is PdfArray bbArr && bbArr.Count >= 4
             ? new[] { NumFrom(bbArr[0]), NumFrom(bbArr[1]), NumFrom(bbArr[2]), NumFrom(bbArr[3]) }
             : null;
-        var tiles = ComputePatternTileRange(pf.edgeTable, pf.ctx, pf.m, pf.xStep, pf.yStep, pf.cellBBox);
+        // An uncoloured cell (PaintType 2) names no colour of its own: it is painted in the
+        // colour the scn operator set beside the pattern, which the state carries.
+        var cellState = pf.pdict.GetInt("PaintType") == UncolouredTilingPattern ? pf.state : null;
 
-        // A fine pattern covering a large area would need more tiles than the per-tile
-        // loop is capped at, leaving most of the region unpainted. Rasterise one cell to
-        // a device-sized tile and stamp it across the masked region instead.
-        if (tiles.RawCount > 8000 &&
-            TryStampTiledPattern(pf.ctx, pf.mask, pf.patternContent, patternContext, pf.patExtG, pf.m, pf.xStep, pf.yStep))
-            return false;
+        // One rasterised period sampled across the region (see TryStampPeriodicTile); a
+        // period too large for that is painted cell by cell.
+        if (TryStampPeriodicTile(pf, patternContext, cellState)) return false;
+        var tiles = ComputePatternTileRange(pf.edgeTable, pf.ctx, pf.m, pf.xStep, pf.yStep, pf.cellBBox);
 
         for (var j = tiles.JMin; j <= tiles.JMax; j++)
         {
@@ -62,11 +62,14 @@ public sealed partial class SoftwarePageRenderer
                 // graphics state, so a context-only mask is overwritten with null by the
                 // first painting operator inside the cell and the tiles then spill past
                 // the filled path (chart bars grew until they touched each other).
-                RenderContent(pf.patternContent, patternContext, pf.patExtG, tileMatrix, pf.mask);
+                RenderContent(pf.patternContent, patternContext, pf.patExtG, tileMatrix, pf.mask, inheritState: cellState);
             }
         }
         return true;
     }
+
+    /// <summary>The PaintType of a tiling pattern whose cell takes its colour from the scn operator (PDF 32000 §8.7.3.3).</summary>
+    private const int UncolouredTilingPattern = 2;
 
     /// <summary></summary>
     private static bool ResolvePatternProgram(PatternFillState pf, PdfObject patternObj)

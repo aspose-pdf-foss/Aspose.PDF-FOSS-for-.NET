@@ -1,4 +1,4 @@
-using Aspose.Pdf.Content;
+﻿using Aspose.Pdf.Content;
 using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.Text;
@@ -222,9 +222,43 @@ public sealed partial class TextBuilder
         return name;
     }
 
+    /// <summary>The show of <paramref name="text"/> in the font the state took from a run of the
+    /// document - the resource name that font has (or is given) on the page, the text in its own codes
+    /// and the width its advances give - or null when the state's font is not such a font, or its map
+    /// has no code for a character; the writers then fall to the face the font's name maps to.</summary>
+    internal static (string fontResName, byte[] bytes, double width)? TryShowInDocumentFont(
+        Page page, TextState ts, string text, double fontSize)
+    {
+        if (ts.FontData is not null || ts.Font is not { IsDocumentEmbeddedFont: true } font
+            || page.Reader is null || font.TryEncode(text) is not { } bytes)
+            return null;
+        var builder = new TextBuilder(page);
+        var name = builder.EnsureDocumentFontResource(builder.FontDictForThisDocument(font));
+        return (name, bytes, font.Metrics.MeasureString(bytes, fontSize));
+    }
+
+    /// <summary>The name <paramref name="fontDict"/> is registered under in the page's own font
+    /// resources, registering it when the page does not carry it yet (a font absorbed from another page).</summary>
+    private string EnsureDocumentFontResource(PdfDictionary fontDict)
+    {
+        var fonts = GetOrCreateOwnFontDict();
+        foreach (var key in fonts.Keys)
+        {
+            if (ReferenceEquals(_page.Reader.Resolve(fonts.Get(key)), fontDict)) return key;
+        }
+        var name = "F1";
+        var counter = 1;
+        while (fonts.ContainsKey(name))
+            name = $"F{++counter}";
+        fonts.Set(name, fontDict);
+        return name;
+    }
+
     private static string GenerateSubsetTag()
     {
+#pragma warning disable S2245 // a font subset tag (ISO 32000-1 9.6.4) needs uniqueness, not unpredictability
         var random = new Random();
+#pragma warning restore S2245
         var chars = new char[6];
         for (int i = 0; i < 6; i++)
             chars[i] = (char)('A' + random.Next(26));
@@ -305,7 +339,7 @@ public sealed partial class TextBuilder
         // GetOrCreateOwnResources cloned the top-level Resources but the Font
         // entry still references the parent's dict). Always re-Set after clone.
         if (!ReferenceEquals(_page.Reader.Resolve(resources.Get("Font")), fontDict)
-            || IsSharedWithParent(resources, fontDict))
+            || IsSharedWithParent(fontDict))
         {
             var cloned = new PdfDictionary();
             foreach (var k in fontDict.Keys) cloned.Set(k, fontDict.Get(k)!);
@@ -322,7 +356,7 @@ public sealed partial class TextBuilder
     /// "freshly created" when the entry is missing; everything else is treated
     /// as inherited and gets cloned.
     /// </summary>
-    private bool IsSharedWithParent(PdfDictionary resources, PdfDictionary fontDict)
+    private bool IsSharedWithParent(PdfDictionary fontDict)
     {
         var parent = _page.Reader.ResolveDict(_page.Dict.Get("Parent"));
         for (var depth = 0; parent is not null && depth < 32; depth++)

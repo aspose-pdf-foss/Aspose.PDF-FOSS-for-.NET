@@ -44,10 +44,13 @@ internal static class GlyphRasterizer
     /// (device y pointing down), so a glyph can carry the rotation or skew its text matrix
     /// asks for. The mask comes back in its own upright buffer;
     /// <c>bearingX</c> and <c>bearingY</c> place its top-left
-    /// corner relative to the glyph origin.
+    /// corner relative to the glyph origin. <paramref name="originX"/> and
+    /// <paramref name="originY"/> are the origin's position inside its pixel, in [0, 1):
+    /// the outline is shifted by them before it is scanned, so the mask carries the
+    /// glyph's fractional place and the bearings stay relative to the pixel the origin is in.
     /// </summary>
     public static (byte[] mask, int width, int height, int bearingX, int bearingY)? RasterizeTransformed(
-        GlyphOutline outline, double a, double b, double c, double d)
+        GlyphOutline outline, double a, double b, double c, double d, double originX = 0, double originY = 0)
     {
         if (outline.Contours.Length == 0) return null;
 
@@ -60,8 +63,8 @@ internal static class GlyphRasterizer
         {
             foreach (var pt in contour)
             {
-                var tx = pt.X * a + pt.Y * c;
-                var ty = pt.X * b + pt.Y * d;
+                var tx = pt.X * a + pt.Y * c + originX;
+                var ty = pt.X * b + pt.Y * d + originY;
                 if (tx < pxMin) pxMin = tx;
                 if (tx > pxMax) pxMax = tx;
                 if (ty < pyMin) pyMin = ty;
@@ -93,8 +96,8 @@ internal static class GlyphRasterizer
         var ssB = b * superSample;
         var ssC = c * superSample;
         var ssD = d * superSample;
-        var ssOffX = -bearingX * superSample;
-        var ssOffY = -bearingY * superSample;
+        var ssOffX = (originX - bearingX) * superSample;
+        var ssOffY = (originY - bearingY) * superSample;
 
         var edgeTable = new EdgeTable();
         foreach (var contour in outline.Contours)

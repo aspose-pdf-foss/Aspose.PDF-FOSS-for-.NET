@@ -38,10 +38,10 @@ public class OperatorSelector : IOperatorSelector
     // Template matching is wider than type equality for the text families:
     //  * any text-STATE operator template (Tc/Tw/Tz/TL/Tf/Tr/Ts) admits every
     //    text-state operator, and any text-PLACE template (Td/TD/Tm/T*) admits
-    //    every text-place operator;
+    //    every text-place operator,
     //  * T* additionally answers to EVERY text-operator template (show, state,
-    //    place or BT/ET) — but never to a non-text template;
-    //  * a plain TextShowOperator template admits every text-show operator;
+    //    place or BT/ET) — but never to a non-text template,
+    //  * a plain TextShowOperator template admits every text-show operator,
     //  * everything else (the concrete text-show ops, BT/ET, path/paint/state ops) matches
     //    on exact runtime type only.
     private static bool Matches(Operator op, Operator template)

@@ -43,11 +43,11 @@ internal static class PsType3Font
 
         if (!any) return null;
         AddNotDef(procs);
-        return Assemble(procs, widths, names, program);
+        return Assemble(procs, widths, names);
     }
 
     private static PdfDictionary Assemble(PdfDictionary procs, List<PdfObject> widths,
-        string[] names, PsFontProgram program)
+        string[] names)
     {
         var font = new PdfDictionary();
         font.Set("Type", new PdfName("Font"));

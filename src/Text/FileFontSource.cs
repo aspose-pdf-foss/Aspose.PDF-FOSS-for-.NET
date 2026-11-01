@@ -37,17 +37,18 @@ public sealed class FileFontSource : FontSource
         {
             try
             {
+                // Every name the face carries, as the folder and system sources match: a
+                // styled-only file ("Aharoni Bold") is asked for by its family ("Aharoni").
                 var data = System.IO.File.ReadAllBytes(FilePath);
-                var actualName = FontRepository.ReadTtfFontName(data);
-                if (string.Equals(actualName, name, comparison) ||
-                    string.Equals(actualName.Replace(" ", "").Replace("-", ""), normalizedName, StringComparison.OrdinalIgnoreCase))
+                var names = FontFaceNames.Read(data);
+                if (names.Match(name, comparison, normalizedName) != FaceNameMatch.None)
                 {
-                    var fd = new FontData(actualName, FontType.TrueType, FilePath);
+                    var fd = new FontData(names.Full, FontType.TrueType, FilePath);
                     fd.SetTtfData(data);
                     return fd;
                 }
             }
-            catch { }
+            catch { /* a font file that cannot be read is not this font */ }
         }
         return null;
     }
@@ -57,11 +58,11 @@ public sealed class FileFontSource : FontSource
         var ext = System.IO.Path.GetExtension(FilePath ?? "").ToLowerInvariant();
         if (ext is not (".ttf" or ".otf") || !System.IO.File.Exists(FilePath)) yield break;
         byte[] data;
-        try { data = System.IO.File.ReadAllBytes(FilePath!); }
+        try { data = System.IO.File.ReadAllBytes(FilePath); }
         catch { yield break; }
         var name = "Unknown";
-        try { name = FontRepository.ReadTtfFamilyName(data); } catch { }
-        if (name == "Unknown") name = System.IO.Path.GetFileNameWithoutExtension(FilePath!);
+        try { name = FontRepository.ReadTtfFamilyName(data); } catch { /* an unreadable name table keeps the fallback name */ }
+        if (name == "Unknown") name = System.IO.Path.GetFileNameWithoutExtension(FilePath);
         var fd = new FontData(name, FontType.TrueType, FilePath);
         fd.SetTtfData(data);
         yield return fd;

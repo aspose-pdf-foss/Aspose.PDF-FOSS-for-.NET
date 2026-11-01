@@ -28,6 +28,7 @@ public sealed partial class TextAbsorber
             if (GlyphNameToUnicode.ContainsKey(name)) continue;
             if (name.StartsWith("uni", StringComparison.Ordinal) && name.Length >= 7 && IsAllHex(name.Substring(3))) continue;
             if (name.Length >= 5 && name.Length <= 7 && name[0] == 'u' && IsAllHex(name.Substring(1))) continue;
+            if (IsUnicName(name)) continue;
             return true; // e.g. "G12" glyph-index names, producer-specific tags
         }
         return false;
@@ -62,9 +63,8 @@ public sealed partial class TextAbsorber
     /// Decode a byte string using the font's encoding. Used by both TextAbsorber and TextFragmentAbsorber.
     /// </summary>
     internal static string DecodeStringPublic(byte[] bytes, Dictionary<int, string>? toUnicode,
-        PdfDictionary? fontDict, PdfReader reader, bool useFontEngineEncoding = false,
-        bool foldNbsp = true)
-        => NormalizeDecoded(DecodeString(bytes, toUnicode, fontDict, reader, useFontEngineEncoding), foldNbsp);
+        PdfDictionary? fontDict, PdfReader reader, bool foldNbsp = true)
+        => NormalizeDecoded(DecodeString(bytes, toUnicode, fontDict, reader), foldNbsp);
 
     /// <summary>
     /// Normalize a decoded text string for extraction. Full-page plain extraction
@@ -120,7 +120,7 @@ public sealed partial class TextAbsorber
     }
 
     private static string DecodeString(byte[] bytes, Dictionary<int, string>? toUnicode,
-        PdfDictionary? fontDict, PdfReader reader, bool useFontEngineEncoding = false)
+        PdfDictionary? fontDict, PdfReader reader)
     {
         // Resolve Differences encoding upfront (used as fallback below)
         Dictionary<int, string>? differences = null;
@@ -142,12 +142,12 @@ public sealed partial class TextAbsorber
         // 1. ToUnicode CMap — highest priority; Differences used as fallback for unmapped codes
         if (toUnicode is not null)
         {
-            return MapSymbolPrivateUse(DecodeWithToUnicode(bytes, toUnicode, fontDict, reader, differences, baseEncodingName), fontDict);
+            return MapSymbolPrivateUse(DecodeWithToUnicode(bytes, toUnicode, fontDict, differences, baseEncodingName, reader), fontDict);
         }
 
         // Identity-H / Identity-V — 2-byte CID encoding
         // Also handle Uni*-UCS2-* / Uni*-UTF16-* predefined CMaps (2-byte big-endian → Unicode codepoint)
-        if (DecodeType0String(bytes, toUnicode, fontDict, reader, useFontEngineEncoding) is { } decodeType0StringResult) return decodeType0StringResult;
+        if (DecodeType0String(bytes, toUnicode, fontDict, reader) is { } decodeType0StringResult) return decodeType0StringResult;
         // 2. Differences from Encoding dict
         if (differences is not null)
         {
@@ -156,6 +156,8 @@ public sealed partial class TextAbsorber
             {
                 if (differences.TryGetValue(b, out var mapped))
                     sb.Append(mapped);
+                else if (baseEncodingName is null && BuiltInStandardCharacter(b, fontDict) is { } builtIn)
+                    sb.Append(builtIn);
                 else
                     sb.Append(DecodeByteWithEncoding(b, baseEncodingName));
             }
@@ -182,6 +184,25 @@ public sealed partial class TextAbsorber
         // 6. Default: WinAnsiEncoding
         return DecodeWithNamedEncoding(bytes, null);
     }
+
+    /// <summary>The character a code shows through a Latin Standard-14 font's own encoding where a
+    /// /Differences array names no other: StandardEncoding's high range (0xAE is fi, 0xD0 the em
+    /// dash), not WinAnsi's (the registered sign, Eth). Null for any other font, or a code below
+    /// the range the two encodings disagree in.</summary>
+    internal static string? BuiltInStandardCharacter(byte code, PdfDictionary? fontDict)
+    {
+        if (fontDict is null || !IsStandardLatinType1(fontDict)) return null;
+        if (code < StandardHighRangeStart && code != QuoteRightCode && code != QuoteLeftCode) return null;
+        // A code StandardEncoding leaves undefined shows nothing through the face's own encoding.
+        if (Type1StandardEncoding.GetName(code) is not { } glyphName) return string.Empty;
+        return GlyphNameToUnicode.TryGetValue(glyphName, out var character) ? character : null;
+    }
+
+    // The first code StandardEncoding and WinAnsi disagree on outside the quotes (ISO 32000-1 Annex D),
+    // and the two quote codes they disagree on in the ASCII range (quoteright, quoteleft).
+    private const byte StandardHighRangeStart = 0xA1;
+    private const byte QuoteRightCode = 0x27;
+    private const byte QuoteLeftCode = 0x60;
 
     /// <summary>True for a non-embedded Latin Standard-14 Type 1 font (Helvetica /
     /// Times / Courier families) — the fonts whose built-in encoding is Adobe
@@ -249,6 +270,17 @@ public sealed partial class TextAbsorber
     /// Returns a map from byte code to Unicode string, or null if no Differences found.
     /// </summary>
     internal static Dictionary<int, string>? ParseDifferencesEncoding(PdfDictionary encodingDict, PdfReader reader)
+    {
+        // The map is read for every string shown under the font; it is parsed once per
+        // encoding dictionary and held beside it for as long as the dictionary lives.
+        return DifferencesByEncoding.GetValue(encodingDict, d => new ParsedDifferences(ParseDifferences(d, reader))).Map;
+    }
+
+    private sealed record ParsedDifferences(Dictionary<int, string>? Map);
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<PdfDictionary, ParsedDifferences> DifferencesByEncoding = new();
+
+    private static Dictionary<int, string>? ParseDifferences(PdfDictionary encodingDict, PdfReader reader)
     {
         var diffObj = encodingDict.Get("Differences");
         PdfArray? diffArray = null;
@@ -320,11 +352,16 @@ public sealed partial class TextAbsorber
         if (name.Length >= 5 && name.Length <= 7 && name[0] == 'u' && IsAllHex(name.Substring(1)))
             return char.ConvertFromUtf32(Convert.ToInt32(name.Substring(1), 16));
 
+        if (IsUnicName(name))
+            return ((char)Convert.ToInt32(name.Substring(UnicPrefix.Length), 16)).ToString();
+
         // AGL underscore ligatures — components joined with '_' (/f_i, /f_f_i):
         // the joined component NAME is looked up first so the standard ligature
         // codepoints apply ("f"+"i" → "fi" → U+FB01), else the components'
         // resolutions concatenate.
+#pragma warning disable S2692 // a match at index 0 is deliberately excluded here
         if (name.IndexOf('_') > 0)
+#pragma warning restore S2692
         {
             var parts = name.Split('_');
             var joinedName = string.Concat(parts);
@@ -351,18 +388,24 @@ public sealed partial class TextAbsorber
                 var code = int.Parse(suffix);
                 if (code < 128)
                     return ((char)code).ToString();
-                if (code < 256)
-                {
-                    // Map through WinAnsiEncoding for 128-255
-                    if (WinAnsiEncoding.TryGetValue((byte)code, out var wch))
-                        return wch.ToString();
-                }
+                // Map through WinAnsiEncoding for 128-255
+                if (code < 256 && WinAnsiEncoding.TryGetValue((byte)code, out var wch))
+                    return wch.ToString();
                 return char.ConvertFromUtf32(code);
             }
         }
 
         return null;
     }
+
+    private const string UnicPrefix = "UNIC";
+    private const int HexDigitsPerCodeUnit = 4;
+
+    /// <summary>"UNIC" and four hex digits (/UNIC00E8): a producer's upper-case spelling of the
+    /// uni&lt;XXXX&gt; form, naming the character by its code point as that form does.</summary>
+    private static bool IsUnicName(string name) =>
+        name.Length == UnicPrefix.Length + HexDigitsPerCodeUnit
+        && name.StartsWith(UnicPrefix, StringComparison.Ordinal) && IsAllHex(name.Substring(UnicPrefix.Length));
 
     private static bool IsAllHex(string s)
     {
@@ -397,8 +440,8 @@ public sealed partial class TextAbsorber
     }
 
     private static string DecodeWithToUnicode(byte[] bytes, Dictionary<int, string> map,
-        PdfDictionary? fontDict, PdfReader reader,
-        Dictionary<int, string>? differences = null, string? baseEncodingName = null)
+        PdfDictionary? fontDict,
+        Dictionary<int, string>? differences = null, string? baseEncodingName = null, PdfReader? reader = null)
     {
         var isCid = fontDict?.GetName("Subtype") == "Type0";
         var sb = new StringBuilder();
@@ -465,7 +508,9 @@ public sealed partial class TextAbsorber
             if (isCid && i + 1 < bytes.Length)
             {
                 var code = (bytes[i] << 8) | bytes[i + 1];
-                if (code is > 0 and < 0xD800 or > 0xDFFF and <= 0xFFFF)
+                if (UnmappedCidText(fontDict, reader, code) is { } programText)
+                    sb.Append(programText);
+                else if (code is > 0 and < 0xD800 or > 0xDFFF and <= 0xFFFF)
                     sb.Append((char)code);
                 else
                     sb.Append('\uFFFD');
@@ -496,17 +541,17 @@ public sealed partial class TextAbsorber
         if (cidSystemInfo is null) return null;
         // Registry and Ordering are PDF strings (not names)
         var registryObj = cidSystemInfo.Get("Registry");
-        var registry = registryObj is PdfString rs ? rs.ToText() : (registryObj is PdfName rn ? rn.Value : null);
+        var registry = registryObj switch { PdfString rs => rs.ToText(), PdfName rn => rn.Value, _ => null };
         if (registry != "Adobe") return null;
         var orderingObj = cidSystemInfo.Get("Ordering");
-        return orderingObj is PdfString os ? os.ToText() : (orderingObj is PdfName on2 ? on2.Value : null);
+        return orderingObj switch { PdfString os => os.ToText(), PdfName on2 => on2.Value, _ => null };
     }
 
     private static string DecodeCidString(byte[] bytes, Dictionary<int, string>? toUnicode,
         string? cidOrdering = null, Dictionary<int, int>? gidToUnicode = null)
     {
         if (toUnicode is not null)
-            return DecodeWithToUnicode(bytes, toUnicode, null, null!);
+            return DecodeWithToUnicode(bytes, toUnicode, null);
 
         var sb = new StringBuilder();
         for (var i = 0; i + 1 < bytes.Length; i += 2)
@@ -532,15 +577,6 @@ public sealed partial class TextAbsorber
             sb.Append((char)code);
         }
         return sb.ToString();
-    }
-
-    /// <summary>Cache entry for a font's inverted gid → Unicode map, remembering whether the
-    /// inversion source was the font's own embedded program (opt-in for decoding) or the
-    /// installed system face (used by default for non-embedded fonts).</summary>
-    private sealed class GidToUnicodeEntry
-    {
-        public Dictionary<int, int> Map = new();
-        public bool FromEmbedded;
     }
 
     private sealed class PostNameMapEntry { public Dictionary<int, string>? Map; }
@@ -606,19 +642,15 @@ public sealed partial class TextAbsorber
     /// <summary>
     /// Build a glyph-id → Unicode map for an Identity-encoded Type0 font that lacks a
     /// /ToUnicode CMap, by inverting a TrueType cmap (threading the CID→GID mapping when
-    /// /CIDToGIDMap is a stream). The inversion source is the embedded program when present
-    /// (returned only when <paramref name="allowEmbedded"/> — raw codes are kept
-    /// for embedded programs unless font-engine decoding is requested), otherwise the
-    /// installed system face named by /BaseFont. Cached per font dictionary.
+    /// /CIDToGIDMap is a stream). The inversion source is the embedded program when present,
+    /// otherwise the installed system face named by /BaseFont. Cached per font dictionary.
     /// </summary>
-    private static Dictionary<int, int>? GetGidToUnicode(PdfDictionary fontDict, PdfReader reader,
-        bool allowEmbedded)
+    private static Dictionary<int, int>? GetGidToUnicode(PdfDictionary fontDict, PdfReader reader)
     {
         if (_gidToUnicodeCache.TryGetValue(fontDict, out var cached))
-            return cached.Map.Count > 0 && (allowEmbedded || !cached.FromEmbedded) ? cached.Map : null;
+            return cached.Count > 0 ? cached : null;
 
-        var entry = new GidToUnicodeEntry();
-        var map = entry.Map;
+        var map = new Dictionary<int, int>();
         try
         {
             var descArr = reader.Resolve(fontDict.Get("DescendantFonts")) as PdfArray;
@@ -626,17 +658,22 @@ public sealed partial class TextAbsorber
             var fd = descendant is null ? null : reader.ResolveDict(descendant.Get("FontDescriptor"));
             var ff2 = fd?.Get("FontFile2") ?? fd?.Get("FontFile3");
             var stream = ff2 is null ? null : reader.ResolveStream(ff2);
-            byte[]? data = stream is not null ? reader.DecodeStream(stream) : null;
-            entry.FromEmbedded = data is not null;
+            byte[]? embedded = stream is not null ? reader.DecodeStream(stream) : null;
+            var baseFont = fontDict.GetName("BaseFont");
+            var parser = embedded is not null ? ParseTrueType(embedded) : null;
             // A NON-embedded Identity CID font draws with the glyph ids of the real face
             // it names, so the installed system font's cmap carries the same gid → Unicode
-            // relation the producer used. Resolve it as the inversion source.
-            if (data is null && fontDict.GetName("BaseFont") is { } nonEmbeddedBase)
-                data = SystemFontResolver.Resolve(nonEmbeddedBase);
-            if (data is not null)
+            // relation the producer used. Resolve it as the inversion source. So does an
+            // embedded program with no cmap of its own (a CID-keyed CFF converted from a
+            // TrueType face keeps that face's glyph ids as its CIDs) - but only when the
+            // installed face IS the one named and its glyph ids are the font's. This runs too
+            // when a /ToUnicode is present but unreadable: every code is then left to it.
+            if (embedded is null && baseFont is not null && SystemFontResolver.Resolve(baseFont) is { } face)
+                parser = ParseTrueType(face);
+            else if (parser is not { CMap.Count: > 0 } && baseFont is not null && descendant is not null)
+                parser = InstalledFaceWithTheseGlyphIds(baseFont, descendant, reader);
+            if (parser is not null)
             {
-                var parser = new TrueTypeParser(data);
-                parser.Parse();
                 // parser.CMap is Unicode → glyph id; invert it. When several codepoints map
                 // to the SAME glyph (e.g. a hyphen glyph reachable from both U+002D
                 // hyphen-minus and U+00AD soft-hyphen), prefer the SMALLEST codepoint — the
@@ -647,10 +684,7 @@ public sealed partial class TextAbsorber
                 // forms, then the base letter) in font-engine extraction.
                 var gidToUni = new Dictionary<int, int>(parser.CMap.Count);
                 static int ArabicRank(int c) =>
-                    c is >= 0xFE70 and <= 0xFEFF ? 3
-                    : c is >= 0xFB50 and <= 0xFDFF ? 2
-                    : c is >= 0x0600 and <= 0x06FF ? 1
-                    : 0;
+                    c switch { >= 0xFE70 and <= 0xFEFF => 3, >= 0xFB50 and <= 0xFDFF => 2, >= 0x0600 and <= 0x06FF => 1, _ => 0 };
                 foreach (var kv in parser.CMap)
                 {
                     if (!gidToUni.TryGetValue(kv.Value, out var existing))
@@ -685,9 +719,53 @@ public sealed partial class TextAbsorber
         }
         catch { /* best-effort: leave the map empty so the caller falls back */ }
 
-        _gidToUnicodeCache.AddOrUpdate(fontDict, entry);
-        return map.Count > 0 && (allowEmbedded || !entry.FromEmbedded) ? map : null;
+        _gidToUnicodeCache.AddOrUpdate(fontDict, map);
+        return map.Count > 0 ? map : null;
     }
+
+    /// <summary>A TrueType program parsed, or null when the data is no TrueType (a CFF program).</summary>
+    private static TrueTypeParser? ParseTrueType(byte[] data)
+    {
+        try
+        {
+            var parser = new TrueTypeParser(data);
+            parser.Parse();
+            return parser;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The installed face whose PostScript name is the one <paramref name="baseFont"/>
+    /// names (subset prefix and encoding suffix aside) and whose glyph ids provably are the
+    /// font's CIDs: the advances it gives those glyphs are the font's /W widths. A subset
+    /// renumbered from the face (its glyph 5 may be any glyph of the face), a face known only
+    /// through a stand-in, a font with no /W to compare or a /CIDToGIDMap stream gets none.</summary>
+    private static TrueTypeParser? InstalledFaceWithTheseGlyphIds(string baseFont, PdfDictionary descendant, PdfReader reader)
+    {
+        if (descendant.Get("CIDToGIDMap") is { } cidToGid && reader.Resolve(cidToGid) is not PdfName) return null;
+        var name = SystemFontResolver.NormalizeBaseFontName(baseFont);
+        if (SystemFontResolver.Resolve(baseFont) is not { } face || ParseTrueType(face) is not { } parser
+            || !string.Equals(parser.PostScriptName, name, StringComparison.Ordinal))
+            return null;
+        var compared = 0;
+        foreach (var (cid, width) in TrueTypeAdvances.CidWidths(reader.Resolve(descendant.Get("W")) as PdfArray, reader))
+        {
+            if (compared == MaxWidthComparisons) break;
+            if (cid >= parser.GlyphWidths.Length
+                || Math.Abs(parser.GlyphWidths[cid] * GlyphSpaceUnits / parser.UnitsPerEm - width) > WidthRounding)
+                return null;
+            compared++;
+        }
+        return compared >= MinWidthComparisons ? parser : null;
+    }
+
+    // Widths compared before an installed face counts as the font's own (a handful could match by
+    // chance; every width of a large font need not be read), the rounding a producer writes them
+    // with, and the 1000-unit glyph space /W is written in.
+    private const int MinWidthComparisons = 4;
+    private const int MaxWidthComparisons = 256;
+    private const double WidthRounding = 1.0;
+    private const double GlyphSpaceUnits = 1000.0;
 
     /// <summary>Arabic lam-alef is drawn by ONE glyph, and a CMap spells its
     /// destination out as the two letters it stands for (&lt;03F7&gt; →

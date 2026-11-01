@@ -34,10 +34,11 @@ public partial class Table
         // Consecutive runs of one anchor become a single Link rectangle over exactly
         // the anchor's characters, measured with the metrics that laid the line out.
         List<(double XOff, double W, Hyperlink Link)>? linkRuns = null;
-        for (var ri = 0; ri < hc.curRuns.Count; ri++)
+        var ri = 0;
+        while (ri < hc.curRuns.Count)
         {
             var url = hc.curRuns[ri].Url;
-            if (string.IsNullOrEmpty(url)) continue;
+            if (string.IsNullOrEmpty(url)) { ri++; continue; }
             var x0 = hc.curRuns[ri].X;
             var end = hc.curRuns[ri].X + MeasureWidthKerned(hc.curRuns[ri].Text, hc.curRuns[ri].Size, EngineRunTtf(hc.curRuns[ri]));
             while (ri + 1 < hc.curRuns.Count && hc.curRuns[ri + 1].Url == url)
@@ -46,6 +47,7 @@ public partial class Table
                 end = hc.curRuns[ri].X + MeasureWidthKerned(hc.curRuns[ri].Text, hc.curRuns[ri].Size, EngineRunTtf(hc.curRuns[ri]));
             }
             (linkRuns ??= new()).Add((x0, end - x0, new WebHyperlink(url)));
+            ri++;
         }
         // The line's CSS box is the larger of the root strut and the box of its
         // own biggest run (a 33pt span opens a 33pt line box; a 10pt small still
@@ -105,14 +107,11 @@ public partial class Table
         // trailing space before an inline element (e.g. "Min. Fee " before <small>)
         // is a real inter-word space that must render; leading spaces at a line
         // start are dropped separately below.
-        var text = DecodeHtmlEntities(Regex.Replace(raw, @"\s+", " "));
+        var text = DecodeHtmlEntities(SafeRegex.Replace(raw, @"\s+", " "));
         if (text.Length == 0) return;
         if (text.Trim().Length > 0) CommitFloats(hc);
-        if (text == " ")
-        {
-            // Inter-tag whitespace: a space only mid-line, never at a line start.
-            if (hc.curRuns.Count == 0 && hc.curX <= hc.lineIndent) return;
-        }
+        // Inter-tag whitespace: a space only mid-line, never at a line start.
+        if (text == " " && hc.curRuns.Count == 0 && hc.curX <= hc.lineIndent) return;
         var size = ResolveEngineSize(hc);
         Color? spanColor = null;
         var spanUnderline = false;
@@ -186,7 +185,9 @@ public partial class Table
                 };
                 hc.curRuns.Add(run);
             }
+#pragma warning disable S1643 // the open run is read whole when its line flushes (FlushLine measures every run), so it takes each token of its piece as it comes
             else run.Text += tokenText;
+#pragma warning restore S1643
             hc.curX += w;
             hc.anyText = true;
         }

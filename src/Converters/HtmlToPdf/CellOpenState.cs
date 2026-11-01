@@ -51,17 +51,11 @@ private sealed class CellOpenState
     public IReadOnlyDictionary<string, Dictionary<string, string>>? docCss;
     public List<CssChainRule>? chainRules;
     public List<CssElem>? cssAncestors;
-    public List<byte[]>? inlineSvgs;
-    public List<string> nestedHtml = null!;
-    public Func<string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio;
-    public double availWidthPt;
-    public double defaultCellFontPt;
     public Dictionary<string, string> tblStyle = null!;
     public bool docElementGrid;
     public bool pinnedBodyGrid;
     public bool authoredCellChrome;
     public bool chainBorderSeparate;
-    public bool elemRuleBorder;
     public List<CssElem> tdChain = null!;
     public Dictionary<string, string>? bgRule;
 }

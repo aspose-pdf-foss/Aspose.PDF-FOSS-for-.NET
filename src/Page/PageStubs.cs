@@ -71,8 +71,7 @@ public class PageActionCollection
 public class Group
 {
     /// <summary>Creates a transparency group description for the given page, with a DeviceRGB colour space.</summary>
-    public Group(Page page) { _page = page; }
-    private readonly Page _page;
+    public Group(Page page) { }
 
     /// <summary>Colour space for the page-group's blending.</summary>
     public ColorSpace ColorSpace { get; set; } = ColorSpace.DeviceRGB;

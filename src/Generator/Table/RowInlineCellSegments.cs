@@ -23,9 +23,12 @@ public partial class Table
         var cjk = fragTtf is not null && CjkCoveredBy(text, fragTtf);
         var runTtf = cjk ? fragTtf : null;
         var runName = cjk ? tf.TextState.Font?.FontName : null;
-        double Wid(string t) => t.Length == 0 ? 0
-            : runTtf is not null ? MeasureWidthWithFont(t, fs, runTtf)
-            : MeasureWidthExact(t, fs);
+        double Wid(string t)
+        {
+            if (t.Length == 0) return 0;
+            if (runTtf is not null) return MeasureWidthWithFont(t, fs, runTtf);
+            return MeasureWidthExact(t, fs);
+        }
         var itemH2 = RowH(il, fs);
         void Emit(string t, double w)
         {
@@ -89,7 +92,9 @@ public partial class Table
     private void LayoutSegmentedFragment(InlineCellLayoutState il, Aspose.Pdf.Text.TextFragment tf, double defaultFontSize, Aspose.Pdf.Text.TextState? cellTextState, HorizontalAlignment cellAlign)
     {
         il.x += il.marginL;
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var seg in il.segs)
+#pragma warning restore S3267
         {
             if (!LayoutFragmentSegment(il, tf, seg, defaultFontSize, cellTextState, cellAlign)) break;
         }
@@ -142,8 +147,8 @@ public partial class Table
             if (!string.IsNullOrEmpty(family))
             {
                 Aspose.Pdf.Text.Font? styledFace = null;
-                try { styledFace = Aspose.Pdf.Text.FontRepository.TryFindFont(family!, wantStyle, ignoreCase: true); }
-                catch { }
+                try { styledFace = Aspose.Pdf.Text.FontRepository.TryFindFont(family, wantStyle, ignoreCase: true); }
+                catch { /* a font that cannot be found or read leaves the fallback in place */ }
                 if (styledFace?.SourceFontData?.TtfData is { Length: > 12 } styledTtf)
                 {
                     il.segTtf = styledTtf;
@@ -173,7 +178,9 @@ public partial class Table
         if (il.segTtf is null && !NeedsGlyphFallback(il.segPiece, null))
         {
             var segFs = (il.sup || il.sub) ? il.baseFs * SubSuperScale : il.baseFs;
-            var shift = il.sup ? il.baseFs * SuperscriptRise : il.sub ? -il.baseFs * SubscriptRise : 0.0;
+            double shift = 0.0;
+            if (il.sup) shift = il.baseFs * SuperscriptRise;
+            else if (il.sub) shift = -il.baseFs * SubscriptRise;
             var sw = il.segBold ? MeasureFaceExact(il.segPiece, segFs, true)
                 : MeasureWidthExact(il.segPiece, segFs);
             if (il.x + sw <= il.contentW || il.sup || il.sub)
@@ -188,7 +195,9 @@ public partial class Table
         // glyph-covering substitute when that face lacks its script (Greek
         // and Arabic in a Standard-14 cell, ideographs in Arial) — and a
         // token wider than the cell is cut character by character.
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var token in SplitKeepingSpaces(il.segPiece))
+#pragma warning restore S3267
         {
             if (!PlaceSegmentToken(il, token, cellAlign)) break;
         }

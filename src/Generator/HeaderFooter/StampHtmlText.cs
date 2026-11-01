@@ -22,7 +22,7 @@ public sealed partial class HeaderFooter
         // drops), draws the "\n"s as text, and hangs the stack from the page's
         // bottom-margin line pushed by the footer's own (negative) top margin —
         // see Table.DrawEscapedNewlineFooterHtml for the measured laws.
-        if (!ResolveFooterTableLines(hf, ts, htmlFrag)) return false;
+        if (!ResolveFooterTableLines(hf, ts)) return false;
         // An HTML <table> in a header/footer fragment renders as real columns
         // (rows × cells) rather than the flat tag-stripped text stack: build a
         // generator Table and lay it out bottom-aligned to the footer band.
@@ -32,26 +32,26 @@ public sealed partial class HeaderFooter
         // CSS row heights stepping the stack (the remaining lines keep the
         // band's 1.12 em pitch).
         if (!ResolveProcedureBandText(hf, ts, htmlFrag)) return false;
-        if (!ResolveHeaderBandText(hf, ts, htmlFrag)) return false;
+        if (!ResolveHeaderBandText(hf, ts)) return false;
         ts.cssLeftIndent = Converters.HtmlToPdfConverter.CssBlockLeftIndentPt(
             ts.hc, htmlFrag.HtmlLoadOptions) + ts.hfBandShift;
         if (!ResolveInlineEmphasisFontText(hf, ts, htmlFrag)) return false;
         if (!ResolveHtmlBlockText(hf, ts, htmlFrag)) return false;
         ts.text = HtmlFragment.StripHtmlTags(ApplyTextTransforms(ts.hc));
-        ts.blkStyle = System.Text.RegularExpressions.Regex.Match(ts.hc,
+        ts.blkStyle = SafeRegex.Match(ts.hc,
             @"<(?:div|p)\b[^>]*style\s*=\s*(['""])(?<s>[^'""]*)\1",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (ts.blkStyle.Success)
         {
             var st = ts.blkStyle.Groups["s"].Value;
-            var fsm = System.Text.RegularExpressions.Regex.Match(st,
+            var fsm = SafeRegex.Match(st,
                 @"font-size\s*:\s*([\d.]+)\s*px",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (fsm.Success && double.TryParse(fsm.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var fpx) && fpx > 0)
                 ts.fs = (float)(fpx * 0.75);
-            var alm = System.Text.RegularExpressions.Regex.Match(st,
+            var alm = SafeRegex.Match(st,
                 @"text-align\s*:\s*(center|right)",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (alm.Success)
@@ -75,7 +75,7 @@ public sealed partial class HeaderFooter
     /// bottom content margin the same way: baseline 511.105 on a 540 pt page), an
     /// underlined run ruled 0.1 em thick 0.1 em under its baseline; false when it drew.
     /// A face without TrueType data draws the Standard-14 twins at the legacy seat.</summary>
-    private bool ResolveInlineEmphasisFontText(StampParagraphsState hf, StampTextState ts, HtmlFragment htmlFrag)
+    private static bool ResolveInlineEmphasisFontText(StampParagraphsState hf, StampTextState ts, HtmlFragment htmlFrag)
     {
         if (ts.embedFont is not null) return true;
         if (Converters.HtmlToPdfConverter.TryParseInlineEmphasisFont(ts.hc) is not (var face, var pt, var runs)
@@ -126,14 +126,15 @@ public sealed partial class HeaderFooter
 
     /// <summary>The legacy band seat for a face with no TrueType data: Standard-14 twins,
     /// the baseline the band cursor pushed by the fragment's own margin.</summary>
-    private void DrawStandard14EmphasisRuns(StampParagraphsState hf, HtmlFragment htmlFrag, ContentStreamBuilder b,
+    private static void DrawStandard14EmphasisRuns(StampParagraphsState hf, HtmlFragment htmlFrag, ContentStreamBuilder b,
         string face, double pt, List<(string text, bool bold, bool underline, bool italic)> runs, double x)
     {
-        var family = face.Contains("Times", StringComparison.OrdinalIgnoreCase) ? "Times"
-            : face.Contains("Courier", StringComparison.OrdinalIgnoreCase) ? "Courier" : "Helvetica";
-        var baseline = hf.isHeader
-            ? hf.y - (htmlFrag.Margin.TopTouched ? htmlFrag.Margin.Top : 0)
-            : hf.y + (htmlFrag.Margin.BottomTouched ? htmlFrag.Margin.Bottom : 0);
+        string family = "Helvetica";
+        if (face.Contains("Times", StringComparison.OrdinalIgnoreCase)) family = "Times";
+        else if (face.Contains("Courier", StringComparison.OrdinalIgnoreCase)) family = "Courier";
+        double baseline;
+        if (hf.isHeader) baseline = hf.y - (htmlFrag.Margin.TopTouched ? htmlFrag.Margin.Top : 0);
+        else baseline = hf.y + (htmlFrag.Margin.BottomTouched ? htmlFrag.Margin.Bottom : 0);
         foreach (var (text, bold, underline, italic) in runs)
         {
             if (text.Length == 0) continue;
@@ -161,9 +162,9 @@ public sealed partial class HeaderFooter
     /// <summary>The Standard-14 face name for a family in a bold/italic style.</summary>
     private static string Standard14StyleName(string family, bool bold, bool italic) => family switch
     {
-        "Times" => bold && italic ? "Times-BoldItalic" : bold ? "Times-Bold" : italic ? "Times-Italic" : "Times-Roman",
-        "Courier" => bold && italic ? "Courier-BoldOblique" : bold ? "Courier-Bold" : italic ? "Courier-Oblique" : "Courier",
-        _ => bold && italic ? "Helvetica-BoldOblique" : bold ? "Helvetica-Bold" : italic ? "Helvetica-Oblique" : "Helvetica",
+        "Times" => (bold, italic) switch { (true, true) => "Times-BoldItalic", (true, _) => "Times-Bold", (_, true) => "Times-Italic", _ => "Times-Roman" },
+        "Courier" => (bold, italic) switch { (true, true) => "Courier-BoldOblique", (true, _) => "Courier-Bold", (_, true) => "Courier-Oblique", _ => "Courier" },
+        _ => (bold, italic) switch { (true, true) => "Helvetica-BoldOblique", (true, _) => "Helvetica-Bold", (_, true) => "Helvetica-Oblique", _ => "Helvetica" },
     };
 
     /// <summary>The fragment's block list picks the face and size the text stamps with; false when the blocks were drawn directly.</summary>
@@ -171,96 +172,107 @@ public sealed partial class HeaderFooter
     {
         ts.hfBlocks = Converters.HtmlToPdfConverter.ParseHtmlBlocks(
             ApplyTextTransforms(ts.hc),
-            ts.hfBandSmall ? 9.75 : hf.fontSize > 10 ? hf.fontSize : 12.0);
+            (ts.hfBandSmall, hf.fontSize) switch { (true, _) => 9.75, (_, > 10) => hf.fontSize, _ => 12.0 });
         ts.hfTextBlocks = ts.hfBlocks.FindAll(b => !string.IsNullOrWhiteSpace(b.Text));
         if (ts.embedFont is null
             && (ts.hfTextBlocks.Count > 1 || (IsClipExtraContent && ts.hfTextBlocks.Count == 1)))
         {
             // Inline emphasis carried by every line of the fragment (the
             // <p><u><strong>… header idiom) — resolved at fragment level.
-            var hfBold = System.Text.RegularExpressions.Regex.IsMatch(ts.hc, @"<(b|strong)[\s>]",
+            var hfBold = SafeRegex.IsMatch(ts.hc, @"<(b|strong)[\s>]",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            var hfUnderline = System.Text.RegularExpressions.Regex.IsMatch(ts.hc, @"<u[\s>]",
+            var hfUnderline = SafeRegex.IsMatch(ts.hc, @"<u[\s>]",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             var hfFont = hfBold ? "Helvetica-Bold" : "Helvetica";
             var hfRes = EnsureFontResource(hf.page, hfFont);
-            // Body content edges this band must respect (the page's content
-            // margins through the same fall-through as mLeft).
-            var bodyTopMargin = Margin.TopTouched && Margin.Top > 0 ? Margin.Top
-                : hf.page.PageInfo?.Margin is { TopTouched: true } ptm ? ptm.Top
-                : hf.document?.PageInfo?.Margin is { TopTouched: true } dtm ? dtm.Top
-                : 90;
-            var bodyBottomMargin = hf.page.PageInfo?.Margin is { BottomTouched: true } pbm ? pbm.Bottom
-                : hf.document?.PageInfo?.Margin is { BottomTouched: true } dbm ? dbm.Bottom
-                : 72;
+            // Body content edge a clipping header must respect (the page's content
+            // margin through the same fall-through as mLeft).
+            var bodyTopMargin = BodyTopMarginPt(hf);
+            // The member's lines hang from the band's stack - a header's stack top, the stacked
+            // footer's running top - its own top margin that much further down, and they read
+            // top-down in both bands; they used to hang from the band's edge over the members
+            // before them, and a footer's stood on the footer margin under a member before it.
+            var memberTop = htmlFrag.Margin.TopTouched ? htmlFrag.Margin.Top : 0;
+            var stackTop = (hf.isHeader ? hf.HeaderStackTop - ts.hfBandOffset : hf.y) - memberTop;
+            var bandWidth = hf.page.Width - hf.mLeft - (Margin.RightTouched ? Margin.Right : hf.mLeft);
             var hfB = new ContentStreamBuilder();
             hfB.SaveState();
-            var lineIdx = 0;
+            var stacked = 0.0;
+            var lines = 0;
+            var clipped = false;
             foreach (var blk in ts.hfTextBlocks)
             {
                 var bfs = blk.FontSize > 0 ? blk.FontSize : hf.fontSize;
-                // The HTML paragraph band steps on a 1.12 em pitch.
-                var pitch = bfs * 1.12;
-                double baseline;
-                if (hf.isHeader)
+                // The HTML paragraph band steps on a 1.12 em pitch; a line wider than the band
+                // wraps at the band's right margin, each of its lines stepping the same.
+                var pitch = BandBlockPitch(blk, hf.fontSize);
+                var lineX = hf.x + ts.cssLeftIndent + blk.LeftIndent;
+                foreach (var line in WrapBandLines(blk.Text, hfFont, bfs, bandWidth - ts.cssLeftIndent - blk.LeftIndent))
                 {
-                    baseline = hf.page.Height - hf.mTop - bfs - lineIdx * pitch - ts.hfBandOffset;
-                    // Clip: a header line whose descender/underline would touch
-                    // the body's first line (cap top = top margin − cap ascent)
-                    // is extra content.
-                    if (IsClipExtraContent
-                        && (hf.page.Height - baseline) + bfs * 0.2 > bodyTopMargin - bfs * 0.72)
-                        break;
-                }
-                else
-                {
-                    // Footer band: with clipping the band tucks under the body's
-                    // bottom content margin; otherwise keep the legacy bottom-up
-                    // stack from the footer margin.
-                    baseline = IsClipExtraContent
-                        ? bodyBottomMargin - bfs - lineIdx * pitch
-                        : hf.mBottom + hf.fontSize + lineIdx * pitch;
-                    if (baseline < 0) break;
-                }
-                // a row that declares its own background paints the band behind
-                // its line, spanning its enclosing column's share of the band
-                if (blk.BackgroundColor is { } hbg && ts.hfBandW > 0)
-                    hfB.SetFillColor(hbg.R / 255.0, hbg.G / 255.0, hbg.B / 255.0)
-                       .Rectangle(hf.x + ts.cssLeftIndent, baseline - RptBandDescentPt,
-                           ts.hfBandW * (blk.WidthFrac > 0 ? blk.WidthFrac : 1.0), RptRowPitchPt)
-                       .Fill()
-                       .SetFillColor(0, 0, 0);
-                hfB.BeginText()
-                    .SetFont(hfRes, bfs)
-                    .MoveTextPosition(hf.x + ts.cssLeftIndent + blk.LeftIndent, baseline)
-                    .ShowText(blk.Text)
-                    .EndText();
-                if (hfUnderline)
-                {
-                    double ulW;
-                    try
+                    var baseline = stackTop - stacked - bfs;
+                    // Clip: a header line whose descender/underline would touch the body's first
+                    // line (cap top = top margin − cap ascent) is extra content, and so is a
+                    // footer line under the page's bottom edge.
+                    if (IsClipExtraContent && (hf.isHeader
+                            ? (hf.page.Height - baseline) + bfs * 0.2 > bodyTopMargin - bfs * 0.72
+                            : baseline < 0))
+                    { clipped = true; break; }
+                    // a row that declares its own background paints the band behind
+                    // its line, spanning its enclosing column's share of the band
+                    if (blk.BackgroundColor is { } hbg && ts.hfBandW > 0)
+                        hfB.SetFillColor(hbg.R / 255.0, hbg.G / 255.0, hbg.B / 255.0)
+                           .Rectangle(hf.x + ts.cssLeftIndent, baseline - RptBandDescentPt,
+                               ts.hfBandW * (blk.WidthFrac > 0 ? blk.WidthFrac : 1.0), RptRowPitchPt)
+                           .Fill()
+                           .SetFillColor(0, 0, 0);
+                    hfB.BeginText()
+                        .SetFont(hfRes, bfs)
+                        .MoveTextPosition(lineX, baseline)
+                        .ShowText(line)
+                        .EndText();
+                    if (hfUnderline)
                     {
-                        ulW = FontRepository.TryFindFont(hfFont)?.MeasureString(blk.Text, bfs)
-                              ?? EstimateWidth(blk.Text, bfs);
+                        double ulW;
+                        try
+                        {
+                            ulW = FontRepository.TryFindFont(hfFont)?.MeasureString(line, bfs)
+                                  ?? EstimateWidth(line, bfs);
+                        }
+                        catch { ulW = EstimateWidth(line, bfs); }
+                        hfB.SetLineWidth(bfs * 0.07)
+                            .MoveTo(lineX, baseline - bfs * 0.12)
+                            .LineTo(lineX + ulW, baseline - bfs * 0.12)
+                            .Stroke();
                     }
-                    catch { ulW = EstimateWidth(blk.Text, bfs); }
-                    hfB.SetLineWidth(bfs * 0.07)
-                        .MoveTo(hf.x + ts.cssLeftIndent + blk.LeftIndent, baseline - bfs * 0.12)
-                        .LineTo(hf.x + ts.cssLeftIndent + blk.LeftIndent + ulW, baseline - bfs * 0.12)
-                        .Stroke();
+                    stacked += pitch;
+                    lines++;
+                    if (!hf.isHeader)
+                        hf.footerInkBottom = Math.Min(hf.footerInkBottom, baseline - FaceDescentEm(hfFont, null) * bfs);
                 }
-                lineIdx++;
+                if (clipped) break;
             }
             hfB.RestoreState();
             hf.page.AddContentStream(hfB.Build());
-            if (hf.isHeader) hf.y -= lineIdx * hf.fontSize * 1.12;
+            if (hf.isHeader)
+            {
+                hf.headerStackH += memberTop + stacked;
+                hf.y -= lines * hf.fontSize * BandHtmlPitchEm;
+            }
+            else hf.y = stackTop - stacked;
+            hf.firstParagraph = false;
             return false;
         }
         return true;
     }
 
+    /// <summary>The pitch an HTML band line steps on: 1.12 em of its own size, else of the band's.</summary>
+    private static double BandBlockPitch(Converters.HtmlToPdfConverter.Block blk, double bandFontSize) =>
+        (blk.FontSize > 0 ? blk.FontSize : bandFontSize) * BandHtmlPitchEm;
+
+    private const double BandHtmlPitchEm = 1.12;
+
     /// <summary>A header band's face, size and offsets from its CSS; false when the band drew itself.</summary>
-    private bool ResolveHeaderBandText(StampParagraphsState hf, StampTextState ts, HtmlFragment htmlFrag)
+    private bool ResolveHeaderBandText(StampParagraphsState hf, StampTextState ts)
     {
         ts.hfBandOffset = 0.0;
         ts.hfBandShift = 0.0;
@@ -268,14 +280,14 @@ public sealed partial class HeaderFooter
         ts.hfBandW = 0.0;
         if (hf.isHeader && ts.embedFont is null)
         {
-            var h5M = System.Text.RegularExpressions.Regex.Match(ts.hc,
+            var h5M = SafeRegex.Match(ts.hc,
                 @"(?s)<h5[^>]*>(.*?)</h5>",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-            var bodyWM = System.Text.RegularExpressions.Regex.Match(ts.hc,
+            var bodyWM = SafeRegex.Match(ts.hc,
                 @"<body\b[^>]*style\s*=\s*(['""])[^'""]*?(?<![-\w])width\s*:\s*([\d.]+\s*(?:cm|mm|in|pt))[^'""]*\1",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             var spans = h5M.Success
-                ? System.Text.RegularExpressions.Regex.Matches(h5M.Groups[1].Value,
+                ? SafeRegex.Matches(h5M.Groups[1].Value,
                     @"(?s)<span\b[^>]*style\s*=\s*(['""])(?<st>[^'""]*width\s*:\s*[\d.]+%[^'""]*)\1[^>]*>(?<t>.*?)</span>",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase)
                 : null;
@@ -327,7 +339,7 @@ public sealed partial class HeaderFooter
     }
 
     /// <summary>An HTML table in the band renders as a table; false when nothing is left to stamp as text.</summary>
-    private bool ResolveHtmlTableText(StampParagraphsState hf, StampTextState ts, HtmlFragment htmlFrag)
+    private static bool ResolveHtmlTableText(StampParagraphsState hf, StampTextState ts, HtmlFragment htmlFrag)
     {
         if (Converters.HtmlToPdfConverter.ContainsTable(ts.hc))
         {
@@ -352,10 +364,9 @@ public sealed partial class HeaderFooter
                 authoredCellChrome: true, defaultCellFace: BandSheetFamily(ts.hc));
             if (htmlTbl is not null)
             {
-                // On a /Rotate page the footer content is drawn through a visual→raw
-                // matrix (the table is laid out in the page's rotation-adjusted VISUAL
-                // space, then mapped into raw content space so it appears upright).
-                var rotCm = VisualToRawRotationCm(hf.page);
+                // On a /Rotate page the table is laid out in the page as shown; the layout
+                // pass turns what it wrote into media space (Page.TurnGeneratedContent).
+                var turned = hf.page.RotationQuarter != 0;
 
                 // The generator centres a table in `page.Width - 2*FlowLeftOffset`; a
                 // left-aligned footer table at Margin.Left would shrink to half width
@@ -364,7 +375,7 @@ public sealed partial class HeaderFooter
                 // from the left margin to the right edge) and translate it to Margin.Left
                 // in the visual frame; the unrotated path keeps the original placement.
                 double flo = hf.x + (bandAvail > 0 ? BandSideInsetPt : 0), translateX = 0;
-                if (rotCm is not null)
+                if (turned)
                 {
                     var desiredUsable = Math.Max(50.0, hf.page.Width - hf.x - 36);
                     flo = (hf.page.Width - desiredUsable) / 2;
@@ -380,7 +391,7 @@ public sealed partial class HeaderFooter
                 var startY = hf.isHeader ? hf.y : hf.mBottom + htmlTbl.LastRenderedHeight;
                 var contents = htmlTbl.BuildMultiPage(hf.page, startY, -hf.page.Height);
 
-                if (rotCm is null)
+                if (!turned)
                 {
                     if (contents.Count > 0) hf.page.AddContentStream(contents[0]);
                     // Cell images are collected by the layout pass, not written into
@@ -396,7 +407,7 @@ public sealed partial class HeaderFooter
                 }
                 else
                 {
-                    var wrap = new System.Text.StringBuilder("q\n").Append(rotCm).Append('\n');
+                    var wrap = new System.Text.StringBuilder("q\n");
                     if (Math.Abs(translateX) > 0.001)
                         wrap.Append("1 0 0 1 ")
                             .Append(translateX.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture))
@@ -464,9 +475,9 @@ public sealed partial class HeaderFooter
 
     /// <summary>The band a stamped fragment lays out in: the width its own body declares, else
     /// the page between the flow's left offset and its mirror on the right.</summary>
-    private double BandBoxWidthPt(StampParagraphsState hf, string html)
+    private static double BandBoxWidthPt(StampParagraphsState hf, string html)
     {
-        var bodyWM = System.Text.RegularExpressions.Regex.Match(html,
+        var bodyWM = SafeRegex.Match(html,
             @"<body\b[^>]*style\s*=\s*(['""])[^'""]*?(?<![-\w])width\s*:\s*([\d.]+\s*(?:cm|mm|in|pt|px))[^'""]*\1",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         var w = bodyWM.Success ? PhysPt(bodyWM.Groups[2].Value) : 0;
@@ -492,12 +503,12 @@ public sealed partial class HeaderFooter
     /// <summary>The headings a fragment carries OUTSIDE its tables, in document order.</summary>
     private static List<string> HeadingsOutsideTables(string html)
     {
-        var loose = System.Text.RegularExpressions.Regex.Replace(html,
+        var loose = SafeRegex.Replace(html,
             @"(?s)<table\b.*?</table>", " ",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         var found = new List<string>();
         foreach (System.Text.RegularExpressions.Match m in
-            System.Text.RegularExpressions.Regex.Matches(loose, @"(?s)<h([1-6])\b[^>]*>(.*?)</h\1>",
+            SafeRegex.Matches(loose, @"(?s)<h([1-6])\b[^>]*>(.*?)</h\1>",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
         {
             var txt = HtmlFragment.StripHtmlTags(m.Groups[2].Value).Trim();
@@ -512,13 +523,13 @@ public sealed partial class HeaderFooter
     /// reference draws them centred under the table, on the same heading ladder the band
     /// dialect measures; a fragment that declares its own body width centres on that band
     /// rather than on the page's content box.</summary>
-    private void StampHeadingsAfterTable(StampParagraphsState hf, StampTextState ts, double tableBottom)
+    private static void StampHeadingsAfterTable(StampParagraphsState hf, StampTextState ts, double tableBottom)
     {
         if (!hf.isHeader) return;
         var headings = HeadingsOutsideTables(ts.hc);
         if (headings.Count == 0) return;
 
-        var bodyWM = System.Text.RegularExpressions.Regex.Match(ts.hc,
+        var bodyWM = SafeRegex.Match(ts.hc,
             @"<body\b[^>]*style\s*=\s*(['""])[^'""]*?(?<![-\w])width\s*:\s*([\d.]+\s*(?:cm|mm|in|pt))[^'""]*\1",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         var bandW = bodyWM.Success ? PhysPt(bodyWM.Groups[2].Value) : 0;
@@ -563,14 +574,14 @@ public sealed partial class HeaderFooter
     }
 
     /// <summary>A footer HTML table with explicit line breaks stamps line by line; false when it drew everything itself.</summary>
-    private bool ResolveFooterTableLines(StampParagraphsState hf, StampTextState ts, HtmlFragment htmlFrag)
+    private bool ResolveFooterTableLines(StampParagraphsState hf, StampTextState ts)
     {
         if (!hf.isHeader && ts.hc.Contains("\\n", StringComparison.Ordinal)
             && Converters.HtmlToPdfConverter.ContainsTable(ts.hc))
         {
-            var escMarginBottom = hf.page.PageInfo?.Margin is { BottomTouched: true } epbm ? epbm.Bottom
-                : hf.document?.PageInfo?.Margin is { BottomTouched: true } edbm ? edbm.Bottom
-                : 72;
+            double escMarginBottom = 72;
+            if (hf.page.PageInfo?.Margin is { BottomTouched: true } epbm) escMarginBottom = epbm.Bottom;
+            else if (hf.document?.PageInfo?.Margin is { BottomTouched: true } edbm) escMarginBottom = edbm.Bottom;
             var escTop = escMarginBottom - (Margin.TopTouched ? Margin.Top : 0);
             // The band's right edge is the RAW media-box width even on a
             // rotated page (measured: a rotated page's visual frame is 792 wide, yet
@@ -579,15 +590,8 @@ public sealed partial class HeaderFooter
             var escRight = hf.page.MediaBox.Width - (Margin.RightTouched ? Margin.Right : 0);
             if (Table.DrawEscapedNewlineFooterHtml(hf.page, ts.hc, hf.x, escRight, escTop) is ({ } escBytes, var escH))
             {
-                // The dialect lays out in the page's rotation-adjusted VISUAL
-                // frame; a /Rotate page needs the same visual→raw mapping the
-                // generic footer-table path applies.
-                if (VisualToRawRotationCm(hf.page) is { } escRot)
-                {
-                    var escWrap = new System.Text.StringBuilder("q\n").Append(escRot).Append('\n')
-                        .Append(System.Text.Encoding.ASCII.GetString(escBytes)).Append("\nQ\n");
-                    escBytes = System.Text.Encoding.ASCII.GetBytes(escWrap.ToString());
-                }
+                // The dialect lays out in the page as shown; on a /Rotate page the layout
+                // pass turns it into media space with the rest of what it wrote.
                 hf.page.AddContentStream(escBytes);
                 hf.y = escTop - escH;
                 return false;
@@ -599,7 +603,7 @@ public sealed partial class HeaderFooter
     /// <summary>A CSS physical length (cm/mm/in/pt) in points; 0 when the text is not one.</summary>
     private static double PhysPt(string v)
     {
-        var m2 = System.Text.RegularExpressions.Regex.Match(v,
+        var m2 = SafeRegex.Match(v,
             @"([\d.]+)\s*(cm|mm|in|pt)",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         if (!m2.Success) return 0;
@@ -612,18 +616,18 @@ public sealed partial class HeaderFooter
     }
 
     /// <summary>Lays out a header band's percentage-width spans as boxes; false when the band drew itself.</summary>
-    private bool LayoutHeaderBandSpans(StampParagraphsState hf, StampTextState ts, System.Text.RegularExpressions.MatchCollection? spans, System.Text.RegularExpressions.Match bodyWM)
+    private bool LayoutHeaderBandSpans(StampParagraphsState hf, StampTextState ts, SafeMatchCollection? spans, System.Text.RegularExpressions.Match bodyWM)
     {
         if (spans is { Count: >= 2 } && bodyWM.Success
             && PhysPt(bodyWM.Groups[2].Value) is > 0 and var bandW)
         {
             var pageMarginCss = 0.0;
-            var atPage = System.Text.RegularExpressions.Regex.Match(ts.hc,
+            var atPage = SafeRegex.Match(ts.hc,
                 @"(?s)@page\s*\{(?<b>[^}]*)\}",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (atPage.Success)
             {
-                var mDecl = System.Text.RegularExpressions.Regex.Match(atPage.Groups["b"].Value,
+                var mDecl = SafeRegex.Match(atPage.Groups["b"].Value,
                     @"(?<![-\w])margin(-left)?\s*:\s*([^;}]+)",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                 if (mDecl.Success) pageMarginCss = PhysPt(mDecl.Groups[2].Value);
@@ -637,23 +641,24 @@ public sealed partial class HeaderFooter
             double MeasureBold(string t, double fs2) => MeasureReportText(t, fs2, bold: true);
             var h5Base = hf.mTop + RptH5BasePt;
             var bx = bandL;
-            foreach (System.Text.RegularExpressions.Match sp in spans)
+            foreach (var groups in spans.Select(sp => sp.Groups))
             {
-                var st = sp.Groups["st"].Value;
-                var pw = System.Text.RegularExpressions.Regex.Match(st, @"width\s*:\s*([\d.]+)%");
+                var st = groups["st"].Value;
+                var pw = SafeRegex.Match(st, @"width\s*:\s*([\d.]+)%");
                 var boxW = pw.Success ? double.Parse(pw.Groups[1].Value,
                     System.Globalization.CultureInfo.InvariantCulture) / 100.0 * bandW : 0;
-                var txt = HtmlFragment.StripHtmlTags(sp.Groups["t"].Value).Trim();
+                var txt = HtmlFragment.StripHtmlTags(groups["t"].Value).Trim();
                 if (txt.Length > 0)
                 {
                     var tw = MeasureBold(txt, h5Fs);
-                    var tx = System.Text.RegularExpressions.Regex.IsMatch(st, @"text-align\s*:\s*center",
-                            System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-                        ? bx + (boxW - tw) / 2
-                        : System.Text.RegularExpressions.Regex.IsMatch(st, @"text-align\s*:\s*right",
-                            System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-                            ? bx + boxW - tw
-                            : bx;
+                    double tx;
+                    if (SafeRegex.IsMatch(st, @"text-align\s*:\s*center",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        tx = bx + (boxW - tw) / 2;
+                    else if (SafeRegex.IsMatch(st, @"text-align\s*:\s*right",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                        tx = bx + boxW - tw;
+                    else tx = bx;
                     bandB.BeginText().SetFont(boldRes, h5Fs)
                         .MoveTextPosition(tx, hf.page.Height - h5Base)
                         .ShowText(txt).EndText();
@@ -665,7 +670,7 @@ public sealed partial class HeaderFooter
             var lastBase = h5Base;
             var firstH3 = true;
             foreach (System.Text.RegularExpressions.Match h3 in
-                System.Text.RegularExpressions.Regex.Matches(ts.hc, @"(?s)<h3\b[^>]*>(.*?)</h3>",
+                SafeRegex.Matches(ts.hc, @"(?s)<h3\b[^>]*>(.*?)</h3>",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase))
             {
                 var txt = HtmlFragment.StripHtmlTags(h3.Groups[1].Value).Trim();
@@ -683,8 +688,8 @@ public sealed partial class HeaderFooter
             // of bold right-aligned labels, bands, checkboxes and framed
             // fieldsets, all at the band's left in the sheet's small size.
             // The first row's baseline sits 18.26 under the last heading's.
-            var regionHtml = System.Text.RegularExpressions.Regex.Replace(
-                System.Text.RegularExpressions.Regex.Match(ts.hc,
+            var regionHtml = SafeRegex.Replace(
+                SafeRegex.Match(ts.hc,
                     @"(?s)<body\b[^>]*>(.*?)</body>",
                     System.Text.RegularExpressions.RegexOptions.IgnoreCase)
                     is { Success: true } rgb ? rgb.Groups[1].Value : ts.hc,

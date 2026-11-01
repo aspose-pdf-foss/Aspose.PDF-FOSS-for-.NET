@@ -108,7 +108,7 @@ public sealed partial class Document
                 pageText ??= PageTextBoxes(page);
                 var text = LinkCoveredText(annot, pageText) ?? LinkTargetFile(action) ?? LinkTargetLine(annot, targets);
                 if (!string.IsNullOrWhiteSpace(text))
-                    annot.Set("Contents", Forms.Field.EncodePdfTextString(text!));
+                    annot.Set("Contents", Forms.Field.EncodePdfTextString(text));
                 else
                     options?.ConversionLog.Add(new PdfAViolation
                     {
@@ -151,10 +151,13 @@ public sealed partial class Document
             if (fs is null || fs.Get("EF") is null) return;
             var uf = (_reader.Resolve(fs.Get("UF")) as PdfString)?.ToText();
             var f = (_reader.Resolve(fs.Get("F")) as PdfString)?.ToText();
-            var name = !string.IsNullOrEmpty(uf) ? uf : !string.IsNullOrEmpty(f) ? f : key;
+            string? name;
+            if (!string.IsNullOrEmpty(uf)) name = uf;
+            else if (!string.IsNullOrEmpty(f)) name = f;
+            else name = key;
             if (string.IsNullOrEmpty(name)) return;
-            if (string.IsNullOrEmpty(uf)) fs.Set("UF", Forms.Field.EncodePdfTextString(name!));
-            if (string.IsNullOrEmpty(f)) fs.Set("F", Forms.Field.EncodePdfTextString(name!));
+            if (string.IsNullOrEmpty(uf)) fs.Set("UF", Forms.Field.EncodePdfTextString(name));
+            if (string.IsNullOrEmpty(f)) fs.Set("F", Forms.Field.EncodePdfTextString(name));
         }
 
         void Walk(PdfObject? node, int depth)

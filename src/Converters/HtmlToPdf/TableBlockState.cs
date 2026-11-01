@@ -36,6 +36,8 @@ private sealed class TableBlockState
     // and pitch on the browser line box the items lay out on.
     public bool radioGridTable;
     public double radioGridFontPt;
+    // A stylesheet form's control table: its builds seat its controls as fields in its cells.
+    public bool fieldGrid;
     // The radio factory for this grid: one RadioButtonField per HTML
     // `name` (an anonymous group per unnamed input), anchored on the page
     // the table starts on. Options join their group at creation so the

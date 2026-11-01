@@ -5,8 +5,8 @@ namespace Aspose.Pdf.Converters;
 
 // The Closing Disclosure ADDENDUM export. Its print stylesheet fixes the sheet:
 // `@page { height: 1170px }` sets the body box's height outright, the page keeps
-// the converter's default 90/72 margins, and `#maincontent { width: 99%;
-// margin: auto }` centres everything inside, which is why the flow opens 0.5%
+// the converter's default 90/72 margins, and `#maincontent { width: 99%; margin:
+// auto }` centres everything inside, which is why the flow opens 0.5%
 // of the sheet in from the left margin rather than on it.
 //
 // Everything below that is table work. The two cost grids lay out on
@@ -19,7 +19,6 @@ namespace Aspose.Pdf.Converters;
 // grids follow the same row/rule model on their own column sets.
 internal static partial class HtmlToPdfConverter
 {
-    private const double CdPxPt = 0.75;             // 96 dpi: one CSS pixel
     private const double CdMarginXPt = 90.0;        // the sheet's own default margins…
     private const double CdMarginYPt = 72.0;        // …which this export never overrides
     private const double CdSheetHeightPt = 877.5;   // @page { height: 1170px }
@@ -35,7 +34,6 @@ internal static partial class HtmlToPdfConverter
     // Calibri and Arial place their baseline at three quarters of the em, which
     // is what every measured baseline below reduces to.
     private const double CdAscEm = 0.75;
-    private const double CdArialAscEm = 0.9043;     // Arial's hhea ascent / upem
 
     // The form's own ladder, measured. This export is a fixed
     // blank form: the label rows pace at the 14px line box plus their 4px
@@ -85,7 +83,6 @@ internal static partial class HtmlToPdfConverter
     private const double CdBannerNoteDropPt = 3.24;
     private const double CdBannerRulePt = 17.25;
 
-    private const double CdSummaryRowPt = 12.75;
     private const double CdSummaryAmountPt = 60.7;  // the amount column
     private const double CdSummaryTextDropPt = 8.87;
     private const double CdSumFirstHeadPt = 12.75;   // the stack's opening lettered head
@@ -171,12 +168,12 @@ internal static partial class HtmlToPdfConverter
     private const double CdSheetOverflowPt = 0.95;
 
     private static string CdFlat(string frag)
-        => Regex.Replace(DecodeEntities(Regex.Replace(frag, "<[^>]+>", " ")), @"\s+", " ").Trim();
+        => SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(frag, "<[^>]+>", " ")), @"\s+", " ").Trim();
 
     /// <summary>The text of the element carrying <paramref name="id"/>.</summary>
     private static string CdText(string html, string id)
     {
-        var m = Regex.Match(html, @"<div\b[^>]*id\s*=\s*[""']" + Regex.Escape(id)
+        var m = SafeRegex.Match(html, @"<div\b[^>]*id\s*=\s*[""']" + Regex.Escape(id)
             + @"[""'][^>]*>([\s\S]*?)</div\s*>", RegexOptions.IgnoreCase);
         return m.Success ? CdFlat(m.Groups[1].Value) : "";
     }
@@ -185,11 +182,11 @@ internal static partial class HtmlToPdfConverter
     private static List<string> CdLabels(string html, string id)
     {
         var outp = new List<string>();
-        var open = Regex.Match(html, @"<div\b[^>]*id\s*=\s*[""']" + Regex.Escape(id)
+        var open = SafeRegex.Match(html, @"<div\b[^>]*id\s*=\s*[""']" + Regex.Escape(id)
             + @"[""'][^>]*>", RegexOptions.IgnoreCase);
         if (!open.Success) return outp;
         var inner = VrDivAt(html, open.Index);
-        foreach (Match b in Regex.Matches(inner, @"<b\b[^>]*>([^<]*)</b\s*>",
+        foreach (Match b in SafeRegex.Matches(inner, @"<b\b[^>]*>([^<]*)</b\s*>",
                      RegexOptions.IgnoreCase))
         {
             var t = CdFlat(b.Groups[1].Value);
@@ -204,24 +201,24 @@ internal static partial class HtmlToPdfConverter
         CdRows(string html, string id)
     {
         var outp = new List<(string, List<(int, string, string)>)>();
-        var t = Regex.Match(html, @"<table\b[^>]*id\s*=\s*[""']" + Regex.Escape(id)
+        var t = SafeRegex.Match(html, @"<table\b[^>]*id\s*=\s*[""']" + Regex.Escape(id)
             + @"[""'][^>]*>([\s\S]*?)</table\s*>", RegexOptions.IgnoreCase);
         if (!t.Success) return outp;
-        foreach (Match r in Regex.Matches(t.Groups[1].Value, @"<tr\b([^>]*)>([\s\S]*?)</tr\s*>",
-                     RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(t.Groups[1].Value, @"<tr\b([^>]*)>([\s\S]*?)</tr\s*>",
+                     RegexOptions.IgnoreCase).Select(r => r.Groups))
         {
-            var rc = Regex.Match(r.Groups[1].Value, @"class\s*=\s*[""']([^""']*)",
+            var rc = SafeRegex.Match(groups[1].Value, @"class\s*=\s*[""']([^""']*)",
                 RegexOptions.IgnoreCase);
             var cells = new List<(int, string, string)>();
-            foreach (Match c in Regex.Matches(r.Groups[2].Value, @"<td\b([^>]*)>([\s\S]*?)</td\s*>",
-                         RegexOptions.IgnoreCase))
+            foreach (var cGroups in SafeRegex.Matches(groups[2].Value, @"<td\b([^>]*)>([\s\S]*?)</td\s*>",
+                         RegexOptions.IgnoreCase).Select(c => c.Groups))
             {
-                var span = Regex.Match(c.Groups[1].Value, @"colspan\s*=\s*[""']?(\d+)",
+                var span = SafeRegex.Match(cGroups[1].Value, @"colspan\s*=\s*[""']?(\d+)",
                     RegexOptions.IgnoreCase);
-                var cc = Regex.Match(c.Groups[1].Value, @"class\s*=\s*[""']([^""']*)",
+                var cc = SafeRegex.Match(cGroups[1].Value, @"class\s*=\s*[""']([^""']*)",
                     RegexOptions.IgnoreCase);
                 cells.Add((span.Success ? int.Parse(span.Groups[1].Value) : 1,
-                    CdFlat(c.Groups[2].Value), cc.Success ? cc.Groups[1].Value : ""));
+                    CdFlat(cGroups[2].Value), cc.Success ? cc.Groups[1].Value : ""));
             }
             outp.Add((rc.Success ? rc.Groups[1].Value : "", cells));
         }
@@ -259,7 +256,7 @@ internal static partial class HtmlToPdfConverter
     private static List<string> CdHeadings(string html)
     {
         var outp = new List<string>();
-        foreach (Match m in Regex.Matches(html,
+        foreach (Match m in SafeRegex.Matches(html,
                      @"<b\b[^>]*font-size\s*:\s*larger[^>]*>([^<]*)</b\s*>",
                      RegexOptions.IgnoreCase))
         {

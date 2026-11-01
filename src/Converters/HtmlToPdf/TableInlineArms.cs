@@ -7,61 +7,27 @@ internal static partial class HtmlToPdfConverter
 {
     /// <summary>One arm of BuildTableFromHtml's token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void HandleInlineOpen(TableParseState ps, TableColumnModel colModel, Table table, Token tok, string tag, HtmlLoadOptions? options, double cellFontSize, bool dwFormCells, bool fullWidthCjkMin, bool widenProbe, bool redlineCells, bool breakAnywhereDoc, bool cellFontShorthand, List<CssElem>? chainBase, double chainSpacingPt, List<(string Tag, int PrevBoldDepth)> chainUnbold, string? cssBaseFamily, double cssBasePt, string? defaultCellFace, double formGridStrutDropPt, bool hasBorder, double inlineFaceRatio, bool overDeclaredDraw, double padSide, bool uaDocGrid, bool uaSerifMin, bool ptCellWidths, bool bandDialect, double cellLineHeightPt, string? cssRunFace, bool formGridDialect, double formGridStrutPt, bool liftNestedTables, bool tightExtras, bool uaCellBoxes, double borderWidth, double pad, Dictionary<string, Dictionary<string, string>> css, IReadOnlyDictionary<string, Dictionary<string, string>>? docCss, List<CssChainRule>? chainRules, List<CssElem>? cssAncestors, List<byte[]>? inlineSvgs, List<string> nestedHtml, Func<string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio, double availWidthPt, double defaultCellFontPt, Dictionary<string, string> tblStyle, bool docElementGrid, bool pinnedBodyGrid, bool authoredCellChrome, bool chainBorderSeparate, bool elemRuleBorder)
+    private static void HandleInlineOpen(TableParseState ps, Token tok, string tag, HtmlLoadOptions? options, double cellFontSize, bool dwFormCells, bool widenProbe, bool redlineCells, List<CssElem>? chainBase, List<(string Tag, int PrevBoldDepth)> chainUnbold, bool ptCellWidths, bool bandDialect, string? cssRunFace, bool formGridDialect, bool liftNestedTables, Dictionary<string, Dictionary<string, string>> css, IReadOnlyDictionary<string, Dictionary<string, string>>? docCss, List<CssChainRule>? chainRules)
     {
         var io = new InlineOpenState();
         io.ps = ps;
-        io.colModel = colModel;
-        io.table = table;
         io.tok = tok;
         io.tag = tag;
         io.options = options;
         io.cellFontSize = cellFontSize;
         io.dwFormCells = dwFormCells;
-        io.fullWidthCjkMin = fullWidthCjkMin;
         io.widenProbe = widenProbe;
         io.redlineCells = redlineCells;
-        io.breakAnywhereDoc = breakAnywhereDoc;
-        io.cellFontShorthand = cellFontShorthand;
         io.chainBase = chainBase;
-        io.chainSpacingPt = chainSpacingPt;
         io.chainUnbold = chainUnbold;
-        io.cssBaseFamily = cssBaseFamily;
-        io.cssBasePt = cssBasePt;
-        io.defaultCellFace = defaultCellFace;
-        io.formGridStrutDropPt = formGridStrutDropPt;
-        io.hasBorder = hasBorder;
-        io.inlineFaceRatio = inlineFaceRatio;
-        io.overDeclaredDraw = overDeclaredDraw;
-        io.padSide = padSide;
-        io.uaDocGrid = uaDocGrid;
-        io.uaSerifMin = uaSerifMin;
         io.ptCellWidths = ptCellWidths;
         io.bandDialect = bandDialect;
-        io.cellLineHeightPt = cellLineHeightPt;
         io.cssRunFace = cssRunFace;
         io.formGridDialect = formGridDialect;
-        io.formGridStrutPt = formGridStrutPt;
         io.liftNestedTables = liftNestedTables;
-        io.tightExtras = tightExtras;
-        io.uaCellBoxes = uaCellBoxes;
-        io.borderWidth = borderWidth;
-        io.pad = pad;
         io.css = css;
         io.docCss = docCss;
         io.chainRules = chainRules;
-        io.cssAncestors = cssAncestors;
-        io.inlineSvgs = inlineSvgs;
-        io.nestedHtml = nestedHtml;
-        io.makeRadio = makeRadio;
-        io.availWidthPt = availWidthPt;
-        io.defaultCellFontPt = defaultCellFontPt;
-        io.tblStyle = tblStyle;
-        io.docElementGrid = docElementGrid;
-        io.pinnedBodyGrid = pinnedBodyGrid;
-        io.authoredCellChrome = authoredCellChrome;
-        io.chainBorderSeparate = chainBorderSeparate;
-        io.elemRuleBorder = elemRuleBorder;
         if (io.ps.cell is null) return;
         // NOTE: no keep here — the line flushed at a <p> OPEN is the
         // inter-tag residue before the paragraph (e.g. "<td> <p>"), not
@@ -100,61 +66,24 @@ internal static partial class HtmlToPdfConverter
 
     /// <summary>One arm of BuildTableFromHtml's token loop, verbatim; an
     /// arm-level continue/break became a return.</summary>
-    private static void HandleDivOpen(TableParseState ps, TableColumnModel colModel, Table table, Token tok, string tag, HtmlLoadOptions? options, double cellFontSize, bool dwFormCells, bool fullWidthCjkMin, bool widenProbe, bool redlineCells, bool breakAnywhereDoc, bool cellFontShorthand, List<CssElem>? chainBase, double chainSpacingPt, List<(string Tag, int PrevBoldDepth)> chainUnbold, string? cssBaseFamily, double cssBasePt, string? defaultCellFace, double formGridStrutDropPt, bool hasBorder, double inlineFaceRatio, bool overDeclaredDraw, double padSide, bool uaDocGrid, bool uaSerifMin, bool ptCellWidths, bool bandDialect, double cellLineHeightPt, string? cssRunFace, bool formGridDialect, double formGridStrutPt, bool liftNestedTables, bool tightExtras, bool uaCellBoxes, double borderWidth, double pad, Dictionary<string, Dictionary<string, string>> css, IReadOnlyDictionary<string, Dictionary<string, string>>? docCss, List<CssChainRule>? chainRules, List<CssElem>? cssAncestors, List<byte[]>? inlineSvgs, List<string> nestedHtml, Func<string, bool, Aspose.Pdf.Forms.RadioButtonOptionField>? makeRadio, double availWidthPt, double defaultCellFontPt, Dictionary<string, string> tblStyle, bool docElementGrid, bool pinnedBodyGrid, bool authoredCellChrome, bool chainBorderSeparate, bool elemRuleBorder)
+    private static void HandleDivOpen(TableParseState ps, Token tok, string tag, HtmlLoadOptions? options, double cellFontSize, bool dwFormCells, bool widenProbe, bool redlineCells, List<CssElem>? chainBase, bool liftNestedTables, bool uaCellBoxes, double pad, IReadOnlyDictionary<string, Dictionary<string, string>>? docCss, List<CssChainRule>? chainRules, bool pinnedBodyGrid)
     {
         var dv = new DivOpenState();
         dv.ps = ps;
-        dv.colModel = colModel;
-        dv.table = table;
         dv.tok = tok;
         dv.tag = tag;
         dv.options = options;
         dv.cellFontSize = cellFontSize;
         dv.dwFormCells = dwFormCells;
-        dv.fullWidthCjkMin = fullWidthCjkMin;
         dv.widenProbe = widenProbe;
         dv.redlineCells = redlineCells;
-        dv.breakAnywhereDoc = breakAnywhereDoc;
-        dv.cellFontShorthand = cellFontShorthand;
         dv.chainBase = chainBase;
-        dv.chainSpacingPt = chainSpacingPt;
-        dv.chainUnbold = chainUnbold;
-        dv.cssBaseFamily = cssBaseFamily;
-        dv.cssBasePt = cssBasePt;
-        dv.defaultCellFace = defaultCellFace;
-        dv.formGridStrutDropPt = formGridStrutDropPt;
-        dv.hasBorder = hasBorder;
-        dv.inlineFaceRatio = inlineFaceRatio;
-        dv.overDeclaredDraw = overDeclaredDraw;
-        dv.padSide = padSide;
-        dv.uaDocGrid = uaDocGrid;
-        dv.uaSerifMin = uaSerifMin;
-        dv.ptCellWidths = ptCellWidths;
-        dv.bandDialect = bandDialect;
-        dv.cellLineHeightPt = cellLineHeightPt;
-        dv.cssRunFace = cssRunFace;
-        dv.formGridDialect = formGridDialect;
-        dv.formGridStrutPt = formGridStrutPt;
         dv.liftNestedTables = liftNestedTables;
-        dv.tightExtras = tightExtras;
         dv.uaCellBoxes = uaCellBoxes;
-        dv.borderWidth = borderWidth;
         dv.pad = pad;
-        dv.css = css;
         dv.docCss = docCss;
         dv.chainRules = chainRules;
-        dv.cssAncestors = cssAncestors;
-        dv.inlineSvgs = inlineSvgs;
-        dv.nestedHtml = nestedHtml;
-        dv.makeRadio = makeRadio;
-        dv.availWidthPt = availWidthPt;
-        dv.defaultCellFontPt = defaultCellFontPt;
-        dv.tblStyle = tblStyle;
-        dv.docElementGrid = docElementGrid;
         dv.pinnedBodyGrid = pinnedBodyGrid;
-        dv.authoredCellChrome = authoredCellChrome;
-        dv.chainBorderSeparate = chainBorderSeparate;
-        dv.elemRuleBorder = elemRuleBorder;
         // Pinned-body report: the sheet's `div { padding: 4px }` boxes a
         // div INSIDE a cell too — its vertical pads grow the row the way
         // the pill row sits taller than its plain siblings.

@@ -38,8 +38,7 @@ internal static class GlyphShapeDecoder
         {
             if (!entry.Locked)
             {
-                foreach (var b in bytes)
-                    if (b < 0x20) { entry.Locked = true; break; }
+                if (bytes.Any(b => b < 0x20)) { entry.Locked = true; }
                 if (!entry.Locked) return null;
             }
             var sb = new StringBuilder(bytes.Length);
@@ -234,7 +233,9 @@ internal static class GlyphShapeClassifier
                 {
                     var (x1, y1) = poly[i];
                     var (x2, y2) = poly[(i + 1) % poly.Count];
+#pragma warning disable S1244 // degenerate geometry (zero radius, coincident ends, horizontal edge) - only the exact case is degenerate
                     if (y1 == y2) continue;
+#pragma warning restore S1244
                     if ((y1 <= y && y2 > y) || (y2 <= y && y1 > y))
                         xs.Add(x1 + (y - y1) / (y2 - y1) * (x2 - x1));
                 }

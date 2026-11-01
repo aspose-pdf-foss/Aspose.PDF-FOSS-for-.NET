@@ -65,8 +65,8 @@ internal static partial class Jbig2Decoder
         {
             // Symbol ID code table (§7.4.3.1.7): 35 runcode lengths (5 bits each),
             // a canonical runcode table over them, then one code length per symbol
-            // (runcode 0..31 = the length itself; 32 = repeat previous 3–6 times;
-            // 33 = 3–10 zeroes; 34 = 11–138 zeroes), then byte alignment.
+            // (runcode 0..31 = the length itself; 32 = repeat previous 3–6 times; 33
+            // = 3–10 zeroes; 34 = 11–138 zeroes), then byte alignment.
             var runLens = new HuffLine[35];
             for (var i = 0; i < 35; i++)
                 runLens[i] = new HuffLine(reader.ReadBits(4), 0, i);

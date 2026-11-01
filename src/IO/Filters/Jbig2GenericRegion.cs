@@ -1,4 +1,4 @@
-using Aspose.Pdf.Core;
+﻿using Aspose.Pdf.Core;
 
 namespace Aspose.Pdf.IO.Filters;
 
@@ -13,20 +13,38 @@ internal static partial class Jbig2Decoder
     {
         private readonly ArithmeticDecoder _ad;
         private readonly int _template;
-        private readonly (int dx, int dy)[] _at;
         private readonly ArithmeticContext[] _ctx;
         private readonly bool _tpgdon;
+        // The template's pixels, adaptive ones included, in the order T.88 forms a context
+        // from them (row by row, left to right, most significant first). Stepping one column
+        // right, a pixel whose right neighbour is the template's next entry takes that entry's
+        // bit by a shift; only the others (one per template row, as a rule) are read again.
+        private readonly (int dx, int dy)[] _pixels;
+        private readonly int _reuseMask;
+        private readonly int[] _fresh;
+        // Template 0 with its nominal adaptive pixels - the common case - has a loop of its own.
+        private readonly bool _nominal0;
 
         public GenericRegionDecoder(ArithmeticDecoder ad, int template, (int, int)[] at, bool tpgdon = false)
         {
             _ad = ad;
             _template = template;
             _tpgdon = tpgdon;
-            _at = at?.Length > 0 ? at.Select(p => (p.Item1, p.Item2)).ToArray() : DefaultAt(template);
+            (int dx, int dy)[] adaptive = at?.Length > 0 ? at.Select(p => (p.Item1, p.Item2)).ToArray() : DefaultAt(template);
             // 16-bit context for template 0; 13-bit for templates 1/2/3.
             var n = template == 0 ? 65536 : 8192;
             _ctx = new ArithmeticContext[n];
-            for (var i = 0; i < n; i++) _ctx[i] = new ArithmeticContext();
+            _nominal0 = template == 0 && adaptive.Take(4).SequenceEqual(DefaultAt(0).Select(p => (p.Item1, p.Item2)));
+            _pixels = NominalPixels(template).Concat(adaptive.Take(template == 0 ? 4 : 1))
+                .OrderBy(p => p.dy).ThenBy(p => p.dx).ToArray();
+            var fresh = new List<int>();
+            for (var k = 0; k < _pixels.Length; k++)
+            {
+                var reusable = k + 1 < _pixels.Length && _pixels[k + 1] == (_pixels[k].dx + 1, _pixels[k].dy);
+                if (reusable) _reuseMask |= 1 << (_pixels.Length - 2 - k);
+                else fresh.Add(k);
+            }
+            _fresh = fresh.ToArray();
         }
 
         // Pseudo-pixel context used to decode the typical-prediction (LTP) bit per row
@@ -47,9 +65,20 @@ internal static partial class Jbig2Decoder
             _ => new (int, int)[] { (2, -1) },
         };
 
+        // The fixed pixels of each template (T.88 Figures 4 to 7), without the adaptive ones.
+        private static (int dx, int dy)[] NominalPixels(int template) => template switch
+        {
+            0 => new[] { (-1, -2), (0, -2), (1, -2), (-2, -1), (-1, -1), (0, -1), (1, -1), (2, -1), (-4, 0), (-3, 0), (-2, 0), (-1, 0) },
+            1 => new[] { (-1, -2), (0, -2), (1, -2), (2, -2), (-2, -1), (-1, -1), (0, -1), (1, -1), (2, -1), (-3, 0), (-2, 0), (-1, 0) },
+            _ => new[] { (-1, -2), (0, -2), (1, -2), (-2, -1), (-1, -1), (0, -1), (1, -1), (2, -1), (-2, 0), (-1, 0) },
+        };
+
+#pragma warning disable S3218 // the nested type's own member, called unqualified inside it on purpose
         public Jbig2Bitmap Decode(int width, int height)
+#pragma warning restore S3218
         {
             var bm = new Jbig2Bitmap(width, height);
+            if (_nominal0) { DecodeTemplate0Nominal(bm, width, height); return bm; }
             // Row-major scan with the JBIG2 template-0/1/2/3 contexts. Two prior rows are
             // accessed; out-of-bounds pixels read as 0 per the spec.
             var ltp = false;
@@ -59,7 +88,7 @@ internal static partial class Jbig2Decoder
                 {
                     // Typical-prediction: a per-row LTP bit toggles "this row equals the
                     // previous one". When set, copy row y-1 verbatim and skip pixel coding.
-                    if (_ad.DecodeBit(_ctx[SltpContext(_template)])) ltp = !ltp;
+                    if (_ad.DecodeBit(ref _ctx[SltpContext(_template)])) ltp = !ltp;
                     if (ltp)
                     {
                         if (y > 0)
@@ -67,86 +96,83 @@ internal static partial class Jbig2Decoder
                         continue;
                     }
                 }
+                var ctx = 0;
                 for (var x = 0; x < width; x++)
                 {
-                    var ctx = BuildContext(bm, x, y);
-                    var bit = _ad.DecodeBit(_ctx[ctx]) ? 1 : 0;
-                    if (bit != 0)
-                    {
+                    ctx = x == 0 ? ContextAt(bm, x, y) : NextContext(bm, ctx, x, y);
+                    if (_ad.DecodeBit(ref _ctx[ctx]))
                         bm.Data[y * bm.RowBytes + (x >> 3)] |= (byte)(0x80 >> (x & 7));
-                    }
                 }
             }
             return bm;
         }
 
-        private int BuildContext(Jbig2Bitmap bm, int x, int y)
+        /// <summary>Template 0 with its nominal adaptive pixels: the context is three windows
+        /// over the rows - row y-2 at x-2..x+2, row y-1 at x-3..x+3, row y at x-4..x-1 - each
+        /// stepped by a shift and one new bit, so a pixel costs two bit reads; a byte of the
+        /// row is written at a time. The contexts are those the general scan forms.</summary>
+        private void DecodeTemplate0Nominal(Jbig2Bitmap bm, int width, int height)
         {
-            // The template pixel layouts below mirror T.88 Figures 6.2.5.3.
-            // 'P' below denotes the AT pixels filling out the 16/13 bits.
-            if (_template == 0)
+            var data = bm.Data;
+            var stride = bm.RowBytes;
+            var ltp = false;
+            for (var y = 0; y < height; y++)
             {
-                // 16-bit context (template 0):
-                //   row y-2: (-1,-2) (0,-2) (1,-2)                              → 3 bits
-                //   row y-1: (-2,-1) (-1,-1) (0,-1) (1,-1) (2,-1)               → 5 bits
-                //   row y  : (-4, 0) (-3, 0) (-2, 0) (-1, 0)                    → 4 bits
-                //   AT pixels (4)                                               → 4 bits
-                var c = 0;
-                c = (c << 1) | bm.GetPixel(x - 1, y - 2);
-                c = (c << 1) | bm.GetPixel(x,     y - 2);
-                c = (c << 1) | bm.GetPixel(x + 1, y - 2);
-                c = (c << 1) | bm.GetPixel(x - 2, y - 1);
-                c = (c << 1) | bm.GetPixel(x - 1, y - 1);
-                c = (c << 1) | bm.GetPixel(x,     y - 1);
-                c = (c << 1) | bm.GetPixel(x + 1, y - 1);
-                c = (c << 1) | bm.GetPixel(x + 2, y - 1);
-                c = (c << 1) | bm.GetPixel(x - 4, y);
-                c = (c << 1) | bm.GetPixel(x - 3, y);
-                c = (c << 1) | bm.GetPixel(x - 2, y);
-                c = (c << 1) | bm.GetPixel(x - 1, y);
-                for (var i = 0; i < 4 && i < _at.Length; i++)
-                    c = (c << 1) | bm.GetPixel(x + _at[i].dx, y + _at[i].dy);
-                return c & 0xFFFF;
+                if (_tpgdon)
+                {
+                    if (_ad.DecodeBit(ref _ctx[SltpContext(0)])) ltp = !ltp;
+                    if (ltp)
+                    {
+                        if (y > 0) System.Array.Copy(data, (y - 1) * stride, data, y * stride, stride);
+                        continue;
+                    }
+                }
+                var row = y * stride;
+                int rowM1 = row - stride, rowM2 = row - 2 * stride;
+                var w2 = 0;
+                for (var p = 0; p <= 2; p++) w2 = (w2 << 1) | PixelOrZero(data, rowM2, y >= 2, p, width);
+                var w1 = 0;
+                for (var p = 0; p <= 3; p++) w1 = (w1 << 1) | PixelOrZero(data, rowM1, y >= 1, p, width);
+                var w0 = 0;
+                for (var x = 0; x < width; x += 8)
+                {
+                    var result = 0;
+                    var count = Math.Min(8, width - x);
+                    for (var k = 0; k < count; k++)
+                    {
+                        var bit = _ad.DecodeBit(ref _ctx[(w2 << 11) | (w1 << 4) | w0]) ? 1 : 0;
+                        result |= bit << (7 - k);
+                        w2 = ((w2 << 1) | PixelOrZero(data, rowM2, y >= 2, x + k + 3, width)) & 0x1F;
+                        w1 = ((w1 << 1) | PixelOrZero(data, rowM1, y >= 1, x + k + 4, width)) & 0x7F;
+                        w0 = ((w0 << 1) | bit) & 0xF;
+                    }
+                    data[row + (x >> 3)] = (byte)result;
+                }
             }
-            else if (_template == 1)
-            {
-                // 13-bit context (template 1):
-                //   row y-2: (-1,-2) (0,-2) (1,-2) (2,-2)                       → 4 bits
-                //   row y-1: (-2,-1) (-1,-1) (0,-1) (1,-1) (2,-1)               → 5 bits
-                //   row y  : (-3,0) (-2,0) (-1,0)                                → 3 bits
-                //   AT (1)                                                       → 1 bit
-                var c = 0;
-                c = (c << 1) | bm.GetPixel(x - 1, y - 2);
-                c = (c << 1) | bm.GetPixel(x,     y - 2);
-                c = (c << 1) | bm.GetPixel(x + 1, y - 2);
-                c = (c << 1) | bm.GetPixel(x + 2, y - 2);
-                c = (c << 1) | bm.GetPixel(x - 2, y - 1);
-                c = (c << 1) | bm.GetPixel(x - 1, y - 1);
-                c = (c << 1) | bm.GetPixel(x,     y - 1);
-                c = (c << 1) | bm.GetPixel(x + 1, y - 1);
-                c = (c << 1) | bm.GetPixel(x + 2, y - 1);
-                c = (c << 1) | bm.GetPixel(x - 3, y);
-                c = (c << 1) | bm.GetPixel(x - 2, y);
-                c = (c << 1) | bm.GetPixel(x - 1, y);
-                c = (c << 1) | bm.GetPixel(x + _at[0].dx, y + _at[0].dy);
-                return c & 0x1FFF;
-            }
-            else // template 2 or 3 (13-bit, smaller footprint)
-            {
-                var c = 0;
-                c = (c << 1) | bm.GetPixel(x - 1, y - 2);
-                c = (c << 1) | bm.GetPixel(x,     y - 2);
-                c = (c << 1) | bm.GetPixel(x + 1, y - 2);
-                c = (c << 1) | bm.GetPixel(x - 2, y - 1);
-                c = (c << 1) | bm.GetPixel(x - 1, y - 1);
-                c = (c << 1) | bm.GetPixel(x,     y - 1);
-                c = (c << 1) | bm.GetPixel(x + 1, y - 1);
-                c = (c << 1) | bm.GetPixel(x + 2, y - 1);
-                c = (c << 1) | bm.GetPixel(x - 2, y);
-                c = (c << 1) | bm.GetPixel(x - 1, y);
-                c = (c << 1) | bm.GetPixel(x + _at[0].dx, y + _at[0].dy);
-                return c & 0x07FF;
-            }
+        }
+
+        /// <summary>Pixel <paramref name="x"/> of a packed row, 0 past the row's width or
+        /// when the row lies above the bitmap.</summary>
+        private static int PixelOrZero(byte[] data, int rowOffset, bool rowExists, int x, int width)
+            => rowExists && x < width ? (data[rowOffset + (x >> 3)] >> (7 - (x & 7))) & 1 : 0;
+
+        /// <summary>The context of pixel (x, y) read in full - the first pixel of a row.</summary>
+        private int ContextAt(Jbig2Bitmap bm, int x, int y)
+        {
+            var c = 0;
+            foreach (var (dx, dy) in _pixels) c = (c << 1) | bm.GetPixel(x + dx, y + dy);
+            return c;
+        }
+
+        /// <summary>The context of pixel (x, y) from that of pixel (x - 1, y): the bits a shift
+        /// carries over, and the pixels read anew.</summary>
+        private int NextContext(Jbig2Bitmap bm, int previous, int x, int y)
+        {
+            var c = (previous & _reuseMask) << 1;
+            var top = _pixels.Length - 1;
+            foreach (var k in _fresh)
+                c |= bm.GetPixel(x + _pixels[k].dx, y + _pixels[k].dy) << (top - k);
+            return c;
         }
     }
 }

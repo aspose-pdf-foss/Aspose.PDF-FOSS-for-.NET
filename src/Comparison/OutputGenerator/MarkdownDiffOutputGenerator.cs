@@ -91,7 +91,7 @@ namespace Aspose.Pdf.Comparison
 
             if (leading.Length == 0 && sb.Length > 0 && !char.IsWhiteSpace(sb[sb.Length - 1])) sb.Append(' ');
             sb.Append(leading).Append(open).Append(core).Append(close).Append(trailing);
-            if (trailing.Length == 0 && !string.IsNullOrEmpty(nextText) && !char.IsWhiteSpace(nextText![0])) sb.Append(' ');
+            if (trailing.Length == 0 && !string.IsNullOrEmpty(nextText) && !char.IsWhiteSpace(nextText[0])) sb.Append(' ');
         }
 
         private static void WriteFile(string content, string targetFilePath)

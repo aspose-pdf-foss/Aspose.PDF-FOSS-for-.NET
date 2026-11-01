@@ -12,7 +12,7 @@ internal static partial class HtmlToPdfConverter
         if (tok.Attributes is not null)
         {
             if (tok.Attributes.TryGetValue("style", out var trSt) && trSt is not null
-                && Regex.Match(trSt, @"background(?:-color)?\s*:\s*([^;]+)",
+                && SafeRegex.Match(trSt, @"background(?:-color)?\s*:\s*([^;]+)",
                     RegexOptions.IgnoreCase) is { Success: true } trBgm
                 && ParseCssColor(trBgm.Groups[1].Value) is { } trBg)
                 ps.row!.BackgroundColor = trBg;
@@ -45,7 +45,7 @@ internal static partial class HtmlToPdfConverter
     {
         if ((cfg.overDeclaredDraw || cfg.ptCellWidths) && tok.Attributes is not null
             && tok.Attributes.TryGetValue("style", out var trHSt) && trHSt is not null
-            && Regex.Match(trHSt, @"(?<![-\w])height\s*:\s*([\d.]+)\s*(px|pt)",
+            && SafeRegex.Match(trHSt, @"(?<![-\w])height\s*:\s*([\d.]+)\s*(px|pt)",
                 RegexOptions.IgnoreCase) is { Success: true } trHm
             && double.TryParse(trHm.Groups[1].Value,
                 System.Globalization.NumberStyles.Float,

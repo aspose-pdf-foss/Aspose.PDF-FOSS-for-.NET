@@ -46,7 +46,7 @@ internal static class FieldFormatScript
     }
 
     private static bool IsBuiltInFormatter(string script)
-        => Regex.IsMatch(script, @"AF(Date|Time|Number|Percent)_Format");
+        => SafeRegex.IsMatch(script, @"AF(Date|Time|Number|Percent)_Format");
 
     private static string? ExtractFormatScript(PdfDictionary fieldDict, PdfReader reader)
     {
@@ -79,36 +79,40 @@ internal static class FieldFormatScript
     /// <summary>Recognise the built-in Acrobat formatters and apply them.</summary>
     internal static string? TryApply(string script, string rawValue)
     {
-        string formatted = rawValue;
         if (string.IsNullOrEmpty(script)) return null;
 
         // AFDate_FormatEx("<pattern>") — most common date formatter.
-        var date = Regex.Match(script, @"AFDate_FormatEx\s*\(\s*""([^""]*)""\s*\)");
+        var date = SafeRegex.Match(script, @"AFDate_FormatEx\s*\(\s*""([^""]*)""\s*\)");
         if (date.Success)
             return TryFormatDate(date.Groups[1].Value, rawValue);
 
         // AFDate_Format(idx) — index into Acrobat's built-in date format list.
-        var dateIdx = Regex.Match(script, @"AFDate_Format\s*\(\s*(\d+)\s*\)");
+        var dateIdx = SafeRegex.Match(script, @"AFDate_Format\s*\(\s*(\d+)\s*\)");
         if (dateIdx.Success && int.TryParse(dateIdx.Groups[1].Value, out var di))
             return TryFormatDate(BuiltInDatePattern(di), rawValue);
 
         // AFTime_Format(idx) — index into the built-in time format list.
-        var timeIdx = Regex.Match(script, @"AFTime_Format\s*\(\s*(\d+)\s*\)");
+        var timeIdx = SafeRegex.Match(script, @"AFTime_Format\s*\(\s*(\d+)\s*\)");
         if (timeIdx.Success && int.TryParse(timeIdx.Groups[1].Value, out var ti))
             return TryFormatDate(BuiltInTimePattern(ti), rawValue);
 
-        // AFNumber_Format(nDec, sepStyle, ...) — first two args drive the layout.
-        var num = Regex.Match(script, @"AFNumber_Format\s*\(\s*(-?\d+)\s*,\s*(-?\d+)");
+        // AFNumber_Format(nDec, sepStyle, negStyle, currStyle, strCurrency, bCurrencyPrepend):
+        // the first two args drive the digits, the rest the sign and the currency string.
+        var num = SafeRegex.Match(script, NumberFormatCall);
         if (num.Success
-            && int.TryParse(num.Groups[1].Value, out var nDec)
-            && int.TryParse(num.Groups[2].Value, out var sepStyle))
-            return TryFormatNumber(nDec, sepStyle, rawValue);
+            && int.TryParse(num.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var nDec)
+            && int.TryParse(num.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sepStyle))
+        {
+            int.TryParse(num.Groups[3].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var negStyle);
+            return TryFormatNumber(nDec, sepStyle, negStyle, UnescapeScriptString(num.Groups[4].Value),
+                num.Groups[5].Value == "true", rawValue);
+        }
 
         // AFPercent_Format(nDec, sepStyle)
-        var pct = Regex.Match(script, @"AFPercent_Format\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)");
+        var pct = SafeRegex.Match(script, @"AFPercent_Format\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)");
         if (pct.Success
-            && int.TryParse(pct.Groups[1].Value, out var pDec)
-            && int.TryParse(pct.Groups[2].Value, out var pSep))
+            && int.TryParse(pct.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pDec)
+            && int.TryParse(pct.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pSep))
             return TryFormatPercent(pDec, pSep, rawValue);
 
         return null;
@@ -139,7 +143,7 @@ internal static class FieldFormatScript
 
     private static string? TryFormatDate(string acrobatPattern, string raw)
     {
-        string formatted = raw;
+        string formatted;
         // Acrobat uses lowercase "m/d/yy" etc.; .NET uses "M/d/yy" (uppercase month).
         // Map the patterns: m → M (month, no zero pad), mm → MM (zero-pad), d → d, dd → dd,
         // yy → yy, yyyy → yyyy, HH/MM/ss/tt all map directly.
@@ -169,13 +173,16 @@ internal static class FieldFormatScript
         return TryScanDate(acrobatPattern, raw, netPattern);
     }
 
+    /// <summary>A word of its own that is not an AM/PM marker.</summary>
+    private const string WordOtherThanMeridiem = @"\b(?![ap]\.?m\b)\p{L}+";
+
     /// <summary>Lenient date parse mirroring Acrobat's <c>util.scand</c>: pull the raw's
     /// numeric groups, assign them in order to the picture's day/month/year/hour/minute/second
     /// slots, swap day↔month when the month slot exceeds 12 (Acrobat's ambiguity resolution),
     /// then render with the .NET-equivalent pattern.</summary>
     private static string? TryScanDate(string acrobatPattern, string raw, string netPattern)
     {
-        string formatted = raw;
+        string formatted;
         // Ordered slot kinds from the picture's letter runs. 'm'(lower)=month; 'M'(upper)=
         // minute when the picture carries an hour token, else month (some authors write MM
         // for month in a pure date picture).
@@ -200,7 +207,11 @@ internal static class FieldFormatScript
             i = j;
         }
 
-        var nums = Regex.Matches(raw, @"\d+");
+        // Words are no part of a date: "Week 1" is text with a digit in it, and scanning that
+        // digit into the picture made a date up. Only a 12-hour marker may stand among the numbers.
+        if (SafeRegex.IsMatch(raw, WordOtherThanMeridiem, RegexOptions.IgnoreCase)) return null;
+
+        var nums = SafeRegex.Matches(raw, @"\d+");
         if (slots.Count == 0 || nums.Count == 0) return null;
 
         int day = 1, month = 1, year = DateTime.MinValue.Year, hour = 0, min = 0, sec = 0;
@@ -233,7 +244,7 @@ internal static class FieldFormatScript
         if (day > dim) day = dim;
         try
         {
-            var dt2 = new DateTime(year, month, day, hour % 24, min % 60, sec % 60);
+            var dt2 = new DateTime(year, month, day, hour % 24, min % 60, sec % 60, DateTimeKind.Unspecified);
             formatted = dt2.ToString(netPattern, CultureInfo.InvariantCulture);
             return formatted;
         }
@@ -275,19 +286,49 @@ internal static class FieldFormatScript
 
     /// <summary>AFNumber_Format: nDec = decimals, sepStyle = thousands/decimal separator pair.
     /// 0 = "1,234.56", 1 = "1234.56", 2 = "1.234,56", 3 = "1234,56".</summary>
-    private static string? TryFormatNumber(int nDec, int sepStyle, string raw)
+    private static string? TryFormatNumber(int nDec, int sepStyle, int negStyle, string currency,
+        bool currencyFirst, string raw)
     {
-        string formatted = raw;
         if (!double.TryParse(raw, NumberStyles.Float | NumberStyles.AllowThousands,
                 CultureInfo.InvariantCulture, out var v))
             return null;
-        formatted = FormatWithSeparators(v, nDec, sepStyle);
-        return formatted;
+        // The viewer's rule: the number carries its own minus only when nothing stands
+        // before it; otherwise the sign is told by the style, outside the currency string.
+        var negative = v < 0;
+        var signOutside = negative && (negStyle != NegativeMinus || currencyFirst);
+        var digits = FormatWithSeparators(signOutside ? -v : v, nDec, sepStyle);
+        var formatted = currencyFirst ? currency + digits : digits + currency;
+        if (!signOutside) return formatted;
+        // The red styles recolour the field in a viewer; the appearance written here keeps
+        // its colour, so a negative shown in red alone keeps a minus to stay negative.
+        return negStyle is NegativeParentheses or NegativeRedParentheses
+            ? "(" + formatted + ")"
+            : "-" + formatted;
+    }
+
+    private const string NumberFormatCall =
+        @"AFNumber_Format\s*\(\s*(-?\d+)\s*,\s*(-?\d+)"
+        + @"(?:\s*,\s*(-?\d+)\s*,\s*-?\d+\s*,\s*""((?:[^""\\]|\\.)*)""\s*,\s*(true|false))?";
+
+    // AFNumber_Format negStyle values.
+    private const int NegativeMinus = 0;
+    private const int NegativeParentheses = 2;
+    private const int NegativeRedParentheses = 3;
+
+    /// <summary>The text of a script string literal: \uXXXX and \xXX escapes and escaped characters resolved.</summary>
+    private static string UnescapeScriptString(string literal)
+    {
+        if (literal.IndexOf('\\') < 0) return literal;
+        return SafeRegex.Replace(literal, @"\\(?:u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|(.))", m =>
+            m.Groups[3].Success
+                ? m.Groups[3].Value
+                : ((char)int.Parse(m.Groups[1].Success ? m.Groups[1].Value : m.Groups[2].Value,
+                    NumberStyles.HexNumber, CultureInfo.InvariantCulture)).ToString());
     }
 
     private static string? TryFormatPercent(int nDec, int sepStyle, string raw)
     {
-        string formatted = raw;
+        string formatted;
         if (!double.TryParse(raw, NumberStyles.Float | NumberStyles.AllowThousands,
                 CultureInfo.InvariantCulture, out var v))
             return null;

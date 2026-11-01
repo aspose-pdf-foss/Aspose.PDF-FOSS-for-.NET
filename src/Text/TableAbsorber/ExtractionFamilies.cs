@@ -11,8 +11,8 @@ public sealed partial class TableAbsorber
     {
         switch (op)
         {
-            case "q": tl.ctmStack.Push((tl.ctmA,tl.ctmB,tl.ctmC,tl.ctmD,tl.ctmE,tl.ctmF)); break;
-            case "Q": if (tl.ctmStack.Count > 0) (tl.ctmA,tl.ctmB,tl.ctmC,tl.ctmD,tl.ctmE,tl.ctmF) = tl.ctmStack.Pop(); break;
+            case "q": tl.ctmStack.Push((tl.ctmA,tl.ctmB,tl.ctmC,tl.ctmD,tl.ctmE,tl.ctmF)); tl.fillStack.Push((tl.fillIsPaper,tl.fillSpaceIsDevice,tl.strokeIsPaper,tl.strokeSpaceIsDevice)); break;
+            case "Q": if (tl.ctmStack.Count > 0) { (tl.ctmA,tl.ctmB,tl.ctmC,tl.ctmD,tl.ctmE,tl.ctmF) = tl.ctmStack.Pop(); (tl.fillIsPaper,tl.fillSpaceIsDevice,tl.strokeIsPaper,tl.strokeSpaceIsDevice) = tl.fillStack.Pop(); } break;
             case "cm":
                 if (tl.operands.Count >= 6)
                 { var a=Num(tl.operands[0]);var b=Num(tl.operands[1]);var c=Num(tl.operands[2]);var d=Num(tl.operands[3]);var e=Num(tl.operands[4]);var f=Num(tl.operands[5]);
@@ -28,7 +28,7 @@ public sealed partial class TableAbsorber
                     if (form is not null && form.Dict.GetName("Subtype") == "Form")
                     {
                         byte[]? formBytes = null;
-                        try { formBytes = reader.DecodeStream(form); } catch { }
+                        try { formBytes = reader.DecodeStream(form); } catch { /* a stream that does not decode is skipped, as if absent */ }
                         if (formBytes is not null)
                         {
                             double fA = tl.ctmA, fB = tl.ctmB, fC = tl.ctmC, fD = tl.ctmD, fE = tl.ctmE, fF = tl.ctmF;
@@ -42,7 +42,8 @@ public sealed partial class TableAbsorber
                             foreach (var kv in fonts) formFonts.TryAdd(kv.Key, kv.Value);
                             var formXObjects = TextAbsorber.ResolveXObjects(form.Dict, reader) ?? xobjects;
                             ExtractTextAndLines(formBytes, formFonts, reader, textRuns, hEdges, vEdges,
-                                fA, fB, fC, fD, fE, fF, formXObjects, depth + 1);
+                                fA, fB, fC, fD, fE, fF, formXObjects, depth + 1, tl.drawn,
+                                ResolveColourSpaces(form.Dict, reader) ?? tl.colourSpaces);
                         }
                     }
                 }
@@ -56,10 +57,10 @@ public sealed partial class TableAbsorber
         switch (op)
         {
             case "BT": tl.tx=tl.txLine=0;tl.ty=tl.tyLine=0;tl.tmA=1;tl.tmB=0;tl.tmC=0;tl.tmD=1;tl.leading=0; break;
-            case "TL": if (tl.operands.Count>=1) tl.leading=Num(tl.operands[0]); break;
+            case "TL": if (tl.operands.Count>=1) { tl.leading=Num(tl.operands[0]); } break;
             case "Tf":
-                if (tl.operands.Count>=1&&tl.operands[0] is PdfName fn&&fonts.TryGetValue(fn.Value,out var fd)){tl.fontDict=fd;tl.toUnicode=TextAbsorber.ParseToUnicodeFromDict(fd,reader);tl.curMetrics=null;try{tl.curMetrics=FontMetrics.FromFontDict(fd,reader);}catch{}}
-                if (tl.operands.Count>=2) tl.fontSize=Math.Abs(Num(tl.operands[1])); break;
+                if (tl.operands.Count>=1&&tl.operands[0] is PdfName fn&&fonts.TryGetValue(fn.Value,out var fd)){tl.fontDict=fd;tl.toUnicode=TextAbsorber.ParseToUnicodeFromDict(fd,reader);tl.curMetrics=null;try{tl.curMetrics=FontMetrics.FromFontDict(fd,reader);}catch{ /* font metrics that do not build leave the font without metrics */ }}
+                if (tl.operands.Count>=2) { tl.fontSize=Math.Abs(Num(tl.operands[1])); } break;
             case "Td": if (tl.operands.Count>=2){var tdX=Num(tl.operands[0]);var tdY=Num(tl.operands[1]);tl.txLine=tl.tmA*tdX+tl.tmC*tdY+tl.txLine;tl.tyLine=tl.tmB*tdX+tl.tmD*tdY+tl.tyLine;tl.tx=tl.txLine;tl.ty=tl.tyLine;} break;
             case "TD": if (tl.operands.Count>=2){var tdX=Num(tl.operands[0]);var tdY=Num(tl.operands[1]);tl.leading=-tdY;tl.txLine=tl.tmA*tdX+tl.tmC*tdY+tl.txLine;tl.tyLine=tl.tmB*tdX+tl.tmD*tdY+tl.tyLine;tl.tx=tl.txLine;tl.ty=tl.tyLine;} break;
             case "T*": tl.txLine=tl.tmC*(-tl.leading)+tl.txLine;tl.tyLine=tl.tmD*(-tl.leading)+tl.tyLine;tl.tx=tl.txLine;tl.ty=tl.tyLine; break;
@@ -82,8 +83,8 @@ public sealed partial class TableAbsorber
                     var sb=new StringBuilder();
                     double pen=0;          // text-space advance from (tx,ty)
                     double runStartPen=0;  // pen at the current sub-run's first glyph
-                    // Gap threshold: 1.5 em. Normal inter-glyph kerning is <0.05 em;
-                    // an inter-word space char is a real glyph (not an adjustment).
+                    // Gap threshold: 1.5 em. Normal inter-glyph kerning is <0.05 em; an
+                    // inter-word space char is a real glyph (not an adjustment).
                     double gapTU=tl.fontSize*1.5;
                     void FlushSub()
                     {
@@ -153,14 +154,28 @@ public sealed partial class TableAbsorber
                     tl.pendingRects.Add(new PendingRect(x, y, w, h));
                 }
                 break;
+            case "c" or "v" or "y":
+                // A curve: the path is no longer made of rules alone.
+                tl.pathHasCurve = true;
+                if (tl.drawn is not null && tl.operands.Count >= 2)
+                {
+                    var (ex, ey) = ApplyMatrix(Num(tl.operands[^2]), Num(tl.operands[^1]), tl.ctmA, tl.ctmB, tl.ctmC, tl.ctmD, tl.ctmE, tl.ctmF);
+                    tl.curveEnds.Add(new PendingLine(ex, ey, ex, ey));
+                }
+                break;
             // Paint operators: finalize buffered path segments as edges
             case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*":
-                FlushPendingEdges(tl.pendingLines, tl.pendingRects, hEdges, vEdges,
-                    stroked: op is "S" or "s" or "B" or "B*" or "b" or "b*");
-                tl.pendingLines.Clear(); tl.pendingRects.Clear(); break;
+            {
+                var stroked = op is "S" or "s" or "B" or "B*" or "b" or "b*";
+                if (stroked) tl.drawn?.AddRange(tl.curveEnds);
+                var filled = op is not ("S" or "s");
+                if (KeepVisibleRules(tl, stroked, filled))
+                    FlushPendingEdges(tl.pendingLines, tl.pendingRects, hEdges, vEdges, stroked, filled, tl);
+                tl.pendingLines.Clear(); tl.pendingRects.Clear(); tl.curveEnds.Clear(); tl.pathHasCurve = false; break;
+            }
             case "n":
                 // No-paint: discard pending paths (clip-only)
-                tl.pendingLines.Clear(); tl.pendingRects.Clear(); break;
+                tl.pendingLines.Clear(); tl.pendingRects.Clear(); tl.curveEnds.Clear(); tl.pathHasCurve = false; break;
             case "W" or "W*": break; // Clip modifiers don't finalize path
         }
     }

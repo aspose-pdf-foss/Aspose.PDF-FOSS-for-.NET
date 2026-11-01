@@ -114,6 +114,7 @@ internal sealed class Md5Digest
 
         // Round 1
         a = FF(a, b, c, d, m[0],  7,  0xD76AA478);
+#pragma warning disable S2234 // RFC 1321: the round function rotates the state words through its parameters
         d = FF(d, a, b, c, m[1],  12, 0xE8C7B756);
         c = FF(c, d, a, b, m[2],  17, 0x242070DB);
         b = FF(b, c, d, a, m[3],  22, 0xC1BDCEEE);
@@ -183,6 +184,7 @@ internal sealed class Md5Digest
         d = II(d, a, b, c, m[11], 10, 0xBD3AF235);
         c = II(c, d, a, b, m[2],  15, 0x2AD7D2BB);
         b = II(b, c, d, a, m[9],  21, 0xEB86D391);
+#pragma warning restore S2234
 
         _a += a;
         _b += b;

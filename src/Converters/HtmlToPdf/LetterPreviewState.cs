@@ -51,6 +51,7 @@ internal static partial class HtmlToPdfConverter
         public int Depth;                        // the em chain depth of the table element
         public bool Fixed;                       // table-layout: fixed (the TTO grid)
         public bool Bordered;                    // collapsed 1px cell borders (the TTO grid)
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public bool Inner;                       // a table nested in a letter table's cell
         public bool BlockThead;                  // the GP-details thead displayed as a block
         public double Spacing;                   // border-spacing between cells
@@ -59,6 +60,7 @@ internal static partial class HtmlToPdfConverter
         public int Cols;
         public double[] ColW = System.Array.Empty<double>();
         public double X, W;
+#pragma warning restore S3218
         public double[] RowH = System.Array.Empty<double>();
         public double Height;
         public double MinW, MaxW;                // the columns' min- and max-content sums, spacings included
@@ -73,12 +75,16 @@ internal static partial class HtmlToPdfConverter
         public bool Bold, Left;                  // inline weight; text-align left
         public double FsScale = 1;               // an inline em font size against the parent
         public bool PadLeftZero;                 // an inline padding-left: 0
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public LpTable? Inner;                   // a nested table as the whole content
+#pragma warning restore S3218
         public List<string> Segments = new();    // br-separated text otherwise
         public double PadT, PadR, PadB, PadL;
         public double Fs;
         public double MinW, MaxW;                // min- and max-content widths, inset included
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<LpLine> Lines = new();
+#pragma warning restore S3218
         public double ContentH;                  // lines (or the inner table) height
     }
 

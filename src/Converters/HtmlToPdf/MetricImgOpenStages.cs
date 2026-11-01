@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
     /// <summary>The stages of the metric &lt;img> open: the in-cell image, its source read and its absolute placement.</summary>
-    private static void OpenMetricImgInCell(MetricParseState mps, Token tok, StringBuilder text, IReadOnlyDictionary<string, Dictionary<string, string>> css, bool stdSerif, bool wrapperStacks, bool reportCells, List<List<MetricCell>> rows, string face, string boldFace, (double asc, double sum) fm, double indent, HtmlLoadOptions? loadOptions, double p, bool rtl, double s, string tableHtml, double tablePct, double tableWpt, string tag)
+    private static void OpenMetricImgInCell(MetricParseState mps, Token tok, StringBuilder text, IReadOnlyDictionary<string, Dictionary<string, string>> css, bool stdSerif, bool reportCells, HtmlLoadOptions? loadOptions)
     {
         var mi = new MetricImgOpenState();
         mi.mps = mps;
@@ -14,21 +14,8 @@ internal static partial class HtmlToPdfConverter
         mi.text = text;
         mi.css = css;
         mi.stdSerif = stdSerif;
-        mi.wrapperStacks = wrapperStacks;
         mi.reportCells = reportCells;
-        mi.rows = rows;
-        mi.face = face;
-        mi.boldFace = boldFace;
-        mi.fm = fm;
-        mi.indent = indent;
         mi.loadOptions = loadOptions;
-        mi.p = p;
-        mi.rtl = rtl;
-        mi.s = s;
-        mi.tableHtml = tableHtml;
-        mi.tablePct = tablePct;
-        mi.tableWpt = tableWpt;
-        mi.tag = tag;
         mi.imgH = 0;
         if (mi.tok.Attributes is { } ia && ia.TryGetValue("height", out var ihv)
             && double.TryParse(ihv.Trim().TrimEnd('p', 'x'),
@@ -47,6 +34,17 @@ internal static partial class HtmlToPdfConverter
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var iwn))
             mi.mps.cell.ImgWPt = Math.Max(mi.mps.cell.ImgWPt, iwn * PxPt);
+        // A PERCENT style width is a share of the cell's content box, known only once the
+        // columns are solved: the picture's natural box is read below for its aspect and the
+        // share is resolved onto it then (see ResolveMetricImgFractions).
+        if (mi.mps.cell.ImgWPt <= 0 && mi.tok.Attributes is { } iaF && iaF.TryGetValue("style", out var ifSt)
+            && SafeRegex.Match(ifSt, @"(?<![-\w])width\s*:\s*([\d.]+)\s*%", RegexOptions.IgnoreCase) is { Success: true } ifm
+            && double.TryParse(ifm.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var ifPct) && ifPct > 0)
+            mi.mps.cell.ImgWFrac = ifPct / WholeWidthPercent;
+        if (mi.tok.Attributes is { } iaD && iaD.TryGetValue("style", out var idSt) && idSt is not null
+            && SafeRegex.IsMatch(idSt, @"(?<![-\w])display\s*:\s*block\b", RegexOptions.IgnoreCase))
+            mi.mps.cell.ImgBlock = true;
         // A SIZED mislabelled data URI (GIF bytes shipped as
         // image/png — base64 opening "R0lGOD") draws at its
         // attribute box: without bytes the cell reserves the box
@@ -77,6 +75,8 @@ internal static partial class HtmlToPdfConverter
         // A data-URI PNG inside an abs-positioned div (left:N%):
         // drawn at natural size at the offset, out of the flow.
         PlaceMetricImgAbsolute(mi);
+        // (a picture that did not load has no box to share: the broken-image rules keep their own)
+        if (mi.mps.cell.ImgBytes is null) mi.mps.cell.ImgWFrac = 0;
         // a REMOTE image the renderer cannot fetch shows its alt
         // text in the reserved box (the expected render's broken-
         // image behaviour — the header logo draws its name)

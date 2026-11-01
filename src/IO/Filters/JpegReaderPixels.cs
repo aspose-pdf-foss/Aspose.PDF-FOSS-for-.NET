@@ -122,7 +122,7 @@ internal static partial class JpegDecoder
                 Pixels = new byte[Width * Height];
                 for (var y = 0; y < Height; y++)
                     for (var x = 0; x < Width; x++)
-                        Pixels[y * Width + x] = (byte)buffers[0][y * bufWidths[0] + x];
+                        Pixels[y * Width + x] = buffers[0][y * bufWidths[0] + x];
             }
             else if (Components == 2)
             {
@@ -155,10 +155,19 @@ internal static partial class JpegDecoder
             }
         }
 
-        private static void Dequantize(int[] block, int[] qt)
+        private void Dequantize(int[] block, int[] qt)
         {
-            for (var i = 0; i < 64; i++)
-                block[i] *= qt[i];
+            if (ScaleDenominator == 1)
+            {
+                for (var i = 0; i < 64; i++)
+                    block[i] *= qt[i];
+                return;
+            }
+            // A reduced transform reads only the block's low-frequency corner.
+            var n = BlockSide;
+            for (var v = 0; v < n; v++)
+                for (var u = 0; u < n; u++)
+                    block[v * 8 + u] *= qt[v * 8 + u];
         }
 
         /// <summary>
@@ -169,9 +178,13 @@ internal static partial class JpegDecoder
         /// output, which is enough to visibly alter a pale watermark's
         /// ink coverage.
         /// </summary>
-        private static void IDCT(int[] block)
+        // The transform's working array, one per reader: a new one per block was most of
+        // what a decode allocated.
+        private readonly int[] _idctWork = new int[64];
+
+        private void IDCT(int[] block)
         {
-            var ws = new int[64];
+            var ws = _idctWork;
 
             // Pass 1: process columns, store scaled by 2^PASS1_BITS.
             for (var c = 0; c < 8; c++)

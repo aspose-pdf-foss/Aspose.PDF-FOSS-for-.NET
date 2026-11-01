@@ -81,7 +81,7 @@ public class PageResources
             if (resDict is null) return null!;
             if (_xform!.Reader.ResolveDict(resDict.Get("Font")) is null
                 && resDict.Get("Font") is not Core.PdfDictionary) return null!;
-            return FontCollection.ForResources(resDict, _xform!.Reader);
+            return FontCollection.ForResources(resDict, _xform.Reader);
         }
     }
 
@@ -114,10 +114,21 @@ public class PageResources
         {
             var reader = _page?.Reader ?? _xform!.Reader;
             var owner = _page is not null ? _page.Dict : _xform!.StreamDict;
-            var resources = reader.ResolveDict(owner.Get("Resources"));
+            var resources = InheritedResources(owner, reader);
             var xobjects = resources is null ? null : reader.ResolveDict(resources.Get("XObject"));
             return new XFormCollection(xobjects ?? new Core.PdfDictionary(), reader, _page, owner);
         }
+    }
+
+    /// <summary>The /Resources of <paramref name="owner"/>, or of the nearest page-tree ancestor that has
+    /// them: a page inherits its resources like its boxes (ISO 32000-1 7.7.3.4).</summary>
+    private static Core.PdfDictionary? InheritedResources(Core.PdfDictionary owner, Aspose.Pdf.IO.PdfReader reader)
+    {
+        for (var node = owner; node is not null; node = reader.ResolveDict(node.Get("Parent")))
+        {
+            if (reader.ResolveDict(node.Get("Resources")) is { } resources) return resources;
+        }
+        return null;
     }
 }
 
@@ -150,13 +161,15 @@ public class Resources : PageResources
     /// for signature compatibility; a live collection is always returned.</summary>
     public FontCollection GetFonts(bool CreateIfAbsent) { _ = CreateIfAbsent; return base.Fonts; }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Enumerate every /ExtGState entry on this page's resources as a name→value map.</summary>
     public System.Collections.Generic.Dictionary<string, ExtGStateValue> GetExtGStates()
+#pragma warning restore S2325
         => new();
 
     /// <summary>Free resource-cache memory. No-op in this build — the
     /// FOSS resource readers don't cache decoded bytes.</summary>
-    public void FreeMemory() { }
+    public void FreeMemory() { /* the resource readers cache no decoded bytes */ }
 
     /// <summary>One /ExtGState entry — name plus stroke/fill alpha factors.</summary>
     public class ExtGStateValue
@@ -331,29 +344,32 @@ public sealed partial class XForm
     /// <paramref name="allowCreate"/> flag is ignored.</summary>
     public Resources GetResources(bool allowCreate) { _ = allowCreate; return Resources; }
 
+#pragma warning disable S2953 // public API: the published Dispose()
     /// <summary>Releases resources held by this XForm. Currently a no-op
     /// — the FOSS XForm reader holds no unmanaged buffers.</summary>
     public void Dispose() { _contents = null; }
+#pragma warning restore S2953
 
     /// <summary>Free decoded-content cache. The FOSS XForm decodes on
     /// demand, so this clears the cached OperatorCollection only.</summary>
     public void FreeMemory() { _contents = null; }
 
-    /// <summary>Construct a new XForm from a source page's content stream
-    /// and register it on <paramref name="document"/>. Stored only — the
-    /// FOSS XForm-from-page pipeline isn't fully wired; the returned
-    /// XForm wraps a freshly created stream with the source page's BBox
-    /// and the page's content bytes.</summary>
+    /// <summary>A form that draws <paramref name="source"/> - its content, over its media
+    /// box, with its resources - for use in <paramref name="document"/>, where the caller
+    /// places it through a page's <see cref="XFormCollection.Add"/>. A page of another
+    /// document brings its resources across, numbered afresh in this one.</summary>
     public static XForm CreateNewForm(Page source, Document document)
     {
         if (source is null) throw new ArgumentNullException(nameof(source));
         if (document is null) throw new ArgumentNullException(nameof(document));
-        // Best-effort: build a /Form XObject stream from the source page's
-        // /MediaBox + content bytes. Mostly stored: this XForm does not
-        // currently get registered in document.Pages or any resource dict.
-        var dict = FormDictionary(source.Rect ?? LetterBox);
-        var stream = new Core.PdfStream(dict, Array.Empty<byte>());
-        return new XForm(stream, source.Reader);
+        var dict = FormDictionary(source.MediaBox ?? source.Rect ?? LetterBox);
+        var resources = PdfPageStamp.ResolveEffectiveResources(source.Dict, source.Reader);
+        if (resources is not null)
+            dict.Set("Resources", ReferenceEquals(source.Reader, document.Reader)
+                ? resources
+                : document.ImportDict(resources, source.Reader, document.GetSharedImportCloneMap(source.Reader)));
+        var content = PdfPageStamp.GetPageContent(source.Dict, source.Reader);
+        return new XForm(new Core.PdfStream(dict, content), document.Reader);
     }
 
     /// <summary>The box of a form created without a page to take one from: US Letter,
@@ -394,19 +410,23 @@ public sealed partial class XForm
 /// /OPI entries.</summary>
 public sealed class Opi
 {
-    private readonly XForm _xform;
-
     /// <summary>Construct an OPI wrapper bound to <paramref name="xform"/>.</summary>
-    public Opi(XForm xform) { _xform = xform ?? throw new ArgumentNullException(nameof(xform)); }
+    public Opi(XForm xform) { if (xform is null) throw new ArgumentNullException(nameof(xform)); }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>OPI dictionary version (1.3 / 2.0 / …). Empty when absent.</summary>
     public string Version => string.Empty;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>External file specification referenced by the OPI entry.</summary>
     public string FileSpecification => string.Empty;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>OPI cropping/positioning rectangle as 4 PDF points.</summary>
     public double[] Position => Array.Empty<double>();
+#pragma warning restore S2325
 }
 
 /// <summary>Resources (fonts, xobjects) on an XForm's stream dict.</summary>
@@ -523,6 +543,19 @@ public sealed class XFormCollection : IEnumerable<XForm>
         StripDoFromOwnerPage(name);
     }
 
+    /// <summary>Remove an XForm by 1-based index. Resolves to the underlying name then defers to Delete(string).</summary>
+    public void Delete(int index)
+    {
+        EnsureForms();
+        if (index < 1 || index > _forms!.Count)
+            throw new ArgumentOutOfRangeException(nameof(index));
+        var name = _forms[index - 1].Name;
+        if (name is not null) Delete(name);
+    }
+
+    /// <summary>Drop all entries (equivalent to <see cref="Clear"/>).</summary>
+    public void Delete() => Clear();
+
     /// <summary>
     /// Remove every <c>/name Do</c> invocation of a just-deleted Form XObject from the owning
     /// page's content stream. Without this the page keeps drawing (or attempting to draw) a form
@@ -537,19 +570,9 @@ public sealed class XFormCollection : IEnumerable<XForm>
         if (bytes.Length == 0) return;
         var text = Compat.Latin1.GetString(bytes);
         var pattern = $@"/{System.Text.RegularExpressions.Regex.Escape(name)}\s+Do\b";
-        if (!System.Text.RegularExpressions.Regex.IsMatch(text, pattern)) return;
-        var newText = System.Text.RegularExpressions.Regex.Replace(text, pattern, string.Empty);
+        if (!SafeRegex.IsMatch(text, pattern)) return;
+        var newText = SafeRegex.Replace(text, pattern, string.Empty);
         _ownerPage.SetContentStream(Compat.Latin1.GetBytes(newText));
-    }
-
-    /// <summary>Remove an XForm by 1-based index. Resolves to the underlying name then defers to Delete(string).</summary>
-    public void Delete(int index)
-    {
-        EnsureForms();
-        if (index < 1 || index > _forms!.Count)
-            throw new ArgumentOutOfRangeException(nameof(index));
-        var name = _forms[index - 1].Name;
-        if (name is not null) Delete(name);
     }
 
     public IEnumerator<XForm> GetEnumerator()
@@ -563,8 +586,12 @@ public sealed class XFormCollection : IEnumerable<XForm>
 
     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
 
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsReadOnly => false;
+#pragma warning restore S2325
+#pragma warning disable S2325 // public API: the published instance member
     public bool IsSynchronized => false;
+#pragma warning restore S2325
     public object SyncRoot { get; } = new();
 
     /// <summary>Adds a form XObject to the collection and to the owner's <c>/XObject</c> resources. A form without a name is named <c>Fm</c> plus its position (for example <c>Fm1</c>); <c>null</c> throws <c>ArgumentNullException</c>.</summary>
@@ -667,14 +694,13 @@ public sealed class XFormCollection : IEnumerable<XForm>
         return _forms!.Remove(item!);
     }
 
-    /// <summary>Drop all entries (equivalent to <see cref="Clear"/>).</summary>
-    public void Delete() => Clear();
-
     /// <summary>Discard cached form list so the next access re-reads from the XObject dict.</summary>
     public void FreeMemory() => _forms = null;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Return the PDF resource name (e.g. "Fm1") under which a Form XObject lives.</summary>
     public string GetFormName(XForm form) => form?.Name ?? string.Empty;
+#pragma warning restore S2325
 
     private void EnsureForms()
     {

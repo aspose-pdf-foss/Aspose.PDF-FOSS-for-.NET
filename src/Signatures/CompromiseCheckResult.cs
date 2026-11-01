@@ -8,9 +8,11 @@ namespace Aspose.Pdf.Signatures;
 /// cover.</summary>
 public sealed class CompromiseCheckResult
 {
+#pragma warning disable S3887 // public API: the published field
     /// <summary>The signatures recognised as forged (a universal signature forgery or a
     /// signature wrapping attack), in field order.</summary>
     public readonly IList<SignatureName> CompromisedSignatures = new List<SignatureName>();
+#pragma warning restore S3887
 
     /// <summary>True when at least one signature is forged.</summary>
     public bool HasCompromisedSignatures => CompromisedSignatures.Count > 0;

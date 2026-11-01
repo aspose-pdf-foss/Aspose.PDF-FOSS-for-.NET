@@ -51,7 +51,7 @@ public sealed partial class Form
     }
 
     /// <summary></summary>
-    private void ImportChoiceEntries(FieldEntryImportState fe)
+    private static void ImportChoiceEntries(FieldEntryImportState fe)
     {
         if (fe.entry.TryGetProperty("Options", out var optEl)
             && optEl.ValueKind == System.Text.Json.JsonValueKind.Array)
@@ -75,7 +75,7 @@ public sealed partial class Form
     }
 
     /// <summary></summary>
-    private void ImportFieldType(FieldEntryImportState fe, System.Text.Json.JsonElement ftEl)
+    private static void ImportFieldType(FieldEntryImportState fe, System.Text.Json.JsonElement ftEl)
     {
         var ftName = ftEl.GetString();
         if (MapFieldTypeToFt(ftName) is { } ft)
@@ -88,7 +88,7 @@ public sealed partial class Form
     }
 
     /// <summary></summary>
-    private void ImportWidgetRect(FieldEntryImportState fe, System.Text.Json.JsonElement rc)
+    private static void ImportWidgetRect(FieldEntryImportState fe, System.Text.Json.JsonElement rc)
     {
         var ra = new PdfArray();
         var idx = 0;

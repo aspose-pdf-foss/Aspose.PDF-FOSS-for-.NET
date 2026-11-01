@@ -21,14 +21,18 @@ private sealed class TransparentScanState
     public bool initialTransparent;
     public string text = null!;
     public System.Text.StringBuilder output = null!;
-    public Stack<(Aspose.Pdf.Document.SimMatrix Ctm, double FillA, double StrokeA, string Bm, bool Sm, (int comps, double[] vals)? FillCol, (int comps, double[] vals)? StrokeCol)> stack = null!;
+    public Stack<(Aspose.Pdf.Document.SimMatrix Ctm, double FillA, double StrokeA, string Bm, bool Sm, (int comps, double[] vals)? FillCol, (int comps, double[] vals)? StrokeCol, int Tr)> stack = null!;
     public Document.SimMatrix ctm;
     public double fillA;
     public double strokeA;
     public string blend = null!;
     public bool softMask;
-    // Current fill/stroke colour for the recolour mode (1=gray, 3=rgb, 4=cmyk;
-    // null = unknown, e.g. after cs/CS to a pattern space). PDF initial = black.
+    // The text rendering mode (Tr), and where the operands of the pending operator start in
+    // the output: a show under an alpha of 0 is wrapped in the invisible mode there.
+    public int textRender;
+    public int operandStart;
+    // Current fill/stroke colour for the recolour mode (1=gray, 3=rgb, 4=cmyk; null
+    // = unknown, e.g. after cs/CS to a pattern space). PDF initial = black.
     public (int comps, double[] vals)? fillCol;
     public (int comps, double[] vals)? strokeCol;
     public string? lastName;
@@ -41,10 +45,11 @@ private sealed class TransparentScanState
     public double pMaxX;
     public double pMaxY;
     public bool hasPath;
-    // Rough text tracking for regions (explicit Tm + Tf only).
-    public double tmX;
-    public double tmY;
+    // Rough text tracking for regions: the text matrix (Tm, Td, BT) and the font size.
+    public Document.SimMatrix tm = Document.SimMatrix.Identity;
     public double fontSize;
+    // The selected font is an embedded composite one: its constant-alpha text is not composited.
+    public bool embeddedCompositeFont;
     public int lastStringLen;
     // an inline image ends the scan with the page kept as-is
     public bool bailOut;

@@ -45,6 +45,7 @@ public sealed partial class TextAbsorber
         var pageTexts = new List<string>();
         var isPure = ExtractionOptions?.FormattingMode
             != TextExtractionOptions.TextFormattingMode.Raw;
+        pdf.LayOutXfaForm();
         foreach (var page in pdf.Pages)
         {
             _text.Clear();
@@ -264,8 +265,8 @@ public sealed partial class TextAbsorber
     {
         if (metrics.IsCid) return (0, 0);
         var n = 0;
-        foreach (var b in bytes)
-            if (b == 0x20) n++;
+        foreach (var b in bytes.Where(b => b == 0x20))
+            n++;
         if (n == 0) return (0, 0);
         return (n, n * metrics.GetWidth(0x20) * fsAdv / 1000.0 * horizScale);
     }

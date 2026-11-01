@@ -22,9 +22,9 @@ internal static partial class HtmlToPdfConverter
             // rows advance one row chrome apart (2 x cellpadding + the
             // UA 2px cellspacing), and a td align=center centres each
             // wrapped line over the table's attribute-width band.
-            var openTag = Regex.Match(seg, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
+            var openTag = SafeRegex.Match(seg, @"<table\b[^>]*>", RegexOptions.IgnoreCase);
             double wrapBandW = 0;
-            var wAttrM = Regex.Match(openTag.Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)",
+            var wAttrM = SafeRegex.Match(openTag.Value, @"\bwidth\s*=\s*[""']?(\d+(?:\.\d+)?)",
                 RegexOptions.IgnoreCase);
             if (wAttrM.Success && double.TryParse(wAttrM.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
@@ -50,16 +50,16 @@ internal static partial class HtmlToPdfConverter
         double w = 0;
         var rootPt = FlowRootFontPt(fbk.cv, sheetBodyRule: false);
         if (rootPt <= 0) rootPt = DefaultBodyFontPt;   // the UA default when the document sizes nothing
-        foreach (Match tdM in Regex.Matches(seg, @"<td\b([^>]*)>([\s\S]*?)</td\s*>", RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(seg, @"<td\b([^>]*)>([\s\S]*?)</td\s*>", RegexOptions.IgnoreCase).Select(tdM => tdM.Groups))
         {
             var cellPt = rootPt;
-            var fsM = Regex.Match(tdM.Groups[1].Value, @"font-size\s*:\s*([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
+            var fsM = SafeRegex.Match(groups[1].Value, @"font-size\s*:\s*([\d.]+)\s*(px|pt)", RegexOptions.IgnoreCase);
             if (fsM.Success && double.TryParse(fsM.Groups[1].Value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var fsV))
                 cellPt = fsM.Groups[2].Value.Equals("px", StringComparison.OrdinalIgnoreCase) ? fsV * 0.75 : fsV;
-            foreach (var lineHtml in Regex.Split(tdM.Groups[2].Value, @"<br\s*/?>", RegexOptions.IgnoreCase))
+            foreach (var lineHtml in SafeRegex.Split(groups[2].Value, @"<br\s*/?>", RegexOptions.IgnoreCase))
             {
-                var text = Regex.Replace(DecodeEntities(Regex.Replace(lineHtml, @"<[^>]*>", "")), @"[ \t\r\n]+", " ").Trim(' ');
+                var text = SafeRegex.Replace(DecodeEntities(SafeRegex.Replace(lineHtml, @"<[^>]*>", "")), @"[ \t\r\n]+", " ").Trim(' ');
                 if (text.Length == 0) continue;
                 w = Math.Max(w, MeasureFaceText(fbk.cv.profile.metricFace, text, cellPt));
             }

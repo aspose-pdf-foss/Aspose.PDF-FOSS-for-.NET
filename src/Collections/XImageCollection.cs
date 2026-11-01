@@ -14,11 +14,15 @@ public class XImageCollection : ImageCollection
     /// <summary>Number of images in the collection.</summary>
     public new int Count => base.Count;
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether the collection is read-only. Always false.</summary>
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Whether the collection is thread-safe. Always false.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Synchronization root for <see cref="IsSynchronized"/>; returns this collection.</summary>
     public object SyncRoot => this;
@@ -55,13 +59,17 @@ public class XImageCollection : ImageCollection
         }
     }
 
-    /// <summary>Append an existing XImage to the collection and return its assigned resource name.</summary>
+    /// <summary>Append an existing XImage to the collection and return its assigned resource name: the image
+    /// XObject itself goes into the owner's resources (one object, drawn wherever a page or form names it), so
+    /// a <c>Do</c> of the returned name draws it. An image the collection holds already keeps its name.</summary>
     public string Add(XImage image)
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
-        // Adding new image XObjects to the underlying resources dict isn't currently
-        // wired through; record intent by returning the image's existing resource name.
-        return image.Name;
+        foreach (var held in _images)
+        {
+            if (ReferenceEquals(held.Stream, image.Stream)) return held.Name;
+        }
+        return AppendImageXObject(image.Stream);
     }
 
     /// <summary>Append an image from a stream; returns its assigned resource name.</summary>
@@ -95,156 +103,27 @@ public class XImageCollection : ImageCollection
         }
     }
 
-    /// <summary>Sniff whether <paramref name="data"/> is an SVG document — an XML
-    /// prolog or a bare &lt;svg&gt; root, after an optional UTF-8 BOM / whitespace.</summary>
-    internal static bool IsSvg(byte[] data)
-    {
-        if (data is null || data.Length < 4) return false;
-        int i = 0;
-        if (data.Length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;
-        while (i < data.Length && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
-        var head = System.Text.Encoding.ASCII.GetString(data, i, System.Math.Min(512, data.Length - i));
-        return head.StartsWith("<?xml") ? head.Contains("<svg") : head.StartsWith("<svg");
-    }
+    /// <summary>Append a stamp's image, as <see cref="Add(Stream)"/> appends a decoded one.</summary>
+    internal string Add(ImageStamp stamp) => AppendImageXObject(stamp.BuildImageXObject());
 
-    /// <summary>Append an image from a stream using the given filter; returns its assigned resource name.</summary>
+    /// <summary>Append an image from a stream stored under the given filter; returns its assigned resource name.
+    /// A CCITT-coded TIFF asked for as CCITTFax and a JPEG asked for as Jpeg keep their own coding; any other
+    /// image is decoded and re-encoded: Jpeg as a JPEG, CCITTFax as a Group 4 bilevel image, Flate as deflated
+    /// samples. Jpeg2000 (no JPEG 2000 encoder ships here) and an image no decoder reads are added as
+    /// <see cref="Add(Stream)"/> adds them.</summary>
     public string Add(Stream image, ImageFilterType filterType)
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
-        if (filterType == ImageFilterType.CCITTFax)
+        var bytes = DrainStream(image);
+        var isJpeg = bytes.Length > 2 && bytes[0] == 0xFF && bytes[1] == 0xD8;
+        var encoded = filterType switch
         {
-            var bytes = DrainStream(image);
-            if (TryBuildCcittImageFromTiff(bytes) is { } imageStream)
-                return AppendImageXObject(imageStream);
-        }
-        return Add(image);
-    }
-
-    private static byte[] DrainStream(Stream s)
-    {
-        if (s.CanSeek) s.Seek(0, SeekOrigin.Begin);
-        using var ms = new MemoryStream();
-        s.CopyTo(ms);
-        return ms.ToArray();
-    }
-
-    // Parse a CCITT-compressed (Group 3 / Group 4) TIFF and re-wrap its raw fax
-    // strips as a PDF /CCITTFaxDecode image XObject — no re-encoding, the bytes
-    // pass through. Returns false for any TIFF that isn't single-component CCITT.
-    private static PdfStream? TryBuildCcittImageFromTiff(byte[] t)
-    {
-        PdfStream imageStream = null!;
-        if (t.Length < 8) return null;
-        bool le = t[0] == 0x49 && t[1] == 0x49;
-        if (!le && !(t[0] == 0x4D && t[1] == 0x4D)) return null;
-
-        int ifd = (int)U32(t, le, 4);
-        if (ifd <= 0 || ifd + 2 > t.Length) return null;
-        int n = (int)U16(t, le, ifd);
-
-        long compression = 0, width = 0, height = 0, t4 = 0, photometric = 1, fillorder = 1;
-        long offPtr = 0, offCnt = 0, cntPtr = 0, cntCnt = 0;
-        int offType = 3, cntType = 4;
-        for (int i = 0; i < n; i++)
-        {
-            int e = ifd + 2 + i * 12;
-            if (e + 12 > t.Length) break;
-            int tag = (int)U16(t, le, e), type = (int)U16(t, le, e + 2);
-            long count = U32(t, le, e + 4), valoff = U32(t, le, e + 8);
-            long val = (count == 1 && type == 3) ? U16(t, le, e + 8) : valoff;
-            switch (tag)
-            {
-                case 256: width = val; break;
-                case 257: height = val; break;
-                case 259: compression = val; break;
-                case 262: photometric = val; break;
-                case 266: fillorder = val; break;
-                case 273: offPtr = valoff; offCnt = count; offType = type; break;
-                case 279: cntPtr = valoff; cntCnt = count; cntType = type; break;
-                case 292: t4 = val; break;
-            }
-        }
-        if (compression != 3 && compression != 4) return null;
-        if (width <= 0 || height <= 0) return null;
-
-        var offsets = ReadIntArray(t, le, offPtr, offCnt, offType);
-        var counts = ReadIntArray(t, le, cntPtr, cntCnt, cntType);
-        if (offsets.Count == 0) return null;
-        // Some CCITT TIFFs omit StripByteCounts for a single strip; the strip then
-        // runs from its offset up to the IFD (or end of file).
-        if (counts.Count == 0 && offsets.Count == 1)
-        {
-            int end = ifd > offsets[0] ? ifd : t.Length;
-            counts.Add(end - offsets[0]);
-        }
-        if (offsets.Count != counts.Count) return null;
-
-        var data = new List<byte>();
-        for (int i = 0; i < offsets.Count; i++)
-        {
-            int off = offsets[i], len = counts[i];
-            if (off < 0 || (long)off + len > t.Length) return null;
-            for (int j = 0; j < len; j++) data.Add(t[off + j]);
-        }
-        var ccitt = data.ToArray();
-        if (fillorder == 2) for (int i = 0; i < ccitt.Length; i++) ccitt[i] = ReverseBits(ccitt[i]);
-
-        var dp = new PdfDictionary();
-        dp.Set("K", new PdfInteger(compression == 4 ? -1 : ((t4 & 1) != 0 ? 1 : 0)));
-        dp.Set("Columns", new PdfInteger((int)width));
-        dp.Set("Rows", new PdfInteger((int)height));
-        if (photometric == 0) dp.Set("BlackIs1", PdfBoolean.True);
-        if ((t4 & 4) != 0) dp.Set("EncodedByteAlign", PdfBoolean.True);
-
-        var dict = new PdfDictionary();
-        dict.Set("Type", new PdfName("XObject"));
-        dict.Set("Subtype", new PdfName("Image"));
-        dict.Set("Width", new PdfInteger((int)width));
-        dict.Set("Height", new PdfInteger((int)height));
-        dict.Set("BitsPerComponent", new PdfInteger(1));
-        dict.Set("ColorSpace", new PdfName("DeviceGray"));
-        dict.Set("Filter", new PdfName("CCITTFaxDecode"));
-        dict.Set("DecodeParms", dp);
-        dict.Set("Length", new PdfInteger(ccitt.Length));
-        imageStream = new PdfStream(dict, ccitt);
-        return imageStream;
-    }
-
-    private static uint U16(byte[] b, bool le, int o)
-        => le ? (uint)(b[o] | b[o + 1] << 8) : (uint)(b[o] << 8 | b[o + 1]);
-
-    private static uint U32(byte[] b, bool le, int o)
-        => le ? (uint)(b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24)
-              : (uint)(b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]);
-
-    private static List<int> ReadIntArray(byte[] t, bool le, long ptr, long count, int type)
-    {
-        var r = new List<int>();
-        if (count <= 0) return r;
-        int size = type == 3 ? 2 : 4; // SHORT vs LONG
-        if (count == 1)
-        {
-            // A single value lives inline in the tag's value field, which the caller
-            // already decoded into `ptr`.
-            r.Add((int)ptr);
-            return r;
-        }
-        if (ptr < 0 || ptr + count * size > t.Length) return r;
-        for (long i = 0; i < count; i++)
-        {
-            int o = (int)(ptr + i * size);
-            r.Add((int)(type == 3 ? U16(t, le, o) : U32(t, le, o)));
-        }
-        return r;
-    }
-
-    private static byte ReverseBits(byte b)
-    {
-        int x = b;
-        x = ((x & 0xF0) >> 4) | ((x & 0x0F) << 4);
-        x = ((x & 0xCC) >> 2) | ((x & 0x33) << 2);
-        x = ((x & 0xAA) >> 1) | ((x & 0x55) << 1);
-        return (byte)x;
+            ImageFilterType.CCITTFax => TryBuildCcittImageFromTiff(bytes) ?? ImageFilterEncoder.Encode(bytes, filterType),
+            ImageFilterType.Jpeg when !isJpeg => ImageFilterEncoder.Encode(bytes, filterType),
+            ImageFilterType.Flate when isJpeg => ImageFilterEncoder.Encode(bytes, filterType),
+            _ => null,
+        };
+        return encoded is not null ? AppendImageXObject(encoded) : Add(new MemoryStream(bytes));
     }
 
     /// <summary>Append an image from a stream re-encoded as JPEG at the given quality.</summary>
@@ -365,7 +244,149 @@ public class XImageCollection : ImageCollection
         return AppendImageXObject(new PdfStream(dict, data));
     }
 
-    private static byte[] FlateCompress(byte[] data, int length) => IO.Filters.ManagedDeflater.DeflateZlib(data, 0, length);
+    /// <summary>Sniff whether <paramref name="data"/> is an SVG document — an XML
+    /// prolog or a bare &lt;svg&gt; root, after an optional UTF-8 BOM / whitespace.</summary>
+    internal static bool IsSvg(byte[] data)
+    {
+        if (data is null || data.Length < 4) return false;
+        int i = 0;
+        if (data.Length >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) i = 3;
+        while (i < data.Length && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+        var head = System.Text.Encoding.ASCII.GetString(data, i, System.Math.Min(512, data.Length - i));
+        // Ordinal: a culture-aware match skips NUL and other ignorable characters on ICU runtimes.
+        return head.StartsWith("<?xml", StringComparison.Ordinal)
+            ? head.Contains("<svg")
+            : head.StartsWith("<svg", StringComparison.Ordinal);
+    }
+
+    private static byte[] DrainStream(Stream s)
+    {
+        if (s.CanSeek) s.Seek(0, SeekOrigin.Begin);
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    // Parse a CCITT-compressed (Group 3 / Group 4) TIFF and re-wrap its raw fax
+    // strips as a PDF /CCITTFaxDecode image XObject — no re-encoding, the bytes
+    // pass through. Returns false for any TIFF that isn't single-component CCITT.
+    private static PdfStream? TryBuildCcittImageFromTiff(byte[] t)
+    {
+        PdfStream imageStream = null!;
+        if (t.Length < 8) return null;
+        bool le = t[0] == 0x49 && t[1] == 0x49;
+        if (!le && !(t[0] == 0x4D && t[1] == 0x4D)) return null;
+
+        int ifd = (int)U32(t, le, 4);
+        if (ifd <= 0 || ifd + 2 > t.Length) return null;
+        int n = (int)U16(t, le, ifd);
+
+        long compression = 0, width = 0, height = 0, t4 = 0, photometric = 1, fillorder = 1;
+        long offPtr = 0, offCnt = 0, cntPtr = 0, cntCnt = 0;
+        int offType = 3, cntType = 4;
+        for (int i = 0; i < n; i++)
+        {
+            int e = ifd + 2 + i * 12;
+            if (e + 12 > t.Length) break;
+            int tag = (int)U16(t, le, e), type = (int)U16(t, le, e + 2);
+            long count = U32(t, le, e + 4), valoff = U32(t, le, e + 8);
+            long val = (count == 1 && type == 3) ? U16(t, le, e + 8) : valoff;
+            switch (tag)
+            {
+                case 256: width = val; break;
+                case 257: height = val; break;
+                case 259: compression = val; break;
+                case 262: photometric = val; break;
+                case 266: fillorder = val; break;
+                case 273: offPtr = valoff; offCnt = count; offType = type; break;
+                case 279: cntPtr = valoff; cntCnt = count; cntType = type; break;
+                case 292: t4 = val; break;
+            }
+        }
+        if (compression != 3 && compression != 4) return null;
+        if (width <= 0 || height <= 0) return null;
+
+        var offsets = ReadIntArray(t, le, offPtr, offCnt, offType);
+        var counts = ReadIntArray(t, le, cntPtr, cntCnt, cntType);
+        if (offsets.Count == 0) return null;
+        // Some CCITT TIFFs omit StripByteCounts for a single strip; the strip then
+        // runs from its offset up to the IFD (or end of file).
+        if (counts.Count == 0 && offsets.Count == 1)
+        {
+            int end = ifd > offsets[0] ? ifd : t.Length;
+            counts.Add(end - offsets[0]);
+        }
+        if (offsets.Count != counts.Count) return null;
+
+        var data = new List<byte>();
+        for (int i = 0; i < offsets.Count; i++)
+        {
+            int off = offsets[i], len = counts[i];
+            if (off < 0 || (long)off + len > t.Length) return null;
+            for (int j = 0; j < len; j++) data.Add(t[off + j]);
+        }
+        var ccitt = data.ToArray();
+        if (fillorder == 2) for (int i = 0; i < ccitt.Length; i++) ccitt[i] = ReverseBits(ccitt[i]);
+
+        var dp = new PdfDictionary();
+        dp.Set("K", new PdfInteger(compression == 4 ? -1 : (int)(t4 & 1)));
+        dp.Set("Columns", new PdfInteger((int)width));
+        dp.Set("Rows", new PdfInteger((int)height));
+        if (photometric == 0) dp.Set("BlackIs1", PdfBoolean.True);
+        if ((t4 & 4) != 0) dp.Set("EncodedByteAlign", PdfBoolean.True);
+
+        var dict = new PdfDictionary();
+        dict.Set("Type", new PdfName("XObject"));
+        dict.Set("Subtype", new PdfName("Image"));
+        dict.Set("Width", new PdfInteger((int)width));
+        dict.Set("Height", new PdfInteger((int)height));
+        dict.Set("BitsPerComponent", new PdfInteger(1));
+        dict.Set("ColorSpace", new PdfName("DeviceGray"));
+        dict.Set("Filter", new PdfName("CCITTFaxDecode"));
+        dict.Set("DecodeParms", dp);
+        dict.Set("Length", new PdfInteger(ccitt.Length));
+        imageStream = new PdfStream(dict, ccitt);
+        return imageStream;
+    }
+
+    private static uint U16(byte[] b, bool le, int o)
+        => le ? (uint)(b[o] | b[o + 1] << 8) : (uint)(b[o] << 8 | b[o + 1]);
+
+    private static uint U32(byte[] b, bool le, int o)
+        => le ? (uint)(b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24)
+              : (uint)(b[o] << 24 | b[o + 1] << 16 | b[o + 2] << 8 | b[o + 3]);
+
+    private static List<int> ReadIntArray(byte[] t, bool le, long ptr, long count, int type)
+    {
+        var r = new List<int>();
+        if (count <= 0) return r;
+        int size = type == 3 ? 2 : 4; // SHORT vs LONG
+        if (count == 1)
+        {
+            // A single value lives inline in the tag's value field, which the caller
+            // already decoded into `ptr`.
+            r.Add((int)ptr);
+            return r;
+        }
+        if (ptr < 0 || ptr + count * size > t.Length) return r;
+        for (long i = 0; i < count; i++)
+        {
+            int o = (int)(ptr + i * size);
+            r.Add((int)(type == 3 ? U16(t, le, o) : U32(t, le, o)));
+        }
+        return r;
+    }
+
+    private static byte ReverseBits(byte b)
+    {
+        int x = b;
+        x = ((x & 0xF0) >> 4) | ((x & 0x0F) << 4);
+        x = ((x & 0xCC) >> 2) | ((x & 0x33) << 2);
+        x = ((x & 0xAA) >> 1) | ((x & 0x55) << 1);
+        return (byte)x;
+    }
+
+    private static byte[] FlateCompress(byte[] data, int length) => IO.Filters.ManagedDeflater.DeflateSamples(data, 0, length);
 
     /// <summary>Remove every image from the collection.</summary>
     public void Clear()
@@ -400,8 +421,11 @@ public class XImageCollection : ImageCollection
     /// <summary>Remove the image at the 1-based index using the supplied action policy.</summary>
     public void Delete(int index, ImageDeleteAction action)
     {
-        _ = action;
-        RemoveImageAt(index);
+        // An index outside 1..Count names no image: it is refused as the indexer refuses it,
+        // rather than returning as if an image had gone - a loop that deletes by a stale index
+        // otherwise left the image on the page with nothing to say so.
+        if (index < 1 || index > Count) throw new ArgumentOutOfRangeException(nameof(index));
+        RemoveImageAt(index, keepContents: action != ImageDeleteAction.None);
     }
 
     /// <summary>Remove the image with the supplied resource name.</summary>
@@ -409,13 +433,14 @@ public class XImageCollection : ImageCollection
 
     /// <summary>Remove the named image using the supplied action policy.</summary>
     public void Delete(string name, ImageDeleteAction action)
-    {
-        _ = action;
-        RemoveImageResource(name);
-    }
+        => RemoveImageResource(name, keepContents: action != ImageDeleteAction.None);
 
+#pragma warning disable S2325 // public API: the published instance member
+#pragma warning disable S4144 // public API: the published lookup
     /// <summary>Return the resource name of the supplied image.</summary>
     public string GetImageName(XImage image)
+#pragma warning restore S2325
+#pragma warning restore S4144
     {
         if (image is null) throw new ArgumentNullException(nameof(image));
         return image.Name;

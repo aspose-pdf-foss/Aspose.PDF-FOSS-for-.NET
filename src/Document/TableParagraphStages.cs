@@ -53,6 +53,10 @@ public sealed partial class Document : IDisposable
         if (tp.tableGraphs.Count > 0)
             foreach (var gc in tp.tableGraphs[0])
                 flow.InjectContentAtCursor(gc);
+        // A start page the flow has already left binds its cell links and annotations
+        // where its slice went, once that overflow page exists.
+        if (tp.startPageDeferred)
+            QueueCellAnnotations(table, 0, flow.CurrentSlot);
         if (tp.pageContents.Count == 1)
         {
             // Single-page table: consume exactly its height so following
@@ -75,7 +79,6 @@ public sealed partial class Document : IDisposable
             // Boxes the table breaks inside close their parts under its first page's rows.
             flow.CloseBoxPartsUnderTable(TablePageEnd(tp, table, flow, 0));
             flow.FlushInFlightBuffer();
-            var tableCheckboxes = table.LastCheckboxDraws;
             for (var pi = 1; pi < tp.pageContents.Count - 1; pi++)
             {
                 if (pi < tp.tableImages.Count && tp.tableImages[pi].Count > 0)
@@ -83,16 +86,15 @@ public sealed partial class Document : IDisposable
                 if (pi < tp.tableBlocks.Count)
                     foreach (var (block, part, rect) in tp.tableBlocks[pi])
                         flow.PlaceReservedPartOn(overflowPages.Count, block, part, rect);
-                if (pi < tableCheckboxes.Count && tableCheckboxes[pi].Count > 0)
-                    _overflowCheckboxes[overflowPages.Count] = tableCheckboxes[pi];
-                var content = tp.pageContents[pi];
+                QueueCellAnnotations(table, pi, overflowPages.Count);
+                var content = WithCellGraphs(tp, pi);
                 if (tp.spillPageMargins is { } margins)
                     content = Concat(flow.BoxPartsAroundSpill(tp.tablePage.LayoutFrameHeight - margins(pi).top,
                         TablePageEnd(tp, table, flow, pi)), content);
-                overflowPages.Add((content, tp.tablePage.Width, tp.tablePage.Height));
+                overflowPages.Add((content, tp.tablePage.LayoutFrameWidth, tp.tablePage.LayoutFrameHeight));
             }
             var lastIdx = tp.pageContents.Count - 1;
-            var lastSlot = flow.ContinueOnPrebuiltSpill(tp.pageContents[lastIdx], table.LastPageEndY);
+            var lastSlot = flow.ContinueOnPrebuiltSpill(WithCellGraphs(tp, lastIdx), table.LastPageEndY);
             if (tp.spillPageMargins is { } lastMargins)
                 flow.ReopenBoxPartsOnSpill(tp.tablePage.LayoutFrameHeight - lastMargins(lastIdx).top);
             if (lastIdx < tp.tableImages.Count && tp.tableImages[lastIdx].Count > 0)
@@ -100,17 +102,45 @@ public sealed partial class Document : IDisposable
             if (lastIdx < tp.tableBlocks.Count)
                 foreach (var (block, part, rect) in tp.tableBlocks[lastIdx])
                     flow.PlaceReservedPartOn(lastSlot, block, part, rect);
-            if (lastIdx < tableCheckboxes.Count && tableCheckboxes[lastIdx].Count > 0)
-                _overflowCheckboxes[lastSlot] = tableCheckboxes[lastIdx];
+            QueueCellAnnotations(table, lastIdx, lastSlot);
         }
+    }
+
+    /// <summary>A spill page's slice with the graphs its cells hold drawn over it.</summary>
+    private static byte[] WithCellGraphs(TableParagraphState tp, int index)
+    {
+        var content = tp.pageContents[index];
+        if (index >= tp.tableGraphs.Count || tp.tableGraphs[index].Count == 0) return content;
+        var all = new MemoryStream(content.Length + tp.tableGraphs[index].Sum(g => g.Length));
+        all.Write(content, 0, content.Length);
+        foreach (var gc in tp.tableGraphs[index]) all.Write(gc, 0, gc.Length);
+        return all.ToArray();
+    }
+
+    /// <summary>Hand the widgets, annotations and links the cells of the table's page
+    /// <paramref name="index"/> hold to the overflow slot that page lands in.</summary>
+    private void QueueCellAnnotations(Table table, int index, int slot)
+    {
+        if (index < table.LastCheckboxDraws.Count && table.LastCheckboxDraws[index].Count > 0)
+            AppendToSlot(_overflowCheckboxes, slot, table.LastCheckboxDraws[index]);
+        if (index < table.LastLinkDraws.Count && table.LastLinkDraws[index].Count > 0)
+            AppendToSlot(_overflowCellLinks, slot, table.LastLinkDraws[index]);
+    }
+
+    private static void AppendToSlot<T>(Dictionary<int, List<T>> bySlot, int slot, List<T> items)
+    {
+        if (bySlot.TryGetValue(slot, out var held)) held.AddRange(items);
+        else bySlot[slot] = new List<T>(items);
     }
 
     /// <summary>Where the table's part on page <paramref name="index"/> of its build ends:
     /// as the table recorded it, else the lowest its rows may reach there.</summary>
-    private static double TablePageEnd(TableParagraphState tp, Table table, FlowLayout flow, int index) =>
-        table.PageEndYs.Count == tp.pageContents.Count ? table.PageEndYs[index]
-        : index == tp.pageContents.Count - 1 ? table.LastPageEndY
-        : flow.BottomMargin;
+    private static double TablePageEnd(TableParagraphState tp, Table table, FlowLayout flow, int index)
+    {
+        if (table.PageEndYs.Count == tp.pageContents.Count) return table.PageEndYs[index];
+        if (index == tp.pageContents.Count - 1) return table.LastPageEndY;
+        return flow.BottomMargin;
+    }
 
     private static byte[] Concat(byte[] first, byte[] second)
     {
@@ -122,7 +152,7 @@ public sealed partial class Document : IDisposable
     }
 
     /// <summary>Build the table's page slices at the flow width with the spill margins.</summary>
-    private void BuildTableSlices(TableParagraphState tp, Table table, FlowLayout flow, List<(byte[] content, double width, double height)> overflowPages)
+    private static void BuildTableSlices(TableParagraphState tp, Table table, FlowLayout flow, List<(byte[] content, double width, double height)> overflowPages)
     {
         for (var tri = 0; tri < table.Rows.Count; tri++)
         {
@@ -154,12 +184,19 @@ public sealed partial class Document : IDisposable
             tp.spillPageMargins = pageMargins;
             table.SpillPageMargins = spill => flow.SpillMarginsInsideBoxes(pageMargins(spill));
         }
+        // (a flow already past its start page draws the table's first rows on an overflow page)
+        tp.startPageDeferred = flow.HasOverflowed;
+        table.DefersStartPageAnnotations = tp.startPageDeferred;
         try
         {
             tp.pageContents = table.BuildMultiPage(tp.tablePage, flow.CurrentY, flow.BottomMargin,
                 tp.spillTopMargin, contentFlow: true);
         }
-        finally { table.SpillPageMargins = null; }
+        finally
+        {
+            table.SpillPageMargins = null;
+            table.DefersStartPageAnnotations = false;
+        }
         tp.tableImages = table.LastImageDraws;
         tp.tableBlocks = table.LastBlockDraws;
         tp.tableGraphs = table.LastGraphDraws;
@@ -175,8 +212,8 @@ public sealed partial class Document : IDisposable
         {
             var room = flow.CurrentY - flow.BottomMargin;
             var wholePage = flow.ContentTop - flow.BottomMargin;
-            // GetHeight is the whole-table measurement (every row, margins included);
-            // LastRenderedHeight would only report the last page's slice.
+            // GetHeight is the whole-table measurement (every row, margins included); LastRenderedHeight
+            // would only report the last page's slice.
             if (room < wholePage - 1e-6 && table.GetHeight(flow.CurrentPage) > room + 1e-6)
             {
                 flow.ForceNewPage();
@@ -227,7 +264,7 @@ public sealed partial class Document : IDisposable
             // from 443.1 pt up — the window's midpoint
             var rbWrapW = 439.0;
 
-            var pageH = flow.CurrentPage.Height;
+            var pageH = flow.CurrentPage.LayoutFrameHeight;
             // Overflow pages pre-register F1 = Helvetica and the resource
             // merge skips names already taken — register Helvetica first
             // so the band's Times faces keep their names across pages.
@@ -242,7 +279,7 @@ public sealed partial class Document : IDisposable
                 {
                     var w = MeasureStd14Width(t, "Times-Bold", rbTitleFs);
                     b.BeginText().SetFont(bold, rbTitleFs)
-                     .MoveTextPosition((flow.CurrentPage.Width - w) / 2, pageH - ty)
+                     .MoveTextPosition((flow.CurrentPage.LayoutFrameWidth - w) / 2, pageH - ty)
                      .ShowText(t).EndText();
                     ty += rbTitlePitch;
                 }
@@ -279,7 +316,6 @@ public sealed partial class Document : IDisposable
                     rbB.SaveState();
                     RbHeader(rbB);
                     reg = Table.RegisterFont(flow.CurrentPage, "Times-Roman");
-                    atPageHead = true;
                 }
                 for (var li = 0; li < wrapped.Count; li++)
                     if (wrapped[li].Length > 0)
@@ -343,7 +379,7 @@ public sealed partial class Document : IDisposable
                         flow.InjectContentAtCursor(gc);
                 if (!flow.HasOverflowed && innerImages.Count > 0)
                     foreach (var (data, rect) in innerImages[0])
-                        innerPage.AddImage(data, rect);
+                        innerPage.AddLayoutImage(data, rect);
                 if (innerContents.Count == 1)
                 {
                     flow.AdvanceY(inner.LastRenderedHeight);
@@ -354,7 +390,7 @@ public sealed partial class Document : IDisposable
                     {
                         if (pi < innerImages.Count && innerImages[pi].Count > 0)
                             overflowImages[overflowPages.Count] = innerImages[pi];
-                        overflowPages.Add((innerContents[pi], innerPage.Width, innerPage.Height));
+                        overflowPages.Add((innerContents[pi], innerPage.LayoutFrameWidth, innerPage.LayoutFrameHeight));
                     }
                     var innerLastIdx = innerContents.Count - 1;
                     var innerSlot = flow.ContinueOnPrebuiltSpill(innerContents[innerLastIdx], inner.LastPageEndY);
@@ -379,7 +415,7 @@ public sealed partial class Document : IDisposable
     }
 
     /// <summary>Detect a container table: one row whose cells hold nothing but inner tables.</summary>
-    private void CollectContainerInners(TableParagraphState tp, Table table)
+    private static void CollectContainerInners(TableParagraphState tp, Table table)
     {
         if (table.Rows.Count > 0)
         {

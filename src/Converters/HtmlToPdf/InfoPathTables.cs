@@ -60,7 +60,7 @@ internal static partial class HtmlToPdfConverter
         for (var r = 0; r < rows.Count; r++) gridY[r + 1] = gridY[r] + rows[r].h;
         var height = gridY[^1] - y;
         if (!paint) return height;
-        IpPaintBands(ip, table, rows, bands, gridX, gridY);
+        IpPaintBands(ip, rows, bands, gridX, gridY);
         IpPaintCellFills(ip, rows, gridX, gridY);
         if (bordered) IpPaintGridEdges(ip, rows, gridX, gridY);
         for (var r = 0; r < rows.Count; r++)
@@ -86,9 +86,7 @@ internal static partial class HtmlToPdfConverter
         {
             if (group.IsText) continue;
             var trs = group.Tag == "tr" ? new List<IpNode> { group } : new List<IpNode>(group.Elements("tr"));
-            foreach (var tr in trs)
-                foreach (var td in tr.Elements("td"))
-                    if (IpSolidBorder(td, "top") || IpSolidBorder(td, "left") || IpSolidBorder(td, "bottom") || IpSolidBorder(td, "right")) return true;
+            if (trs.Any(tr => tr.Elements("td").Any(td => IpSolidBorder(td, "top") || IpSolidBorder(td, "left") || IpSolidBorder(td, "bottom") || IpSolidBorder(td, "right")))) return true;
         }
         return false;
     }
@@ -114,7 +112,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var td in tr.Elements("td"))
         {
             if (col >= colCount) break;
-            var span = int.TryParse(td.Attr("colspan"), out var cs) && cs > 0 ? cs : 1;
+            var span = int.TryParse(td.Attr("colspan"), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var cs) && cs > 0 ? cs : 1;
             span = Math.Min(span, colCount - col);
             var valign = td.Css("vertical-align");
             if (valign.Length == 0) valign = td.Attr("valign");

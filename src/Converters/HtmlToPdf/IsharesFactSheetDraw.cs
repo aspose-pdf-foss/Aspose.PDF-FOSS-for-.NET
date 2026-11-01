@@ -9,13 +9,13 @@ internal static partial class HtmlToPdfConverter
 {
 // Ishares fact sheet: 
     private static string IfsFlat(string s) => DecodeEntities(
-        Regex.Replace(s, @"<[^>]+>", "")).Replace(' ', ' ').Trim();
+        SafeRegex.Replace(s, @"<[^>]+>", "")).Replace(' ', ' ').Trim();
 
     // the 0.001 pt "@[" "]@" wrappers are invisible markers
-    private static string StripMarkers(IsharesFactSheetState ix, string s) => Regex.Replace(s,
+    private static string StripMarkers(string s) => SafeRegex.Replace(s,
         @"<span style=""font-size: 0\.001pt;"">[^<]*</span>", "");
 
-    private static double MW(IsharesFactSheetState ix, string s, double fs, string face = "Arial") => MeasureFaceText(face, s, fs);
+    private static double MW(string s, double fs, string face = "Arial") => MeasureFaceText(face, s, fs);
 
     private static void Run(IsharesFactSheetState ix, string res, double fs, double x, double yTd, string text)
         => ix.sb.AppendLine(Compat.Format(ix.inv,

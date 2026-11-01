@@ -24,10 +24,13 @@ public sealed partial class PageCollection
                 setter(clone);
                 foreach (var key in dict.Keys)
                 {
-                    if (key == "Parent") continue;
+                    if (key == "Parent" || Forms.SignatureField.IsSignatureValue(dict, key)) continue;
                     var val = dict.Get(key);
                     if (val is not null)
                     {
+                        // A destination given by name comes along with the link that names it.
+                        if (ro.destinations is not null && val is PdfName or PdfString && NamesADestination(dict, key))
+                            val = CarryNamedDestination(ro, val);
                         var k = key;
                         ro.stack.Push((val, v => clone.Set(k, v)));
                     }
@@ -58,9 +61,12 @@ public sealed partial class PageCollection
     }
 
     /// <summary></summary>
-    private void RemapStream(ObjectRemapState ro, PdfStream stream, Action<PdfObject> setter)
+    private static void RemapStream(ObjectRemapState ro, PdfStream stream, Action<PdfObject> setter)
     {
         if (!ro.visitedIdentity.Add(stream)) { setter(stream); return; }
+        // A font program this session embedded is cut down to the glyphs drawn only when its own
+        // document saves: a page copied before then would carry the whole face.
+        Text.Type0FontEmbedder.CutBeforeCopy(stream);
         var dictClone = new PdfDictionary();
         var dataCopy = new byte[stream.RawData.Length];
         Array.Copy(stream.RawData, dataCopy, stream.RawData.Length);

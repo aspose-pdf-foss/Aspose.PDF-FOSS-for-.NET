@@ -29,7 +29,7 @@ public class Collection : EmbeddedFileCollection
         get
         {
             var d = _dict?.Get("D");
-            return d is PdfString s ? s.ToText() : d is PdfName n ? n.Value : string.Empty;
+            return d switch { PdfString s => s.ToText(), PdfName n => n.Value, _ => string.Empty };
         }
     }
 
@@ -137,8 +137,18 @@ public class Collection : EmbeddedFileCollection
         }
     }
 
-    private static int Compare(long x, long y) => x < y ? -1 : x > y ? 1 : 0;
-    private static int Compare(double x, double y) => x < y ? -1 : x > y ? 1 : 0;
+    private static int Compare(long x, long y)
+    {
+        if (x < y) return -1;
+        if (x > y) return 1;
+        return 0;
+    }
+    private static int Compare(double x, double y)
+    {
+        if (x < y) return -1;
+        if (x > y) return 1;
+        return 0;
+    }
 
     private static long CompressedSizeOf(FileSpecification fs, PdfReader reader)
     {

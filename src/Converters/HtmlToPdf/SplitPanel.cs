@@ -28,8 +28,6 @@ internal static partial class HtmlToPdfConverter
     private const double SpTitleGapPt = 21.3;          // line-1 → first title line
     private const double SpTitlePitchPt = 21.75;       // Verdana 18 title line pitch
     private const double SpTitleWrapPt = 283.0;        // title wrap width (measured lines)
-    private const double SpSidebarStepGapPt = 13.45;   // sidebar paragraph gap
-    private const double SpSidebarHrGapPt = 16.1;      // gap above/below the sidebar hr
     private const double SpBlockquoteIndentPt = 30.0;  // 40px blockquote indent, each side
 
     private sealed class SpRun
@@ -46,10 +44,8 @@ internal static partial class HtmlToPdfConverter
         public List<SpRun> Runs = new();
         public double BlankFs;               // empty block = one blank line of this size
         public bool Hr;                      // horizontal rule groove
-        public double HrWidth;               // 0 = full content width
         public double Indent;                // left indent (blockquote)
         public double RightIndent;
-        public bool Center;
     }
 
     /// <summary>The html font-size ladder used by this dialect (size=1..7 → px).</summary>
@@ -123,9 +119,11 @@ internal static partial class HtmlToPdfConverter
                         if (fa.TryGetValue("size", out var sv))
                         {
                             var svt = sv.Trim();
-                            if (svt.StartsWith('+') && int.TryParse(svt[1..], out var rel))
+                            if (svt.StartsWith('+') && int.TryParse(svt[1..], System.Globalization.NumberStyles.Integer,
+                                    System.Globalization.CultureInfo.InvariantCulture, out var rel))
                                 fs = SpLadderPt(3 + rel);
-                            else if (int.TryParse(svt.Trim('"'), out var abs))
+                            else if (int.TryParse(svt.Trim('"'), System.Globalization.NumberStyles.Integer,
+                                    System.Globalization.CultureInfo.InvariantCulture, out var abs))
                                 fs = SpLadderPt(abs);
                         }
                         if (fa.TryGetValue("color", out var cv)
@@ -139,9 +137,6 @@ internal static partial class HtmlToPdfConverter
                     CloseSpBlock(pf); break;
                 case "p":
                     CloseSpBlock(pf, pMargin: true);
-                    if (tok.Attributes is { } pa && pa.TryGetValue("align", out var av)
-                        && av.Trim().Equals("center", StringComparison.OrdinalIgnoreCase))
-                        pf.cur.Center = true;
                     break;
                 case "blockquote":
                     CloseSpBlock(pf, pMargin: true);
@@ -152,12 +147,6 @@ internal static partial class HtmlToPdfConverter
                 {
                     CloseSpBlock(pf);
                     pf.cur.Hr = true;
-                    if (tok.Attributes is { } ha && ha.TryGetValue("width", out var wv)
-                        && double.TryParse(wv.Trim().TrimEnd('%'),
-                            System.Globalization.NumberStyles.Float,
-                            System.Globalization.CultureInfo.InvariantCulture, out var wn)
-                        && !wv.Contains('%'))
-                        pf.cur.HrWidth = wn * 0.75;
                     CloseSpBlock(pf);
                     break;
                 }
@@ -218,7 +207,7 @@ internal static partial class HtmlToPdfConverter
     /// pushed and reset around the shown text.</summary>
     private static readonly Dictionary<string, string> SpFaceRes = new(StringComparer.Ordinal);
 
-    private static void SpEmitRun(Page page, Core.PdfDictionary docFontDict, SpRun r,
+    private static void SpEmitRun(Page page, SpRun r,
         string text, double x, double y, System.Globalization.CultureInfo invc)
     {
         var faceName = r.Face + (r.Bold ? " Bold" : "");

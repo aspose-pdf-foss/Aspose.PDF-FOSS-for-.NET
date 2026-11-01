@@ -16,7 +16,7 @@ internal static class DeflateBlockWriter
     private const int MinHlit = 257, MinHdist = 1, MinHclen = 4;
     private const int RepeatPrevious = 16, ShortZeroRun = 17, LongZeroRun = 18;
     private const int RepeatPreviousMin = 3, RepeatPreviousMax = 6;
-    private const int ShortZeroRunMin = 3, ShortZeroRunMax = 10;
+    private const int ShortZeroRunMin = 3;
     private const int LongZeroRunMin = 11, LongZeroRunMax = 138;
     private const int RepeatPreviousExtraBits = 2, ShortZeroRunExtraBits = 3, LongZeroRunExtraBits = 7;
 
@@ -25,6 +25,9 @@ internal static class DeflateBlockWriter
     private static readonly byte[] FixedDistanceLengths = BuildFixedDistanceLengths();
     private static readonly ushort[] FixedDistanceCodes = DeflateHuffman.AssignCodes(FixedDistanceLengths);
     private static readonly byte[] LengthCodeOf = BuildLengthCodeOf();
+    // The distance code of every distance the window allows, read off a table like the
+    // length codes: the writer asks twice per match, once to count and once to code.
+    private static readonly byte[] DistanceCodeOfDistance = BuildDistanceCodeOf();
 
     /// <summary>A run of code lengths as the code-length alphabet spells it.</summary>
     private readonly record struct LengthSymbol(byte Symbol, byte Extra, byte ExtraBits);
@@ -247,18 +250,19 @@ internal static class DeflateBlockWriter
         return -1;
     }
 
-    private static int DistanceCodeOf(int distance)
+    private static int DistanceCodeOf(int distance) => DistanceCodeOfDistance[distance];
+
+    private static byte[] BuildDistanceCodeOf()
     {
-        var bases = DeflateTables.DistanceBase;
-        var low = 0;
-        var high = bases.Length - 1;
-        while (low < high)
+        var table = new byte[DeflateTables.WindowSize + 1];
+        for (var code = 0; code < DeflateTables.DistanceBase.Length; code++)
         {
-            var mid = (low + high + 1) / 2;
-            if (bases[mid] <= distance) low = mid;
-            else high = mid - 1;
+            var first = DeflateTables.DistanceBase[code];
+            var count = 1 << DeflateTables.DistanceExtraBits[code];
+            for (var distance = first; distance < first + count && distance <= DeflateTables.WindowSize; distance++)
+                table[distance] = (byte)code;
         }
-        return low;
+        return table;
     }
 
     private static byte[] BuildLengthCodeOf()
@@ -284,7 +288,7 @@ internal static class DeflateBlockWriter
     {
         var lengths = new byte[FixedLiteralAlphabet];
         for (var i = 0; i < lengths.Length; i++)
-            lengths[i] = (byte)(i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8);
+            lengths[i] = (byte)(i switch { < 144 => 8, < 256 => 9, < 280 => 7, _ => 8 });
         return lengths;
     }
 

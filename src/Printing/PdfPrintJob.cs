@@ -25,7 +25,7 @@ namespace Aspose.Pdf.Printing
     /// the job is asking what was requested.
     /// </remarks>
     [SupportedOSPlatform("windows")]
-    internal sealed class PdfPrintJob
+    internal sealed partial class PdfPrintJob
     {
         /// <summary>Printer surfaces measure in hundredths of an inch; a PDF measures in
         /// points, 72 to the inch.</summary>
@@ -275,8 +275,8 @@ namespace Aspose.Pdf.Printing
         /// </summary>
         private bool PrintsWholeSheet
             => (_options.PrintAsGrayscale || (_options.UseIntermediateImage && _options.AutoResize))
-               && (_pageSettings?.IsDefaultMargins ?? true)
-               && (_printerSettings?.DefaultPageSettings.IsDefaultMargins ?? true);
+               && !(_pageSettings?.MarginsGiven ?? false)
+               && !(_printerSettings?.DefaultPageSettings.MarginsGiven ?? false);
 
         /// <summary>Renders the page to a bitmap and prints that as a PNG: fitted to the sheet, into the
         /// page's seated size (see <see cref="PdfPrintPlacement.SeatedWidth"/>); otherwise at the

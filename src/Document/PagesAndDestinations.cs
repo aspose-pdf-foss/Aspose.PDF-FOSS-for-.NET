@@ -147,6 +147,7 @@ public sealed partial class Document
         namesArray.Add(new PdfString(Compat.Latin1.GetBytes(name)));
         namesArray.Add(destination.Array);
         destsTree.Set("Names", namesArray);
+        NamedDestinationsTouched = true;
     }
 
     /// <summary>

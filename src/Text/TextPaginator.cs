@@ -47,13 +47,6 @@ internal static partial class TextPaginator
     public static List<string> WrapToWidth(string text, string fontName, double fontSize, double maxWidth)
         => WrapToWidth(text, fontName, fontSize, maxWidth, fontData: null);
 
-    private static int CountSpaces(string s)
-    {
-        var n = 0;
-        foreach (var c in s) if (c == ' ') n++;
-        return n;
-    }
-
     /// <summary>
     /// Greedy word-wrap. When <paramref name="fontData"/> has TTF data, per-glyph
     /// advance widths come from the font's own hmtx so wrap break-points follow
@@ -128,19 +121,21 @@ internal static partial class TextPaginator
                     // the remainder starts the next (an unbroken 3000-glyph segment
                     // chain fills 69 full lines per page; a Chinese paragraph in
                     // Arial Unicode MS breaks at the margin).
-                    var rest = word;
-                    while (rest.Length > 0)
+                    // The cut walks an offset through the token: re-slicing the remainder
+                    // per line copies it whole each time, quadratic in a long token.
+                    var start = 0;
+                    while (start < word.Length)
                     {
                         effectiveMax = lines.Count == 0 ? maxWidth - firstLineIndent : maxWidth;
-                        (var take, var pieceWidth) = LongestFittingPrefix(rest, measurer, effectiveMax);
-                        if (take >= rest.Length)
+                        (var take, var pieceWidth) = LongestFittingPrefix(word, start, measurer, effectiveMax);
+                        if (start + take >= word.Length)
                         {
-                            current.Append(rest);
+                            current.Append(word, start, word.Length - start);
                             currentWidth = pieceWidth;
                             break;
                         }
-                        lines.Add(rest.Substring(0, take));
-                        rest = rest.Substring(take);
+                        lines.Add(word.Substring(start, take));
+                        start += take;
                     }
                 }
                 else
@@ -152,6 +147,13 @@ internal static partial class TextPaginator
             if (current.Length > 0) lines.Add(current.ToString());
         }
         return lines;
+    }
+
+    private static int CountSpaces(string s)
+    {
+        var n = 0;
+        foreach (var c in s.Where(c => c == ' ')) n++;
+        return n;
     }
 
     /// <summary>Whether an over-wide token is cut character by character for this
@@ -176,21 +178,21 @@ internal static partial class TextPaginator
         return tag == 0x00010000 || tag == 0x74727565; // sfnt 1.0 / 'true'
     }
 
-    /// <summary>Number of leading characters of <paramref name="word"/> whose
-    /// summed advances stay within <paramref name="maxWidth"/> (at least one, so
+    /// <summary>Number of characters of <paramref name="word"/> from <paramref name="start"/>
+    /// whose summed advances stay within <paramref name="maxWidth"/> (at least one, so
     /// an over-wide glyph still makes progress); <c>width</c> is the
     /// prefix's width.</summary>
-    private static (int result, double width) LongestFittingPrefix(string word, Func<string, double> measurer, double maxWidth)
+    private static (int result, double width) LongestFittingPrefix(string word, int start, Func<string, double> measurer, double maxWidth)
     {
-        double width = default;
-        width = 0;
+        double width = 0;
         var take = 0;
-        while (take < word.Length)
+        while (start + take < word.Length)
         {
             // A surrogate pair is one glyph: it is measured and cut as a unit.
-            var len = char.IsHighSurrogate(word[take]) && take + 1 < word.Length
-                      && char.IsLowSurrogate(word[take + 1]) ? 2 : 1;
-            var cw = measurer(word.Substring(take, len));
+            var at = start + take;
+            var len = char.IsHighSurrogate(word[at]) && at + 1 < word.Length
+                      && char.IsLowSurrogate(word[at + 1]) ? 2 : 1;
+            var cw = measurer(word.Substring(at, len));
             if (take > 0 && width + cw > maxWidth) break;
             width += cw;
             take += len;
@@ -227,7 +229,9 @@ internal static partial class TextPaginator
         for (var i = 0; i < tl.raw.Count; i++)
         {
             var r = tl.raw[i];
-            char reason = !r.lastInPara ? 'M' : (r.para == tl.lastParagraph ? 'E' : 'N');
+            char reason;
+            if (!r.lastInPara) reason = 'M';
+            else reason = r.para == tl.lastParagraph ? 'E' : 'N';
             // Only a MARGIN break contributes a delimiter space: the wrap consumed
             // the space that separated this line from the overflowing word, and
             // WrapToWidth keeps it on the finished line. A line that ends because its
@@ -254,11 +258,16 @@ internal static partial class TextPaginator
     /// FontData has TtfData, instantiates a GlyphOutlineParser once and routes
     /// every character through cmap -> hmtx -> scaled-to-pt; otherwise falls
     /// back to Standard-14 widths.</summary>
+    // One parser per font program: a measurer is built for every run laid out, and a parser
+    // reads the program's tables when it is made. Held by the program's bytes, so a font the
+    // document drops goes with it.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<byte[], GlyphOutlineParser> Parsers = new();
+
     private static Func<string, double> BuildMeasurer(string fontName, double fontSize, FontData? fontData)
     {
         if (fontData is { TtfData: { Length: > 12 } ttf })
         {
-            var parser = new GlyphOutlineParser(ttf);
+            var parser = Parsers.GetValue(ttf, static program => new GlyphOutlineParser(program));
             var upm = parser.UnitsPerEm > 0 ? parser.UnitsPerEm : 1000;
             var whole = WholeUnitAdvances.Holds(ttf);
             return s =>

@@ -21,7 +21,7 @@ internal static partial class HtmlToPdfConverter
             || !theadR.TryGetValue("display", out var thDisp)
             || !thDisp.Contains("table-header-group", StringComparison.OrdinalIgnoreCase)
             || !co.css.ContainsKey(".text-xs")
-            || Regex.Matches(co.html, @"<table\b", RegexOptions.IgnoreCase).Count < 5)
+            || SafeRegex.Matches(co.html, @"<table\b", RegexOptions.IgnoreCase).Count < 5)
             return null;
         co.simsun = Text.SystemFontResolver.Resolve("SimSun");
         co.arial = Text.SystemFontResolver.Resolve("Arial");

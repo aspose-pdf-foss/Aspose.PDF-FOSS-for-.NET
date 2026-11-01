@@ -11,7 +11,7 @@ namespace Aspose.Pdf.Forms;
 public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnnotation>
 {
     /// <summary>The stages of the field add: the source kids copy, the page placement and the document registration.</summary>
-    private void RegisterAddedField(FieldAddState fa)
+    private static void RegisterAddedField(FieldAddState fa)
     {
         var acroFormObjNum = fa.doc!.FindObjectNumber(fa.acroForm!);
         if (acroFormObjNum > 0)
@@ -25,7 +25,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     }
 
     /// <summary>The stages of the field add: the source kids copy, the page placement and the document registration.</summary>
-    private void PlaceAddedFieldOnPage(FieldAddState fa)
+    private static void PlaceAddedFieldOnPage(FieldAddState fa)
     {
         fa.pageDict = fa.pages[fa.pageNumber].Dict;
         var annots = fa.pageDict.Get("Annots") as PdfArray;
@@ -53,7 +53,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     }
 
     /// <summary>The stages of the field add: the source kids copy, the page placement and the document registration.</summary>
-    private void CopyAddedFieldKids(FieldAddState fa)
+    private static void CopyAddedFieldKids(FieldAddState fa)
     {
         foreach (var k in fa.srcKids!)
         {

@@ -26,7 +26,6 @@ private sealed class BlockTranslateState
     public bool afterBt;
     public List<Aspose.Pdf.Operators.SetTextMatrix> toReplace = null!;
     public Page page = default!;
-    public string oldText = default!;
     public string newText = default!;
     public Rectangle rect = default!;
     public double baseFs = 0;

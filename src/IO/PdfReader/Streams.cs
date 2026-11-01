@@ -11,7 +11,54 @@ internal sealed partial class PdfReader
     /// Get the decoded stream data (decryption + filters applied).
     /// </summary>
     public byte[] DecodeStream(PdfStream stream, int objectNumber = 0, int generation = 0)
-        => StreamFilter.Decode(DecryptedRawData(stream, objectNumber, generation), ResolveStreamFilterDict(stream.Dict));
+    {
+        if (_decoded.TryGetValue(stream, out var known) && known.Matches(stream, objectNumber, generation))
+            return (byte[])known.Data.Clone();
+        var data = StreamFilter.Decode(DecryptedRawData(stream, objectNumber, generation), ResolveStreamFilterDict(stream.Dict));
+        Remember(stream, objectNumber, generation, data);
+        return data;
+    }
+
+    // Decoded content by stream, kept while the stream's data and filter entries are the same
+    // instances (a rewrite replaces the data array, a filter edit the entry): content and
+    // resources are decoded over and over - a form once per page, a Type 3 glyph at every
+    // showing, an XFA part once per field. Callers get a copy, so what they do to it stays
+    // theirs. Streams up to 16 MB (a form of ten million operators, drawn on every page,
+    // is one), and the whole cache goes once it holds 128 MB, so a document of large
+    // images is never held twice.
+    private const int MaxCachedDecodedLength = 16 << 20;
+    private const int MaxDecodedCacheBytes = 128 << 20;
+    private readonly Dictionary<PdfStream, DecodedStream> _decoded = new(ReferenceEqualityComparer.Instance);
+    private int _decodedCacheBytes;
+
+    private sealed record DecodedStream(byte[] Raw, PdfObject? Filter, PdfObject? Parms, int ObjectNumber, int Generation, byte[] Data)
+    {
+        public bool Matches(PdfStream stream, int objectNumber, int generation) =>
+            ReferenceEquals(Raw, stream.RawData) && ReferenceEquals(Filter, stream.Dict.Get("Filter"))
+            && ReferenceEquals(Parms, stream.Dict.Get("DecodeParms"))
+            && ObjectNumber == objectNumber && Generation == generation;
+    }
+
+    /// <summary>The decoded content of <paramref name="stream"/> when the cache holds the decode
+    /// <see cref="DecodeStream"/> makes of it without an object number; null otherwise.</summary>
+    internal byte[]? DecodedIfCached(PdfStream stream) =>
+        _decoded.TryGetValue(stream, out var known) && known.Matches(stream, 0, 0) ? (byte[])known.Data.Clone() : null;
+
+    private void Remember(PdfStream stream, int objectNumber, int generation, byte[] data)
+    {
+        if (data.Length > MaxCachedDecodedLength) return;
+        if (_decodedCacheBytes + data.Length > MaxDecodedCacheBytes) ForgetDecoded();
+        if (_decoded.TryGetValue(stream, out var old)) _decodedCacheBytes -= old.Data.Length;
+        _decoded[stream] = new DecodedStream(stream.RawData, stream.Dict.Get("Filter"), stream.Dict.Get("DecodeParms"),
+            objectNumber, generation, (byte[])data.Clone());
+        _decodedCacheBytes += data.Length;
+    }
+
+    private void ForgetDecoded()
+    {
+        _decoded.Clear();
+        _decodedCacheBytes = 0;
+    }
 
     /// <summary>
     /// Decode a stream as <see cref="DecodeStream"/> does, but with every predictor's
@@ -51,6 +98,10 @@ internal sealed partial class PdfReader
         return copy;
     }
 
+    /// <summary>The stream's raw bytes - still filtered - with the document's encryption removed: what a copy
+    /// of the stream into another document holds. The stream itself is left as it is.</summary>
+    internal byte[] PlaintextRawData(PdfStream stream) => DecryptedRawData(stream, 0, 0);
+
     /// <summary>The stream's raw bytes with the document's encryption removed.</summary>
     private byte[] DecryptedRawData(PdfStream stream, int objectNumber, int generation)
     {
@@ -63,8 +114,9 @@ internal sealed partial class PdfReader
             generation = stream.Generation;
         }
 
-        // Decrypt stream if needed (but not XRef streams or the Encrypt dict)
-        if (_decryptor is not null && objectNumber > 0)
+        // Decrypt stream if needed (but not XRef streams or the Encrypt dict); replaced data
+        // is what a writer put there, in plaintext, never the file's ciphertext.
+        if (_decryptor is not null && objectNumber > 0 && !stream.DataReplaced)
         {
             // Check for /Crypt filter — if present, the crypt filter name overrides the default
             string? cryptFilterName = null;
@@ -74,17 +126,14 @@ internal sealed partial class PdfReader
                 var dp = stream.Dict.Get("DecodeParms") as PdfDictionary;
                 cryptFilterName = dp?.GetName("Name") ?? "Identity";
             }
-            else if (filterObj is PdfArray filterArr)
+            // Check if first filter is Crypt
+            else if (filterObj is PdfArray filterArr && filterArr.Count > 0 && filterArr[0] is PdfName fn && fn.Value == "Crypt")
             {
-                // Check if first filter is Crypt
-                if (filterArr.Count > 0 && filterArr[0] is PdfName fn && fn.Value == "Crypt")
-                {
-                    var dpArr = stream.Dict.Get("DecodeParms") as PdfArray;
-                    if (dpArr is { Count: > 0 } && dpArr[0] is PdfDictionary dp)
-                        cryptFilterName = dp.GetName("Name") ?? "Identity";
-                    else
-                        cryptFilterName = "Identity";
-                }
+                var dpArr = stream.Dict.Get("DecodeParms") as PdfArray;
+                if (dpArr is { Count: > 0 } && dpArr[0] is PdfDictionary dp)
+                    cryptFilterName = dp.GetName("Name") ?? "Identity";
+                else
+                    cryptFilterName = "Identity";
             }
 
             data = _decryptor.DecryptStream(data, objectNumber, generation, cryptFilterName);
@@ -104,10 +153,10 @@ internal sealed partial class PdfReader
     }
 
     /// <summary>
-    /// Decrypt every in-use stream's RawData in place, then forget the decryptor.
-    /// Call this when an encrypted-input document is about to be saved unencrypted —
-    /// otherwise the writer would copy still-encrypted bytes into a trailer with no
-    /// /Encrypt, leaving the saved PDF undecodable.
+    /// Decrypt every in-use stream's RawData in place (data a writer replaced is plaintext
+    /// already), then forget the decryptor. Call this before an encrypted-input document is
+    /// written whole — otherwise the writer would copy still-encrypted bytes into a trailer
+    /// with no /Encrypt, or encrypt them a second time.
     /// </summary>
     internal void EnsurePlaintextStreams()
     {
@@ -124,7 +173,7 @@ internal sealed partial class PdfReader
             PdfObject? obj;
             try { obj = ResolveRef(objNum, entry.Generation); }
             catch { continue; }
-            if (obj is not PdfStream s) continue;
+            if (obj is not PdfStream s || s.DataReplaced) continue;
 
             // Mirror DecodeStream's /Crypt filter detection so we apply the same key.
             string? cryptFilterName = null;
@@ -293,7 +342,10 @@ internal sealed partial class PdfReader
         // attaches the decryptor via AttachDecryptor. Leave decryption uninitialised
         // here (no password gating) so the open does not fail before that runs.
         if (encryptDict.GetName("Filter") is "Adobe.PPKLite" or "Adobe.PPKMS" or "Adobe.PubSec")
+        {
+            UndecryptableFilter = encryptDict.GetName("Filter");
             return;
+        }
 
         // A caller-supplied handler takes over whenever it claims this document's
         // /Filter — the Standard handler cannot read an alternative one's /O and /U.
@@ -323,6 +375,10 @@ internal sealed partial class PdfReader
             // If creation fails (e.g., malformed encryption dict), continue without decryption
             _decryptor = null;
             malformedEncrypt = true;
+            // A dictionary of another handler (a rights-management /Filter) is not a malformed
+            // Standard one: nothing in the file can be decrypted.
+            if (encryptDict.GetName("Filter") is { } filter && filter != StandardFilter)
+                UndecryptableFilter = filter;
         }
 
         // If TryCreate returned null (password verification failed, not malformed dict):
@@ -349,6 +405,14 @@ internal sealed partial class PdfReader
     /// branch; <see cref="Document"/> construction turns it into
     /// <see cref="InvalidPasswordException"/>.</summary>
     internal bool RequiresPassword { get; private set; }
+
+    /// <summary>The /Filter of an encryption no password opens: a public-key handler, which only a
+    /// certificate decrypts (<see cref="AttachDecryptor"/>), or a handler the library does not have.
+    /// Null when the file is not encrypted or a password decryptor is in place.</summary>
+    internal string? UndecryptableFilter { get; private set; }
+
+    /// <summary>The password security handler's /Filter name.</summary>
+    private const string StandardFilter = "Standard";
 
     /// <summary>
     /// Try to initialize decryption with empty password (for PDFs with owner-only protection).

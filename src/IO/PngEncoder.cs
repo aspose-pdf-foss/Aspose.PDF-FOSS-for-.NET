@@ -1,4 +1,4 @@
-
+﻿
 namespace Aspose.Pdf.IO;
 
 /// <summary>
@@ -15,8 +15,13 @@ internal static class PngEncoder
     /// <param name="height">Image height in pixels.</param>
     /// <param name="colorType">PNG color type: 0=Grayscale, 2=RGB, 4=GrayAlpha, 6=RGBA.</param>
     /// <param name="bitDepth">Bits per channel (typically 8).</param>
+    /// <param name="level">The deflate level of the image data.</param>
+    /// <param name="pixelsPerMetre">The resolution written as a pHYs chunk; none when null.</param>
+    // Fast, as for the PDF sample streams: on filtered raster rows greedy matching is faster
+    // and no larger than the lazy default (measured on corpus images).
     public static byte[] Encode(byte[] pixels, int width, int height,
-        int colorType = 2, int bitDepth = 8)
+        int colorType = 2, int bitDepth = 8, Filters.DeflateLevel level = Filters.DeflateLevel.Fast,
+        (int X, int Y)? pixelsPerMetre = null)
     {
         var channelCount = colorType switch
         {
@@ -30,48 +35,34 @@ internal static class PngEncoder
         var bytesPerPixel = channelCount * (bitDepth / 8);
         var rowBytes = width * bytesPerPixel;
 
-        using var output = new MemoryStream();
-
-        // PNG signature
-        output.Write(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
-
-        // IHDR chunk
-        WriteChunk(output, "IHDR", writer =>
+        // The filtered rows (filter type None, so a zero byte before each row's samples) in
+        // one buffer of their exact size; pixels shorter than the image leave their rows zero.
+        var raw = new byte[(rowBytes + 1) * height];
+        for (var y = 0; y < height; y++)
         {
-            WriteUInt32BE(writer, (uint)width);
-            WriteUInt32BE(writer, (uint)height);
-            writer.WriteByte((byte)bitDepth);
-            writer.WriteByte((byte)colorType);
-            writer.WriteByte(0); // compression method (deflate)
-            writer.WriteByte(0); // filter method (adaptive)
-            writer.WriteByte(0); // interlace method (none)
-        });
+            var rowStart = y * rowBytes;
+            var rowLen = Math.Max(0, Math.Min(rowBytes, pixels.Length - rowStart));
+            if (rowLen > 0)
+                Buffer.BlockCopy(pixels, rowStart, raw, y * (rowBytes + 1) + 1, rowLen);
+        }
+        var idat = Filters.ManagedDeflater.DeflateZlib(raw, level);
 
-        // IDAT chunk — filtered + compressed pixel data
-        WriteChunk(output, "IDAT", writer =>
-        {
-            var raw = new MemoryStream();
-            for (var y = 0; y < height; y++)
-            {
-                raw.WriteByte(0); // filter type: None
-                var rowStart = y * rowBytes;
-                // Clamp to [0, rowBytes]: once rowStart runs past the buffer
-                // (pixels shorter than height*rowBytes) the available length
-                // would go negative, which previously made the pad loop below
-                // iterate billions of times. Clamp so short buffers just pad.
-                var rowLen = Math.Max(0, Math.Min(rowBytes, pixels.Length - rowStart));
-                if (rowLen > 0)
-                    raw.Write(pixels, rowStart, rowLen);
-                // Pad with zeros if pixel data is short
-                for (var p = rowLen; p < rowBytes; p++)
-                    raw.WriteByte(0);
-            }
-            writer.Write(Filters.ManagedDeflater.DeflateZlib(raw.ToArray()));
-        });
+        var ihdr = new MemoryStream(13);
+        WriteUInt32BE(ihdr, (uint)width);
+        WriteUInt32BE(ihdr, (uint)height);
+        ihdr.WriteByte((byte)bitDepth);
+        ihdr.WriteByte((byte)colorType);
+        ihdr.WriteByte(0); // compression method (deflate)
+        ihdr.WriteByte(0); // filter method (adaptive)
+        ihdr.WriteByte(0); // interlace method (none)
 
-        // IEND chunk
-        WriteChunk(output, "IEND", _ => { });
-
+        using var output = new MemoryStream(idat.Length + 64);
+        output.Write(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }); // PNG signature
+        WriteChunk(output, "IHDR", ihdr.ToArray());
+        if (pixelsPerMetre is { } ppm)
+            WritePhysChunk(output, ppm.X, ppm.Y);
+        WriteChunk(output, "IDAT", idat);
+        WriteChunk(output, "IEND", Array.Empty<byte>());
         return output.ToArray();
     }
 
@@ -82,7 +73,9 @@ internal static class PngEncoder
     /// <param name="width">Image width in pixels.</param>
     /// <param name="height">Image height in pixels.</param>
     /// <param name="blackIs1">If true, bit 1 = black; otherwise bit 1 = white.</param>
-    public static byte[] Encode1Bit(byte[] pixels, int width, int height, bool blackIs1 = false)
+    /// <param name="level">The deflate level, as for <see cref="Encode"/>.</param>
+    public static byte[] Encode1Bit(byte[] pixels, int width, int height, bool blackIs1 = false,
+        Filters.DeflateLevel level = Filters.DeflateLevel.Fast)
     {
         // Convert 1-bit to 8-bit grayscale for simplicity
         var gray = new byte[width * height];
@@ -106,14 +99,21 @@ internal static class PngEncoder
             }
         }
 
-        return Encode(gray, width, height, colorType: 0, bitDepth: 8);
+        return Encode(gray, width, height, colorType: 0, bitDepth: 8, level);
     }
 
-    private static void WriteChunk(Stream output, string type, Action<MemoryStream> writeData)
+    /// <summary>Write a pHYs chunk: the pixel density, in pixels per metre along each axis.</summary>
+    internal static void WritePhysChunk(Stream output, int xPixelsPerMetre, int yPixelsPerMetre)
     {
-        using var data = new MemoryStream();
-        writeData(data);
-        var dataBytes = data.ToArray();
+        var phys = new MemoryStream(9);
+        WriteUInt32BE(phys, (uint)xPixelsPerMetre);
+        WriteUInt32BE(phys, (uint)yPixelsPerMetre);
+        phys.WriteByte(1); // unit: metre
+        WriteChunk(output, "pHYs", phys.ToArray());
+    }
+
+    private static void WriteChunk(Stream output, string type, byte[] dataBytes)
+    {
         var typeBytes = System.Text.Encoding.ASCII.GetBytes(type);
 
         // Length

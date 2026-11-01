@@ -27,7 +27,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         //    XFA template) must first be folded to a standard AcroForm: paint the
         //    form onto real pages (replacing the viewer placeholder page) and
         //    materialise flat fields. A static XFA form keeps its widget path.
-        if (IsXfa)
+        //    A form the catalog asks a viewer to build is laid out whatever fields it has
+        //    beside the XFA packets (a signature field): its pages only carry a notice.
+        if (!fl.document.LayOutXfaForm(convert: true) && IsXfa)
         {
             var xfaAcro = fl.document.Reader.ResolveDict(fl.document.Catalog.Get("AcroForm"));
             var xfaFields = xfaAcro is null ? null : fl.document.Reader.Resolve(xfaAcro.Get("Fields")) as PdfArray;
@@ -50,7 +52,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
                 System.Collections.Generic.ReferenceEqualityComparer.Instance);
             foreach (var f in _fields)
             {
-                if (!seenDicts.Add(f.Dict)) continue;
+                // A converted form's fields keep the faces the conversion drew: the field generators
+                // would redraw a wrapped value on one line and a coloured button grey.
+                if (!seenDicts.Add(f.Dict) || _convertedAppearanceDicts.Contains(f.Dict)) continue;
                 RegenerateAppearanceForFlatten(f);
             }
         }
@@ -86,7 +90,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
             // has nothing to anchor the orphan filter — leave it inactive.
             if (fl.fieldWidgets.Count == 0) fl.fieldWidgets = null;
         }
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var page in fl.document.Pages)
+#pragma warning restore S3267
         {
             if (!FlattenPageAnnotations(fl, page)) break;
         }
@@ -95,6 +101,8 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         // below — so its /DR fonts survive for DefaultResources readers).
         if (!fl.keepAcroFormDict)
             fl.document.Catalog.Remove("AcroForm");
+        // A flattened form has nothing left for a viewer to build from an XFA packet
+        fl.document.Catalog.Remove("NeedsRendering");
 
         // Empty the /Fields array on the (now-detached) AcroForm dict too: Count reads the
         // AcroForm's /Fields (this Form's cached _acroForm, or the catalog's) before falling
@@ -105,6 +113,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
 
         // Clear cached field list so Count reflects the flattened state
         _fields.Clear();
+        _convertedAppearanceDicts.Clear();
     }
 
     /// <summary>Flatten ONE page: fold every annotation on it that has (or can be given) an
@@ -215,6 +224,9 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
     /// dict when its second wrapper is processed.</summary>
     private static void RegenerateAppearanceForFlatten(Field field)
     {
+        // A barcode field's appearance is its symbol; the value is the data the symbol
+        // encodes, not a text to draw in its place.
+        if (field is BarcodeField) return;
         // A parent field carrying only {V, Kids, T, FT} has no /Rect of its own — its
         // visuals live on the widget KIDS. An appearance is synthesised for those kids
         // only when the field actually HAS something to paint: a field with a value
@@ -250,6 +262,11 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         // the /Matrix and mis-place the flattened form (and can split the value's words). The
         // existing /AP already reflects the value, so keep it verbatim.
         if (HasNonIdentityAppearanceMatrix(field, oldAp)) return;
+        // A push button showing an icon keeps the face it carries: the button face generator draws
+        // no icon, and would stamp a blank grey button over the picture.
+        if (field is ButtonField && oldAp is not null
+            && field.Reader.ResolveStream(field.Reader.ResolveDict(field.Dict.Get("MK"))?.Get("I")) is not null)
+            return;
         // Drop and re-emit so the appearance reflects the current value. If the per-type
         // generator can't produce a new /AP (e.g. an Off checkbox / button it doesn't
         // synthesise), keep the original so flatten can still render it.
@@ -338,6 +355,35 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         }
         pageDict.Set("Resources", res);
         return res;
+    }
+
+    /// <summary>The page's own /Resources with an /XObject dictionary of its own, ready for an entry to go or
+    /// come: a /Resources or /XObject that is an object of its own may be listed by other pages as well (a
+    /// printer driver writes one for every page), and one inherited from the /Pages node is every page's, so the
+    /// page takes a copy of what it shares before the edit, the other pages keeping theirs.</summary>
+    internal static PdfDictionary EnsureOwnPageXObjects(PdfDictionary pageDict, PdfReader reader)
+    {
+        var resources = EnsureOwnPageResources(pageDict, reader);
+        var shared = pageDict.Get("Resources") is PdfIndirectRef;
+        if (shared)
+        {
+            resources = CopyEntries(resources);
+            pageDict.Set("Resources", resources);
+        }
+        var entry = resources.Get("XObject");
+        if ((shared || entry is PdfIndirectRef) && reader.ResolveDict(entry) is { } xobjects)
+            resources.Set("XObject", CopyEntries(xobjects));
+        return resources;
+    }
+
+    private static PdfDictionary CopyEntries(PdfDictionary source)
+    {
+        var copy = new PdfDictionary();
+        foreach (var key in source.Keys)
+        {
+            if (source.Get(key) is { } value) copy.Set(key, value);
+        }
+        return copy;
     }
 
     /// <summary>Resolve the /Resources a page inherits from an ancestor /Pages node when
@@ -505,7 +551,7 @@ public sealed partial class Form : ICollection<Aspose.Pdf.Annotations.WidgetAnno
         return ft == "Btn" && (ff & (1L << 16)) != 0;
     }
 
-    private void FlattenFieldsOnPage(Page page, bool hideButtons = false, int frmStartIndex = 0, bool flattenNonWidgets = false, bool skipInvisible = false, System.Collections.Generic.HashSet<PdfDictionary>? fieldWidgets = null, bool dropUnstamped = false)
+    private static void FlattenFieldsOnPage(Page page, bool hideButtons = false, int frmStartIndex = 0, bool flattenNonWidgets = false, bool skipInvisible = false, System.Collections.Generic.HashSet<PdfDictionary>? fieldWidgets = null, bool dropUnstamped = false)
     {
         var fp = new FlattenPageState();
         fp.page = page;

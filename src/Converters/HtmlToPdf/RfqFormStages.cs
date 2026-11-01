@@ -105,12 +105,12 @@ internal static partial class HtmlToPdfConverter
     {
         rq.headers = new List<(string Ar, string En)>();
         rq.rows = new List<(string Serial, string Label, List<string> Items)>();
-        foreach (Match tr in Regex.Matches(rq.grid, "<tr>((?:(?!</tr>)[\\s\\S])*)</tr>",
-            RegexOptions.IgnoreCase))
+        foreach (var groups in SafeRegex.Matches(rq.grid, "<tr>((?:(?!</tr>)[\\s\\S])*)</tr>",
+            RegexOptions.IgnoreCase).Select(tr => tr.Groups))
         {
-            var cells = RqCells(tr.Groups[1].Value);
+            var cells = RqCells(groups[1].Value);
             if (cells.Count == 0) continue;
-            if (tr.Groups[1].Value.Contains("<th", StringComparison.OrdinalIgnoreCase))
+            if (groups[1].Value.Contains("<th", StringComparison.OrdinalIgnoreCase))
             {
                 foreach (var th in cells)
                 {
@@ -123,7 +123,7 @@ internal static partial class HtmlToPdfConverter
             var serial = RqFlat(cells[0].Groups[2].Value);
             var label = RqLabels(cells[1].Groups[2].Value) is { Count: > 0 } ll ? ll[0] : "";
             var items = new List<string>();
-            foreach (Match ul in Regex.Matches(cells[1].Groups[2].Value,
+            foreach (Match ul in SafeRegex.Matches(cells[1].Groups[2].Value,
                 "<ul\\b[^>]*>((?:(?!</ul>)[\\s\\S])*)</ul>", RegexOptions.IgnoreCase))
             {
                 var t = RqFlat(ul.Groups[1].Value);

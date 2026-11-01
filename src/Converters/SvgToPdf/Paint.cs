@@ -39,7 +39,7 @@ internal static partial class SvgToPdfConverter
             var styleAttr = el.GetAttribute("style");
             if (!string.IsNullOrEmpty(styleAttr))
             {
-                var m = Regex.Match(styleAttr, @"stop-opacity\s*:\s*([^;]+)");
+                var m = SafeRegex.Match(styleAttr, @"stop-opacity\s*:\s*([^;]+)");
                 if (m.Success) op = m.Groups[1].Value.Trim();
             }
             max = Math.Max(max, string.IsNullOrEmpty(op) ? 1.0 : ParseOpacity(op));
@@ -144,7 +144,7 @@ internal static partial class SvgToPdfConverter
         {
             var v = pat.GetAttribute(attr);
             if (string.IsNullOrEmpty(v)) return 0;
-            if (v.EndsWith("%")) return ParseLength(v[..^1]) / 100.0 * (isBbox ? bboxLen : vpLen);
+            if (v.EndsWith('%')) return ParseLength(v[..^1]) / 100.0 * (isBbox ? bboxLen : vpLen);
             var n = ParseLength(v);
             return isBbox ? n * bboxLen : n;
         }
@@ -169,11 +169,10 @@ internal static partial class SvgToPdfConverter
         // target bounding box (about the bbox origin). User-space content
         // anchors at the TILE origin (the tile establishes the content
         // coordinate system, as browsers place it).
-        var contentPrefix = pat.GetAttribute("patternContentUnits") == "objectBoundingBox"
-            ? $"{F(bbox[2])} 0 0 {F(bbox[3])} {F(bbox[0])} {F(bbox[1])} cm\n"
-            : tx != 0 || ty != 0
-                ? $"1 0 0 1 {F(tx)} {F(ty)} cm\n"
-                : "";
+        string contentPrefix = "";
+        if (pat.GetAttribute("patternContentUnits") == "objectBoundingBox")
+            contentPrefix = $"{F(bbox[2])} 0 0 {F(bbox[3])} {F(bbox[0])} {F(bbox[1])} cm\n";
+        else if (tx != 0 || ty != 0) contentPrefix = $"1 0 0 1 {F(tx)} {F(ty)} cm\n";
 
         var patDict = new PdfDictionary();
         patDict.Set("Type", new PdfName("Pattern"));
@@ -214,8 +213,16 @@ internal static partial class SvgToPdfConverter
         var href = Href(elem);
         if (string.IsNullOrEmpty(href)) return;
 
+        var svgUri = SafeRegex.Match(href, @"^data:image/svg\+xml(?<params>(?:;[^;,]*)*),(?<payload>.*)$",
+            RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        if (svgUri.Success)
+        {
+            RenderSvgDataImage(elem, ctx, style, ctm, svgUri.Groups["params"].Value, svgUri.Groups["payload"].Value);
+            return;
+        }
+
         byte[]? data = null;
-        var dataUri = Regex.Match(href, @"^data:image/(png|jpeg|jpg);base64,(.*)$",
+        var dataUri = SafeRegex.Match(href, @"^data:image/(png|jpeg|jpg);base64,(.*)$",
             RegexOptions.Singleline | RegexOptions.IgnoreCase);
         if (dataUri.Success)
         {
@@ -273,6 +280,59 @@ internal static partial class SvgToPdfConverter
         sb.Append($"{F(dw)} 0 0 {F(-dh)} {F(dx)} {F(dy + dh)} cm\n");
         sb.Append($"/{name} Do\n");
         sb.Append("Q\n");
+    }
+
+    /// <summary>An image whose source is an SVG document in a data URI - base64 or percent-encoded -
+    /// is drawn as vector content: the document is placed like a nested svg whose viewport is the
+    /// image's box, with its own definitions and style sheet in force while it draws.</summary>
+    private static void RenderSvgDataImage(XmlElement elem, Ctx ctx, Dictionary<string, string> style,
+        double[] ctm, string parameters, string payload)
+    {
+        if (ctx.UseDepth > 8) return;
+        string text;
+        try
+        {
+            text = parameters.IndexOf(";base64", StringComparison.OrdinalIgnoreCase) >= 0
+                ? Encoding.UTF8.GetString(System.Convert.FromBase64String(payload.Trim()))
+                : Uri.UnescapeDataString(payload);
+        }
+        catch (FormatException)
+        {
+            return;
+        }
+        var root = LoadSvgXml(text).DocumentElement;
+        if (root is null || root.LocalName != "svg") return;
+
+        var placed = (XmlElement)elem.OwnerDocument.ImportNode(root, true);
+        // A document without a viewBox is scaled by its own size, as a nested svg's would be.
+        if (!placed.HasAttribute("viewBox") && placed.HasAttribute("width") && placed.HasAttribute("height"))
+        {
+            placed.SetAttribute("viewBox",
+                $"0 0 {F(ParseLength(placed.GetAttribute("width")))} {F(ParseLength(placed.GetAttribute("height")))}");
+        }
+        foreach (var attr in new[] { "x", "y", "width", "height", "preserveAspectRatio", "transform" })
+        {
+            var value = elem.GetAttribute(attr);
+            if (!string.IsNullOrEmpty(value)) placed.SetAttribute(attr, value);
+            else if (attr is "x" or "y" or "transform") placed.RemoveAttribute(attr);
+        }
+
+        var defs = ctx.Defs;
+        var css = ctx.Css;
+        ctx.Defs = new Dictionary<string, XmlElement>(defs, StringComparer.Ordinal);
+        ctx.Css = new List<(string Selector, int Specificity, int Order, Dictionary<string, string> Props)>(css);
+        ctx.UseDepth++;
+        try
+        {
+            CollectDefsAndCss(placed, ctx);
+            RenderElement(placed, ctx, style, ctm);
+        }
+        finally
+        {
+            ctx.UseDepth--;
+            ctx.Defs = defs;
+            ctx.Css = css;
+        }
     }
 
     private static string RegisterImageXObject(ImageStamp stamp, Ctx ctx)
@@ -334,7 +394,7 @@ internal static partial class SvgToPdfConverter
     private static string? ParseUrlRef(string? value)
     {
         if (string.IsNullOrEmpty(value)) return null;
-        var m = Regex.Match(value, @"url\(\s*['""]?#([^'"")\s]+)['""]?\s*\)");
+        var m = SafeRegex.Match(value, @"url\(\s*['""]?#([^'"")\s]+)['""]?\s*\)");
         return m.Success ? m.Groups[1].Value : null;
     }
 
@@ -342,7 +402,9 @@ internal static partial class SvgToPdfConverter
     {
         var href = el.GetAttribute("href");
         if (string.IsNullOrEmpty(href))
+#pragma warning disable S1075 // an XML namespace name, an identifier and not a location
             href = el.GetAttribute("href", "http://www.w3.org/1999/xlink");
+#pragma warning restore S1075
         if (string.IsNullOrEmpty(href))
             href = el.GetAttribute("xlink:href");
         return href;
@@ -351,9 +413,9 @@ internal static partial class SvgToPdfConverter
     private static double ParseOpacity(string? v)
     {
         if (string.IsNullOrEmpty(v)) return 1.0;
-        if (v.EndsWith("%")) v = v[..^1];
-        return double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var o)
-            ? Compat.Clamp(v.Length > 0 && o > 1 ? o / 100.0 : o, 0, 1)
-            : 1.0;
+        if (v.EndsWith('%')) v = v[..^1];
+        if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out var o))
+            return Compat.Clamp(v.Length > 0 && o > 1 ? o / 100.0 : o, 0, 1);
+        return 1.0;
     }
 }

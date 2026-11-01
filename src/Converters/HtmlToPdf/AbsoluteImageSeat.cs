@@ -15,7 +15,7 @@ internal static partial class HtmlToPdfConverter
     /// column 353 pt and the sheet twice too wide.</summary>
     private static bool PositionedInline(Token tok)
         => tok.Attributes is { } attrs && attrs.TryGetValue("style", out var style) && style is not null
-            && Regex.IsMatch(style, @"(?<![-\w])position\s*:\s*(absolute|fixed)\b", RegexOptions.IgnoreCase);
+            && SafeRegex.IsMatch(style, @"(?<![-\w])position\s*:\s*(absolute|fixed)\b", RegexOptions.IgnoreCase);
 
     /// <summary>Whether the run being read sits inside such a wrapper.</summary>
     private static bool InPositionedInline(TableParseState ps)
@@ -82,7 +82,7 @@ internal static partial class HtmlToPdfConverter
     private static double? CssEmLength(Dictionary<string, string> bag, string prop)
     {
         if (!bag.TryGetValue(prop, out var v) || v is null) return null;
-        var m = Regex.Match(v.Trim(), @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*em$", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(v.Trim(), @"^(-?(?:\d+(?:\.\d+)?|\.\d+))\s*em$", RegexOptions.IgnoreCase);
         return m.Success ? double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) : null;
     }
 
@@ -106,14 +106,14 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The seating properties of one rule, overlaying what earlier rules put in the bag.</summary>
     private static void TakeSeatDeclarations(Dictionary<string, string> bag, Dictionary<string, string> rule)
     {
-        foreach (var kv in rule) if (IsAbsoluteSeatProperty(kv.Key)) bag[kv.Key] = kv.Value;
+        foreach (var kv in rule.Where(kv => IsAbsoluteSeatProperty(kv.Key))) bag[kv.Key] = kv.Value;
     }
 
     /// <summary>The seating properties of an inline style string, overlaying the rules' values.</summary>
     private static void TakeInlineSeatDeclarations(Dictionary<string, string> bag, string style)
     {
-        foreach (Match dm in StyleDeclRx.Matches(style))
-            if (IsAbsoluteSeatProperty(dm.Groups[1].Value)) bag[dm.Groups[1].Value] = dm.Groups[2].Value.Trim();
+        foreach (var groups in SafeRegex.Matches(StyleDeclRx, style).Where(dm => IsAbsoluteSeatProperty(dm.Groups[1].Value)).Select(dm => dm.Groups))
+            bag[groups[1].Value] = groups[2].Value.Trim();
     }
 
     /// <summary>The properties that seat a box: its position, its offsets and its box chrome.</summary>
@@ -214,8 +214,8 @@ internal static partial class HtmlToPdfConverter
         // `border-left` then `border-left-width` - which is the order that leaves each
         // declaration saying what it was written to say.
         var props = new List<string>();
-        foreach (var kv in bag)
-            if (kv.Key.StartsWith("border", StringComparison.OrdinalIgnoreCase)) props.Add(kv.Key);
+        foreach (var kv in bag.Where(kv => kv.Key.StartsWith("border", StringComparison.OrdinalIgnoreCase)))
+            props.Add(kv.Key);
         props.Sort((a, b) =>
         {
             var d = a.Split('-').Length.CompareTo(b.Split('-').Length);

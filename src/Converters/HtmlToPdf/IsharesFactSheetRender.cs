@@ -13,11 +13,13 @@ internal static partial class HtmlToPdfConverter
         ix.html = html;
         if (!ix.html.Contains("iShares_Custom", StringComparison.Ordinal)
             || !ix.html.Contains("class=\"sideBySide\"", StringComparison.Ordinal)
-            || !Regex.IsMatch(ix.html, @"subtype\s*=\s*[""']TSR_", RegexOptions.IgnoreCase))
+            || !SafeRegex.IsMatch(ix.html, @"subtype\s*=\s*[""']TSR_", RegexOptions.IgnoreCase))
             return null;
 
         ix.cols = new List<IfsColumn>();
-        foreach (Match colM in Regex.Matches(ix.html,
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
+        foreach (Match colM in SafeRegex.Matches(ix.html,
+#pragma warning restore S3267
             @"<div class=""sideBySideColumn\w+"">([\s\S]*?)(?=<div class=""sideBySideColumn|<!-- 2-COLUMN|</body)",
             RegexOptions.IgnoreCase))
         {

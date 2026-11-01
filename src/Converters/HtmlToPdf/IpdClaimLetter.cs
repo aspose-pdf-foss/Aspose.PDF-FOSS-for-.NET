@@ -15,8 +15,8 @@ internal static partial class HtmlToPdfConverter
     //
     // Geometry (all measured on the expected conversion of the corpus letter):
     //   page 771.5 × 842 = 96 content left + the section-title border box 585.5
-    //   (576 declared + 2×3.75 px padding + 2×1 border) + the 90 right band;
-    //   content runs 72..770. The 18 pt bold title centres on the 96..672 sheet
+    //   (576 declared + 2×3.75 px padding + 2×1 border) + the 90 right band; content
+    //   runs 72..770. The 18 pt bold title centres on the 96..672 sheet
     //   (baseline 94.74) over a 1.5 pt rule at 99.75. A section title seats its
     //   12 pt bold lines on a 13.5 pitch inside a 1 pt "double" border (drawn as
     //   two ⅓ pt strokes) with 3.75 padding; margins collapse to 15 between the
@@ -64,7 +64,9 @@ internal static partial class HtmlToPdfConverter
         public string Kind = "";                     // title/sectitle/subbegin/subend/grid/form/text
         public string Text = "";
         public double Fs = 10;
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public List<List<string>> Rows = new();      // grid + form cell texts per row
+#pragma warning restore S3218
         public double[] Cols = Array.Empty<double>();
         public bool Framed;
     }
@@ -79,15 +81,15 @@ internal static partial class HtmlToPdfConverter
 
         var ic = new IpdClaimLetterState();
         ic.items = new List<IpdItem>();
-        ic.bodyM = Regex.Match(html, @"<div\b[^>]*class=""ipdPortrait""[^>]*>",
+        ic.bodyM = SafeRegex.Match(html, @"<div\b[^>]*class=""ipdPortrait""[^>]*>",
             RegexOptions.IgnoreCase);
         if (!ic.bodyM.Success) return null;
-        (ic.seg, _) = DivInner(ic, html, ic.bodyM.Index + ic.bodyM.Length);
+        (ic.seg, _) = DivInner(html, ic.bodyM.Index + ic.bodyM.Length);
 
         ic.pos = 0;
         ic.subDepth = new Stack<int>();
         ic.depthNow = 0;
-        ic.tagRx = new Regex(@"<(/?)(div|table|textarea)\b([^>]*)>", RegexOptions.IgnoreCase);
+        ic.tagRx = new Regex(@"<(/?)(div|table|textarea)\b([^>]*)>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, RegexLimits.Timeout);
         while (ic.pos < ic.seg.Length)
         {
             if (!ParseIpdToken(ic)) break;
@@ -107,7 +109,9 @@ internal static partial class HtmlToPdfConverter
         ic.subTop = -1;
         ic.inSub = false;
 
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var it in ic.items)
+#pragma warning restore S3267
         {
             if (!RenderIpdItem(ic, it)) break;
         }

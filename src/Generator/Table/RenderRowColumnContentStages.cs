@@ -15,17 +15,16 @@ public partial class Table
     {
         rc.first = rc.cellLines![rc.firstLine];
         rc.textX = rc.cellX + rc.padLeft;
-        rc.engineLift = SuppressBaselineLift
-            ? 0
-            : (HtmlEngineMetrics ? 0.207 : rc.borderLiftFactor) * rc.first.FontSize;
+        if (SuppressBaselineLift) rc.engineLift = 0;
+        else rc.engineLift = (HtmlEngineMetrics ? 0.207 : rc.borderLiftFactor) * rc.first.FontSize;
         var uaSeatDrop = UaSeatDropPt(rc.first.FontSize);
         // A DECLARED line box seats the baseline outright — the drop already
         // carries the half-leading, so the leading must not be counted again.
         var declaredDrop = DeclaredLineBoxBaseOff(rc.first);
-        rc.textY = declaredDrop > 0
-            ? rc.slice.TopY - rc.contentTop - declaredDrop
-            : rc.slice.TopY - rc.contentTop - rc.first.Leading
-                   - (uaSeatDrop > 0 ? uaSeatDrop : rc.first.FontSize - rc.engineLift);
+        if (declaredDrop > 0) rc.textY = rc.slice.TopY - rc.contentTop - declaredDrop;
+        else
+            rc.textY = rc.slice.TopY - rc.contentTop - rc.first.Leading
+                - (uaSeatDrop > 0 ? uaSeatDrop : rc.first.FontSize - rc.engineLift);
 
         rc.cellHasInk = !NestedTableRender;
         for (var li = rc.firstLine; li < rc.lastLine && !rc.cellHasInk; li++)
@@ -63,9 +62,8 @@ public partial class Table
             for (var li2 = rc.firstLine; li2 < rc.lastLine; li2++)
             {
                 var cl2 = rc.cellLines![li2];
-                cssTotal += cl2.BoxH > 0
-                    ? (cl2.HtmlEngine && rc.generatorCell ? EngineLineExtent(cl2, li2 == rc.lastLine - 1) : cl2.BoxH)
-                    : rc.slice.Plan.LineHeight;
+                if (cl2.BoxH > 0) cssTotal += cl2.HtmlEngine && rc.generatorCell ? EngineLineExtent(cl2) : cl2.BoxH;
+                else cssTotal += rc.slice.Plan.LineHeight;
                 if (cl2.Boxes is { } bxs)
                     foreach (var b7 in bxs)
                         if (b7.Height > 0) anyPlate = true;
@@ -76,8 +74,12 @@ public partial class Table
             // stack plus padding plus rules, so a two-line 12 pt <li> cell seats at
             // its pad top, not half a rule lower).
             var availV = rc.slice.Height - rc.padTop - rc.padBot
-                - (FormGridCells ? 2 * rc.borderInsetTop
-                    : rc.generatorCell ? rc.borderInsetTop + rc.borderInsetBottom : 0);
+                - ((FormGridCells, rc.generatorCell) switch
+                {
+                    (true, _) => 2 * rc.borderInsetTop,
+                    (_, true) => rc.borderInsetTop + rc.borderInsetBottom,
+                    _ => 0,
+                });
             // cssTop subtracts the cursor, so a POSITIVE seed moves
             // the stack down into the slack. A stack holding a
             // declared-height plate is near-exact — split only its
@@ -105,16 +107,19 @@ public partial class Table
         rc.anyBoxes = false;
         rc.anyLinks = false;
         rc.xmlMixedSizes = false;
+        rc.anyDeclaredUnderline = false;
         for (var li = rc.firstLine; li < rc.lastLine; li++)
         {
             var cl = rc.cellLines![li];
-            if (cl.Option is not null || cl.Checkbox is not null
+            if (cl.StateUnderline) rc.anyDeclaredUnderline = true;
+            if (cl.Option is not null || cl.HasControlBox
                 || cl.InlineOptions is not null
                 || cl.Text.IndexOf(InlineButtonChar) >= 0
                 || cl.InputBoxes is not null
                 || cl.Text.IndexOf(InlineCheckChar) >= 0
                 || cl.Text.IndexOf(InlineCheckboxGapChar) >= 0) { rc.hasOption = true; break; }
-            if (cl.Align is HorizontalAlignment.Center or HorizontalAlignment.Right) rc.anyNonLeft = true;
+            if (cl.Align is HorizontalAlignment.Center or HorizontalAlignment.Right or HorizontalAlignment.FullJustify)
+                rc.anyNonLeft = true;
             if (cl.Type0Ttf is not null) rc.anyType0 = true;
             // A line whose pieces sit at their OWN x offsets (an HTML-engine
             // line: a list marker in its column, the item's text at the list
@@ -193,7 +198,7 @@ public partial class Table
     /// below the cell's inner top, 13.686 being the line's baseline drop), an inline run
     /// cell's last line on its descent, a block's or a list item's on its full box; the
     /// planner already sized each last box that way, so the stack fills its band.</summary>
-    private static double EngineLineExtent(CellLine line, bool last) => line.BoxH;
+    private static double EngineLineExtent(CellLine line) => line.BoxH;
 
     private void OffsetVerticallyAlignedLines(RowColumnState rc)
     {
@@ -212,29 +217,29 @@ public partial class Table
             // font size; a checkbox line is its box height).
             double blockH = 0;
             for (var bi = rc.slice.LineStart; bi < rc.slice.LineStart + countForVa && bi < rc.cellLines.Count; bi++)
-                blockH += rc.cellLines[bi].Checkbox is { Height: > 0 } vcb ? vcb.Height
-                    // UA cell boxes: a line occupies its LINE BOX, not its glyph
-                    // height — measuring the block at the bare font size would
-                    // leave a full-height cell looking short and nudge it down.
-                    // The lifted nested-table render prices its slices AND walks
-                    // its draw at the uniform line box too, so the centering must
-                    // measure with the same ruler — at bare font size every line
-                    // fabricates (lineBox − fontSize) of slack and a tall cell
-                    // sinks by half of it. A reserve line's box is its own
-                    // FontSize (a share of the nested grid's real height).
-                    : NestedTableRender && rc.cellLines[bi].ImgReserve && rc.cellLines[bi].FontSize > 0
-                        ? rc.cellLines[bi].FontSize
-                    : UaCellBoxes || NestedTableRender ? rc.slice.Plan.LineHeight
-                    // An HTML-engine line is its CSS line box here as well (the row
-                    // was priced at the boxes; at the bare font size a two-line 12 pt
-                    // cell sinks by half of 2 x 1.5 of leading it never had).
-                    : rc.cellLines[bi].HtmlEngine && rc.cellLines[bi].BoxH > 0
-                        ? EngineLineExtent(rc.cellLines[bi], bi == rc.slice.LineStart + countForVa - 1)
-                    // A declared leading is part of the line's pitch, so it is part
-                    // of the block being centred — pricing the line at the bare
-                    // font size would leave a full cell looking short and sink its
-                    // text by half the leading it actually occupies.
-                    : rc.cellLines[bi].FontSize + rc.cellLines[bi].Leading;
+            {
+                if (rc.cellLines[bi].ControlBoxHeight > 0) blockH += rc.cellLines[bi].ControlBoxHeight;
+                // UA cell boxes: a line occupies its LINE BOX, not its glyph
+                // height — measuring the block at the bare font size would
+                // leave a full-height cell looking short and nudge it down.
+                // The lifted nested-table render prices its slices AND walks
+                // its draw at the uniform line box too, so the centering must
+                // measure with the same ruler — at bare font size every line
+                // fabricates (lineBox − fontSize) of slack and a tall cell
+                // sinks by half of it. A reserve line's box is its own
+                // FontSize (a share of the nested grid's real height).
+                else if (NestedTableRender && rc.cellLines[bi].ImgReserve && rc.cellLines[bi].FontSize > 0) blockH += rc.cellLines[bi].FontSize;
+                else if (UaCellBoxes || NestedTableRender) blockH += rc.slice.Plan.LineHeight;
+                // An HTML-engine line is its CSS line box here as well (the row
+                // was priced at the boxes; at the bare font size a two-line 12 pt
+                // cell sinks by half of 2 x 1.5 of leading it never had).
+                else if (rc.cellLines[bi].HtmlEngine && rc.cellLines[bi].BoxH > 0) blockH += EngineLineExtent(rc.cellLines[bi]);
+                // A declared leading is part of the line's pitch, so it is part
+                // of the block being centred — pricing the line at the bare
+                // font size would leave a full cell looking short and sink its
+                // text by half the leading it actually occupies.
+                else blockH += rc.cellLines[bi].FontSize + rc.cellLines[bi].Leading;
+            }
             // Generator dialect: the block centres in the INNER box — the bottom
             // border is outside it too (probed: a column-slice row 12 pt tall
             // with 1 pt rules seats its 10 pt line at 761.07, not 760.57).
@@ -260,6 +265,11 @@ public partial class Table
         // (the grid draws in the nested pass below) — no empty marker run.
         if (rc.generatorCell && rc.cellLines is not null
             && rc.slice.Plan.CellTables is { } gridCells && gridCells.ContainsKey(rc.col)
+            && rc.cellLines.TrueForAll(l => l.ImgReserve || l.Text.Length == 0))
+            rc.cellLines = null;
+        // ...nor does a cell that holds only turned text (drawn in its box by the chrome pass).
+        if (rc.cellLines is not null && rc.slice.Plan.CellImages is { } boxed && boxed.TryGetValue(rc.col, out var boxes)
+            && boxes.TrueForAll(b => b.Rotated is not null)
             && rc.cellLines.TrueForAll(l => l.ImgReserve || l.Text.Length == 0))
             rc.cellLines = null;
 
@@ -369,9 +379,9 @@ public partial class Table
         // Its runs still keep their PLACES: the marker column and the
         // item indent survive, drawn in the table's Standard-14 face.
         if (!DrawStyledLineRuns(rc)) return;
-        rc.plResolvedFont = rc.line.BaseFont is { } namedFace && rc.page is not null
-            ? RegisterFont(rc.page, namedFace)
-            : rc.line.Bold && rc.page is not null ? RegisterFont(rc.page, "Helvetica-Bold") : rc.fontName;
+        if (rc.line.BaseFont is { } namedFace && rc.page is not null) rc.plResolvedFont = RegisterFont(rc.page, namedFace);
+        else if (rc.line.Bold && rc.page is not null) rc.plResolvedFont = RegisterFont(rc.page, "Helvetica-Bold");
+        else rc.plResolvedFont = rc.fontName;
         if (NestedTableRender
             && (rc.line.LinkRuns is { Count: > 0 } || rc.line.Hyperlink is not null))
             ShowLineWithLinks(rc.builder, rc.line, rc.plResolvedFont, rc.lineX, rc.lineBase);
@@ -380,8 +390,11 @@ public partial class Table
             rc.builder.BeginText();
             rc.builder.SetFont(rc.plResolvedFont, rc.line.FontSize);
             ApplyColor(rc.builder, rc.line.ForegroundColor);
+            if (rc.justifyCharSpacing > 0) rc.builder.SetCharSpacing(rc.justifyCharSpacing);
             rc.builder.MoveTextPosition(rc.lineX, rc.lineBase);
             rc.builder.ShowText(rc.line.Text);
+            // The spacing is text state that outlives the text object: back to none.
+            if (rc.justifyCharSpacing > 0) rc.builder.SetCharSpacing(0);
             rc.builder.EndText();
         }
         if (rc.links is not null && rc.line.Hyperlink is not null)
@@ -447,9 +460,10 @@ public partial class Table
         var serif = mk.Family is null || mk.Family.Contains("Times", StringComparison.OrdinalIgnoreCase)
             || mk.Family.Contains("serif", StringComparison.OrdinalIgnoreCase);
         var mkFont = serif && rc.page is not null ? RegisterFont(rc.page, "Times-Roman") : rc.fontName;
-        var mkW = serif ? MeasureTimesRoman(mk.Text, mk.Size)
-            : HonorCellTtfFaces ? MeasureFaceExact(mk.Text, mk.Size, false)
-            : MeasureWidth(mk.Text, mk.Size);
+        double mkW;
+        if (serif) mkW = MeasureTimesRoman(mk.Text, mk.Size);
+        else if (HonorCellTtfFaces) mkW = MeasureFaceExact(mk.Text, mk.Size, false);
+        else mkW = MeasureWidth(mk.Text, mk.Size);
         rc.builder.BeginText();
         rc.builder.SetFont(mkFont, mk.Size);
         ApplyColor(rc.builder, rc.line.ForegroundColor);
@@ -459,7 +473,7 @@ public partial class Table
     }
 
     /// <summary>The line's boxes draw at their measured seats: fills, borders and the text each box carries.</summary>
-    private void DrawStyledLineBoxes(RowColumnState rc, int li)
+    private static void DrawStyledLineBoxes(RowColumnState rc, int li)
     {
         if (rc.line.Boxes is { Count: > 0 } lineBoxes)
         {
@@ -498,10 +512,10 @@ public partial class Table
                 // the cell anchors at the BORDER BOX top (+UA pad):
                 // a padded sibling div must not displace it.
                 var ibTopOff = ib.Height > 0 ? 2 * ib.InsetV : ib.InsetV;
-                var drawTop = ib.SpanCell ? rc.lineTop - ib.InsetV
-                    : ib.FullWidth && li == rc.firstLine
-                    ? rc.slice.TopY - rc.bandInset - 0.75
-                    : rc.lineTop - ibTopOff;
+                double drawTop;
+                if (ib.SpanCell) drawTop = rc.lineTop - ib.InsetV;
+                else if (ib.FullWidth && li == rc.firstLine) drawTop = rc.slice.TopY - rc.bandInset - 0.75;
+                else drawTop = rc.lineTop - ibTopOff;
                 if (ib.Fill is { } boxFill)
                 {
                     rc.builder.SetFillColor(boxFill.R / 255.0, boxFill.G / 255.0, boxFill.B / 255.0);
@@ -553,63 +567,75 @@ public partial class Table
     /// <summary>The line's x seat by alignment, its top, collapsed seat and baseline, then the underline and decoration strokes.</summary>
     private void SeatStyledLineAndDecorate(RowColumnState rc, int li)
     {
-        rc.lineX = rc.line.Align == HorizontalAlignment.Center
-            // A COLLAPSED grid's box is half a rule to the left of its own
-            // boundary, so its middle is not the box's middle: centre in the
-            // PADDED box, which is the same box the right-aligned arm below
-            // already measures from.
-            ? (rc.line.LeftIndent + rc.line.RightInsetPt > 0 || IsBordersCollapsed
+        // A COLLAPSED grid's box is half a rule to the left of its own
+        // boundary, so its middle is not the box's middle: centre in the
+        // PADDED box, which is the same box the right-aligned arm below
+        // already measures from.
+        if (rc.line.Align == HorizontalAlignment.Center)
+            rc.lineX = rc.line.LeftIndent + rc.line.RightInsetPt > 0 || IsBordersCollapsed
                 ? rc.cellX + rc.padLeft + rc.line.LeftIndent + Math.Max(0,
                     (rc.cellWidth - rc.padLeft - rc.padRight - rc.line.LeftIndent
                      - rc.line.RightInsetPt - rc.w) / 2)
-                : rc.cellX + Math.Max(rc.padLeft, (rc.cellWidth - rc.w) / 2))
-            : rc.line.Align == HorizontalAlignment.Right
-                ? Math.Max(rc.cellX + rc.padLeft,
-                    rc.cellX + rc.cellWidth - rc.padRight - rc.w - rc.boxRightPad - rc.line.RightInsetPt)
-                : rc.cellX + rc.padLeft + rc.line.LeftIndent;
-        rc.lineTop = rc.cssCell && rc.line.BoxH > 0
-            ? rc.cssTop
-            : DwFormCells
-            ? rc.slice.TopY - rc.contentTop - rc.dwLineOff
-            : XmlGeneratorModel && rc.xmlMixedSizes
-                // XML-generator: cumulative own-size pitch
-                // (14/10/14 stacks at 14, then 10, …).
-                ? rc.xmlTop
-                : DeclaresLineBox(rc.line)
-                // Each line the cell declared a box for advances by its OWN box,
-                // so the tops are summed rather than multiplied out.
-                ? rc.slice.TopY - rc.contentTop - DeclaredLinesHeight(rc, li)
-                : rc.slice.TopY - rc.contentTop - (li - rc.firstLine) * rc.slice.Plan.LineHeight;
-        rc.collapsedSeat = HtmlWrapInsetsCellMargins ? PtGridSeatDropPt
-            // redline cells: AscLead seat (0.929 em) vs the
-            // legacy 0.793 em drop, plus the constant 1.2 pt
-            // the expected rows sit below the plain seat at every size
-            : RedlineCellSeat ? 0.136 * rc.line.FontSize + 1.2
-            // DataWorks h1 title: seats 9.8 below the top-aligned
-            // legacy drop (measured).
-            : DwFormCells
-                && rc.line.FontSize >= Converters.HtmlToPdfConverter.DwH1FontPt - 0.1
-            ? Converters.HtmlToPdfConverter.DwH1SeatDropPt : 0;
+                : rc.cellX + Math.Max(rc.padLeft, (rc.cellWidth - rc.w) / 2);
+        else if (rc.line.Align == HorizontalAlignment.Right)
+            rc.lineX = Math.Max(rc.cellX + rc.padLeft,
+                rc.cellX + rc.cellWidth - rc.padRight - rc.w - rc.boxRightPad - rc.line.RightInsetPt);
+        else rc.lineX = rc.cellX + rc.padLeft + rc.line.LeftIndent;
+        // A fully justified line spreads its glyphs to the cell's inner width by the
+        // character spacing, every line of the cell alike; it used to sit at the left
+        // edge like a left-aligned one.
+        rc.justifyCharSpacing = 0;
+        if (rc.line.Align == HorizontalAlignment.FullJustify && rc.line.Text.Length > 1)
+        {
+            // ...ending where a right-aligned line ends.
+            var innerWidth = rc.cellX + rc.cellWidth - rc.padRight - rc.boxRightPad - rc.line.RightInsetPt - rc.lineX;
+            if (innerWidth > rc.w)
+            {
+                rc.justifyCharSpacing = (innerWidth - rc.w) / (rc.line.Text.Length - 1);
+                rc.w = innerWidth;
+            }
+        }
+        if (rc.cssCell && rc.line.BoxH > 0) rc.lineTop = rc.cssTop;
+        else if (DwFormCells) rc.lineTop = rc.slice.TopY - rc.contentTop - rc.dwLineOff;
+        // XML-generator: cumulative own-size pitch
+        // (14/10/14 stacks at 14, then 10, …).
+        else if (XmlGeneratorModel && rc.xmlMixedSizes) rc.lineTop = rc.xmlTop;
+        // Each line the cell declared a box for advances by its OWN box,
+        // so the tops are summed rather than multiplied out.
+        else if (DeclaresLineBox(rc.line)) rc.lineTop = rc.slice.TopY - rc.contentTop - DeclaredLinesHeight(rc, li);
+        else rc.lineTop = rc.slice.TopY - rc.contentTop - (li - rc.firstLine) * rc.slice.Plan.LineHeight;
+        if (HtmlWrapInsetsCellMargins) rc.collapsedSeat = PtGridSeatDropPt;
+        // redline cells: AscLead seat (0.929 em) vs the
+        // legacy 0.793 em drop, plus the constant 1.2 pt
+        // the expected rows sit below the plain seat at every size
+        else if (RedlineCellSeat) rc.collapsedSeat = 0.136 * rc.line.FontSize + 1.2;
+        // DataWorks h1 title: seats 9.8 below the top-aligned
+        // legacy drop (measured).
+        else if (DwFormCells
+            && rc.line.FontSize >= Converters.HtmlToPdfConverter.DwH1FontPt - 0.1)
+            rc.collapsedSeat = Converters.HtmlToPdfConverter.DwH1SeatDropPt;
+        else rc.collapsedSeat = 0;
         var uaSeatDrop = UaSeatDropPt(rc.line.FontSize);
         // A DECLARED line box seats this line the same way it seats a plain
         // cell's: half the surplus leading, then the ascent — and no leading
         // subtracted below, because that drop has already spent it.
         var declaredDrop = DeclaredLineBoxBaseOff(rc.line);
-        rc.lineBase = declaredDrop > 0
-            ? rc.lineTop - declaredDrop
-            : rc.lineTop - (rc.cssCell && rc.line.BaseOff > 0
-            ? rc.line.BaseOff
-            : uaSeatDrop > 0
-            ? uaSeatDrop + rc.collapsedSeat
-            : rc.line.FontSize + rc.collapsedSeat
-              - (SuppressBaselineLift ? 0 : rc.borderLiftFactor * rc.line.FontSize))
-            // The declared leading sits ABOVE the glyphs, pushing
-            // the baseline that much deeper into the line box.
-            - rc.line.Leading;
+        if (declaredDrop > 0) rc.lineBase = rc.lineTop - declaredDrop;
+        else
+            rc.lineBase = rc.lineTop - ((rc.cssCell, rc.line.BaseOff, uaSeatDrop) switch
+            {
+                (true, > 0, _) => rc.line.BaseOff,
+                (_, _, > 0) => uaSeatDrop + rc.collapsedSeat,
+                _ => rc.line.FontSize + rc.collapsedSeat
+                    - (SuppressBaselineLift ? 0 : rc.borderLiftFactor * rc.line.FontSize),
+            })
+                // The declared leading sits ABOVE the glyphs, pushing
+                // the baseline that much deeper into the line box.
+                - rc.line.Leading;
         // <u> underline: one bar under the drawn run, in the
         // text colour, at the link-underline seat. Dialect-gated:
         // legacy corpora were calibrated without <u> ink.
-        if ((HtmlOverDeclaredDraw || XmlGeneratorModel) && rc.line.Underline && rc.w > 0)
+        if ((((HtmlOverDeclaredDraw || XmlGeneratorModel) && rc.line.Underline) || rc.line.StateUnderline) && rc.w > 0)
         {
             if (rc.line.ForegroundColor is { } ulc)
                 rc.builder.SetStrokeColor(ulc.R / 255.0, ulc.G / 255.0, ulc.B / 255.0);
@@ -665,15 +691,15 @@ public partial class Table
         // A blank line still draws its inline boxes (the
         // standalone badge circles).
         if (rc.line.Text.Length == 0 && rc.line.Boxes is null) return false;
-        rc.w = rc.line.KernedWidth > 0 ? rc.line.KernedWidth
-            // A line in a named Standard-14 face measures on that face's advances.
-            : rc.line.BaseFont is { } measuredFace ? Text.TextPaginator.CreateMeasurer(measuredFace, rc.line.FontSize, null)(rc.line.Text)
-            // A line that DECLARED its box is being laid out to an exact model,
-            // so it is measured exactly: the bare AFM advance its own planner
-            // wrapped it with, not the HTML dialects' ~5 % estimate, which would
-            // seat a centred line half the inflation off its middle.
-            : DeclaresLineBox(rc.line) ? MeasureWidthExactAfm(rc.line.Text, rc.line.FontSize)
-            : MeasureWidth(rc.line.Text, rc.line.FontSize);
+        if (rc.line.KernedWidth > 0) rc.w = rc.line.KernedWidth;
+        // A line in a named Standard-14 face measures on that face's advances.
+        else if (rc.line.BaseFont is { } measuredFace) rc.w = Text.TextPaginator.CreateMeasurer(measuredFace, rc.line.FontSize, null)(rc.line.Text);
+        // A line that DECLARED its box is being laid out to an exact model,
+        // so it is measured exactly: the bare AFM advance its own planner
+        // wrapped it with, not the HTML dialects' ~5 % estimate, which would
+        // seat a centred line half the inflation off its middle.
+        else if (DeclaresLineBox(rc.line)) rc.w = MeasureWidthExactAfm(rc.line.Text, rc.line.FontSize);
+        else rc.w = MeasureWidth(rc.line.Text, rc.line.FontSize);
         // Over-declared grid dialect: a Type0 line centres on the
         // width its OWN face will draw — the Standard-14 measure
         // prices CJK at half an em and the centred title lands
@@ -694,7 +720,7 @@ public partial class Table
     }
 
     /// <summary>A Type0 line draws through its CID face, glyph by glyph, with its own advances and the line's decorations; false when it drew the whole line.</summary>
-    private bool DrawType0Line(RowColumnState rc)
+    private static bool DrawType0Line(RowColumnState rc)
     {
         if (rc.line.Type0Ttf is not null && rc.page is not null)
         {
@@ -703,23 +729,7 @@ public partial class Table
             // advancing by its kerned width.
             if (rc.line.StyleRuns is { Count: > 0 })
             {
-                var runX = rc.lineX;
-                foreach (var (runText, runTtf, runName) in rc.line.StyleRuns)
-                {
-                    var (runRes, runHex) = Aspose.Pdf.Text.Type0FontEmbedder.Embed(
-                        fontDict, runTtf, runName, runText,
-                        stripSpacesInBaseFont: true);
-                    rc.builder.BeginText();
-                    rc.builder.SetFont(runRes, rc.line.FontSize);
-                    ApplyColor(rc.builder, rc.line.ForegroundColor);
-                    rc.builder.MoveTextPosition(runX, rc.lineBase);
-                    if (rc.line.KernTj && KernAdjustments(runText, runTtf) is { } runKern)
-                        rc.builder.ShowTextHexKerned(runHex, runKern);
-                    else
-                        rc.builder.ShowTextHex(runHex);
-                    rc.builder.EndText();
-                    runX += MeasureWidthKerned(runText, rc.line.FontSize, runTtf);
-                }
+                DrawStyleRuns(rc.builder, fontDict, rc.line, rc.lineX, rc.lineBase);
                 return false;
             }
             if (rc.line.Type0SplitTokens)
@@ -760,13 +770,15 @@ public partial class Table
             rc.builder.BeginText();
             rc.builder.SetFont(resName, rc.line.FontSize);
             ApplyColor(rc.builder, rc.line.ForegroundColor);
+            if (rc.justifyCharSpacing > 0) rc.builder.SetCharSpacing(rc.justifyCharSpacing);
             rc.builder.MoveTextPosition(rc.lineX, rc.lineBase);
-            // Bold-serif HTML lines are kerned;
-            // all other Type0 lines (shaped Arabic, CJK) stay unkerned.
+            // Bold-serif HTML lines are kerned; all
+            // other Type0 lines (shaped Arabic, CJK) stay unkerned.
             if (rc.line.KernTj && KernAdjustments(rc.line.Text, rc.line.Type0Ttf) is { } kernAdj)
                 rc.builder.ShowTextHexKerned(hex, kernAdj);
             else
                 rc.builder.ShowTextHex(hex);
+            if (rc.justifyCharSpacing > 0) rc.builder.SetCharSpacing(0);
             rc.builder.EndText();
             return false;
         }
@@ -831,7 +843,7 @@ public partial class Table
     }
 
     /// <summary>The plain lines' hyperlinks and footnotes are recorded at their seats for the page pass.</summary>
-    private void RecordPlainCellLinksAndFootnotes(RowColumnState rc)
+    private static void RecordPlainCellLinksAndFootnotes(RowColumnState rc)
     {
         if (rc.links is not null)
         {
@@ -873,9 +885,12 @@ public partial class Table
     /// <summary>The plain lines draw as one text object: a Tm seat, then one T* pitched line per row in its own leading and font.</summary>
     private void DrawPlainCellInk(RowColumnState rc)
     {
-        string FontFor(CellLine l) => l.BaseFont is { } face && rc.page is not null
-            ? RegisterFont(rc.page, face)
-            : l.Bold && rc.page is not null ? RegisterFont(rc.page, "Helvetica-Bold") : rc.fontName;
+        string FontFor(CellLine l)
+        {
+            if (l.BaseFont is { } face && rc.page is not null) return RegisterFont(rc.page, face);
+            if (l.Bold && rc.page is not null) return RegisterFont(rc.page, "Helvetica-Bold");
+            return rc.fontName;
+        }
         // The lifted dialect keeps deliberate blank line boxes as
         // vertical space; they must not EMIT — an empty Tj reads
         // back as an empty text fragment and shifts every absorber
@@ -888,11 +903,10 @@ public partial class Table
             {
                 // A reserve line's box is its own FontSize (a share
                 // of the nested grid's real height), not the pitch.
-                leadDy += rc.cellLines[fi].ImgReserve && rc.cellLines[fi].FontSize > 0
-                    ? rc.cellLines[fi].FontSize
-                    // (a UA-boxed cell's blank line is its own box, not the row's pitch)
-                    : UaCellBoxes && rc.cellLines[fi].BoxH > 0 ? rc.cellLines[fi].BoxH
-                    : rc.slice.Plan.LineHeight;
+                if (rc.cellLines[fi].ImgReserve && rc.cellLines[fi].FontSize > 0) leadDy += rc.cellLines[fi].FontSize;
+                // (a UA-boxed cell's blank line is its own box, not the row's pitch)
+                else if (UaCellBoxes && rc.cellLines[fi].BoxH > 0) leadDy += rc.cellLines[fi].BoxH;
+                else leadDy += rc.slice.Plan.LineHeight;
                 fi++;
             }
         var firstInk = fi < rc.lastLine ? rc.cellLines![fi] : rc.first;
@@ -916,13 +930,14 @@ public partial class Table
             var line = rc.cellLines![li];
             if (NestedTableRender && line.Text.Length == 0)
             {
-                skippedDy += line.ImgReserve && line.FontSize > 0
-                    ? line.FontSize
-                    : UaCellBoxes && line.BoxH > 0 ? line.BoxH
-                    : rc.slice.Plan.LineHeight;
+                if (line.ImgReserve && line.FontSize > 0) skippedDy += line.FontSize;
+                else if (UaCellBoxes && line.BoxH > 0) skippedDy += line.BoxH;
+                else skippedDy += rc.slice.Plan.LineHeight;
                 continue;
             }
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             if (line.FontSize != lastFontSize || line.Bold != lastBold || line.BaseFont != lastBaseFont)
+#pragma warning restore S1244
             {
                 rc.builder.SetFont(FontFor(line), line.FontSize);
                 lastFontSize = line.FontSize;
@@ -974,7 +989,7 @@ public partial class Table
 
     /// <summary>Whether the slice's first line is an HTML-engine line (a split engine cell's
     /// continuation keeps the engine seat and faces).</summary>
-    private bool SliceOpensOnEngineLine(RowColumnState rc)
+    private static bool SliceOpensOnEngineLine(RowColumnState rc)
     {
         var lines = rc.slice.Plan.CellLines is { } all && rc.col < all.Count ? all[rc.col] : null;
         return lines is not null && rc.slice.LineStart < lines.Count && lines[rc.slice.LineStart].HtmlEngine;

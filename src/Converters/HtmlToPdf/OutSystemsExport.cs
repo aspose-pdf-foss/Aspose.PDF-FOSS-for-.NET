@@ -201,13 +201,13 @@ internal static partial class HtmlToPdfConverter
         var bold = 0;
         var stack = new List<(string Face, double Fs)>();
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        foreach (Match m in Regex.Matches(frag, @"<[^>]+>|[^<]+"))
+        foreach (var value in SafeRegex.Matches(frag, @"<[^>]+>|[^<]+").Select(m => m.Value))
         {
-            var tok = m.Value;
+            var tok = value;
             if (tok[0] == '<')
             {
                 var close = tok.Length > 1 && tok[1] == '/';
-                var name = Regex.Match(tok, @"^</?\s*([a-zA-Z0-9]+)").Groups[1].Value.ToLowerInvariant();
+                var name = SafeRegex.Match(tok, @"^</?\s*([a-zA-Z0-9]+)").Groups[1].Value.ToLowerInvariant();
                 switch (name)
                 {
                     case "strong" or "b":
@@ -218,9 +218,9 @@ internal static partial class HtmlToPdfConverter
                         break;
                     case "img" when !close:
                     {
-                        var st = Regex.Match(tok, @"style\s*=\s*[""']([^""']*)").Groups[1].Value;
-                        var wM = Regex.Match(st, @"width\s*:\s*([\d.]+)px");
-                        var hM = Regex.Match(st, @"height\s*:\s*([\d.]+)px");
+                        var st = SafeRegex.Match(tok, @"style\s*=\s*[""']([^""']*)").Groups[1].Value;
+                        var wM = SafeRegex.Match(st, @"width\s*:\s*([\d.]+)px");
+                        var hM = SafeRegex.Match(st, @"height\s*:\s*([\d.]+)px");
                         if (wM.Success && hM.Success)
                             img = (double.Parse(wM.Groups[1].Value, inv) * 0.75,
                                    double.Parse(hM.Groups[1].Value, inv) * 0.75);
@@ -228,12 +228,12 @@ internal static partial class HtmlToPdfConverter
                     }
                     case "span" when !close:
                     {
-                        var style = Regex.Match(tok, @"style\s*=\s*[""']([^""']*)").Groups[1].Value;
+                        var style = SafeRegex.Match(tok, @"style\s*=\s*[""']([^""']*)").Groups[1].Value;
                         var face = stack.Count > 0 ? stack[^1].Face : "Times New Roman";
                         var fs = stack.Count > 0 ? stack[^1].Fs : 12.0;
-                        if (Regex.IsMatch(style, @"font-family\s*:\s*Arial", RegexOptions.IgnoreCase))
+                        if (SafeRegex.IsMatch(style, @"font-family\s*:\s*Arial", RegexOptions.IgnoreCase))
                             face = "Arial";
-                        var fsM = Regex.Match(style, @"font-size\s*:\s*([\d.]+)px");
+                        var fsM = SafeRegex.Match(style, @"font-size\s*:\s*([\d.]+)px");
                         if (fsM.Success) fs = double.Parse(fsM.Groups[1].Value, inv) * 0.75;
                         stack.Add((face, fs));
                         break;
@@ -244,7 +244,7 @@ internal static partial class HtmlToPdfConverter
                 }
                 continue;
             }
-            var text = Regex.Replace(DecodeEntities(tok), @"[ \t\r\n]+", " ");
+            var text = SafeRegex.Replace(DecodeEntities(tok), @"[ \t\r\n]+", " ");
             if (text.Length == 0) continue;
             var f = stack.Count > 0 ? stack[^1].Face : "Times New Roman";
             var size = stack.Count > 0 ? stack[^1].Fs : 12.0;
@@ -280,10 +280,10 @@ internal static partial class HtmlToPdfConverter
         if (end < 0) return (null, frag);
         var inner = frag[open..end];
         frag = frag.Remove(open, end - open);
-        var td = Regex.Match(inner, @"<td[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase);
+        var td = SafeRegex.Match(inner, @"<td[^>]*>([\s\S]*?)</td>", RegexOptions.IgnoreCase);
         if (!td.Success) return (null, frag);
-        return (Regex.Replace(DecodeEntities(
-            Regex.Replace(td.Groups[1].Value, @"<[^>]+>", "")), @"[ \t\r\n]+", " ").Trim(' '), frag);
+        return (SafeRegex.Replace(DecodeEntities(
+            SafeRegex.Replace(td.Groups[1].Value, @"<[^>]+>", "")), @"[ \t\r\n]+", " ").Trim(' '), frag);
     }
 
     private static int OsMatchTableEnd(string html, int open)
@@ -294,7 +294,7 @@ internal static partial class HtmlToPdfConverter
             if (string.Compare(html, i, "<table", 0, 6, StringComparison.OrdinalIgnoreCase) == 0)
             { depth++; i += 6; continue; }
             if (string.Compare(html, i, "</table>", 0, 8, StringComparison.OrdinalIgnoreCase) == 0)
-            { i += 8; if (--depth == 0) return i; continue; }
+            { i += 8; if (--depth == 0) { return i; } continue; }
             i++;
         }
         return -1;
@@ -304,13 +304,13 @@ internal static partial class HtmlToPdfConverter
     /// and rules — with scripts, styles and hidden form inputs stripped.</summary>
     private static List<(char Kind, string Frag)> OsTopLevel(string html)
     {
-        html = Regex.Replace(html, @"<script\b[\s\S]*?</script>", "", RegexOptions.IgnoreCase);
-        html = Regex.Replace(html, @"<style\b[\s\S]*?</style>", "", RegexOptions.IgnoreCase);
-        html = Regex.Replace(html, @"<input\b[^>]*>", "", RegexOptions.IgnoreCase);
+        html = SafeRegex.Replace(html, @"<script\b[\s\S]*?</script>", "", RegexOptions.IgnoreCase);
+        html = SafeRegex.Replace(html, @"<style\b[\s\S]*?</style>", "", RegexOptions.IgnoreCase);
+        html = SafeRegex.Replace(html, @"<input\b[^>]*>", "", RegexOptions.IgnoreCase);
         var res = new List<(char, string)>();
         for (var i = 0; i < html.Length;)
         {
-            var m = Regex.Match(html[i..], @"<(table|p|hr)[\s>]", RegexOptions.IgnoreCase);
+            var m = SafeRegex.Match(html[i..], @"<(table|p|hr)[\s>]", RegexOptions.IgnoreCase);
             if (!m.Success) break;
             var at = i + m.Index;
             switch (char.ToLowerInvariant(m.Groups[1].Value[0]))
@@ -365,19 +365,19 @@ internal static partial class HtmlToPdfConverter
         body = sb.ToString();
 
         var rows = new List<List<OsCell>>();
-        foreach (Match tr in Regex.Matches(body, @"<tr[^>]*>([\s\S]*?)</tr>", RegexOptions.IgnoreCase))
+        foreach (Match tr in SafeRegex.Matches(body, @"<tr[^>]*>([\s\S]*?)</tr>", RegexOptions.IgnoreCase))
         {
             var row = new List<OsCell>();
-            foreach (Match td in Regex.Matches(tr.Groups[1].Value,
-                @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(tr.Groups[1].Value,
+                @"<td\b([^>]*)>([\s\S]*?)</td>", RegexOptions.IgnoreCase).Select(td => td.Groups))
             {
-                var attrs = td.Groups[1].Value;
-                var content = Regex.Replace(td.Groups[2].Value, OsMark + @"(\d+)" + OsMark,
+                var attrs = groups[1].Value;
+                var content = SafeRegex.Replace(groups[2].Value, OsMark + @"(\d+)" + OsMark,
                     nm => nested[int.Parse(nm.Groups[1].Value)]);
                 var cell = new OsCell
                 {
-                    AlignRight = Regex.IsMatch(attrs, @"text-align\s*:\s*right", RegexOptions.IgnoreCase),
-                    ValignTop = Regex.IsMatch(attrs, @"vertical-align\s*:\s*top", RegexOptions.IgnoreCase),
+                    AlignRight = SafeRegex.IsMatch(attrs, @"text-align\s*:\s*right", RegexOptions.IgnoreCase),
+                    ValignTop = SafeRegex.IsMatch(attrs, @"vertical-align\s*:\s*top", RegexOptions.IgnoreCase),
                 };
                 (cell.Runs, var cellImg, var nestedText) = OsParseRuns(content);
                 cell.Img = cellImg;

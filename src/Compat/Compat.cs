@@ -41,11 +41,31 @@ internal static class Compat
     public static float Clamp(float value, float min, float max) => Math.Clamp(value, min, max);
     public static byte Clamp(byte value, byte min, byte max) => Math.Clamp(value, min, max);
 #else
-    public static int Clamp(int value, int min, int max) => value < min ? min : value > max ? max : value;
-    public static long Clamp(long value, long min, long max) => value < min ? min : value > max ? max : value;
-    public static double Clamp(double value, double min, double max) => value < min ? min : value > max ? max : value;
-    public static float Clamp(float value, float min, float max) => value < min ? min : value > max ? max : value;
-    public static byte Clamp(byte value, byte min, byte max) => value < min ? min : value > max ? max : value;
+    public static int Clamp(int value, int min, int max)
+    {
+        if (value < min) return min;
+        return value > max ? max : value;
+    }
+    public static long Clamp(long value, long min, long max)
+    {
+        if (value < min) return min;
+        return value > max ? max : value;
+    }
+    public static double Clamp(double value, double min, double max)
+    {
+        if (value < min) return min;
+        return value > max ? max : value;
+    }
+    public static float Clamp(float value, float min, float max)
+    {
+        if (value < min) return min;
+        return value > max ? max : value;
+    }
+    public static byte Clamp(byte value, byte min, byte max)
+    {
+        if (value < min) return min;
+        return value > max ? max : value;
+    }
 #endif
 
 #if NETCOREAPP3_0_OR_GREATER
@@ -57,7 +77,9 @@ internal static class Compat
     {
         var approximate = Math.Log(value) / Math.Log(2);
         var rounded = Math.Round(approximate);
+#pragma warning disable S1244 // exact on purpose: only a power of two, which Pow(2, n) hits exactly, takes the integer
         return Math.Pow(2, rounded) == value ? rounded : approximate;
+#pragma warning restore S1244
     }
 #endif
 
@@ -128,6 +150,14 @@ internal static class Compat
     public static bool IsLinux() => RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
 #endif
 
+    /// <summary>Whether the process runs as WebAssembly (the WASI module or a browser). The older targets
+    /// never run there.</summary>
+#if NET8_0_OR_GREATER
+    public static bool IsWebAssembly() => OperatingSystem.IsWasi() || OperatingSystem.IsBrowser();
+#else
+    public static bool IsWebAssembly() => false;
+#endif
+
     // ── Array ─────────────────────────────────────────────────────────────────────
 #if NETCOREAPP2_0_OR_GREATER
     public static void Fill<T>(T[] array, T value) => Array.Fill(array, value);
@@ -177,6 +207,7 @@ internal static class Compat
     public static byte[] Sha1(byte[] data) =>
         HasPlatformSha1 ? PlatformSha1(data) : Aspose.Pdf.Security.HmacSha.Sha1Hash(data);
 
+#pragma warning disable S4790 // SHA-1 and MD5 as the PDF standard security handler and signature digests require
 #if NET5_0_OR_GREATER
     private static byte[] PlatformSha1(byte[] data) => SHA1.HashData(data);
     public static byte[] Sha256(byte[] data) => SHA256.HashData(data);
@@ -198,6 +229,7 @@ internal static class Compat
         return md5.ComputeHash(data);
     }
 #endif
+#pragma warning restore S4790
 
     // ⚠ A platform can lack System.Security.Cryptography altogether: the WebAssembly (WASI) build answers every
     // call into it with PlatformNotSupportedException, and the library's encryption, its public-key envelopes and
@@ -281,7 +313,9 @@ internal static class Compat
     public static Random SharedRandom => Random.Shared;
 #else
     [ThreadStatic] private static Random? t_random;
+#pragma warning disable S2245 // Random.Shared's stand-in: it draws font subset tags, never a secret
     public static Random SharedRandom => t_random ??= new Random();
+#pragma warning restore S2245
 #endif
 
     // ── BigInteger unsigned big-endian round trip ─────────────────────────────────
@@ -364,12 +398,35 @@ internal static class Compat
     public static int ArrayMaxLength => 0x7FFFFFC7;
 #endif
 
+    // ── the next non-zero byte ────────────────────────────────────────────────────
+    /// <summary>The index of the first byte from <paramref name="start"/> on that is not zero,
+    /// or -1: a vectorised search where the runtime has one.</summary>
+#if NET7_0_OR_GREATER
+    public static int IndexOfNonZero(byte[] bytes, int start)
+    {
+        var at = bytes.AsSpan(start).IndexOfAnyExcept((byte)0);
+        return at < 0 ? -1 : start + at;
+    }
+#else
+    public static int IndexOfNonZero(byte[] bytes, int start)
+    {
+        for (var i = start; i < bytes.Length; i++)
+            if (bytes[i] != 0) return i;
+        return -1;
+    }
+#endif
+
     // ── RegexOptions.NonBacktracking ──────────────────────────────────────────────
-    // The linear-time engine is a .NET 7 addition; without it the option is simply absent.
+    // The linear-time engine is a .NET 7 addition. The targets compiled before it read the
+    // option off the runtime they run on: the netstandard2.0 build loaded by .NET 7 or later
+    // gets the engine, and on .NET Framework, which has none, the option stays absent.
 #if NET7_0_OR_GREATER
     public static System.Text.RegularExpressions.RegexOptions NonBacktracking => System.Text.RegularExpressions.RegexOptions.NonBacktracking;
 #else
-    public static System.Text.RegularExpressions.RegexOptions NonBacktracking => System.Text.RegularExpressions.RegexOptions.None;
+    public static System.Text.RegularExpressions.RegexOptions NonBacktracking { get; } =
+        Enum.TryParse<System.Text.RegularExpressions.RegexOptions>("NonBacktracking", out var runtimeOption)
+            ? runtimeOption
+            : System.Text.RegularExpressions.RegexOptions.None;
 #endif
 
     // ── int.Parse / int.TryParse over a span ──────────────────────────────────────

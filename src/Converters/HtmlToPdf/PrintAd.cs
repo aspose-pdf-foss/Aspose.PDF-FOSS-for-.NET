@@ -19,7 +19,7 @@ internal static partial class HtmlToPdfConverter
         // Gate: an explicit zero-margin conversion of a document carrying an
         // @media print block and a container class with max-width + padding +
         // a px font-size + a unitless line-height.
-        if (!Regex.IsMatch(pa.html, @"@media\s+print", RegexOptions.IgnoreCase)) return null;
+        if (!SafeRegex.IsMatch(pa.html, @"@media\s+print", RegexOptions.IgnoreCase)) return null;
         pa.contCls = null;
         pa.contRule = null;
         foreach (var (sel, props) in pa.css)
@@ -30,10 +30,10 @@ internal static partial class HtmlToPdfConverter
                 && props.ContainsKey("line-height"))
             { pa.contCls = sel[1..]; pa.contRule = props; break; }
         if (pa.contCls is null || pa.contRule is null) return null;
-        pa.bodyM = Regex.Match(pa.html, @"<body\b[^>]*style\s*=\s*[""']([^""']*)[""']",
+        pa.bodyM = SafeRegex.Match(pa.html, @"<body\b[^>]*style\s*=\s*[""']([^""']*)[""']",
             RegexOptions.IgnoreCase);
         pa.face = pa.bodyM.Success
-            && Regex.Match(pa.bodyM.Groups[1].Value, @"font-family\s*:\s*([^;]+)",
+            && SafeRegex.Match(pa.bodyM.Groups[1].Value, @"font-family\s*:\s*([^;]+)",
                 RegexOptions.IgnoreCase) is { Success: true } bfm
             ? FirstFontFamily(bfm.Groups[1].Value) : null;
         if (pa.face is null || WinMetricsFor(pa.face) is not { } wm) return null;
@@ -45,7 +45,7 @@ internal static partial class HtmlToPdfConverter
             System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var lf) && lf > 0 ? lf : 1.25;
 
-        pa.contM = Regex.Match(pa.html,
+        pa.contM = SafeRegex.Match(pa.html,
             @"<div\b[^>]*class\s*=\s*[""'][^""']*\b" + Regex.Escape(pa.contCls) + @"\b[^""']*[""'][^>]*>",
             RegexOptions.IgnoreCase);
         if (!pa.contM.Success) return null;
@@ -56,7 +56,7 @@ internal static partial class HtmlToPdfConverter
         pa.xText = UaBodyMarginPt + pad;
         pa.contentW = maxW;
 
-        pa.beforeM = Regex.Match(pa.html,
+        pa.beforeM = SafeRegex.Match(pa.html,
             @"li:before\s*\{[^}]*content\s*:\s*[""']([^""']*)[""'][^}]*margin-right\s*:\s*([\d.]+)\s*px",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
         pa.liMarker = pa.beforeM.Success ? pa.beforeM.Groups[1].Value : "";
@@ -86,7 +86,7 @@ internal static partial class HtmlToPdfConverter
         pa.inv = System.Globalization.CultureInfo.InvariantCulture;
         pa.y = UaBodyMarginPt + pad;
         pa.pendingGap = 0.0;
-        pa.tagRx = new Regex(@"<(/?)(\w+)([^>]*?)(/?)>|<!--[\s\S]*?-->", RegexOptions.Singleline);
+        pa.tagRx = new Regex(@"<(/?)(\w+)([^>]*?)(/?)>|<!--[\s\S]*?-->", RegexOptions.Singleline, RegexLimits.Timeout);
         WalkAd(pa, pa.inner);
         pa.page.AddContentStream(Encoding.ASCII.GetBytes(pa.sb.ToString()));
         return pa.doc;

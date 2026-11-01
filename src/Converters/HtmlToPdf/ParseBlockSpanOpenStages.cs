@@ -18,7 +18,7 @@ internal static partial class HtmlToPdfConverter
             if (pb.cv?.profile.fieldListDoc == true && pb.titleColSpanDepth < 0
                 && spanHost.Tag == "div" && spanHost.InFieldsBox && !spanHost.ChildOpened)
             {
-                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, spanHost);
+                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, spanHost);
                 pb.openTitleColW = 0;
                 pb.openTitleColFrac = pb.cv.profile.fieldLabelFrac;
                 pb.titleColSpanDepth = pb.spanDepth;
@@ -30,9 +30,9 @@ internal static partial class HtmlToPdfConverter
             // on a wiki page: the edit links stand at the right edge beside the tagline).
             if (pb.browserUa && tok.Attributes is not null
                 && tok.Attributes.TryGetValue("style", out var flSt) && flSt is not null
-                && Regex.IsMatch(flSt, @"(?<![-\w])float\s*:\s*right", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(flSt, @"(?<![-\w])float\s*:\s*right", RegexOptions.IgnoreCase))
             {
-                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+                Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
                 pb.blockSpanDepths.Push(pb.spanDepth);
                 pb.floatRightSpanDepths.Push(pb.spanDepth);
             }
@@ -49,7 +49,7 @@ internal static partial class HtmlToPdfConverter
                         && spr.TryGetValue("display", out var spd)
                         && spd.Trim().Equals("block", StringComparison.OrdinalIgnoreCase))
                     {
-                        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+                        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
                         pb.blockSpanDepths.Push(pb.spanDepth);
                         break;
                     }
@@ -66,7 +66,7 @@ internal static partial class HtmlToPdfConverter
                         && ibr.TryGetValue("width", out var ibw)
                         && ((TryParseLength(ibw) is { } ibwPt && ibwPt > 0) || PercentFraction(ibw) > 0))
                     {
-                        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, pb.styleStack.Peek());
+                        Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, pb.styleStack.Peek());
                         // a percent column resolves against the content width at layout
                         pb.openTitleColW = TryParseLength(ibw) ?? 0;
                         pb.openTitleColFrac = pb.openTitleColW > 0 ? 0 : PercentFraction(ibw);

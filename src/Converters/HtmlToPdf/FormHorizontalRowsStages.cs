@@ -14,7 +14,7 @@ internal static partial class HtmlToPdfConverter
 
     private static double FhPxOf(string style, string prop)
     {
-        var m = Regex.Match(style, prop + @"\s*:\s*(\d+(?:\.\d+)?)px", RegexOptions.IgnoreCase);
+        var m = SafeRegex.Match(style, prop + @"\s*:\s*(\d+(?:\.\d+)?)px", RegexOptions.IgnoreCase);
         return m.Success && double.TryParse(m.Groups[1].Value,
             System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
@@ -26,7 +26,7 @@ internal static partial class HtmlToPdfConverter
         {
             var st = FhStyleOf(p2);
             if (p2.Tag == "div" && FhPxOf(st, "width") > 0
-                && Regex.IsMatch(st, @"float\s*:\s*left", RegexOptions.IgnoreCase))
+                && SafeRegex.IsMatch(st, @"float\s*:\s*left", RegexOptions.IgnoreCase))
                 return FhPxOf(st, "width");
         }
         return containerPx > 0 ? containerPx : 780.0;
@@ -50,7 +50,7 @@ internal static partial class HtmlToPdfConverter
         var wLab = FhPxOf(labStyle, "width");
         var mVal = FhPxOf(FhStyleOf(controls), "margin-left");
         if (wLab <= 0 || mVal <= wLab
-            || !Regex.IsMatch(labStyle, @"float\s*:\s*left", RegexOptions.IgnoreCase)) return true;
+            || !SafeRegex.IsMatch(labStyle, @"float\s*:\s*left", RegexOptions.IgnoreCase)) return true;
         var wVal = Math.Max(60, FhColWidth(g, containerPx) - mVal);
         // A value span carrying its own CSS width sets the value cell's width —
         // it may overflow the enclosing float column exactly as the float does
@@ -67,7 +67,7 @@ internal static partial class HtmlToPdfConverter
         // ("…catheters," stays on the 190px line; the inset-
         // narrowed cell broke it a word early).
         wVal += 6;
-        var bold = Regex.IsMatch(labStyle, @"font-weight\s*:\s*(700|bold)", RegexOptions.IgnoreCase);
+        var bold = SafeRegex.IsMatch(labStyle, @"font-weight\s*:\s*(700|bold)", RegexOptions.IgnoreCase);
         var labText = FhContentSpan(label) is { } ls2 ? html[ls2.start..ls2.end].Trim() : "";
         var valHtml = FhContentSpan(controls) is { } cs2 ? html[cs2.start..cs2.end].Trim() : "";
         // class=fh-row marks the synthesized row for the layout pass (per-row CSS

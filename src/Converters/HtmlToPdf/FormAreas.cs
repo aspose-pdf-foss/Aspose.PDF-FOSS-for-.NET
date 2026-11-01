@@ -29,11 +29,11 @@ internal static partial class HtmlToPdfConverter
     private const double FaSpacing = 1.5;                   // the UA 2px border-spacing
     private const double FaBoundary = 1e-6;
 
-    private static readonly Regex FaAreaOpenRx = new("<div\\b[^>]*class\\s*=\\s*['\"]formArea['\"][^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex FaControlOpenRx = new("<div\\b[^>]*class\\s*=\\s*['\"]newControl['\"][^>]*>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex FaPxRx = new("(?<![a-z-])(top|left|width)\\s*:\\s*(-?\\d+(?:\\.\\d+)?)\\s*px", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex FaRowRx = new("<tr\\b[^>]*>([\\s\\S]*?)</tr>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex FaCellRx = new("<(t[hd])\\b([^>]*)>([\\s\\S]*?)</t[hd]>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex FaAreaOpenRx = new("<div\\b[^>]*class\\s*=\\s*['\"]formArea['\"][^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex FaControlOpenRx = new("<div\\b[^>]*class\\s*=\\s*['\"]newControl['\"][^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex FaPxRx = new("(?<![a-z-])(top|left|width)\\s*:\\s*(-?\\d+(?:\\.\\d+)?)\\s*px", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex FaRowRx = new("<tr\\b[^>]*>([\\s\\S]*?)</tr>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
+    private static readonly Regex FaCellRx = new("<(t[hd])\\b([^>]*)>([\\s\\S]*?)</t[hd]>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexLimits.Timeout);
 
     private sealed class FaArea
     {
@@ -50,10 +50,12 @@ internal static partial class HtmlToPdfConverter
 
     private sealed class FaTable
     {
+#pragma warning disable S3218 // data-only nested type: its members are always reached through an instance
         public double W;                                    // the declared width, pt
         public List<string> Head = new();                   // the th texts
         public List<double> HeadW = new();                  // …and their declared content widths, pt
         public List<List<string>> Rows = new();
+#pragma warning restore S3218
         public double[] ColW = Array.Empty<double>();
     }
 
@@ -61,8 +63,8 @@ internal static partial class HtmlToPdfConverter
     private static Document? TryRenderFormAreas(ConvertState cv)
     {
         var html = cv.html;
-        if (!FaAreaOpenRx.IsMatch(html) || !FaControlOpenRx.IsMatch(html)
-            || !Regex.IsMatch(html, "<table\\b[^>]*class\\s*=\\s*['\"]tblDynamicContent['\"]", RegexOptions.IgnoreCase))
+        if (!SafeRegex.IsMatch(FaAreaOpenRx, html) || !SafeRegex.IsMatch(FaControlOpenRx, html)
+            || !SafeRegex.IsMatch(html, "<table\\b[^>]*class\\s*=\\s*['\"]tblDynamicContent['\"]", RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor(FaFace) is not { } tm) return null;
         var areas = FaParse(html);
@@ -87,14 +89,14 @@ internal static partial class HtmlToPdfConverter
     {
         var areas = new List<FaArea>();
         var invc = System.Globalization.CultureInfo.InvariantCulture;
-        for (var m = FaAreaOpenRx.Match(html); m.Success; m = m.NextMatch())
+        for (var m = SafeRegex.Match(FaAreaOpenRx, html); m.Success; m = SafeRegex.NextMatch(m))
         {
             var px = FaPxValues(m.Value, invc);
             if (!px.TryGetValue("top", out var top)) return null;
             var start = m.Index + m.Length;
             var body = html[start..DivClose(html, start)];
             var area = new FaArea { Top = top * FaPxPt };
-            for (var c = FaControlOpenRx.Match(body); c.Success; c = c.NextMatch())
+            for (var c = SafeRegex.Match(FaControlOpenRx, body); c.Success; c = SafeRegex.NextMatch(c))
             {
                 var cpx = FaPxValues(c.Value, invc);
                 var cs = c.Index + c.Length;
@@ -104,7 +106,7 @@ internal static partial class HtmlToPdfConverter
                     Left = cpx.TryGetValue("left", out var l) ? l * FaPxPt : 0,
                     Top = cpx.TryGetValue("top", out var t) ? t * FaPxPt : 0,
                 };
-                var tbl = Regex.Match(inner, "<table\\b[^>]*>", RegexOptions.IgnoreCase);
+                var tbl = SafeRegex.Match(inner, "<table\\b[^>]*>", RegexOptions.IgnoreCase);
                 if (tbl.Success)
                 {
                     if (FaParseTable(inner, tbl, invc) is not { } table) return null;
@@ -122,8 +124,8 @@ internal static partial class HtmlToPdfConverter
     private static Dictionary<string, double> FaPxValues(string tag, System.Globalization.CultureInfo invc)
     {
         var d = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
-        foreach (Match m in FaPxRx.Matches(tag))
-            d[m.Groups[1].Value.ToLowerInvariant()] = double.Parse(m.Groups[2].Value, invc);
+        foreach (var groups in SafeRegex.Matches(FaPxRx, tag).Select(m => m.Groups))
+            d[groups[1].Value.ToLowerInvariant()] = double.Parse(groups[2].Value, invc);
         return d;
     }
 
@@ -135,16 +137,16 @@ internal static partial class HtmlToPdfConverter
         if (!px.TryGetValue("width", out var w)) return null;
         var t = new FaTable { W = w * FaPxPt };
         var end = LpTableClose(frag, open.Index);
-        foreach (Match row in FaRowRx.Matches(frag[open.Index..end]))
+        foreach (Match row in SafeRegex.Matches(FaRowRx, frag[open.Index..end]))
         {
             var cells = new List<string>();
             var head = false;
-            foreach (Match cell in FaCellRx.Matches(row.Groups[1].Value))
+            foreach (var groups in SafeRegex.Matches(FaCellRx, row.Groups[1].Value).Select(cell => cell.Groups))
             {
-                cells.Add(LpFlat(cell.Groups[3].Value));
-                if (!cell.Groups[1].Value.Equals("th", StringComparison.OrdinalIgnoreCase)) continue;
+                cells.Add(LpFlat(groups[3].Value));
+                if (!groups[1].Value.Equals("th", StringComparison.OrdinalIgnoreCase)) continue;
                 head = true;
-                var cpx = FaPxValues(cell.Groups[2].Value, invc);
+                var cpx = FaPxValues(groups[2].Value, invc);
                 t.HeadW.Add(cpx.TryGetValue("width", out var cw) ? cw * FaPxPt : 0);
             }
             if (cells.Count == 0) continue;

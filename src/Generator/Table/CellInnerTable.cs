@@ -38,19 +38,20 @@ public partial class Table
             var ctLead = 0.0;
             for (var pli = rc.slice.LineStart;
                  pli < ct.LineOffset && leadLines is not null && pli < leadLines.Count; pli++)
-                ctLead += leadLines[pli].ImgReserve && leadLines[pli].FontSize > 0
-                    ? leadLines[pli].FontSize
-                    // A generator cell holding a grid is an EXACT stack, and
-                    // its text is drawn by the per-line walk -- measuring the
-                    // lead on the row's uniform pitch instead put the grid
-                    // above the heading it belongs under.
-                    // (…and a UA-boxed cell is an exact stack too: its grid seats under the boxes its lines
-                    //  stand on - the mailing's itemized grid under its heading, not a hundred points lower)
-                    : rc.generatorCell || UaCellBoxes
-                        ? (leadLines[pli].BoxH > 0
-                            ? leadLines[pli].BoxH
-                            : leadLines[pli].FontSize + leadLines[pli].Leading)
-                    : rc.slice.Plan.LineHeight;
+            {
+                if (leadLines[pli].ImgReserve && leadLines[pli].FontSize > 0) ctLead += leadLines[pli].FontSize;
+                // A generator cell holding a grid is an EXACT stack, and
+                // its text is drawn by the per-line walk -- measuring the
+                // lead on the row's uniform pitch instead put the grid
+                // above the heading it belongs under.
+                // (…and a UA-boxed cell is an exact stack too: its grid seats under the boxes its lines
+                //  stand on - the mailing's itemized grid under its heading, not a hundred points lower)
+                else if (rc.generatorCell || UaCellBoxes)
+                    ctLead += leadLines[pli].BoxH > 0
+                        ? leadLines[pli].BoxH
+                        : leadLines[pli].FontSize + leadLines[pli].Leading;
+                else ctLead += rc.slice.Plan.LineHeight;
+            }
             // (…and a UA-boxed cell's continuation slice carries no top padding: the box was padded on its first page)
             var tabTopY = rc.slice.TopY - (UaCellBoxes && rc.slice.LineStart > 0 ? 0 : rc.padTop) - ctLead
                 // Generator dialect: the grid starts inside the host's border.
@@ -76,14 +77,26 @@ public partial class Table
                 // model keeps the smaller reserves (see DwNestedDrawShiftPt).
                 + (DwFormCells && innerT.HtmlDwGapReservePt > 0
                     ? Converters.HtmlToPdfConverter.DwNestedDrawShiftPt : 0);
+            // The host cell's alignment places the grid as it places the cell's text: a
+            // centred or right-aligned cell seats a narrower grid by the slack. It used to
+            // sit at the cell's left edge whatever the cell asked for.
+            var innerAlign = ResolveCellAlignment(rc.cell, rc.row);
+            if (innerAlign is HorizontalAlignment.Center or HorizontalAlignment.Right)
+            {
+                var innerWidth = innerT.GetWidth();
+                var innerSlack = rc.cellWidth - rc.padLeft - (rc.padding?.Right ?? rc.dp) - innerWidth;
+                if (innerWidth > 0 && innerSlack > 0)
+                    innerT.FlowLeftOffset += innerAlign == HorizontalAlignment.Center ? innerSlack / 2 : innerSlack;
+            }
             // Generator dialect: a grid inside a FIXED-height host row is bounded
             // by the host cell's inner bottom — rows that do not fit there go
             // to a continuation slice nobody consumes (a 35.1 pt
             // second logo row never draws inside the 27 pt host row).
-            var gridBottom = rc.generatorCell && rc.row.FixedRowHeight > 0
-                ? Math.Max(_curPageBottom, rc.slice.TopY - rc.slice.Height
-                    + (rc.pitchBorder is not null ? SideInsets(rc.pitchBorder, half: false).b : 0))
-                : _curPageBottom;
+            double gridBottom;
+            if (rc.generatorCell && rc.row.FixedRowHeight > 0)
+                gridBottom = Math.Max(_curPageBottom, rc.slice.TopY - rc.slice.Height
+                    + (rc.pitchBorder is not null ? SideInsets(rc.pitchBorder, half: false).b : 0));
+            else gridBottom = _curPageBottom;
             try
             {
                 ct.Slices = innerT.BuildMultiPage(_buildPage!, tabTopY,

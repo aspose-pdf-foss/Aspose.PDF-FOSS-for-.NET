@@ -24,12 +24,10 @@ public sealed partial class PdfToHtmlConverter
         sd.st = sd.styles[styleIdx];
         sd.fs = Math.Max(0.01, sd.st.FontSize);
         sd.fontNum = sd.styleReg.Font(sd.st.CssFamily,
-            sd.emGrid
-                ? Math.Round(sd.st.FontSize / 12.0, 2, MidpointRounding.AwayFromZero)
-                : sd.st.FontSize / 12.0,
+            sd.emGrid ? EmGridFontSizeEm(sd.st.FontSize) : sd.st.FontSize / 12.0,
             sd.st.CssColor, null,
-            sd.st.UseFallbackMetrics ? "Times New Roman" : null);
-        sd.lhNum = sd.styleReg.LineHeight(sd.st.LineHeightEm > 0 ? Math.Round(sd.st.LineHeightEm, 6) : 1.2);
+            sd.st.UseFallbackMetrics || sd.st.OverflowFace ? "Times New Roman" : null);
+        sd.lhNum = sd.styleReg.LineHeight(LineHeightClassEm(sd.st.LineHeightEm));
 
         sd.lsMilli = 0;
         sd.wsEm = null;
@@ -52,8 +50,9 @@ public sealed partial class PdfToHtmlConverter
         sd.wsCss = sd.wsEm is { } w
             ? $"word-spacing:{w.ToString("0.####", CultureInfo.InvariantCulture)}em;"
             : "";
-        sd.wsAttr = sd.weightCss.Length + sd.wsCss.Length > 0
-            ? $" style=\"{sd.weightCss}{sd.wsCss}\""
+        var bidiCss = BidiOverrideCss(sd.text);
+        sd.wsAttr = sd.weightCss.Length + sd.wsCss.Length + bidiCss.Length > 0
+            ? $" style=\"{sd.weightCss}{sd.wsCss}{bidiCss}\""
             : "";
         sd.spanLink = sd.popupItems is null && sd.linkFor is not null
             ? sd.linkFor(its[0].StartX, its[^1].StartX)
@@ -160,33 +159,41 @@ public sealed partial class PdfToHtmlConverter
         const double TAtom = 1000.0 / 11.0;
         sd.runStart = 0;
         if (!sd.emGrid)
-        for (var k = 1; k <= sd.partItems.Count; k++)
-        {
-            if (k < sd.partItems.Count && !sd.partItems[k].IsSlot && !sd.cut[k] && !sd.partItems[k - 1].IsSlot) continue;
-            // run = items[runStart..k)
-            var internals = new List<int>();
-            for (var t = sd.runStart; t < k; t++)
-                if (!sd.partItems[t].IsSlot && sd.partItems[t].LsEligible) internals.Add(t);
-            if (internals.Count >= 2)
+            for (var k = 1; k <= sd.partItems.Count; k++)
             {
-                for (var t = 0; t < internals.Count; t++)
+                if (k < sd.partItems.Count && !sd.partItems[k].IsSlot && !sd.cut[k] && !sd.partItems[k - 1].IsSlot) continue;
+                // run = items[runStart..k)
+                var internals = new List<int>();
+                for (var t = sd.runStart; t < k; t++)
+                    if (!sd.partItems[t].IsSlot && sd.partItems[t].LsEligible) internals.Add(t);
+                if (internals.Count >= 2)
                 {
-                    double sum = 0;
-                    foreach (var u in internals) if (u != internals[t]) sum += sd.partItems[u].E;
-                    var meanOther = sum / (internals.Count - 1);
-                    if (Math.Abs(sd.partItems[internals[t]].E - meanOther) > TAtom)
+                    for (var t = 0; t < internals.Count; t++)
                     {
-                        var carrier = internals[t];
-                        if (carrier > sd.runStart) sd.cut[carrier] = true;                 // [prefix][carrier
-                        if (carrier + 1 < sd.partItems.Count) sd.cut[carrier + 1] = true;      // carrier][first-after
-                        if (carrier + 2 < sd.partItems.Count && !sd.partItems[carrier + 1].IsSlot
-                            && !sd.partItems[carrier + 2].IsSlot) sd.cut[carrier + 2] = true;  // first-after][rest
-                        break;   // one atomization per run
+                        double sum = 0, sumUnkerned = 0;
+                        foreach (var u in internals)
+                            if (u != internals[t]) { sum += sd.partItems[u].E; sumUnkerned += sd.partItems[u].E - sd.partItems[u].KernMilli; }
+                        var meanOther = sum / (internals.Count - 1);
+                        var meanOtherUnkerned = sumUnkerned / (internals.Count - 1);
+                        // A char whose error is the kern that pulls the next glyph in (a TJ position adjustment
+                        // inside a word or before its punctuation) is no outlier: the kern is spacing the span
+                        // absorbs. A gap pushed open after it (a leader or tab stop) keeps its exact place.
+                        var own = sd.partItems[internals[t]];
+                        var pulledIn = own.KernMilli < 0
+                            && Math.Abs(own.E - own.KernMilli - meanOtherUnkerned) <= TAtom;
+                        if (Math.Abs(own.E - meanOther) > TAtom && !pulledIn)
+                        {
+                            var carrier = internals[t];
+                            if (carrier > sd.runStart) sd.cut[carrier] = true;                 // [prefix][carrier
+                            if (carrier + 1 < sd.partItems.Count) sd.cut[carrier + 1] = true;      // carrier][first-after
+                            if (carrier + 2 < sd.partItems.Count && !sd.partItems[carrier + 1].IsSlot
+                                && !sd.partItems[carrier + 2].IsSlot) sd.cut[carrier + 2] = true;  // first-after][rest
+                            break;   // one atomization per run
+                        }
                     }
                 }
+                sd.runStart = k;
             }
-            sd.runStart = k;
-        }
     }
 
     /// <summary>A text span's letter-spacing error and word spacing: from its slots, the em grid, or the inherited word spacing, with the text escaped for HTML.</summary>
@@ -226,7 +233,7 @@ public sealed partial class PdfToHtmlConverter
         }
         else if (slots > 0)
         {
-            ResolveSlotSpacing(sd, its, inheritWs, s, slots);
+            ResolveSlotSpacing(sd, its, slots, s == sd.spans.Count - 1);
         }
         else if (inheritWs is { } iw && !sd.emGrid)
         {
@@ -243,6 +250,6 @@ public sealed partial class PdfToHtmlConverter
             else if (x.Text is not null) t2.Append(x.Text);
             else t2.Append(x.Ch);
         }
-        sd.text = EscapeHtml(t2.ToString());
+        sd.text = EscapeHtml(SeparateStandInMarks(t2.ToString(), sd.isMintedStandIn));
     }
 }

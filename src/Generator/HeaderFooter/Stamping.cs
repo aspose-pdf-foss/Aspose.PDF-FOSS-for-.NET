@@ -64,12 +64,12 @@ public sealed partial class HeaderFooter
     /// "PLANNING AND ZONING").</summary>
     private static string ApplyTextTransforms(string html)
     {
-        return System.Text.RegularExpressions.Regex.Replace(html,
+        return SafeRegex.Replace(html,
             @"(?is)<(\w+)\b[^>]*style\s*=\s*(['""])[^'""]*?text-transform\s*:\s*(uppercase|lowercase)[^'""]*\2[^>]*>(.*?)</\1>",
             m =>
             {
                 var upper = m.Groups[3].Value.Equals("uppercase", StringComparison.OrdinalIgnoreCase);
-                return System.Text.RegularExpressions.Regex.Replace(
+                return SafeRegex.Replace(
                     m.Groups[4].Value, @"(?<=^|>)[^<>]+(?=<|$)",
                     t => upper ? t.Value.ToUpperInvariant() : t.Value.ToLowerInvariant());
             });
@@ -104,6 +104,8 @@ public sealed partial class HeaderFooter
         }
         foreach (var hard in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
         {
+            // A line that fits whole is measured once, not word by word.
+            if (Width(hard) <= bandWidth) { lines.Add(hard); continue; }
             var line = "";
             foreach (var word in hard.Split(' '))
             {
@@ -124,8 +126,10 @@ public sealed partial class HeaderFooter
     private static double FragmentLeading(TextFragment tf)
     {
         if (tf.TextState.LineSpacing > 0) return tf.TextState.LineSpacing;
-        foreach (var seg in tf.Segments)
-            if (seg.TextState.LineSpacing > 0) return seg.TextState.LineSpacing;
+#pragma warning disable S3267 // a first-match search over a value type - FirstOrDefault cannot tell no match from a default item
+        foreach (var lineSpacing in tf.Segments.Select(seg => seg.TextState).Select(textState => textState.LineSpacing))
+#pragma warning restore S3267
+            if (lineSpacing > 0) return lineSpacing;
         return 0;
     }
 
@@ -141,25 +145,6 @@ public sealed partial class HeaderFooter
         var d = Aspose.Pdf.Text.Standard14Fonts.GetDescent(Aspose.Pdf.Text.TextBuilder.MapToStandard14Public(
             new Aspose.Pdf.Text.TextState { FontName = fontName }));
         return Math.Abs(d) / 1000.0;
-    }
-
-    /// <summary>A `cm` operator mapping the page's VISUAL (rotation-adjusted) space — where
-    /// header/footer content is laid out using <c>page.Width</c>/<c>page.Height</c> — into raw
-    /// page-content space, so content drawn for a <c>/Rotate 90/180/270</c> page appears upright
-    /// at its laid-out position. Returns null for an unrotated page (Wm/Hm = raw MediaBox dims;
-    /// same mapping the watermark-on-rotated-page path uses).</summary>
-    private static string? VisualToRawRotationCm(Page page)
-    {
-        var mb = page.MediaBox;
-        var wm = mb.Width.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
-        var hm = mb.Height.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture);
-        return page.Rotate switch
-        {
-            Rotation.on90 => $"0 1 -1 0 {wm} 0 cm",
-            Rotation.on180 => $"-1 0 0 -1 {wm} {hm} cm",
-            Rotation.on270 => $"0 -1 1 0 0 {hm} cm",
-            _ => null,
-        };
     }
 
     /// <summary>Walk a HeaderFooter's Paragraphs tree (descending into Tables/
@@ -221,7 +206,7 @@ public sealed partial class HeaderFooter
     /// then keeps the Standard-14 path.</summary>
     private static Aspose.Pdf.Text.Font? ResolveDeclaredFont(string html)
     {
-        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(
+        foreach (System.Text.RegularExpressions.Match m in SafeRegex.Matches(
             html, @"font-family\s*:\s*[""']{0,2}([^;""'}]+)"))
         {
             var family = m.Groups[1].Value.Trim();
@@ -239,8 +224,7 @@ public sealed partial class HeaderFooter
     /// <summary>The page's /Resources /Font dictionary, created on demand.</summary>
     private static PdfDictionary ResolvePageFontDict(Page page)
     {
-        var resources = page.Reader.ResolveDict(page.Dict.Get("Resources"));
-        if (resources is null) { resources = new PdfDictionary(); page.Dict.Set("Resources", resources); }
+        var resources = Aspose.Pdf.Forms.Form.EnsureOwnPageResources(page.Dict, page.Reader);
         var fontDict = page.Reader.ResolveDict(resources.Get("Font"));
         if (fontDict is null) { fontDict = new PdfDictionary(); resources.Set("Font", fontDict); }
         return fontDict;
@@ -252,14 +236,11 @@ public sealed partial class HeaderFooter
     /// </summary>
     private static string EnsureFontResource(Page page, string baseFontName)
     {
-        var resources = page.Dict.Get("Resources") as PdfDictionary;
-        if (resources is null)
-        {
-            resources = new PdfDictionary();
-            page.Dict.Set("Resources", resources);
-        }
+        // Resolved, and the page's own: a bare cast misses an indirect or inherited dictionary
+        // and a fresh one in its place hides the page's existing fonts and images.
+        var resources = Aspose.Pdf.Forms.Form.EnsureOwnPageResources(page.Dict, page.Reader);
 
-        var fontDict = resources.Get("Font") as PdfDictionary;
+        var fontDict = page.Reader.ResolveDict(resources.Get("Font"));
         if (fontDict is null)
         {
             fontDict = new PdfDictionary();

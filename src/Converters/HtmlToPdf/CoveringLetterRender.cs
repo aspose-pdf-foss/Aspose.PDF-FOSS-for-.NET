@@ -15,7 +15,7 @@ internal static partial class HtmlToPdfConverter
         cl.pageHeight = pageHeight;
         if (!cl.html.Contains("covering-letter", StringComparison.Ordinal)
             || !cl.html.Contains("data-berthr-editable", StringComparison.Ordinal)
-            || !Regex.IsMatch(cl.html, @"class\s*=\s*[""']justify[""']", RegexOptions.IgnoreCase))
+            || !SafeRegex.IsMatch(cl.html, @"class\s*=\s*[""']justify[""']", RegexOptions.IgnoreCase))
             return null;
         if (WinMetricsFor("Arial") is not { } am) return null;
         cl.cm = WinMetricsFor("Candara Bold") ?? am;

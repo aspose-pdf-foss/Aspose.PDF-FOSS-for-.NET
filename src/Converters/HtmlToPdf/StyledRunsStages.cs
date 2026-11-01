@@ -15,7 +15,7 @@ internal static partial class HtmlToPdfConverter
         int j = er.i;
         var faceName = PosFaceNameFor(char.IsHighSurrogate(er.lineText[er.i]) && er.i + 1 < er.lineText.Length
             ? char.ConvertToUtf32(er.lineText[er.i], er.lineText[er.i + 1]) : er.lineText[er.i]);
-        var isSupRun = er.supFlags.Count > er.i && er.supFlags.ElementAt(er.i);
+        var isSupRun = er.supFlags.Count > er.i && er.supFlags[er.i];
         var runFs = isSupRun ? er.supFontSize : er.fontSize;
         var runY = er.y + (isSupRun ? er.supRise : 0);
         double runW = 0;
@@ -24,7 +24,7 @@ internal static partial class HtmlToPdfConverter
         {
             var u2 = j < er.urls.Count ? er.urls[j] : null;
             if (!string.Equals(u2, url, StringComparison.Ordinal)) break;
-            if ((er.supFlags.Count > j && er.supFlags.ElementAt(j)) != isSupRun) break;
+            if ((er.supFlags.Count > j && er.supFlags[j]) != isSupRun) break;
             int cp = er.lineText[j];
             int cpLen = 1;
             if (char.IsHighSurrogate(er.lineText[j]) && j + 1 < er.lineText.Length && char.IsLowSurrogate(er.lineText[j + 1]))
@@ -39,7 +39,7 @@ internal static partial class HtmlToPdfConverter
             (var adv, k) = MeasureSerifChar(er.lineText, k, runFs);
             runW += adv;
             runSb.Append(er.lineText, j, cpLen);
-            var ext = er.extraAdv.Count > j ? er.extraAdv.ElementAt(j) : 0;
+            var ext = er.extraAdv.Count > j ? er.extraAdv[j] : 0;
             j += cpLen;
             if (ext != 0) { runW += ext; break; }
         }
@@ -49,8 +49,7 @@ internal static partial class HtmlToPdfConverter
         er.sb.Append(isLink ? "0 0 1 rg " : "0 0 0 rg ");
 
         var allAnsi = true;
-        foreach (var ch in runText)
-            if (ch > 0x7F && Text.Cp1252.TryGetByte(ch) is null) { allAnsi = false; break; }
+        if (runText.Any(ch => ch > 0x7F && Text.Cp1252.TryGetByte(ch) is null)) { allAnsi = false; }
 
         var face = PosFace(faceName);
         if (allAnsi && faceName.Equals("Times New Roman", StringComparison.OrdinalIgnoreCase) && face.ttf is not null)

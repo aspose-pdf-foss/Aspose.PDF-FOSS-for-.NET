@@ -38,39 +38,6 @@ public sealed partial class PdfFileSignature
     public bool VerifySignature(SignatureName signName)
         => signName is not null && VerifySignature(signName.FullName);
 
-    /// <summary>Returns the signing certificate of the named signature as a stream of DER-encoded (.cer) bytes, or null when it cannot be found or the name is null.</summary>
-    public Stream? ExtractCertificate(SignatureName signName)
-        => signName is null ? null : ExtractCertificate(signName.FullName);
-
-    public bool TryExtractCertificate(SignatureName signName, out Stream stream)
-    {
-        stream = null!;
-        if (signName is null) return false;
-        var s = ExtractCertificate(signName.FullName);
-        if (s is null) return false;
-        stream = s;
-        return true;
-    }
-
-    public bool TryExtractCertificate(SignatureName signName, out System.Security.Cryptography.X509Certificates.X509Certificate2 certificate)
-    {
-        certificate = null!;
-        if (signName is null) return false;
-        using var certStream = ExtractCertificate(signName.FullName);
-        if (certStream is null) return false;
-        try
-        {
-            var bytes = new byte[certStream.Length];
-            certStream.ReadExactly(bytes);
-            certificate = Compat.LoadCertificate(bytes);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     /// <summary>Returns true when the named signature is intact and valid. Throws when the signature is detected as forged.</summary>
     public bool VerifySignature(string signName)
     {
@@ -80,129 +47,6 @@ public sealed partial class PdfFileSignature
         var input = RequireBound();
         return PdfSigner.Verify(input, signName, _password);
     }
-
-    /// <summary>The forgery verdict for the named signature - see
-    /// <see cref="Signature.DetectForgery(long)"/> - or null when it is sound or absent.</summary>
-    private string? DetectSignatureForgery(string signName)
-    {
-        var input = RequireBound();
-        using var doc = OpenDoc(input);
-        var sig = Signature.EnumerateSignatures(doc).FirstOrDefault(s => s.FieldName == signName);
-        return sig?.DetectForgery(input.Length);
-    }
-
-    /// <summary>
-    /// Non-throwing signature verification. Returns whether the signature is valid
-    /// and reports the outcome (including forgery detection) via
-    /// <paramref name="verificationResult"/>.
-    /// </summary>
-    public bool TryVerifySignature(SignatureName signName, out VerificationResult verificationResult)
-    {
-        if (signName is null)
-        {
-            verificationResult = VerificationResult.Undefined("Signature name is null.");
-            return false;
-        }
-        try
-        {
-            var ok = VerifySignature(signName.FullName);
-            verificationResult = ok
-                ? VerificationResult.Valid()
-                : VerificationResult.Invalid($"Signature '{signName.FullName}' failed cryptographic verification.");
-            return ok;
-        }
-        catch (Aspose.Pdf.Sanitization.SanitizationException e)
-        {
-            // A recognised forgery attack — undefined verdict, flagged compromised.
-            verificationResult = VerificationResult.Compromised(e.Message, e);
-            return false;
-        }
-        catch (Exception e)
-        {
-            verificationResult = VerificationResult.Undefined(e.Message, e);
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Extract the X.509 signing certificate from the named signature field
-    /// and return it as a memory stream of DER-encoded bytes (.cer format).
-    /// PKCS#7 /Contents are parsed via the managed CMS reader; the legacy
-    /// adbe.x509.rsa_sha1 /Cert array is also honoured.
-    /// </summary>
-    public Stream? ExtractCertificate(string signName)
-    {
-        var input = RequireBound();
-        using var doc = OpenDoc(input);
-        var form = doc.Form;
-        if (form is null) return null;
-        Forms.Field? field = null;
-        foreach (var f in form.Fields)
-        {
-            if (f.Type == Forms.FieldType.Signature &&
-                (f.FullName == signName || f.PartialName == signName))
-            {
-                field = f;
-                break;
-            }
-        }
-        if (field is null) return null;
-
-        var sigDict = doc.Reader.ResolveDict(field.Dict.Get("V"));
-        if (sigDict is null) return null;
-
-        var certObj = doc.Reader.Resolve(sigDict.Get("Cert"));
-        if (certObj is Aspose.Pdf.Core.PdfString single)
-            return new MemoryStream(single.Value, writable: false);
-        if (certObj is Aspose.Pdf.Core.PdfArray arr && arr.Count > 0 &&
-            arr[0] is Aspose.Pdf.Core.PdfString s)
-            return new MemoryStream(s.Value, writable: false);
-
-        var contentsObj = doc.Reader.Resolve(sigDict.Get("Contents"));
-        if (contentsObj is not Aspose.Pdf.Core.PdfString p7) return null;
-        try
-        {
-            var certDer = Aspose.Pdf.Security.CmsParser.GetFirstCertificateDer(p7.Value);
-            if (certDer is null) return null;
-            return new MemoryStream(certDer, writable: false);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    /// <summary>Returns true when the bound document carries usage rights (a /UR or /UR3 entry in /Perms).</summary>
-    public bool ContainsUsageRights()
-    {
-        var input = RequireBound();
-        using var doc = OpenDoc(input);
-        var perms = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("Perms"));
-        if (perms is null) return false;
-        return perms.ContainsKey("UR") || perms.ContainsKey("UR3");
-    }
-
-    /// <summary>Removes the usage rights (/UR and /UR3) from the bound document.</summary>
-    public void RemoveUsageRights()
-    {
-        var input = RequireBound();
-        using var doc = OpenDoc(input);
-        var perms = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("Perms"));
-        if (perms is null)
-        {
-            _boundPdf = doc.ToArray();
-            return;
-        }
-        perms.Remove("UR");
-        perms.Remove("UR3");
-        if (!perms.Keys.Any())
-            doc.Reader.Catalog.Remove("Perms");
-        _boundPdf = doc.ToArray();
-    }
-
-    /// <summary>Verifies that a signed signature is intact. Alias for
-    /// <see cref="VerifySignature(string)"/>.</summary>
-    public bool VerifySigned(string signName) => VerifySignature(signName);
 
     /// <summary>Verify a signature with explicit options + return a
     /// <see cref="Security.ValidationResult"/> describing the outcome.
@@ -290,6 +134,162 @@ public sealed partial class PdfFileSignature
         }
         return VerifySignature(signName.FullName, publicKeyCertificate, options, out validationResult);
     }
+
+    /// <summary>Returns the signing certificate of the named signature as a stream of DER-encoded (.cer) bytes, or null when it cannot be found or the name is null.</summary>
+    public Stream? ExtractCertificate(SignatureName signName)
+        => signName is null ? null : ExtractCertificate(signName.FullName);
+
+    /// <summary>
+    /// Extract the X.509 signing certificate from the named signature field
+    /// and return it as a memory stream of DER-encoded bytes (.cer format).
+    /// PKCS#7 /Contents are parsed via the managed CMS reader; the legacy
+    /// adbe.x509.rsa_sha1 /Cert array is also honoured.
+    /// </summary>
+    public Stream? ExtractCertificate(string signName)
+    {
+        var input = RequireBound();
+        using var doc = OpenDoc(input);
+        var form = doc.Form;
+        if (form is null) return null;
+        Forms.Field? field = null;
+        foreach (var f in form.Fields)
+        {
+            if (f.Type == Forms.FieldType.Signature &&
+                (f.FullName == signName || f.PartialName == signName))
+            {
+                field = f;
+                break;
+            }
+        }
+        if (field is null) return null;
+
+        var sigDict = doc.Reader.ResolveDict(field.Dict.Get("V"));
+        if (sigDict is null) return null;
+
+        var certObj = doc.Reader.Resolve(sigDict.Get("Cert"));
+        if (certObj is Aspose.Pdf.Core.PdfString single)
+            return new MemoryStream(single.Value, writable: false);
+        if (certObj is Aspose.Pdf.Core.PdfArray arr && arr.Count > 0 &&
+            arr[0] is Aspose.Pdf.Core.PdfString s)
+            return new MemoryStream(s.Value, writable: false);
+
+        var contentsObj = doc.Reader.Resolve(sigDict.Get("Contents"));
+        if (contentsObj is not Aspose.Pdf.Core.PdfString p7) return null;
+        try
+        {
+            var certDer = Aspose.Pdf.Security.CmsParser.GetSignerCertificateDer(p7.Value);
+            if (certDer is null) return null;
+            return new MemoryStream(certDer, writable: false);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public bool TryExtractCertificate(SignatureName signName, out Stream stream)
+    {
+        stream = null!;
+        if (signName is null) return false;
+        var s = ExtractCertificate(signName.FullName);
+        if (s is null) return false;
+        stream = s;
+        return true;
+    }
+
+    public bool TryExtractCertificate(SignatureName signName, out System.Security.Cryptography.X509Certificates.X509Certificate2 certificate)
+    {
+        certificate = null!;
+        if (signName is null) return false;
+        using var certStream = ExtractCertificate(signName.FullName);
+        if (certStream is null) return false;
+        try
+        {
+            var bytes = new byte[certStream.Length];
+            certStream.ReadExactly(bytes);
+            certificate = Compat.LoadCertificate(bytes);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The forgery verdict for the named signature - see
+    /// <see cref="Signature.DetectForgery(long)"/> - or null when it is sound or absent.</summary>
+    private string? DetectSignatureForgery(string signName)
+    {
+        var input = RequireBound();
+        using var doc = OpenDoc(input);
+        var sig = Signature.EnumerateSignatures(doc).FirstOrDefault(s => s.FieldName == signName);
+        return sig?.DetectForgery(input.Length);
+    }
+
+    /// <summary>
+    /// Non-throwing signature verification. Returns whether the signature is valid
+    /// and reports the outcome (including forgery detection) via
+    /// <paramref name="verificationResult"/>.
+    /// </summary>
+    public bool TryVerifySignature(SignatureName signName, out VerificationResult verificationResult)
+    {
+        if (signName is null)
+        {
+            verificationResult = VerificationResult.Undefined("Signature name is null.");
+            return false;
+        }
+        try
+        {
+            var ok = VerifySignature(signName.FullName);
+            verificationResult = ok
+                ? VerificationResult.Valid()
+                : VerificationResult.Invalid($"Signature '{signName.FullName}' failed cryptographic verification.");
+            return ok;
+        }
+        catch (Aspose.Pdf.Sanitization.SanitizationException e)
+        {
+            // A recognised forgery attack — undefined verdict, flagged compromised.
+            verificationResult = VerificationResult.Compromised(e.Message, e);
+            return false;
+        }
+        catch (Exception e)
+        {
+            verificationResult = VerificationResult.Undefined(e.Message, e);
+            return false;
+        }
+    }
+
+    /// <summary>Returns true when the bound document carries usage rights (a /UR or /UR3 entry in /Perms).</summary>
+    public bool ContainsUsageRights()
+    {
+        var input = RequireBound();
+        using var doc = OpenDoc(input);
+        var perms = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("Perms"));
+        if (perms is null) return false;
+        return perms.ContainsKey("UR") || perms.ContainsKey("UR3");
+    }
+
+    /// <summary>Removes the usage rights (/UR and /UR3) from the bound document.</summary>
+    public void RemoveUsageRights()
+    {
+        var input = RequireBound();
+        using var doc = OpenDoc(input);
+        var perms = doc.Reader.ResolveDict(doc.Reader.Catalog.Get("Perms"));
+        if (perms is null)
+        {
+            _boundPdf = doc.ToArray();
+            return;
+        }
+        perms.Remove("UR");
+        perms.Remove("UR3");
+        if (!perms.Keys.Any())
+            doc.Reader.Catalog.Remove("Perms");
+        _boundPdf = doc.ToArray();
+    }
+
+    /// <summary>Verifies that a signed signature is intact. Alias for
+    /// <see cref="VerifySignature(string)"/>.</summary>
+    public bool VerifySigned(string signName) => VerifySignature(signName);
 
     /// <summary>Apply <paramref name="options"/> on top of the cryptographic check
     /// and produce the (result, verified) pair the option-taking overloads return.

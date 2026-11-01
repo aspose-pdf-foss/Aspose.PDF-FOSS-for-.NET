@@ -52,7 +52,7 @@ internal static partial class HtmlToPdfConverter
         var comma = src.IndexOf(',');
         if (comma < 0 || !rule.HasH) return;
         byte[] bytes;
-        try { bytes = System.Convert.FromBase64String(src[(comma + 1)..]); }
+        try { bytes = Base64Payload(src[(comma + 1)..]); }
         catch { return; }
         var top = offT + rule.T;
         var p0 = (int)Math.Floor(top / dp.band);

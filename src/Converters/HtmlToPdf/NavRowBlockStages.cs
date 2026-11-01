@@ -15,7 +15,9 @@ internal static partial class HtmlToPdfConverter
 
     private static void CollectNavCluster(NavRowBlockState nv, HtmlNode cluster, bool rightGroup)
     {
+#pragma warning disable S3267 // a step loop: each call does the work and returns false to stop - as a LINQ predicate the side effects would hide in a query
         foreach (var li in cluster.Descendants())
+#pragma warning restore S3267
         {
             if (!CollectNavClusterItem(nv, cluster, rightGroup, li)) break;
         }
@@ -34,7 +36,7 @@ internal static partial class HtmlToPdfConverter
         var text = DomText(li, nv.css);
         if (text.Length == 0) return true;
         // style anchor: deepest element directly holding a text node
-        HtmlNode styleEl = li;
+        HtmlNode styleEl;
         HtmlNode? Find(HtmlNode n)
         {
             foreach (var c in n.Children)

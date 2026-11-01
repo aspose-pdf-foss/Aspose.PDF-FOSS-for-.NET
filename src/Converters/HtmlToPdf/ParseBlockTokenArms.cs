@@ -8,7 +8,9 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The inline tokens the block arms leave over: the line breaks, the emphasis and image tags, and the anchors that open a link over the run.</summary>
     private static void ParseInlineAndAnchorToken(ParseBlocksState pb, Token tok)
     {
-        if (pb.tagCmp == "small")
+        if (pb.tagCmp.Equals("bdo", StringComparison.OrdinalIgnoreCase))
+            pb.openBdoRuns.Push((pb.currentText.Length, DirAttributeRtl(tok) == true));
+        else if (pb.tagCmp == "small")
             MarkInlineSize(pb.styleStack, factor: 0.85);
         else if (pb.tagCmp is "sub" or "sup")
             // The UA sheet gives sub and sup `font-size: smaller`, which steps the size down
@@ -52,7 +54,7 @@ internal static partial class HtmlToPdfConverter
                     aFore = aCol;
                 if (aFam is not null || aFore is not null)
                 {
-                    Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, false, aTop);
+                    Flush(pb, pb.controlBoxes, pb.uaBlockRhythm, pb.articleRhythm, pb.spanPtTypography, aTop);
                     pb.uaFontSaves.Push((aTop.FontSize, aTop.ForeColor, aTop.FontFamily));
                     pb.uaAnchorFrames++;
                     if (aFam is not null) aTop.FontFamily = aFam;

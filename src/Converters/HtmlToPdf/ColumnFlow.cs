@@ -25,36 +25,36 @@ internal static partial class HtmlToPdfConverter
         ic.options = options;
         ic.pageWidth = pageWidth;
         ic.pageHeight = pageHeight;
-        ic.contM = Regex.Match(ic.html,
+        ic.contM = SafeRegex.Match(ic.html,
             @"<div\b[^>]*style\s*=\s*([""'])(?<st>(?:(?!\1).)*?(?<![-\w])columns\s*:\s*(?<n>\d+)[^""']*)\1[^>]*>",
             RegexOptions.IgnoreCase);
         if (!ic.contM.Success) return null;
         ic.nCols = int.Parse(ic.contM.Groups["n"].Value);
         if (ic.nCols is < 2 or > 12) return null;
         ic.body = ic.html[(ic.contM.Index + ic.contM.Length)..];
-        ic.endM = Regex.Match(ic.body, @"</body\s*>", RegexOptions.IgnoreCase);
+        ic.endM = SafeRegex.Match(ic.body, @"</body\s*>", RegexOptions.IgnoreCase);
         if (ic.endM.Success) ic.body = ic.body[..ic.endM.Index];
 
-        ic.gapM = Regex.Match(ic.contM.Groups["st"].Value,
+        ic.gapM = SafeRegex.Match(ic.contM.Groups["st"].Value,
             @"column-gap\s*:\s*([\d.]+\s*\w*)", RegexOptions.IgnoreCase);
 
-        ic.bodyM = Regex.Match(ic.html, @"<body\b[^>]*style\s*=\s*([""'])(?<st>(?:(?!\1).)*)\1",
+        ic.bodyM = SafeRegex.Match(ic.html, @"<body\b[^>]*style\s*=\s*([""'])(?<st>(?:(?!\1).)*)\1",
             RegexOptions.IgnoreCase);
         ic.bodySt = ic.bodyM.Success ? DecodeEntities(ic.bodyM.Groups["st"].Value) : "";
         ic.face = "Times New Roman";
-        if (Regex.Match(ic.bodySt, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
+        if (SafeRegex.Match(ic.bodySt, @"font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase)
                 is { Success: true } bfM
             && FirstFontFamily(bfM.Groups[1].Value) is { Length: > 0 } bfName
             && WinMetricsFor(bfName) is not null)
             ic.face = bfName;
         if (WinMetricsFor(ic.face) is not { } fm) return null;
         ic.fs = 10.0;
-        if (Regex.Match(ic.bodySt, @"font-size\s*:\s*([\d.]+\s*\w*)", RegexOptions.IgnoreCase)
+        if (SafeRegex.Match(ic.bodySt, @"font-size\s*:\s*([\d.]+\s*\w*)", RegexOptions.IgnoreCase)
                 is { Success: true } bsM
             && TryParseLength(bsM.Groups[1].Value.Replace(" ", "")) is { } bsPt && bsPt > 0)
             ic.fs = bsPt;
         ic.padX = 0.0;
-        if (Regex.Match(ic.bodySt, @"padding\s*:\s*([\d.]+\s*\w*)\s+([\d.]+\s*\w*)",
+        if (SafeRegex.Match(ic.bodySt, @"padding\s*:\s*([\d.]+\s*\w*)\s+([\d.]+\s*\w*)",
                 RegexOptions.IgnoreCase) is { Success: true } bpM
             && TryParseLength(bpM.Groups[2].Value.Replace(" ", "")) is { } padXv)
             ic.padX = padXv;

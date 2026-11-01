@@ -21,8 +21,8 @@ private sealed class MultiPageSliceState
     // into column slices, one run of pages per slice. Slicing is GRID-column
     // based (a ColSpan cell crossing a slice boundary contributes an EMPTY
     // continuation cell that keeps its background/border; text renders once,
-    // in the slice where the cell starts). Each slice re-renders every row;
-    // the first `repeat` grid columns are prepended to every slice. The
+    // in the slice where the cell starts). Each slice re-renders every row; the
+    // first `repeat` grid columns are prepended to every slice. The
     // packing budget is the page content band (page width minus BOTH page
     // margins) minus the repeating block — measured on the
     // 12/6/8-page layouts of the repeating-column shape.

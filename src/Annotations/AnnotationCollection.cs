@@ -161,8 +161,10 @@ public sealed partial class AnnotationCollection : IReadOnlyList<Annotation>
         return AddDict(dict);
     }
 
+#pragma warning disable S2368 // public API: the published signature
     /// <summary>Add an ink (freehand drawing) annotation.</summary>
     public Annotation AddInkAnnotation(Rectangle rect,
+#pragma warning restore S2368
         double[][] inkPaths, double[]? color = null, double lineWidth = 1)
     {
         var dict = AnnotationFactory.CreateInkAnnotation(rect, inkPaths, color, lineWidth);
@@ -349,10 +351,7 @@ public sealed partial class AnnotationCollection : IReadOnlyList<Annotation>
     public bool Contains(Annotation annotation)
     {
         if (annotation is null) return false;
-        foreach (var a in _annotations)
-            if (ReferenceEquals(a, annotation) || ReferenceEquals(a.Dict, annotation.Dict))
-                return true;
-        return false;
+        return _annotations.Any(a => ReferenceEquals(a, annotation) || ReferenceEquals(a.Dict, annotation.Dict));
     }
 
     /// <summary>Copy annotations into <paramref name="array"/> starting at
@@ -372,6 +371,22 @@ public sealed partial class AnnotationCollection : IReadOnlyList<Annotation>
     {
         if (index < 1 || index > _annotations.Count) return;
         RemoveAt(index - 1);
+    }
+
+    /// <summary>Remove the given annotation from the collection. Matches by the
+    /// underlying PDF dictionary so callers iterating an earlier snapshot can
+    /// still target an annotation in a later, refreshed collection.</summary>
+    public void Delete(Annotation annotation)
+    {
+        var targetDict = annotation.Dict;
+        for (var i = 0; i < _annotations.Count; i++)
+        {
+            if (ReferenceEquals(_annotations[i].Dict, targetDict))
+            {
+                RemoveAt(i);
+                return;
+            }
+        }
     }
 
     /// <summary>Find an annotation whose /NM (annotation name) entry
@@ -405,30 +420,18 @@ public sealed partial class AnnotationCollection : IReadOnlyList<Annotation>
         return false;
     }
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers may add and remove annotations.</summary>
     public bool IsReadOnly => false;
+#pragma warning restore S2325
 
+#pragma warning disable S2325 // public API: the published instance member
     /// <summary>Always false: callers serialise their own access.</summary>
     public bool IsSynchronized => false;
+#pragma warning restore S2325
 
     /// <summary>Sentinel object for ICollection.SyncRoot-style locking.</summary>
     public object SyncRoot { get; } = new();
-
-    /// <summary>Remove the given annotation from the collection. Matches by the
-    /// underlying PDF dictionary so callers iterating an earlier snapshot can
-    /// still target an annotation in a later, refreshed collection.</summary>
-    public void Delete(Annotation annotation)
-    {
-        var targetDict = annotation.Dict;
-        for (var i = 0; i < _annotations.Count; i++)
-        {
-            if (ReferenceEquals(_annotations[i].Dict, targetDict))
-            {
-                RemoveAt(i);
-                return;
-            }
-        }
-    }
 
     /// <summary>Remove an annotation at the given index.</summary>
     public void RemoveAt(int index)
@@ -452,9 +455,12 @@ public sealed partial class AnnotationCollection : IReadOnlyList<Annotation>
     /// PdfPageStamp carries the stamped page's annotations onto the target).</summary>
     internal Annotation AddImportedDict(PdfDictionary dict) => AddDict(dict);
 
-    private Annotation AddDict(PdfDictionary dict)
+    /// <summary>Add an annotation imported as an object of the document: /Annots holds its reference.</summary>
+    internal Annotation AddImportedObject(PdfIndirectRef reference, PdfDictionary dict) => AddDict(dict, reference);
+
+    private Annotation AddDict(PdfDictionary dict, PdfIndirectRef? reference = null)
     {
-        var annot = Annotation.Create(dict, _reader);
+        var annot = Annotation.Create(dict, _reader, reference?.ObjectNumber ?? -1);
         _annotations.Add(annot);
 
         var annotsObj = _reader.Resolve(_pageDict.Get("Annots"));
@@ -468,7 +474,7 @@ public sealed partial class AnnotationCollection : IReadOnlyList<Annotation>
             annotsArr = new PdfArray();
             _pageDict.Set("Annots", annotsArr);
         }
-        annotsArr.Add(dict);
+        annotsArr.Add(reference ?? (PdfObject)dict);
 
         return annot;
     }

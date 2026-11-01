@@ -19,7 +19,7 @@ public sealed partial class Document
     {
         var ur = new UaRowState();
         ur.declH = 0.0;
-        ur.dhm = System.Text.RegularExpressions.Regex.Match(
+        ur.dhm = SafeRegex.Match(
             rm.Groups["a"].Value, @"height\s*:\s*([\d.]+)pt", UaRx);
         if (ur.dhm.Success)
             ur.declH = double.Parse(ur.dhm.Groups[1].Value,
@@ -29,10 +29,10 @@ public sealed partial class Document
             Color? Bg, Color? EdgeColor, bool[] Solid,
             List<string> Lines, List<double> Boxes)>();
         foreach (System.Text.RegularExpressions.Match dm in
-            System.Text.RegularExpressions.Regex.Matches(rm.Groups["in"].Value,
+            SafeRegex.Matches(rm.Groups["in"].Value,
                 @"<td(?<a>[^>]*)>(?<in>.*?)</td>", UaRx))
         {
-            ParseUaCell(ua, ur, dm);
+            ParseUaCell(ur, dm);
         }
         if (ur.cells.Count == 0) return true;
 
@@ -43,9 +43,10 @@ public sealed partial class Document
         }
 
         ur.edged = false;
-        foreach (var c in ur.cells) if (c.Solid[0] || c.Solid[2]) ur.edged = true;
+        foreach (var solid in ur.cells.Select(c => c.Solid)) if (solid[0] || solid[2]) ur.edged = true;
+        var edges = ur.edged ? 2 * UaTableEdgePt : 0;
         ur.rowH = Math.Max(
-            ur.declH > 0 ? ur.declH + (ur.edged ? 2 * UaTableEdgePt : 0) : 0,
+            ur.declH > 0 ? ur.declH + edges : 0,
             ur.rowContentH + 2 * ua.pad);
 
         ur.cellL = ua.marginLeft;

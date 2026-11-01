@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Aspose.Pdf.Text;
 
@@ -21,10 +22,19 @@ internal static partial class HtmlToPdfConverter
     // all eight Employer-grid columns within a point: 'Employer Name'
     // rides one line while 'Contact Person' wraps. Widths measure in the
     // REAL TimesNewRoman metrics the cells draw with.
-    private static double GridMeasure(EscapedTableState et, bool bold, string s, double pt)
+    /// <summary>An inline control's box width: an input's own width (a select box adds its side bearings), a
+    /// button its caption plus chrome, an empty button the empty width.</summary>
+    private static double ControlBoxWidth(Block it)
+    {
+        if (it.IsInputField) return it.InputWidth + (it.IsSelectBox ? 2 * SelectSideBearingPt : 0);
+        if (it.ButtonCaption.Length > 0) return MeasureStd14("Helvetica", it.ButtonCaption, 10) + ButtonChromeWPt;
+        return EmptyButtonWPt;
+    }
+
+    private static double GridMeasure(bool bold, string s, double pt)
         => MeasureFaceText(bold ? "Times New Roman Bold" : "Times New Roman", s, pt);
 
-    private static (double Full, double Min) CellWidths(EscapedTableState et, List<Block> items, bool header)
+    private static (double Full, double Min) CellWidths(List<Block> items, bool header)
     {
         double full = 0, min = 0;
         foreach (var it in items)
@@ -39,17 +49,17 @@ internal static partial class HtmlToPdfConverter
             {
                 var bold = header || it.FontRes == "F2";
                 var fpt = it.FontSize > 0 ? it.FontSize : EscapedBodyFontPt;
-                full += GridMeasure(et, bold, it.Text, fpt);
+                full += GridMeasure(bold, it.Text, fpt);
                 foreach (var word in it.Text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 {
                     var hy = word.IndexOf('-');
                     if (hy > 0 && hy < word.Length - 1)
                     {
-                        min = System.Math.Max(min, GridMeasure(et, bold, word[..(hy + 1)], fpt));
-                        min = System.Math.Max(min, GridMeasure(et, bold, word[(hy + 1)..], fpt));
+                        min = System.Math.Max(min, GridMeasure(bold, word[..(hy + 1)], fpt));
+                        min = System.Math.Max(min, GridMeasure(bold, word[(hy + 1)..], fpt));
                     }
                     else
-                        min = System.Math.Max(min, GridMeasure(et, bold, word, fpt));
+                        min = System.Math.Max(min, GridMeasure(bold, word, fpt));
                 }
             }
         }
@@ -59,7 +69,7 @@ internal static partial class HtmlToPdfConverter
     // Assemble every cell's wrapped lines: row height comes from the
     // tallest cell (16.5 floor = one 13.5 line + the cell's 3 pt of
     // vertical padding) and a shorter cell CENTRES in its row.
-    private static (List<(List<(Block? Ctl, string? Txt, double XOff, double FontPt, string Res)> Items, double H)> Lines, double ContentH) AssembleCell(EscapedTableState et, List<Block> items, bool header, double availW)
+    private static (List<(List<(Block? Ctl, string? Txt, double XOff, double FontPt, string Res)> Items, double H)> Lines, double ContentH) AssembleCell(List<Block> items, bool header, double availW)
     {
         var cellLines = new List<(List<(Block? Ctl, string? Txt, double XOff, double FontPt, string Res)>, double)>();
         var cl = new List<(Block? Ctl, string? Txt, double XOff, double FontPt, string Res)>();
@@ -75,12 +85,10 @@ internal static partial class HtmlToPdfConverter
         {
             if (it.IsInputField || it.IsButton)
             {
-                var w = it.IsInputField
-                    ? it.InputWidth + (it.IsSelectBox ? 2 * SelectSideBearingPt : 0)
-                    : it.ButtonCaption.Length > 0
-                        ? MeasureStd14("Helvetica", it.ButtonCaption, 10) + ButtonChromeWPt : EmptyButtonWPt;
-                var h = it.IsInputField ? it.InputHeight
-                    : it.ButtonCaption.Length > 0 ? ButtonHeightPt : EmptyButtonHPt;
+                var w = ControlBoxWidth(it);
+                double h = EmptyButtonHPt;
+                if (it.IsInputField) h = it.InputHeight;
+                else if (it.ButtonCaption.Length > 0) h = ButtonHeightPt;
                 if (cl.Count > 0 && pen + w > availW + 1e-6) EndCellLine();
                 cl.Add((it, null, pen, 0, ""));
                 // A control FILLS its cell: a 16.17 combo
@@ -92,8 +100,9 @@ internal static partial class HtmlToPdfConverter
             }
             else if (!string.IsNullOrEmpty(it.Text))
             {
-                var res = header || it.FontRes == "F2" ? "F6"
-                    : it.FontRes == "F3" ? "F7" : "F5";
+                string res = "F5";
+                if (header || it.FontRes == "F2") res = "F6";
+                else if (it.FontRes == "F3") res = "F7";
                 var bold = res == "F6";
                 var fpt = it.FontSize > 0 ? it.FontSize : EscapedBodyFontPt;
                 int p = 0;
@@ -113,12 +122,12 @@ internal static partial class HtmlToPdfConverter
                         var segEnd = hy >= 0 && hy < word.Length - 1 ? hy + 1 : word.Length;
                         var token = word[segStart..segEnd];
                         segStart = segEnd;
-                        var wTrim = GridMeasure(et, bold, token.TrimEnd(' '), fpt);
+                        var wTrim = GridMeasure(bold, token.TrimEnd(' '), fpt);
                         if (cl.Count > 0 && pen + wTrim > availW + 1e-6) EndCellLine();
                         var drawTok = cl.Count == 0 ? token.TrimStart(' ') : token;
                         if (drawTok.Length == 0) continue;
                         cl.Add((null, drawTok, pen, fpt, res));
-                        pen += GridMeasure(et, bold, drawTok, fpt);
+                        pen += GridMeasure(bold, drawTok, fpt);
                     }
                 }
             }
@@ -156,13 +165,7 @@ internal static partial class HtmlToPdfConverter
                 {
                     double lineW = 0;
                     foreach (var (lc, lt, lx, lp, lr) in lineItems)
-                        lineW = System.Math.Max(lineW, lx + (lc is null
-                            ? GridMeasure(et, lr == "F6", lt ?? "", lp)
-                            : lc.IsInputField
-                                ? lc.InputWidth + (lc.IsSelectBox ? 2 * SelectSideBearingPt : 0)
-                                : lc.ButtonCaption.Length > 0
-                                    ? MeasureStd14("Helvetica", lc.ButtonCaption, 10) + ButtonChromeWPt
-                                    : EmptyButtonWPt));
+                        lineW = System.Math.Max(lineW, lx + (lc is null ? GridMeasure(lr == "F6", lt ?? "", lp) : ControlBoxWidth(lc)));
                     cellHOff = System.Math.Max(0, (cw - 2 * GridCellPad - lineW) / 2);
                 }
                 foreach (var (ctl, txt, xOff, fpt, res) in lineItems)
@@ -198,7 +201,7 @@ internal static partial class HtmlToPdfConverter
                             DrawBox(flow.page, bcx + 2, bcy + 1.5, bcw - 4, bch - 3,
                                 null, 0, dialectButtonFill);
                         if (ctl.ButtonCaption.Length > 0)
-                            flow.page.AddContentStream(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+                            flow.page.AddContentStream(Encoding.ASCII.GetBytes(Compat.Format(CultureInfo.InvariantCulture,
                                 $"q BT /F1 10 Tf {dialectButtonTextRg} 1 0 0 1 {bcx + ButtonCaptionInsetXPt:0.##} {bcy + bch - ButtonCaptionDropPt:0.##} Tm ({EscapePdfString(ctl.ButtonCaption)}) Tj ET Q\n")));
                     }
                 }
@@ -221,7 +224,7 @@ internal static partial class HtmlToPdfConverter
             double rh = 16.5;
             for (int ci = 0; ci < r.Count; ci++)
             {
-                plans[ci] = AssembleCell(et, r[ci].Items, r[ci].Header, et.colW[ci] - 2 * GridCellPad);
+                plans[ci] = AssembleCell(r[ci].Items, r[ci].Header, et.colW[ci] - 2 * GridCellPad);
                 rh = System.Math.Max(rh, plans[ci].ContentH);
             }
             et.planRows.Add(plans);
@@ -262,40 +265,38 @@ internal static partial class HtmlToPdfConverter
         foreach (var r in et.trRows)
             for (int ci = 0; ci < r.Count; ci++)
             {
-                var (cf, cm) = CellWidths(et, r[ci].Items, r[ci].Header);
+                var (cf, cm) = CellWidths(r[ci].Items, r[ci].Header);
                 et.colFull[ci] = System.Math.Max(et.colFull[ci], cf + 2 * GridCellPad);
                 et.colMin[ci] = System.Math.Max(et.colMin[ci], cm + 2 * GridCellPad);
             }
         et.colW = new double[et.nCols];
         et.gridChrome = 2 * GridEdgePad + GridCellGap * (et.nCols - 1);
+        // An empty column still keeps a sliver of a cell.
+        for (int ci = 0; ci < et.nCols; ci++)
         {
-            // An empty column still keeps a sliver of a cell.
+            et.colMin[ci] = System.Math.Max(et.colMin[ci], 10.5);
+            et.colFull[ci] = System.Math.Max(et.colFull[ci], et.colMin[ci]);
+        }
+        double fullSum = et.gridChrome, minSum = et.gridChrome;
+        foreach (var w in et.colFull) fullSum += w;
+        foreach (var w in et.colMin) minSum += w;
+        if (fullSum <= flow.contentWidth)
+            for (int ci = 0; ci < et.nCols; ci++) et.colW[ci] = et.colFull[ci];
+        else if (minSum >= flow.contentWidth)
+        {
+            var scale = (flow.contentWidth - et.gridChrome) / (minSum - et.gridChrome);
+            for (int ci = 0; ci < et.nCols; ci++) et.colW[ci] = et.colMin[ci] * scale;
+        }
+        else
+        {
+            var surplus = flow.contentWidth - minSum;
+            double slackSum = 0;
+            for (int ci = 0; ci < et.nCols; ci++)
+                slackSum += System.Math.Max(0, et.colFull[ci] - et.colMin[ci]);
             for (int ci = 0; ci < et.nCols; ci++)
             {
-                et.colMin[ci] = System.Math.Max(et.colMin[ci], 10.5);
-                et.colFull[ci] = System.Math.Max(et.colFull[ci], et.colMin[ci]);
-            }
-            double fullSum = et.gridChrome, minSum = et.gridChrome;
-            foreach (var w in et.colFull) fullSum += w;
-            foreach (var w in et.colMin) minSum += w;
-            if (fullSum <= flow.contentWidth)
-                for (int ci = 0; ci < et.nCols; ci++) et.colW[ci] = et.colFull[ci];
-            else if (minSum >= flow.contentWidth)
-            {
-                var scale = (flow.contentWidth - et.gridChrome) / (minSum - et.gridChrome);
-                for (int ci = 0; ci < et.nCols; ci++) et.colW[ci] = et.colMin[ci] * scale;
-            }
-            else
-            {
-                var surplus = flow.contentWidth - minSum;
-                double slackSum = 0;
-                for (int ci = 0; ci < et.nCols; ci++)
-                    slackSum += System.Math.Max(0, et.colFull[ci] - et.colMin[ci]);
-                for (int ci = 0; ci < et.nCols; ci++)
-                {
-                    var s = System.Math.Max(0, et.colFull[ci] - et.colMin[ci]);
-                    et.colW[ci] = et.colMin[ci] + (slackSum > 1e-6 ? surplus * s / slackSum : 0);
-                }
+                var s = System.Math.Max(0, et.colFull[ci] - et.colMin[ci]);
+                et.colW[ci] = et.colMin[ci] + (slackSum > 1e-6 ? surplus * s / slackSum : 0);
             }
         }
 
@@ -305,16 +306,16 @@ internal static partial class HtmlToPdfConverter
     private static bool TryParseEscapedRows(EscapedTableState et, Block block, HtmlFlowCursor flow, Dictionary<string, Dictionary<string, string>> css)
     {
         et.trRows = new List<List<(bool Header, List<Block> Items)>>();
-        foreach (Match trm in Regex.Matches(block.TableHtml ?? "",
+        foreach (Match trm in SafeRegex.Matches(block.TableHtml ?? "",
             @"<tr\b[^>]*>([\s\S]*?)</tr\s*>", RegexOptions.IgnoreCase))
         {
             var cellsRow = new List<(bool, List<Block>)>();
-            foreach (Match cm in Regex.Matches(trm.Groups[1].Value,
-                @"<(td|th)\b[^>]*>([\s\S]*?)</\1\s*>", RegexOptions.IgnoreCase))
+            foreach (var groups in SafeRegex.Matches(trm.Groups[1].Value,
+                @"<(td|th)\b[^>]*>([\s\S]*?)</\1\s*>", RegexOptions.IgnoreCase).Select(cm => cm.Groups))
             {
-                var isTh = cm.Groups[1].Value.Equals("th", StringComparison.OrdinalIgnoreCase);
+                var isTh = groups[1].Value.Equals("th", StringComparison.OrdinalIgnoreCase);
                 var items = new List<Block>();
-                foreach (var cb in ParseBlocks(cm.Groups[2].Value, css,
+                foreach (var cb in ParseBlocks(groups[2].Value, css,
                     bodyFontSize: 12, controlBoxes: true))
                 {
                     if (cb.InlineItems is { } inner) items.AddRange(inner);

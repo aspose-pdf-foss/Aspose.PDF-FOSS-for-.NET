@@ -6,7 +6,7 @@ namespace Aspose.Pdf.Converters;
 internal static partial class HtmlToPdfConverter
 {
 // OutSystems export drawing helpers: resources, segments, rules, frames, header, grid, bands, signature and date.
-    private static string ResFor(OutSystemsState os, string face) => face switch
+    private static string ResFor(string face) => face switch
     {
         "Arial Bold" => "F9",
         "Times New Roman" => "F10",
@@ -20,16 +20,9 @@ internal static partial class HtmlToPdfConverter
         foreach (var r in segs)
         {
             if (r.Text.Length > 0)
-                EmitPositionedRun(os.page, ResFor(os, r.Face), r.Fs, x, os.pageHeight - yTd, r.Text);
+                EmitPositionedRun(os.page, ResFor(r.Face), r.Fs, x, os.pageHeight - yTd, r.Text);
             x += MeasureFaceText(r.Face, r.Text, r.Fs);
         }
-    }
-
-    private static double SegsW(OutSystemsState os, List<OsRun> segs)
-    {
-        double w = 0;
-        foreach (var r in segs) w += MeasureFaceText(r.Face, r.Text, r.Fs);
-        return w;
     }
 
     // A rectangle stroked at the given line CENTERS (top-down y).
@@ -61,10 +54,10 @@ internal static partial class HtmlToPdfConverter
         }
         Stream(os, "0 0 0 rg\nQ\n");
         if (rows[0][0].Img is { } img)        // the inline icon seats on the title baseline
-            ImgFrame(os, x0 + SegsW(os, groups[0]), titleTop + OsTitleDrop, img.W, img.H);
+            ImgFrame(os, x0 + SegsW(groups[0]), titleTop + OsTitleDrop, img.W, img.H);
         var ver = OsWrap(rows[0][1].Runs, os.contentW);
         if (ver.Count > 0)
-            EmitSegs(os, ver[0], os.contentX + os.contentW - OsPad1 - SegsW(os, ver[0]), titleTop + os.dropTnr);
+            EmitSegs(os, ver[0], os.contentX + os.contentW - OsPad1 - SegsW(ver[0]), titleTop + os.dropTnr);
         return lineTop + os.pMargin + OsPad1;
     }
 
@@ -88,7 +81,7 @@ internal static partial class HtmlToPdfConverter
                 for (var i = 0; i < lines[c].Count; i++)
                 {
                     var x = row[c].AlignRight
-                        ? colX[c + 1] - SegsW(os, lines[c][i]) : colX[c];
+                        ? colX[c + 1] - SegsW(lines[c][i]) : colX[c];
                     EmitSegs(os, lines[c][i], x, top + off + i * OsLine + os.drop12);
                 }
             }
@@ -144,7 +137,7 @@ internal static partial class HtmlToPdfConverter
             for (var i = 0; i < lineSets[0].Count; i++)
             {
                 var segs = lineSets[0][i];
-                var x = centered ? os.contentX + OsPad1 + (innerW - SegsW(os, segs)) / 2
+                var x = centered ? os.contentX + OsPad1 + (innerW - SegsW(segs)) / 2
                     : os.contentX + OsPad1;
                 EmitSegs(os, segs, x, top + OsPad1 + i * OsLine + os.drop12);
             }
@@ -209,7 +202,7 @@ internal static partial class HtmlToPdfConverter
                 for (var i = 0; i < lines.Count; i++)
                 {
                     var x = row[c].AlignRight
-                        ? colX[c + 1] - SegsW(os, lines[i]) : colX[c];
+                        ? colX[c + 1] - SegsW(lines[i]) : colX[c];
                     EmitSegs(os, lines[i], x, top + off + i * OsLine + os.drop12);
                 }
             }

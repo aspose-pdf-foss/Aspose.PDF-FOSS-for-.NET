@@ -10,14 +10,14 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The footer paragraph and the contact table with its 30/20/20/30 columns and vertically centred rows, opening the second page.</summary>
     private static void DrawFooterAndContacts(DecisionLetterState dl)
     {
-        var ftM = Regex.Match(dl.c, @"class\s*=\s*[""']notifications-footer[""']",
+        var ftM = SafeRegex.Match(dl.c, @"class\s*=\s*[""']notifications-footer[""']",
             RegexOptions.IgnoreCase);
         var ftText = "";
         if (ftM.Success)
         {
-            var pM = Regex.Match(dl.c[ftM.Index..], @"<p\b[^>]*>(.*?)</p>",
+            var pM = SafeRegex.Match(dl.c[ftM.Index..], @"<p\b[^>]*>(.*?)</p>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (pM.Success) ftText = Inner(dl, pM.Groups[1].Value);
+            if (pM.Success) ftText = Inner(pM.Groups[1].Value);
         }
         var yF = dl.y;   // the footer's 15 px top margin COLLAPSES with the
                       // disclosure boxSection's bottom margin (max-wise)
@@ -33,12 +33,12 @@ internal static partial class HtmlToPdfConverter
         {
             // declared percent columns off the table markup
             var pcts = new List<double>();
-            var ftTblM = Regex.Matches(dl.c,
+            var ftTblM = SafeRegex.Matches(dl.c,
                 @"<table\b[^>]*class\s*=\s*[""']information-table[""'][^>]*>",
                 RegexOptions.IgnoreCase);
             if (ftTblM.Count >= 3
                 && BalancedInner(dl.c, ftTblM[2].Index + ftTblM[2].Length, "table") is { } fInner)
-                foreach (Match tdM in Regex.Matches(fInner, @"<td\b[^>]*width\s*:\s*([\d.]+)%",
+                foreach (Match tdM in SafeRegex.Matches(fInner, @"<td\b[^>]*width\s*:\s*([\d.]+)%",
                     RegexOptions.IgnoreCase))
                     pcts.Add(double.Parse(tdM.Groups[1].Value, dl.inv) / 100.0);
             while (pcts.Count < fRows.Count) pcts.Add(1.0 / Math.Max(1, fRows.Count));
@@ -57,12 +57,12 @@ internal static partial class HtmlToPdfConverter
                 var wrapped = MeasuredWordWrap(val, avail - lblW, dl.face, dl.bodyFs);
                 var lines = new (string, string)[Math.Max(1, wrapped.Length)];
                 for (var k = 0; k < lines.Length; k++)
-                    lines[k] = (k == 0 ? lbl : "",
-                        // the value keeps its leading space after the label
-                        k < wrapped.Length
-                            ? (k == 0 && !wrapped[k].StartsWith(' ')
-                                ? " " + wrapped[k] : wrapped[k])
-                            : "");
+                {
+                    var value = k < wrapped.Length ? wrapped[k] : "";
+                    // the value keeps its leading space after the label
+                    if (k == 0 && k < wrapped.Length && !value.StartsWith(' ')) value = " " + value;
+                    lines[k] = (k == 0 ? lbl : "", value);
+                }
                 cellLines.Add(lines);
                 maxLines = Math.Max(maxLines, lines.Length);
             }
@@ -95,14 +95,14 @@ internal static partial class HtmlToPdfConverter
     private static void DrawDisclaimer(DecisionLetterState dl)
     {
         var frameTop = BoxTitle(dl, "Notification Disclosure", dl.cx, dl.discTop);
-        var dM = Regex.Match(dl.c, @"class\s*=\s*[""']notifications-disclosure[""']",
+        var dM = SafeRegex.Match(dl.c, @"class\s*=\s*[""']notifications-disclosure[""']",
             RegexOptions.IgnoreCase);
         var dText = "";
         if (dM.Success)
         {
-            var pM = Regex.Match(dl.c[dM.Index..], @"<p\b[^>]*>(.*?)</p>",
+            var pM = SafeRegex.Match(dl.c[dM.Index..], @"<p\b[^>]*>(.*?)</p>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (pM.Success) dText = Inner(dl, pM.Groups[1].Value);
+            if (pM.Success) dText = Inner(pM.Groups[1].Value);
         }
         var yD = frameTop + 2 + 11.25;
         foreach (var ln in MeasuredWordWrap(dText, dl.cw - 4 - 15, dl.face, dl.bodyFs))
@@ -122,17 +122,17 @@ internal static partial class HtmlToPdfConverter
         var padSide = 7.5;
         var stX = dl.rightX + 2 + padSide;
         var stW = dl.halfW - 4 - 2 * padSide;
-        var stipM = Regex.Match(dl.c, @"class\s*=\s*[""']stipulations-text[""'][^>]*>",
+        var stipM = SafeRegex.Match(dl.c, @"class\s*=\s*[""']stipulations-text[""'][^>]*>",
             RegexOptions.IgnoreCase);
         var yRow = frameTop + 2 + 11.25;
         if (stipM.Success && BalancedInner(dl.c, stipM.Index + stipM.Length, "div") is { } stInner)
         {
-            foreach (Match pM in Regex.Matches(stInner, @"<p\b[^>]*>(.*?)</p>",
+            foreach (Match pM in SafeRegex.Matches(stInner, @"<p\b[^>]*>(.*?)</p>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
             {
                 var odd = pM.Value.Contains("odd", StringComparison.OrdinalIgnoreCase);
                 if (odd) HLine(dl, stX, stX + stW, yRow, dl.bandBlue);
-                EmitRun(dl, Inner(dl, pM.Groups[1].Value), dl.bodyFs, false,
+                EmitRun(dl, Inner(pM.Groups[1].Value), dl.bodyFs, false,
                     stX + 11.25, yRow + Drop(dl, dl.bodyFs, 15.0), null);
                 if (odd) HLine(dl, stX, stX + stW, yRow + 15.0, dl.bandBlue);
                 yRow += 15.0;
@@ -144,15 +144,15 @@ internal static partial class HtmlToPdfConverter
         // Comments box under it
         var cmTop = stipBottom + 11.25;
         var cmFrameTop = BoxTitle(dl, "Comments", dl.rightX, cmTop);
-        var cmM = Regex.Match(dl.c, @"class\s*=\s*[""']approved-comments[^""']*[""']",
+        var cmM = SafeRegex.Match(dl.c, @"class\s*=\s*[""']approved-comments[^""']*[""']",
             RegexOptions.IgnoreCase);
         var cmText = "";
         var cmLineH = 12.75;                      // p line-height: 17px
         if (cmM.Success)
         {
-            var pM = Regex.Match(dl.c[cmM.Index..], @"<p\b[^>]*>(.*?)</p>",
+            var pM = SafeRegex.Match(dl.c[cmM.Index..], @"<p\b[^>]*>(.*?)</p>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (pM.Success) cmText = Inner(dl, pM.Groups[1].Value);
+            if (pM.Success) cmText = Inner(pM.Groups[1].Value);
         }
         var yCm = cmFrameTop + 2 + 11.25;
         foreach (var ln in MeasuredWordWrap(cmText, stW, dl.face, dl.bodyFs))
@@ -167,14 +167,14 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The half-width split and the dealer table with its framed rows.</summary>
     private static void DrawDealerTable(DecisionLetterState dl)
     {
-        dl.halfM = Regex.Match(dl.c, @"class\s*=\s*[""'][^""']*\bleft[""'][^>]*style\s*=\s*[""'][^""']*width\s*:\s*([\d.]+)%",
+        dl.halfM = SafeRegex.Match(dl.c, @"class\s*=\s*[""'][^""']*\bleft[""'][^>]*style\s*=\s*[""'][^""']*width\s*:\s*([\d.]+)%",
             RegexOptions.IgnoreCase);
         dl.halfPct = dl.halfM.Success ? double.Parse(dl.halfM.Groups[1].Value, dl.inv) / 100.0 : 0.485;
         dl.halfW = dl.halfPct * dl.cw;
         dl.rightX = dl.cx + dl.cw - dl.halfW;
 
         dl.leftBottom = dl.midTop;
-        dl.dealerM = Regex.Match(dl.c,
+        dl.dealerM = SafeRegex.Match(dl.c,
             @"<table\b[^>]*class\s*=\s*[""']dealer-structure-approved-table[""'][^>]*>",
             RegexOptions.IgnoreCase);
         if (dl.dealerM.Success && BalancedInner(dl.c, dl.dealerM.Index + dl.dealerM.Length, "table") is { } dInner)
@@ -186,13 +186,13 @@ internal static partial class HtmlToPdfConverter
             var rowTop = frameTop + 2 + 11.25;
             var rowH = 15.0;                          // 2px pads + line + border
             var rows = new List<(string lbl, string val)>();
-            foreach (Match trM in Regex.Matches(dInner, @"<tr\b[^>]*>(.*?)</tr>",
+            foreach (Match trM in SafeRegex.Matches(dInner, @"<tr\b[^>]*>(.*?)</tr>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
             {
-                var tds = Regex.Matches(trM.Groups[1].Value, @"<td\b[^>]*>(.*?)</td>",
+                var tds = SafeRegex.Matches(trM.Groups[1].Value, @"<td\b[^>]*>(.*?)</td>",
                     RegexOptions.IgnoreCase | RegexOptions.Singleline);
                 if (tds.Count >= 2)
-                    rows.Add((Inner(dl, tds[0].Groups[1].Value), Inner(dl, tds[1].Groups[1].Value)));
+                    rows.Add((Inner(tds[0].Groups[1].Value), Inner(tds[1].Groups[1].Value)));
             }
             var yRow = rowTop;
             foreach (var (lbl, val) in rows)
@@ -211,20 +211,20 @@ internal static partial class HtmlToPdfConverter
     /// <summary>The column table: its rows of label/value cells with band fills and rules.</summary>
     private static void DrawColumnTable(DecisionLetterState dl)
     {
-        dl.colM = Regex.Match(dl.c,
+        dl.colM = SafeRegex.Match(dl.c,
             @"<table\b[^>]*class\s*=\s*[""']application-approved-table[""'][^>]*>",
             RegexOptions.IgnoreCase);
         dl.colBottom = dl.sectionTop0;
         if (dl.colM.Success && BalancedInner(dl.c, dl.colM.Index + dl.colM.Length, "table") is { } colInner)
         {
             var ths = new List<string>();
-            foreach (Match thM in Regex.Matches(colInner, @"<th\b[^>]*>(.*?)</th>",
+            foreach (Match thM in SafeRegex.Matches(colInner, @"<th\b[^>]*>(.*?)</th>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
-                ths.Add(Inner(dl, thM.Groups[1].Value));
+                ths.Add(Inner(thM.Groups[1].Value));
             var tds = new List<string>();
-            foreach (Match tdM in Regex.Matches(colInner, @"<td\b[^>]*>(.*?)</td>",
+            foreach (Match tdM in SafeRegex.Matches(colInner, @"<td\b[^>]*>(.*?)</td>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
-                tds.Add(Inner(dl, tdM.Groups[1].Value));
+                tds.Add(Inner(tdM.Groups[1].Value));
 
             var frameTop = BoxTitle(dl, "Collateral", dl.cx, dl.sectionTop0);
             var padSide = 7.5;                        // box-content 10 px sides
@@ -236,12 +236,10 @@ internal static partial class HtmlToPdfConverter
             // the auto solve: each column floors at max(declared 98 px, its
             // content + the 10px/4px pads), the leftover splits EQUALLY
             var thDeclared = 73.5;
-            {
-                var thDeclM = Regex.Match(colInner, @"<th\b[^>]*width\s*:\s*([\d.]+)px",
-                    RegexOptions.IgnoreCase);
-                if (thDeclM.Success)
-                    thDeclared = double.Parse(thDeclM.Groups[1].Value, dl.inv) * 0.75;
-            }
+            var thDeclM = SafeRegex.Match(colInner, @"<th\b[^>]*width\s*:\s*([\d.]+)px",
+                RegexOptions.IgnoreCase);
+            if (thDeclM.Success)
+                thDeclared = double.Parse(thDeclM.Groups[1].Value, dl.inv) * 0.75;
             var colWs = new double[n];
             double colSum = 0;
             for (var i = 0; i < n; i++)
@@ -308,28 +306,26 @@ internal static partial class HtmlToPdfConverter
         dl.r2 = dl.infoTables[1];
         dl.r2Top = dl.infoTop + 0.4 + dl.r1RowH;
         dl.r2RowH = 3.75 + dl.lineH + 3.75;
+        var maxc = new double[dl.r2.Count];
+        double sum = 0;
+        for (var i = 0; i < dl.r2.Count; i++)
         {
-            var maxc = new double[dl.r2.Count];
-            double sum = 0;
-            for (var i = 0; i < dl.r2.Count; i++)
-            {
-                foreach (var (lbl, val) in dl.r2[i])
-                    maxc[i] = Math.Max(maxc[i],
-                        Measure(dl, lbl, true, dl.bodyFs) + Measure(dl, val, false, dl.bodyFs));
-                sum += maxc[i] + 22.5;
-            }
-            var surplus = Math.Max(0, dl.cw - sum);
-            double xCell = dl.cx + 0.75 + 11.25;
-            var yLine = dl.r2Top + 3.75 + Drop(dl, dl.bodyFs, dl.lineH);
-            double contentSum = 0;
-            foreach (var mcW in maxc) contentSum += mcW;
-            for (var i = 0; i < dl.r2.Count; i++)
-            {
-                if (dl.r2[i].Count > 0)
-                    EmitLabelValue(dl, dl.r2[i][0].label, dl.r2[i][0].val, dl.bodyFs, xCell, yLine);
-                xCell += maxc[i] + 22.5
-                    + (contentSum > 0 ? surplus * maxc[i] / contentSum : 0);
-            }
+            foreach (var (lbl, val) in dl.r2[i])
+                maxc[i] = Math.Max(maxc[i],
+                    Measure(dl, lbl, true, dl.bodyFs) + Measure(dl, val, false, dl.bodyFs));
+            sum += maxc[i] + 22.5;
+        }
+        var surplus = Math.Max(0, dl.cw - sum);
+        double r2X = dl.cx + 0.75 + 11.25;
+        var r2Y = dl.r2Top + 3.75 + Drop(dl, dl.bodyFs, dl.lineH);
+        double contentSum = 0;
+        foreach (var mcW in maxc) contentSum += mcW;
+        for (var i = 0; i < dl.r2.Count; i++)
+        {
+            if (dl.r2[i].Count > 0)
+                EmitLabelValue(dl, dl.r2[i][0].label, dl.r2[i][0].val, dl.bodyFs, r2X, r2Y);
+            r2X += maxc[i] + 22.5
+                + (contentSum > 0 ? surplus * maxc[i] / contentSum : 0);
         }
         dl.infoBottom = dl.r2Top + dl.r2RowH;
         FrameRect(dl, dl.cx, dl.infoTop, dl.cw, dl.infoBottom - dl.infoTop + 0.4, dl.frameGray, 0.75);
@@ -339,26 +335,26 @@ internal static partial class HtmlToPdfConverter
     private static bool TryParseInfoTables(DecisionLetterState dl)
     {
         dl.infoTables = new List<List<List<(string label, string val)>>>();
-        foreach (Match tM in Regex.Matches(dl.c,
+        foreach (Match tM in SafeRegex.Matches(dl.c,
             @"<table\b[^>]*class\s*=\s*[""']information-table[""'][^>]*>", RegexOptions.IgnoreCase))
         {
             var innerT = BalancedInner(dl.c, tM.Index + tM.Length, "table");
             if (innerT is null) continue;
             var cells = new List<List<(string, string)>>();
-            foreach (Match tdM in Regex.Matches(innerT, @"<td\b[^>]*>(.*?)</td>",
+            foreach (Match tdM in SafeRegex.Matches(innerT, @"<td\b[^>]*>(.*?)</td>",
                 RegexOptions.IgnoreCase | RegexOptions.Singleline))
             {
                 var lines = new List<(string, string)>();
-                foreach (var part in Regex.Split(tdM.Groups[1].Value, @"<br\s*/?>",
+                foreach (var part in SafeRegex.Split(tdM.Groups[1].Value, @"<br\s*/?>",
                     RegexOptions.IgnoreCase))
                 {
-                    var spM = Regex.Match(part, @"<span\b[^>]*>(.*?)</span>(.*)$",
+                    var spM = SafeRegex.Match(part, @"<span\b[^>]*>(.*?)</span>(.*)$",
                         RegexOptions.IgnoreCase | RegexOptions.Singleline);
                     if (spM.Success)
-                        lines.Add((Inner(dl, spM.Groups[1].Value),
-                            " " + Inner(dl, spM.Groups[2].Value)));
-                    else if (Inner(dl, part).Length > 0)
-                        lines.Add(("", Inner(dl, part)));
+                        lines.Add((Inner(spM.Groups[1].Value),
+                            " " + Inner(spM.Groups[2].Value)));
+                    else if (Inner(part).Length > 0)
+                        lines.Add(("", Inner(part)));
                 }
                 cells.Add(lines);
             }
@@ -372,7 +368,7 @@ internal static partial class HtmlToPdfConverter
     private static void DrawLetterHeader(DecisionLetterState dl)
     {
         BrokenFrame(dl, dl.cx, DnHeaderImgTopPt);
-        dl.qrPadM = Regex.Match(dl.c, @"class\s*=\s*[""']qr-code[^""']*[""'][^>]*style\s*=\s*[""']([^""']*)[""']",
+        dl.qrPadM = SafeRegex.Match(dl.c, @"class\s*=\s*[""']qr-code[^""']*[""'][^>]*style\s*=\s*[""']([^""']*)[""']",
             RegexOptions.IgnoreCase);
         dl.qrPad = dl.qrPadM.Success
             ? CssEmLen(dl.qrPadM.Groups[1].Value.Replace("padding: 0 ", "padding-left: "),
@@ -380,7 +376,7 @@ internal static partial class HtmlToPdfConverter
         BrokenFrame(dl, dl.cx + dl.cw - dl.qrPad - 34, DnHeaderImgTopPt);
 
         dl.hdrImgW = 0.0;
-        dl.hdrImgM = Regex.Match(dl.c,
+        dl.hdrImgM = SafeRegex.Match(dl.c,
             @"class\s*=\s*[""']header-image[""'][^>]*style\s*=\s*[""']([^""']*)[""']",
             RegexOptions.IgnoreCase);
         if (dl.hdrImgM.Success)
@@ -388,54 +384,54 @@ internal static partial class HtmlToPdfConverter
         dl.titlePadLeft = 7.5;
         dl.titleX = dl.cx + dl.hdrImgW + dl.titlePadLeft;
 
-        dl.h3M = Regex.Match(dl.c, @"<h3\b[^>]*>(.*?)</h3>", RegexOptions.IgnoreCase);
-        dl.h1M = Regex.Match(dl.c, @"<h1\b[^>]*>(.*?)</h1>", RegexOptions.IgnoreCase);
+        dl.h3M = SafeRegex.Match(dl.c, @"<h3\b[^>]*>(.*?)</h3>", RegexOptions.IgnoreCase);
+        dl.h1M = SafeRegex.Match(dl.c, @"<h1\b[^>]*>(.*?)</h1>", RegexOptions.IgnoreCase);
         dl.y = DnH3BaselinePt;
         if (dl.h3M.Success)
         {
-            var h3Style = Regex.Match(dl.h3M.Value, @"style\s*=\s*[""']([^""']*)[""']").Groups[1].Value;
+            var h3Style = SafeRegex.Match(dl.h3M.Value, @"style\s*=\s*[""']([^""']*)[""']").Groups[1].Value;
             var h3Fs = CssEmLen(h3Style, "font-size", dl.bodyFs) ?? 11.25;
-            var h3Text = Inner(dl, dl.h3M.Groups[1].Value);
+            var h3Text = Inner(dl.h3M.Groups[1].Value);
             if (h3Style.Contains("uppercase", StringComparison.OrdinalIgnoreCase))
                 h3Text = h3Text.ToUpperInvariant();
             EmitRun(dl, h3Text, h3Fs, true, dl.titleX, dl.y,
-                ParseCssColor(Regex.Match(h3Style, @"color\s*:\s*([^;]+)").Groups[1].Value.Trim()));
+                ParseCssColor(SafeRegex.Match(h3Style, @"color\s*:\s*([^;]+)").Groups[1].Value.Trim()));
         }
         dl.y += DnH1AdvancePt;
         if (dl.h1M.Success)
         {
-            var h1Style = Regex.Match(dl.h1M.Value, @"style\s*=\s*[""']([^""']*)[""']").Groups[1].Value;
+            var h1Style = SafeRegex.Match(dl.h1M.Value, @"style\s*=\s*[""']([^""']*)[""']").Groups[1].Value;
             var h1Fs = CssEmLen(h1Style, "font-size", dl.bodyFs) ?? 21.75;
-            EmitRun(dl, Inner(dl, dl.h1M.Groups[1].Value), h1Fs, true, dl.titleX, dl.y,
-                ParseCssColor(Regex.Match(h1Style, @"color\s*:\s*([^;]+)").Groups[1].Value.Trim()));
+            EmitRun(dl, Inner(dl.h1M.Groups[1].Value), h1Fs, true, dl.titleX, dl.y,
+                ParseCssColor(SafeRegex.Match(h1Style, @"color\s*:\s*([^;]+)").Groups[1].Value.Trim()));
         }
     }
 
     /// <summary>Parse the body style, face, size and the basis box, and resolve the letter's colours; a letter that lacks them is not this dialect.</summary>
     private static bool TryParseLetterHead(DecisionLetterState dl, string html)
     {
-        dl.c = Regex.Replace(html, @"\s+", " ");
+        dl.c = SafeRegex.Replace(html, @"\s+", " ");
         dl.inv = System.Globalization.CultureInfo.InvariantCulture;
-        dl.bodyM = Regex.Match(dl.c, @"<body\b[^>]*style\s*=\s*[""']([^""']*)[""']",
+        dl.bodyM = SafeRegex.Match(dl.c, @"<body\b[^>]*style\s*=\s*[""']([^""']*)[""']",
             RegexOptions.IgnoreCase);
         if (!dl.bodyM.Success) return false;
-        dl.faceM = Regex.Match(dl.bodyM.Groups[1].Value, @"font-family\s*:\s*([^;]+)",
+        dl.faceM = SafeRegex.Match(dl.bodyM.Groups[1].Value, @"font-family\s*:\s*([^;]+)",
             RegexOptions.IgnoreCase);
         dl.face = (dl.faceM.Success ? FirstFontFamily(dl.faceM.Groups[1].Value) : null)!;
         if (dl.face is null || WinMetricsFor(dl.face) is not { } wm) return false;
         dl.wm = wm;
         dl.bodyFs = CssEmLen(dl.bodyM.Groups[1].Value, "font-size", 12) ?? 9.75;
 
-        dl.basisM = Regex.Match(dl.c,
+        dl.basisM = SafeRegex.Match(dl.c,
             @"<div\b[^>]*class\s*=\s*[""']basis[""'][^>]*style\s*=\s*[""']([^""']*)[""']",
             RegexOptions.IgnoreCase);
         if (!dl.basisM.Success) return false;
         dl.basisW = 0;
-        foreach (Match wMatch in Regex.Matches(dl.basisM.Groups[1].Value,
+        foreach (Match wMatch in SafeRegex.Matches(dl.basisM.Groups[1].Value,
             @"(?<![-\w])width\s*:\s*([\d.]+)\s*px", RegexOptions.IgnoreCase))
             dl.basisW = double.Parse(wMatch.Groups[1].Value, dl.inv) * 0.75;   // LAST wins
         if (dl.basisW <= 0) return false;
-        dl.padM = Regex.Match(dl.basisM.Groups[1].Value,
+        dl.padM = SafeRegex.Match(dl.basisM.Groups[1].Value,
             @"padding\s*:\s*[\d.]+\w*\s+([\d.]+)px", RegexOptions.IgnoreCase);
         dl.sidePad = dl.padM.Success ? double.Parse(dl.padM.Groups[1].Value, dl.inv) * 0.75 : 15.0;
 

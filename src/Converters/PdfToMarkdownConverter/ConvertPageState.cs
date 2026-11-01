@@ -18,8 +18,6 @@ private sealed class ConvertPageState
     public List<Aspose.Pdf.Converters.PdfToMarkdownConverter.LinkInfo> links = null!;
     // Detect horizontal rules from content stream
     public List<double> horizontalRules = null!;
-    // Resolve base font names from page resources
-    public Dictionary<string, string> baseFontNames = null!;
     // Fall back to plain text extraction with font-size-based heading detection
     public Aspose.Pdf.Text.TextFragmentAbsorber fragmentAbsorber = null!;
     // Track which links have been matched to text

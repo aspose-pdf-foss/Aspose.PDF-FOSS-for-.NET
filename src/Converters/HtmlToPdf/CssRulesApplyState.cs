@@ -16,6 +16,7 @@ private sealed class CssRulesApplyState
     public BlockStyle s = default!;
     public bool metricLayout = false;
     public bool coverStyles = false;
+    public bool cssBoxBody;   // the sheet's body pads its own box: its rules' vertical margins are the layout
     public bool floatFlow = false;
 }
 }

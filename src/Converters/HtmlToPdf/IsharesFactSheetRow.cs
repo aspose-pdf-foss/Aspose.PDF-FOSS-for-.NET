@@ -17,7 +17,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var word in r.Label.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
             var trial = cur.Length == 0 ? word : cur + " " + word;
-            if (cur.Length == 0 || MW(ix, trial, 8) <= ix.labelW) { cur.Clear(); cur.Append(trial); }
+            if (cur.Length == 0 || MW(trial, 8) <= ix.labelW) { cur.Clear(); cur.Append(trial); }
             else { labelLines.Add(cur.ToString()); cur.Clear(); cur.Append(word); }
         }
         if (cur.Length > 0) labelLines.Add(cur.ToString());
@@ -38,7 +38,7 @@ internal static partial class HtmlToPdfConverter
         // dot leaders fill the label cell remainder on the LAST line,
         // 2.01 after the text, while a dot's end stays within half a
         // dot of the cell edge
-        var lastW = (labelLines.Count > 1 ? 6.0 : 0) + MW(ix, labelLines[^1], 8);
+        var lastW = (labelLines.Count > 1 ? 6.0 : 0) + MW(labelLines[^1], 8);
         var dotsStart = ix.x0 + lastW + 2.01;
         var nDots = (int)Math.Floor((ix.labelRight + ix.dotW / 2 - dotsStart) / ix.dotW);
         if (nDots > 3)
@@ -49,7 +49,7 @@ internal static partial class HtmlToPdfConverter
         var yVal = r.ValueIns ? yLast + IfsInsSeat : yLast;
         if (r.Value.Length > 0)
         {
-            var vw = MW(ix, r.Value, 8);
+            var vw = MW(r.Value, 8);
             Run(ix, "F8", 8, ix.valueRight - vw, yVal, r.Value);
             if (r.ValueDelta) Delta(ix, ix.valueRight - vw, yVal);
             if (r.ValueIns)
@@ -61,9 +61,9 @@ internal static partial class HtmlToPdfConverter
         var hx = ix.valueRight;
         foreach (var (t, sup, pct) in r.Hang)
         {
-            if (pct && ri > 0) { hx += MW(ix, t, 8) - IfsHiddenPctMargin; continue; }
+            if (pct && ri > 0) { hx += MW(t, 8) - IfsHiddenPctMargin; continue; }
             Run(ix, "F8", sup ? IfsSupFs : 8, hx, sup ? yVal - IfsSupRise : yVal, t);
-            hx += MW(ix, t, sup ? IfsSupFs : 8);
+            hx += MW(t, sup ? IfsSupFs : 8);
         }
         ix.yRow = yLast + IfsRowPitch;
     }

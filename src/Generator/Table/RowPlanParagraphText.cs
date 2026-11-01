@@ -10,8 +10,8 @@ namespace Aspose.Pdf;
 
 public partial class Table
 {
-    /// <summary>The text stage of a row-plan paragraph: the fragment verdicts, the wrapped lines and their measures, and the generator-cell ledgers, verbatim. Returns true when the paragraph is done.</summary>
-    private bool RowPlanParagraphText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, RowPlanState rp, int col, Row row, double[] colWidths, int[] cellMap, int[]? gridToCell, int[]? effRowSpan, double svgFillHeight)
+    /// <summary>The text stage of a row-plan paragraph: the fragment verdicts, the wrapped lines and their measures, and the generator-cell ledgers, verbatim.</summary>
+    private void RowPlanParagraphText(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, RowPlanState rp, Row row)
     {
         pp.text = null;
         pp.fragFontSize = pc.defaultFontSize;
@@ -33,8 +33,8 @@ public partial class Table
         pp.fragItalic = false;
         pp.fragGridRuns = null;
         PlanTextFragmentSource(pp, paragraph, pc, row);
-        if (PlanHtmlFragmentSource(pp, paragraph, pc, rp, row)) return true;
-        if (pp.text is null) return true;
+        if (PlanHtmlFragmentSource(pp, paragraph, pc, rp)) return;
+        if (pp.text is null) return;
         pp.fragLineH = (paragraph as TextFragment)?.CssLineHeightPt ?? 0;
         pp.boxedFrag = (paragraph as TextFragment)?.InlineBoxes is { Count: > 0 };
         pp.thisLineHeight = !pp.boxedFrag && pp.fragLineH > 0 ? Math.Max(pp.fragFontSize, pp.fragLineH) : pp.fragFontSize;
@@ -63,14 +63,14 @@ public partial class Table
         // in its own size, face and colour, every line boxed by its largest run.
         // (Before the empty-text spacer: a paragraph of one picture has no text and
         // is a line of its own, not a blank one.)
-        if (PlanSegmentRunsText(pp, paragraph, pc, rp)) return true;
-        if (PlanEmptyText(pp, paragraph, pc, row)) return true;
+        if (PlanSegmentRunsText(pp, paragraph, pc, rp)) return;
+        if (PlanEmptyText(pp, paragraph, pc)) return;
 
         // Arabic/RTL cell text: the table draws cells with a single Standard-14 font in
         // single-byte encoding, which has no Arabic glyphs. Shape the text (contextual
         // presentation forms + visual bidi order) and emit it as one line flagged to be
         // drawn with an embedded Arabic-capable font (Type0/CID) by the render pass.
-        if (PlanArabicText(pp, paragraph, pc, row)) return true;
+        if (PlanArabicText(pp, paragraph, pc)) return;
 
         // Cell text carrying a fragment-level embedded font AND CJK content: draw each
         // newline-split line as Type0/CID with that font. Scoped to CJK so a fragment
@@ -83,27 +83,26 @@ public partial class Table
         // space is twice a Times space). It outranks the fragment's own
         // embedded face too. Control lines (inline radios, buttons) keep
         // their own arms below.
-        if (PlanOverDeclaredHtml(pp, paragraph, pc)) return true;
-        if (PlanEmbeddedTtfText(pp, pc)) return true;
+        if (PlanOverDeclaredHtml(pp, paragraph, pc)) return;
+        if (PlanEmbeddedTtfText(pp, pc)) return;
 
         // CJK cell text whose fragment font can't cover it — either no font resolved or
         // the named face is unavailable (e.g. "Arial Unicode MS" isn't installed). The
         // Standard-14 path below has no CJK glyphs and would emit '?'. Substitute an
         // installed system CJK font (MS Gothic when available) and draw as
         // Type0/CID, mirroring the Arabic fallback above.
-        if (PlanCjkText(pp, pc)) return true;
+        if (PlanCjkText(pp, pc)) return;
 
         // A fragment carrying an inline BUTTON marker renders as ONE control
         // line too — the render pass draws the button chrome around the
         // bracketed caption, so the line must not word-wrap through it.
-        if (PlanInlineWidgets(pp, paragraph, pc)) return true;
-        if (FinishParagraphTextPlan(pp, paragraph, pc, row)) return true;
-        return false;
+        if (PlanInlineWidgets(pp, paragraph, pc)) return;
+        FinishParagraphTextPlan(pp, paragraph, pc, row);
     }
 
 
     /// <summary>The plan's tail: pending anchors, the wrapped segments and the fragment's inline boxes.</summary>
-    private bool FinishParagraphTextPlan(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Row row)
+    private void FinishParagraphTextPlan(RowPlanParagraphState pp, BaseParagraph paragraph, RowPlanColumnState pc, Row row)
     {
         pp.pendingAnchors = pp.fragAnchors is { Count: > 0 }
             ? new List<(string Text, string Url)>(pp.fragAnchors) : null;
@@ -111,21 +110,21 @@ public partial class Table
         // <strong>… in an HTML table cell): the HTML engine draws it in the
         // embedded bold serif face with kerned advances — wrap, align and
         // annotate with those metrics, not the Standard-14 estimate.
-        if (PlanBoldCssText(pp, paragraph, pc, row)) return true;
+        if (PlanBoldCssText(pp, paragraph, pc)) return;
 
         // Opted-in band tables (HonorCellFontFaces): a cell fragment that resolved
         // a serif font draws in the embedded serif face via the Type0 path, wrapped
         // with the same kerned metrics the column width was measured with. Without
         // this the text wraps and renders on the wider Standard-14 Helvetica
         // estimates, over-wrapping the serif-measured column and overgrowing rows.
-        if (PlanCellFontFaceText(pp, paragraph, pc)) return true;
+        if (PlanCellFontFaceText(pp, paragraph, pc)) return;
 
         // Form-document dialect (HonorCellTtfFaces): a cell fragment that resolved
         // any real installed face wraps and draws with that face's kerned hmtx
         // advances via the Type0 path. The Standard-14 Helvetica estimate is
         // narrower than faces like Verdana — it under-wraps the lines the
         // real face wraps and shortens every band below.
-        if (PlanCellTtfFaceText(pp, paragraph, pc, row)) return true;
+        if (PlanCellTtfFaceText(pp, paragraph, pc)) return;
 
         // Generator cell in a RESOLVED installed face: the fragment's own font,
         // else the cell/row/table DefaultCellTextState's (a row whose default
@@ -134,14 +133,12 @@ public partial class Table
         // in the face's own bold/italic variant (embedded as
         // "CalibriBold" / "Calibri,Italic" subsets; a Standard-14 face keeps
         // the plain path). Unkerned: generator shows are single hex strings.
-        if (PlanGeneratorCellText(pp, paragraph, pc, row)) return true;
+        if (PlanGeneratorCellText(pp, paragraph, pc, row)) return;
 
         pp.linesBeforeFrag = pc.lines.Count;
-        pp.htmlMeas = HtmlLayoutWrap || CssRunBoxes || NestedTableRender
-            ? s => MeasureFaceExact(s, pp.fragFontSize, pp.fragBold)
-            : pp.fragEmbeddedTtf is { Length: > 12 } wrapTtf
-                ? s => MeasureWidthWithFont(s, pp.fragFontSize, wrapTtf)
-                : null;
+        if (HtmlLayoutWrap || CssRunBoxes || NestedTableRender) pp.htmlMeas = s => MeasureFaceExact(s, pp.fragFontSize, pp.fragBold);
+        else if (pp.fragEmbeddedTtf is { Length: > 12 } wrapTtf) pp.htmlMeas = s => MeasureWidthWithFont(s, pp.fragFontSize, wrapTtf);
+        else pp.htmlMeas = null;
         pp.ownBoxH = NestedTableRender && pp.fragLineH > 0
             && (paragraph as TextFragment)?.CssLineHeightFromCell == true
             ? pp.fragLineH : 0.0;
@@ -155,9 +152,12 @@ public partial class Table
                 || GeneratorCellTtf(mtf, pc.cell, row, pp.fragBold, pp.fragItalic) is null);
         // A fragment naming a Standard-14 face wraps on that face's advances.
         pp.genMeas = pp.htmlMeas
-            ?? (pp.fragBaseFont is { } namedFace ? Text.TextPaginator.CreateMeasurer(namedFace, pp.fragFontSize, null)
-            : pp.genDefaultFace ? new Func<string, double>(s => MeasureWidthExactAfm(s, pp.fragFontSize))
-            : null);
+            ?? ((pp.fragBaseFont, pp.genDefaultFace) switch
+            {
+                ({ } namedFace, _) => Text.TextPaginator.CreateMeasurer(namedFace, pp.fragFontSize, null),
+                (_, true) => new Func<string, double>(s => MeasureWidthExactAfm(s, pp.fragFontSize)),
+                _ => null,
+            });
         PlanTextSegments(pp, pc);
         // WrapLinesCount keeps only the fragment's first N wrapped lines.
         if (paragraph is TextFragment { WrapLinesCount: > 0 } capped
@@ -177,7 +177,6 @@ public partial class Table
         // laid-out line; the box line height (text pitch + pads) becomes the
         // line's own CSS box so the row reserves the pill's full height.
         PlanInlineBoxes(pp, paragraph, pc);
-        return false;
     }
 
     /// <summary>Inline buttons, options, input boxes and check marks in a nested table render as widgets; true when the text was one.</summary>

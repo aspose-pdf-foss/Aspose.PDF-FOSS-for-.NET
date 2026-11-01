@@ -285,9 +285,10 @@ public sealed partial class HeaderFooter
         for (var i = 0; i < t.Length; i++)
         {
             var c = t[i];
-            w += c is >= (char)32 and < (char)127 ? table[c - 32]
-                : c == ' ' ? table[0]
-                : bold ? 0.6 : 0.55;
+            if (c is >= (char)32 and < (char)127) w += table[c - 32];
+            else if (c == ' ') w += table[0];
+            else if (bold) w += 0.6;
+            else w += 0.55;
             if (i + 1 < t.Length && kern.TryGetValue((c << 8) | t[i + 1], out var kv))
                 w += kv;
         }
@@ -372,16 +373,19 @@ public sealed partial class HeaderFooter
         rr.fs = RptFontPt;
         rr.pitch = RptRowPitchPt;
         rr.draw = rr.page is not null && rr.b is not null;
+        // Case folds by the invariant culture's rules, as in the helper's calls that send a nested block back
+        // here: by a Turkish culture's, "div" misses "DIV" and the wrapped region is sent back whole, without end.
         rr.rx = new System.Text.RegularExpressions.Regex(
             @"(?s)<(?<tag>div|fieldset)\b(?<attrs>[^>]*)>",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            | System.Text.RegularExpressions.RegexOptions.CultureInvariant, RegexLimits.Timeout);
         rr.yBase = rr.yTopBase;
         rr.pos = 0;
         rr.pendingCols = new List<(string inner, double frac)>();
 
         // a fragment with no block children IS one leaf row (a column whose
         // content is a bare input+label pair, or bare text)
-        if (!rr.rx.IsMatch(rr.html))
+        if (!SafeRegex.IsMatch(rr.rx, rr.html))
         {
             if (HtmlFragment.StripHtmlTags(rr.html).Trim().Length == 0
                 && !rr.html.Contains("<input", StringComparison.OrdinalIgnoreCase))
@@ -400,15 +404,16 @@ public sealed partial class HeaderFooter
     /// <summary>Renders the next element of the region's HTML - a fieldset, an inline column or a row - and advances past it; false at the end of the markup.</summary>
     private static bool RenderReportElement(ReportRegionState rr)
     {
-        var m = rr.rx.Match(rr.html, rr.pos);
+        var m = SafeRegex.Match(rr.rx, rr.html, rr.pos);
         if (!m.Success) return false;
         // balanced end of this element
         var depth = 1;
         var scan = m.Index + m.Length;
         var tagRx = new System.Text.RegularExpressions.Regex("<(/?)" + m.Groups["tag"].Value + @"\b",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            | System.Text.RegularExpressions.RegexOptions.CultureInvariant, RegexLimits.Timeout);
         var end = rr.html.Length;
-        for (var tm = tagRx.Match(rr.html, scan); tm.Success; tm = tagRx.Match(rr.html, tm.Index + 1))
+        for (var tm = SafeRegex.Match(tagRx, rr.html, scan); tm.Success; tm = SafeRegex.Match(tagRx, rr.html, tm.Index + 1))
         {
             depth += tm.Groups[1].Value.Length > 0 ? -1 : 1;
             if (depth == 0) { end = tm.Index; break; }
@@ -417,12 +422,12 @@ public sealed partial class HeaderFooter
         rr.pos = Math.Min(rr.html.Length, end + m.Groups["tag"].Value.Length + 3);
 
         var attrs = m.Groups["attrs"].Value;
-        var styleM = System.Text.RegularExpressions.Regex.Match(attrs,
+        var styleM = SafeRegex.Match(attrs,
             @"style\s*=\s*(['""])(?<s>[^'""]*)\1",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         var style = styleM.Success ? styleM.Groups["s"].Value : "";
-        var fracM = System.Text.RegularExpressions.Regex.Match(style, @"width\s*:\s*([\d.]+)%");
-        var isInline = System.Text.RegularExpressions.Regex.IsMatch(style,
+        var fracM = SafeRegex.Match(style, @"width\s*:\s*([\d.]+)%");
+        var isInline = SafeRegex.IsMatch(style,
             @"display\s*:\s*inline-block", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         var isFieldset = m.Groups["tag"].Value.Equals("fieldset", StringComparison.OrdinalIgnoreCase);
 
@@ -436,7 +441,7 @@ public sealed partial class HeaderFooter
         FlushCols(rr);
         // white-space:pre content (class="pre") keeps its own line breaks:
         // one row per source line
-        if (System.Text.RegularExpressions.Regex.IsMatch(attrs,
+        if (SafeRegex.IsMatch(attrs,
                 @"class\s*=\s*(['""])[^'""]*\bpre\b",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
         {
@@ -453,9 +458,9 @@ public sealed partial class HeaderFooter
         }
         // a leaf row: label + value, a checkbox + label, a background band,
         // plain text, or a blank spacer; a div of nested divs recurses
-        if (System.Text.RegularExpressions.Regex.IsMatch(inner, @"(?s)^\s*<(div|fieldset)\b",
+        if (SafeRegex.IsMatch(inner, @"(?s)^\s*<(div|fieldset)\b",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            && !System.Text.RegularExpressions.Regex.IsMatch(inner,
+            && !SafeRegex.IsMatch(inner,
                 @"(?s)^\s*<div\b[^>]*background-color",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase))
         {
@@ -469,19 +474,19 @@ public sealed partial class HeaderFooter
     /// <summary>Renders one report row: its background, a label/value pair or a check box, else its plain text.</summary>
     private static void RenderReportRow(ReportRegionState rr, string inner, string style)
     {
-        var bgM = System.Text.RegularExpressions.Regex.Match(inner + " " + style,
+        var bgM = SafeRegex.Match(inner + " " + style,
             @"background-color\s*:\s*([-\w#]+)",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var lbl = System.Text.RegularExpressions.Regex.Match(inner,
+        var lbl = SafeRegex.Match(inner,
             @"(?s)<label[^>]*>(.*?)</label>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var val = System.Text.RegularExpressions.Regex.Match(inner,
+        var val = SafeRegex.Match(inner,
             @"(?s)<span[^>]*>(.*?)</span>",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var hasCheckbox = System.Text.RegularExpressions.Regex.IsMatch(inner,
+        var hasCheckbox = SafeRegex.IsMatch(inner,
             @"<input\b[^>]*type\s*=\s*(['""])?checkbox",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var text = HtmlFragment.StripHtmlTags(System.Text.RegularExpressions.Regex.Replace(
+        var text = HtmlFragment.StripHtmlTags(SafeRegex.Replace(
             inner, @"(?s)<(label|span|input)\b[^>]*>|</(label|span)>", "")).Trim();
 
         if (rr.draw && bgM.Success
@@ -537,7 +542,7 @@ public sealed partial class HeaderFooter
         }
         // plain text, an &nbsp; spacer line, or a genuinely EMPTY div — the
         // empty one gets NO line box at all
-        var plainTxt = System.Text.RegularExpressions.Regex.Replace(
+        var plainTxt = SafeRegex.Replace(
             text.Replace("&nbsp;", " ").Replace(' ', ' '), @"\s+", " ").Trim();
         if (rr.draw && plainTxt.Length > 0)
             DrawReportWords(rr.b!, rr.plainRes!, plainTxt, rr.x, rr.page!.Height - rr.yBase, rr.fs, bold: false, rr.page);
@@ -557,12 +562,12 @@ public sealed partial class HeaderFooter
                 System.Globalization.CultureInfo.InvariantCulture) / 100.0 : 1.0;
             // the legend TAKES the arriving row baseline and the frame opens
             // FsLegendDrop above it, crossing the legend's caps
-            var legend = System.Text.RegularExpressions.Regex.Match(inner,
+            var legend = SafeRegex.Match(inner,
                 @"(?s)<legend[^>]*>(.*?)</legend>",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             var legendBase = rr.yBase;
             var boxTop = legendBase - FsLegendDrop;
-            var innerRows = System.Text.RegularExpressions.Regex.Replace(inner,
+            var innerRows = SafeRegex.Replace(inner,
                 @"(?s)<legend[^>]*>.*?</legend>", "",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             var rowsTop = legendBase + FsLegendToRow;

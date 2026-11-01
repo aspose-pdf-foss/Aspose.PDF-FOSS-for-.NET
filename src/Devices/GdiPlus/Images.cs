@@ -49,33 +49,75 @@ public sealed partial class GdiPlusPageRenderer
         // bitmap instead: correct area-averaged appearance (a halftone screen reduces
         // to smooth grey, as it should), bounded memory, and far faster
         // than resampling the full-resolution expansion.
+        var iw = (int)xobj.Dict.GetInt("Width");
+        var ih = (int)xobj.Dict.GetInt("Height");
+        var ibpc = (int)xobj.Dict.GetInt("BitsPerComponent");
+        if (Environment.GetEnvironmentVariable("Q_HUGEGRAY") != "0"
+            && (long)iw * ih > 100_000_000 && (ibpc == 1 || ibpc == 8))
         {
-            var iw = (int)xobj.Dict.GetInt("Width");
-            var ih = (int)xobj.Dict.GetInt("Height");
-            var ibpc = (int)xobj.Dict.GetInt("BitsPerComponent");
-            if (Environment.GetEnvironmentVariable("Q_HUGEGRAY") != "0"
-                && (long)iw * ih > 100_000_000 && (ibpc == 1 || ibpc == 8))
+            var csi = SoftwarePageRenderer.ResolveImageColorSpace(xobj.Dict.Get("ColorSpace"), _reader);
+            if (csi.BaseName == "DeviceGray" && csi.Palette is null && csi.TintTransform is null)
             {
-                var csi = SoftwarePageRenderer.ResolveImageColorSpace(xobj.Dict.Get("ColorSpace"), _reader);
-                if (csi.BaseName == "DeviceGray" && csi.Palette is null && csi.TintTransform is null)
+                using var small = DecodeHugeGrayDownsampled(xobj, iw, ih, ibpc, state);
+                if (small is not null)
                 {
-                    using var small = DecodeHugeGrayDownsampled(xobj, iw, ih, ibpc, state);
-                    if (small is not null)
-                    {
-                        var sm2 = state.SoftMask is { } smk ? GetSoftMaskAlpha(smk) : null;
-                        BlitImage(small, state.Ctm, overprint: false, state.FillAlpha, sm2);
-                        return;
-                    }
+                    var sm2 = state.SoftMask is { } smk ? GetSoftMaskAlpha(smk) : null;
+                    BlitImage(small, state.Ctm, overprint: false, state.FillAlpha, sm2);
+                    return;
                 }
             }
         }
 
         if (_vectorTarget && TryBlitJpegAsItself(xobj, state)) return;
+        // The probe draw decides only how the page is printed, and an image drawn as a drawing
+        // command - no soft mask, no overprint - cannot change that: it is not decoded there.
+        if (_vectorProbe && state.SoftMask is null && !state.OverprintFill) return;
 
-        using var bmp = ImageDecoder.TryDecode(xobj, state, _reader, _pdfxOverprintSim, replicateChroma: PrintedPageImage);
+        var jpegScale = ReducedJpegScale(xobj.Dict, state.Ctm, iw, ih);
+        using var decoded = _tilingCellImages is null ? DecodeImage(xobj, state, jpegScale) : null;
+        var bmp = decoded ?? TilingCellImage(xobj, state, jpegScale);
         if (bmp is null) return;
         var softMask = state.SoftMask is { } sm ? GetSoftMaskAlpha(sm) : null;
         BlitImage(bmp, state.Ctm, state.OverprintFill && IsSubtractiveImage(xobj.Dict), state.FillAlpha, softMask);
+    }
+
+    private Bitmap? DecodeImage(PdfStream xobj, GraphicsState state, int jpegScale)
+        => ImageDecoder.TryDecode(xobj, state, _reader, _pdfxOverprintSim, replicateChroma: PrintedPageImage, jpegScale: jpegScale);
+
+    /// <summary>An image a tiling pattern's cell draws, decoded once for the whole fill: every cell runs
+    /// the same content from the same state, so the image decodes the same in each of them. The key
+    /// holds the image and everything the decode reads of the state.</summary>
+    private Bitmap? TilingCellImage(PdfStream xobj, GraphicsState state, int jpegScale)
+    {
+        var key = (xobj, jpegScale, state.OverprintFill, state.FillR, state.FillG, state.FillB, state.FillAlpha);
+        if (!_tilingCellImages!.TryGetValue(key, out var bmp))
+            _tilingCellImages[key] = bmp = DecodeImage(xobj, state, jpegScale);
+        return bmp;
+    }
+
+    // The largest of 2, 4 and 8 that a JPEG drawn far smaller than its size is decoded
+    // smaller by, leaving at least one decoded sample per device pixel; 1 otherwise. Only a
+    // plain draw qualifies - a mask or a /Decode array is applied sample by sample at the
+    // image's own size - and only an image of a million samples or more, where the decode
+    // is what the draw costs.
+    private int ReducedJpegScale(PdfDictionary dict, double[] ctm, int iw, int ih)
+    {
+        if ((long)iw * ih < 1_000_000 || !IsPlainJpeg(dict)) return 1;
+        var devW = Math.Sqrt(ctm[0] * ctm[0] + ctm[1] * ctm[1]) * _scale;
+        var devH = Math.Sqrt(ctm[2] * ctm[2] + ctm[3] * ctm[3]) * _scaleY;
+        return Aspose.Pdf.IO.Filters.JpegDecoder.ScaleDenominatorFor(iw, ih, devW, devH);
+    }
+
+    /// <summary>A DCTDecode image with nothing applied to its samples after the decode:
+    /// no mask of either kind, no /Decode array, not a stencil.</summary>
+    private bool IsPlainJpeg(PdfDictionary dict)
+    {
+        if (dict.Get("SMask") is not null || dict.Get("Mask") is not null || dict.Get("Decode") is not null
+            || dict.Get("ImageMask") is PdfBoolean { Value: true })
+            return false;
+        var filter = _reader.Resolve(dict.Get("Filter"));
+        return filter is PdfName { Value: "DCTDecode" }
+            || filter is PdfArray { Count: 1 } one && _reader.Resolve(one[0]) is PdfName { Value: "DCTDecode" };
     }
 
     /// <summary>
@@ -94,22 +136,19 @@ public sealed partial class GdiPlusPageRenderer
     {
         var dict = xobj.Dict;
         if (state.SoftMask is not null || state.FillAlpha < FullyOpaqueImage || state.OverprintFill) return false;
-        if (dict.Get("SMask") is not null || dict.Get("Mask") is not null || dict.Get("Decode") is not null
-            || dict.Get("ImageMask") is PdfBoolean { Value: true })
+        if (!IsPlainJpeg(dict) || _reader.Resolve(dict.Get("ColorSpace")) is not PdfName { Value: "DeviceRGB" or "DeviceGray" })
             return false;
-        var filter = _reader.Resolve(dict.Get("Filter"));
-        var isJpeg = filter is PdfName { Value: "DCTDecode" }
-            || filter is PdfArray { Count: 1 } one && _reader.Resolve(one[0]) is PdfName { Value: "DCTDecode" };
-        if (!isJpeg || _reader.Resolve(dict.Get("ColorSpace")) is not PdfName { Value: "DeviceRGB" or "DeviceGray" })
-            return false;
+        if (_vectorProbe) return true;
 
         // The reader decrypts; a DCTDecode stream decodes to its JPEG bytes as they are.
         byte[] bytes;
         try { bytes = _reader.DecodeStream(xobj); }
         catch { return false; }
         using var stream = new MemoryStream(bytes, writable: false);
+        // Not validated: validation decodes the whole image, which the draw does again - a
+        // quarter of a second each for a scanned page, twice for every scan of a long print.
         Bitmap jpeg;
-        try { jpeg = new Bitmap(stream); }
+        try { jpeg = (Bitmap)System.Drawing.Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: false); }
         catch (ArgumentException) { return false; }
         using (jpeg)
         {
@@ -209,8 +248,8 @@ public sealed partial class GdiPlusPageRenderer
         // AVERAGED — GDI+'s bicubic samples a fixed window, not the full footprint of
         // each destination pixel, so a 25× decimation of a dot screen comes out as
         // binary moiré instead of the smooth grey area averaging produces (and takes
-        // minutes on the way). Box-average into a device-sized intermediate first;
-        // the normal high-quality blit then only resamples by a small factor.
+        // minutes on the way). Box-average into a device-sized intermediate first; the
+        // normal high-quality blit then only resamples by a small factor.
         Bitmap? shrunk = null;
         using (var worldProbe = WorldMatrix(ctm))
         {
@@ -257,6 +296,7 @@ public sealed partial class GdiPlusPageRenderer
     /// </remarks>
     private void BlitTranslucentImageAsDrawingCommand(Bitmap bmp, double alpha)
     {
+        if (_vectorProbe) return;
         using var attributes = new ImageAttributes();
         attributes.SetWrapMode(WrapMode.TileFlipXY);
         var levels = Math.Floor(Math.Max(0.0, Math.Min(1.0, alpha)) * AlphaLevels) / AlphaLevels;
@@ -293,6 +333,7 @@ public sealed partial class GdiPlusPageRenderer
     /// </remarks>
     private void BlitImageAsDrawingCommand(Bitmap bmp, GdiMatrix world)
     {
+        if (_vectorProbe) return;
         var corners = new[] { new PointF(0, 1), new PointF(1, 1), new PointF(0, 0) };
         world.TransformPoints(corners);
         _layoutToSheet!.TransformPoints(corners);
@@ -374,7 +415,9 @@ public sealed partial class GdiPlusPageRenderer
     private static (float x0, float x1, float y0, float y1) SnapBlitToIdentity(GdiMatrix world, Bitmap bmp,
         float x0, float x1, float y0, float y1)
     {
+#pragma warning disable S1244 // the whole-image source rectangle is passed as the literals 0 and 1 - exact on purpose
         if (x0 != 0f || x1 != 1f || y0 != 0f || y1 != 1f) return (x0, x1, y0, y1);
+#pragma warning restore S1244
 
         var e = world.Elements;
         const float AxisAlignedTol = 1e-4f;
@@ -430,7 +473,8 @@ public sealed partial class GdiPlusPageRenderer
                 for (int x = 0; x < w; x++)
                 {
                     long bi = rowBase + (x >> 3);
-                    int v = bi < data.Length ? ((((data[bi] >> (7 - (x & 7))) & 1) ^ inv) == 1 ? 255 : 0) : 255;
+                    int v = 255;
+                    if (bi < data.Length) v = (((data[bi] >> (7 - (x & 7))) & 1) ^ inv) == 1 ? 255 : 0;
                     int di = db + (int)((long)x * dw / w);
                     sum[di] += v; cnt[di]++;
                 }
@@ -440,7 +484,8 @@ public sealed partial class GdiPlusPageRenderer
                 for (int x = 0; x < w; x++)
                 {
                     long bi = rowBase + x;
-                    int v = bi < data.Length ? (invert ? 255 - data[bi] : data[bi]) : 255;
+                    int v = 255;
+                    if (bi < data.Length) v = invert ? 255 - data[bi] : data[bi];
                     int di = db + (int)((long)x * dw / w);
                     sum[di] += v; cnt[di]++;
                 }

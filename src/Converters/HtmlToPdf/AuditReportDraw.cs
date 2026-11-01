@@ -33,7 +33,7 @@ internal static partial class HtmlToPdfConverter
         foreach (var w in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
             var t = cur.Length == 0 ? w : cur + " " + w;
-            if (cur.Length > 0 && Measure(ar, ar.reg!, t, size) > width) { outp.Add(cur); cur = w; }
+            if (cur.Length > 0 && Measure(ar, ar.reg, t, size) > width) { outp.Add(cur); cur = w; }
             else cur = t;
         }
         if (cur.Length > 0) outp.Add(cur);

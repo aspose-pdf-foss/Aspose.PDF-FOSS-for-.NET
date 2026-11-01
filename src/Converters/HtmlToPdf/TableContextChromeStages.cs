@@ -63,20 +63,20 @@ internal static partial class HtmlToPdfConverter
             Dictionary<string, string>? clsCellRule = null;
             if (!cfg.css.TryGetValue("." + tcls + " td", out clsCellRule))
                 cfg.docCss?.TryGetValue("." + tcls + " td", out clsCellRule);
-            if (clsCellRule is null || !clsCellRule.TryGetValue("border", out var clsBorder)) continue;
-            var bm2 = Regex.Match(clsBorder, @"([\d.]+)\s*px");
+            if (clsCellRule is null || cfg.chainClearsCellBorder || !clsCellRule.TryGetValue("border", out var clsBorder)) continue;
+            var bm2 = SafeRegex.Match(clsBorder, @"([\d.]+)\s*px");
             if (bm2.Success && double.TryParse(bm2.Groups[1].Value,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var clsBwv) && clsBwv > 0)
             { table.HtmlCellBorderPt = clsBwv * PxToPt; table.HtmlCellBorderShared = true; break; }
         }
         if (cfg.tblBorderAttr is not null
-            && double.TryParse(Regex.Match(cfg.tblBorderAttr, @"[\d.]+").Value,
+            && double.TryParse(SafeRegex.Match(cfg.tblBorderAttr, @"[\d.]+").Value,
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var tblBw) && tblBw > 0)
         { table.HtmlCellBorderPt = tblBw * PxToPt; table.HtmlCellBorderShared = false; }
         table.HtmlAutoWidth = !cfg.tblTag.Success
-            || !Regex.IsMatch(cfg.tblTag.Value, @"width\s*=\s*['""]?\s*[\d.]", RegexOptions.IgnoreCase);
+            || !SafeRegex.IsMatch(cfg.tblTag.Value, @"width\s*=\s*['""]?\s*[\d.]", RegexOptions.IgnoreCase);
     }
 
     /// <summary>The dialect flags the built table carries: its cell borders and padding, the sheet's paragraph margins and the UA cell boxes.</summary>
@@ -85,7 +85,8 @@ internal static partial class HtmlToPdfConverter
         // collapsed borders share one stroke between neighbours: the row bills half its top + bottom pair
         // A UA-boxed grid's cell lines keep their own left margins (a list item's hanging indent).
         if (cfg.uaCellBoxes) table.HtmlWrapInsetsCellMargins = true;
-        if (cfg.uaCellBoxes && cfg.breakAnywhereDoc) table.HtmlBreakAnywhere = true;
+        // (…and a grid in the body face breaks a word wider than its column, as the built-in path does)
+        if ((cfg.uaCellBoxes && cfg.breakAnywhereDoc) || ps.bodyFaceCells) table.HtmlBreakAnywhere = true;
         if (cfg.collapsedGrid && cfg.makeCheckbox is not null)
         {
             table.HtmlWrapInsetsCellMargins = true;
@@ -100,7 +101,9 @@ internal static partial class HtmlToPdfConverter
             table.Border = new BorderInfo(BorderSide.Box, cfg.borderWidth, cfg.borderColor);
         else if (cfg.cellSideBorder is not null) table.DefaultCellBorder = cfg.cellSideBorder;
         if (cfg.outerBorder is not null) table.Border = cfg.outerBorder;
-        if (!(cfg.collapsedGrid && cfg.makeCheckbox is not null)) ApplyTableFrameStyle(table, cfg, cfg.tblBorderAttr);
+        // (the UA check box grid's cell borders are its frame; a field grid, which takes the check box factory for its
+        // lone check boxes, keeps the frame its table declares)
+        if (!(cfg.collapsedGrid && cfg.makeCheckbox is not null) || cfg.fieldCells) ApplyTableFrameStyle(table, cfg, cfg.tblBorderAttr);
         // The chain rule's `border` on the table is the grid's outer frame (CSS boxes the table, not its
         // cells), and its background fills the whole grid box behind the cells' own fills (measured:
         // `#right_column TABLE { BACKGROUND: #c8c8c8; BORDER: 1px solid #304742 }` frames the 560 px grid
@@ -176,8 +179,10 @@ internal static partial class HtmlToPdfConverter
             // kerned advances. Without this the cell writer falls back to the Standard-14
             // pair and silently retypesets the table in Helvetica while the prose around
             // it sets in the declared face.
-            HonorCellTtfFaces = cfg.defaultCellFace is { Length: > 0 } || cfg.inlineFaceRatio > 0 || cfg.uaCellBoxes,
-            InlineFaceGridRatio = cfg.inlineFaceRatio,
+            HonorCellTtfFaces = cfg.defaultCellFace is { Length: > 0 } || cfg.inlineFaceRatio > 0 || cfg.uaCellBoxes || ps.bodyFaceCells,
+            InlineFaceGridRatio = ps.bodyFaceCells && WinMetricsFor(ps.cellFamily!) is { } bodyFm ? bodyFm.sum : cfg.inlineFaceRatio,
+            // (…and a body-face line of mixed weights wraps across its runs as the built-in path's runs wrap)
+            HtmlWrapStyleRuns = ps.bodyFaceCells,
             // A grid pitching on the document face's own line box seats its baselines in
             // that box the browser's way too.
             UaSeatMetrics = cfg.uaDocGrid && cfg.defaultCellFace is { Length: > 0 } usf
@@ -190,14 +195,24 @@ internal static partial class HtmlToPdfConverter
             // 20.25 at cellspacing=1, 21.0 at 2, 19.5 at 0; leading gap included),
             // and the shipped-era template needs the accumulation the modern
             // engine also has.
-            RowSpacingPt = cfg.dwFormCells ? colModel.cellSpacingPt
-                : cfg.uaDocGrid ? (colModel.cellSpacingPt > 0 ? colModel.cellSpacingPt : UaCellSpacingPt)
-                : cfg.overDeclaredDraw ? (colModel.cellSpacingPt > 0 ? colModel.cellSpacingPt
-                    : cfg.tblCellSpacingDeclared ? 0 : UaCellSpacingPt)
-                : 0,
+            RowSpacingPt = (cfg.dwFormCells, cfg.uaDocGrid, cfg.overDeclaredDraw) switch
+            {
+                (true, _, _) => colModel.cellSpacingPt,
+                (_, true, _) => colModel.cellSpacingPt > 0 ? colModel.cellSpacingPt : UaCellSpacingPt,
+                (_, _, true) => (colModel.cellSpacingPt, cfg.tblCellSpacingDeclared) switch
+                {
+                    (> 0, _) => colModel.cellSpacingPt,
+                    (_, true) => 0,
+                    _ => UaCellSpacingPt,
+                },
+                _ => 0,
+            },
             HtmlOverDeclaredDraw = cfg.overDeclaredDraw,
             // The markup's cell rule is sized into the column by HtmlCellBorderPt.
             CellBorderInPitch = false,
+            // A browser cuts a row-spanning cell at the page break: its text starts in its first row, not
+            // on the page that holds its last one.
+            SpanBlockSplitsAtPageBreak = true,
         };
     }
 }

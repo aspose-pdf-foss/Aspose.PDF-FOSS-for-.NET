@@ -20,7 +20,9 @@ internal static partial class HtmlToPdfConverter
         /// <summary>An inline box's own left padding: the pen advances by it before the run.</summary>
         public double PadLeft;
         public bool SameAs(MetricRunStyle o)
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             => Fs == o.Fs && Face == o.Face && Bold == o.Bold && Italic == o.Italic && PadLeft == o.PadLeft;
+#pragma warning restore S1244
     }
 
     /// <summary>The marks a UA cell's text carries while it is parsed: one private-use character per
@@ -105,7 +107,7 @@ internal static partial class HtmlToPdfConverter
     private static (string text, List<(int pos, MetricRunStyle st)>? runs) SplitOutRunMarks(string marked, List<MetricRunStyle> styles)
     {
         var any = false;
-        foreach (var ch in marked) if (IsRunMark(ch)) { any = true; break; }
+        if (marked.Any(ch => IsRunMark(ch))) { any = true; }
         if (!any) return (marked, null);
         var sb = new StringBuilder(marked.Length);
         var runs = new List<(int pos, MetricRunStyle st)>();
@@ -148,7 +150,7 @@ internal static partial class HtmlToPdfConverter
     private static MetricRunStyle? RunStyleAt(List<(int pos, MetricRunStyle st)> runs, int at)
     {
         MetricRunStyle? s = null;
-        foreach (var (pos, st) in runs) { if (pos > at) break; s = st; }
+        foreach (var (pos, st) in runs) { if (pos > at) { break; } s = st; }
         return s;
     }
 
@@ -236,7 +238,9 @@ internal static partial class HtmlToPdfConverter
         {
             if (s is null) continue;
             if (seen is null) seen = s;
+#pragma warning disable S1244 // same-style test on values copied from one source - exact on purpose
             else if (s.Fs != seen.Fs || s.Face != seen.Face || s.Italic != seen.Italic) { differ = true; break; }
+#pragma warning restore S1244
         }
         if (!differ) return false;
         var segs = new List<MetricDivSeg>();
@@ -296,30 +300,30 @@ internal static partial class HtmlToPdfConverter
     /// and margins.</summary>
     private static void ReadUaCellBlockStyleText(MetricDivSeg seg, string st, double cellEmPt)
     {
-        var fsM = Regex.Match(st, @"(?<![-\w])font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
+        var fsM = SafeRegex.Match(st, @"(?<![-\w])font-size\s*:\s*([^;]+)", RegexOptions.IgnoreCase);
         if (fsM.Success && TryParseCssFontSize(fsM.Groups[1].Value.Trim()) is { } fs && fs > 0) seg.FontSize = fs;
         var emPt = seg.FontSize ?? (cellEmPt > 0 ? cellEmPt : UaDefaultFontPt);
-        if (Regex.IsMatch(st, @"(?<![-\w])font-weight\s*:\s*(bold|[6-9]00)", RegexOptions.IgnoreCase)) seg.Bold = true;
-        if (Regex.IsMatch(st, @"(?<![-\w])font-style\s*:\s*italic", RegexOptions.IgnoreCase)) seg.Italic = true;
-        if (Regex.Match(st, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } ffM
+        if (SafeRegex.IsMatch(st, @"(?<![-\w])font-weight\s*:\s*(bold|[6-9]00)", RegexOptions.IgnoreCase)) seg.Bold = true;
+        if (SafeRegex.IsMatch(st, @"(?<![-\w])font-style\s*:\s*italic", RegexOptions.IgnoreCase)) seg.Italic = true;
+        if (SafeRegex.Match(st, @"(?<![-\w])font-family\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } ffM
             && FirstFontFamily(ffM.Groups[1].Value) is { Length: > 0 } fam && SourceEngineFaces.Contains(fam))
             seg.Face = fam;
-        if (Regex.Match(st, @"(?<![-\w])color\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } cM
+        if (SafeRegex.Match(st, @"(?<![-\w])color\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } cM
             && ParseCssColor(cM.Groups[1].Value.Trim()) is { } col)
             seg.Fore = col;
-        if (Regex.Match(st, @"(?<![-\w])text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase) is { Success: true } taM)
+        if (SafeRegex.Match(st, @"(?<![-\w])text-align\s*:\s*(left|center|right)", RegexOptions.IgnoreCase) is { Success: true } taM)
         {
             var ta = taM.Groups[1].Value.ToLowerInvariant();
             seg.AlignCenter = ta == "center"; seg.AlignRight = ta == "right";
         }
-        if (Regex.IsMatch(st, @"(?<![-\w])float\s*:\s*right", RegexOptions.IgnoreCase)) { seg.FloatRight = true; seg.AlignRight = true; }
+        if (SafeRegex.IsMatch(st, @"(?<![-\w])float\s*:\s*right", RegexOptions.IgnoreCase)) { seg.FloatRight = true; seg.AlignRight = true; }
         double Len(string v) => StatedMarginPt(v, emPt) ?? 0;
         var (pt, pr, pb, pl) = CssPaddingSidesPt(st, emPt);
         seg.PadLeft += pl;
         seg.PadRight += pr;
-        if (Regex.Match(st, @"(?<![-\w])margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mlM) seg.PadLeft += Len(mlM.Groups[1].Value);
-        if (Regex.Match(st, @"(?<![-\w])margin-right\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mrM) seg.PadRight += Len(mrM.Groups[1].Value);
-        if (Regex.Match(st, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mM)
+        if (SafeRegex.Match(st, @"(?<![-\w])margin-left\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mlM) seg.PadLeft += Len(mlM.Groups[1].Value);
+        if (SafeRegex.Match(st, @"(?<![-\w])margin-right\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mrM) seg.PadRight += Len(mrM.Groups[1].Value);
+        if (SafeRegex.Match(st, @"(?<![-\w])margin\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mM)
         {
             var parts = mM.Groups[1].Value.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length > 0)
@@ -331,9 +335,9 @@ internal static partial class HtmlToPdfConverter
                 seg.PadRight += Len(right); seg.PadLeft += Len(left);
             }
         }
-        if (Regex.Match(st, @"(?<![-\w])margin-top\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mtM)
+        if (SafeRegex.Match(st, @"(?<![-\w])margin-top\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mtM)
             seg.MarginTopStatedPt = StatedMarginPt(mtM.Groups[1].Value, emPt);
-        if (Regex.Match(st, @"(?<![-\w])margin-bottom\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mbM)
+        if (SafeRegex.Match(st, @"(?<![-\w])margin-bottom\s*:\s*([^;]+)", RegexOptions.IgnoreCase) is { Success: true } mbM)
             seg.MarginBottomStatedPt = StatedMarginPt(mbM.Groups[1].Value, emPt);
         // (a block's vertical padding is band space above and below its lines)
         seg.MarginTopPt = (seg.MarginTopStatedPt ?? 0) + pt;
@@ -348,7 +352,7 @@ internal static partial class HtmlToPdfConverter
     {
         var mps = mt.mps;
         if (!mps.uaBlockCells && mps.curSeg is null) FlushUaCellText(mps, mt.text, mt.reportCells);
-        CloseSeg(mps, mt.text, mt.reportCells, mt.stdSerif);
+        CloseSeg(mps, mt.text, mt.stdSerif);
         var em = mps.cell!.FontSize ?? mps.fontSize;
         var (sizeEm, marginEm) = UaHeadingEm(tag);
         var seg = mps.divStyleStack.Count > 0 ? InheritedUaBlockSeg(mps.divStyleStack[^1]) : new MetricDivSeg { Fore = mps.cell.Fore, Face = mps.cell.Face };
@@ -361,7 +365,7 @@ internal static partial class HtmlToPdfConverter
         if (mt.css.TryGetValue(tag, out var headRule))
         {
             var probe = new MetricCell { FontSize = seg.FontSize, Face = seg.Face, Bold = true };
-            ApplyCellClassBag(mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, probe, headRule);
+            ApplyCellClassBag(mps, mt.stdSerif, probe, headRule);
             seg.Face = probe.Face ?? seg.Face;
             seg.Fore = probe.Fore ?? seg.Fore;
         }
@@ -376,7 +380,7 @@ internal static partial class HtmlToPdfConverter
         if (AncestorClassRuleDecls(mt.css, mps.divStyleStack, tag, mps.hostBlockClasses) is { } ancDecls)
         {
             var ancProbe = new MetricCell { FontSize = seg.FontSize, Face = seg.Face, Bold = true };
-            ApplyCellClassBag(mps, mt.css, mt.text, mt.reportCells, mt.stdSerif, ancProbe, ancDecls);
+            ApplyCellClassBag(mps, mt.stdSerif, ancProbe, ancDecls);
             if (ancProbe.FontFromClass) seg.FontSize = ancProbe.FontSize;
             seg.Face = ancProbe.Face ?? seg.Face;
             seg.Fore = ancProbe.Fore ?? seg.Fore;
@@ -446,8 +450,8 @@ internal static partial class HtmlToPdfConverter
         if (mps.cell is null || text.Length == 0) return;
         var raw = text.ToString();
         var markerRx = (char)2 + "\\d+" + (char)3;
-        var markers = string.Concat(from Match m in Regex.Matches(raw, markerRx) select m.Value);
-        var plain = CollapseWs(Regex.Replace(raw, markerRx, " ")).Trim(' ').TrimEnd(MetricHardBreakChar).Trim(' ');
+        var markers = string.Concat(from Match m in SafeRegex.Matches(raw, markerRx) select m.Value);
+        var plain = CollapseWs(SafeRegex.Replace(raw, markerRx, " ")).Trim(' ').TrimEnd(MetricHardBreakChar).Trim(' ');
         var ink = false;
         foreach (var ch in plain) if (!(ch == ' ' || ch == NbspChar || ch == MetricHardBreakChar || IsRunMark(ch))) { ink = true; break; }
         // (a `<br>` after a block, with no ink after it, is an empty line of its own - measured on
@@ -611,7 +615,9 @@ internal static partial class HtmlToPdfConverter
     {
         var minW = 0.0;
         var at = 0;
+#pragma warning disable S3878 // the explicit array keeps the call off Split(char, int, options)
         foreach (var word in text.Split(new[] { ' ', MetricHardBreakChar }))
+#pragma warning restore S3878
         {
             if (word.Length > 0) minW = Math.Max(minW, MeasureStyledLine(face, boldFace, probe, fs, word, at, runs));
             at += word.Length + 1;
